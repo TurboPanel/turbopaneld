@@ -11,6 +11,24 @@
  * committed field may not be removed or narrowed. A wider live type passes
  * only when that pin sets `expansion: true`.
  *
+ * Daemon first. A wire change merges into the daemon's trunk before the
+ * control plane's, and each side is checked against the other repository's
+ * trunk (never another pull request's branch). So the rule is one-way:
+ *
+ *   - lists and maps (DAEMON_WIRE_FEATURES, DAEMON_FEATURE_MIN_VERSIONS,
+ *     INSTANCE_FEATURE_MIN_VERSIONS, UPDATE_CHANNELS, the ServerReportedIp
+ *     field names) and the field snapshot: every control plane entry must be
+ *     in the daemon's, unchanged. The daemon may have more (a daemon-only
+ *     snapshot field must be optional); old control planes ignore daemon
+ *     features they do not know.
+ *   - byte mirrors (the metrics contract body, hostname rules, machine-key
+ *     namespace, signed-session bytes, key-set and folder name vectors, slot
+ *     mapping, INSTANCE_VERSION_HEADER): there is no "ahead" for bytes, so on
+ *     the daemon side a mismatch (or a control plane copy that does not exist
+ *     yet) is only a notice that the control plane has not caught up. The
+ *     control plane's twin goes red when its own pull request changes its
+ *     copy to something other than daemon trunk's.
+ *
  * Run: `deno task check:contract-drift`.
  */
 import { fromFileUrl, join } from "@std/path";
@@ -151,12 +169,98 @@ function requireText(value: string | null, message: string): string {
   return value;
 }
 
-function requireEqual(
+/** A byte mirror that differs: the control plane has not caught up yet. */
+function mirrorNotice(message: string): void {
+  console.log(
+    `::notice title=Contract mirror::${message}; the control plane has not caught up with this daemon yet`,
+  );
+}
+
+function mirrorEqual(
   left: string | null,
   right: string | null,
   message: string,
 ): void {
-  if (left !== right || left == null) fail(message);
+  if (right == null) fail(message);
+  if (left !== right) mirrorNotice(message);
+}
+
+/** The control plane's copy of a mirror, or null (with a notice) when it has none yet. */
+async function mirrorSource(root: string, rel: string): Promise<string | null> {
+  const text = await readRel(root, rel);
+  if (text == null) mirrorNotice(`${rel} is not on the control plane yet`);
+  return text;
+}
+
+/**
+ * The entries of `instance` that `daemon` lacks. Daemon first: the daemon may
+ * list more; the control plane may not rely on anything the daemon lacks.
+ */
+export function missingFromDaemon(
+  instance: readonly string[],
+  daemon: readonly string[],
+): string[] {
+  const have = new Set(daemon);
+  return instance.filter((entry) => !have.has(entry));
+}
+
+function requireSubset(
+  instance: string[] | null,
+  daemon: string[] | null,
+  what: string,
+): void {
+  if (instance == null || daemon == null) {
+    fail(`${what} missing on one side of the pair`);
+  }
+  const missing = missingFromDaemon(instance, daemon);
+  if (missing.length > 0) {
+    fail(
+      `${what}: the control plane relies on ${
+        missing.join(", ")
+      }, which this daemon does not have; merge the daemon change first`,
+    );
+  }
+}
+
+/** `{ a: 0.1.1, b: 0.2.0 }` (as extractObjectLiteral returns it) as [key, value] pairs. */
+export function objectLiteralEntries(
+  literal: string | null,
+): [string, string][] | null {
+  if (literal == null) return null;
+  const body = literal.trim().replace(/^\{/, "").replace(/\}$/, "");
+  const entries: [string, string][] = [];
+  for (const part of body.split(",")) {
+    const item = part.trim();
+    if (!item) continue;
+    const colon = item.indexOf(":");
+    if (colon < 1) return null;
+    entries.push([item.slice(0, colon).trim(), item.slice(colon + 1).trim()]);
+  }
+  return entries;
+}
+
+/** Every control plane key must be in the daemon's map with the same value. */
+export function mapDriftFromDaemon(
+  instanceLiteral: string | null,
+  daemonLiteral: string | null,
+): string | null {
+  const instance = objectLiteralEntries(instanceLiteral);
+  const daemon = objectLiteralEntries(daemonLiteral);
+  if (instance == null || daemon == null) {
+    return "missing or not a plain object literal";
+  }
+  const byKey = new Map(daemon);
+  for (const [key, value] of instance) {
+    if (!byKey.has(key)) {
+      return `${key} is not in this daemon's map; merge the daemon change first`;
+    }
+    if (byKey.get(key) !== value) {
+      return `${key} is ${value} on the control plane but ${
+        byKey.get(key)
+      } here`;
+    }
+  }
+  return null;
 }
 
 const PLAIN_SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
@@ -213,12 +317,13 @@ export function versionFloorsDrift(
   );
 }
 
-function requireJoinedEqual(
+function mirrorJoinedEqual(
   left: string[] | null,
   right: string[] | null,
   message: string,
 ): void {
-  if (left?.join(",") !== right?.join(",") || right == null) fail(message);
+  if (right == null) fail(message);
+  if (left?.join(",") !== right.join(",")) mirrorNotice(message);
 }
 
 function updateChannelsFromType(source: string): string[] | null {
@@ -232,34 +337,38 @@ function updateChannelsFromType(source: string): string[] | null {
 }
 
 async function checkMetrics(tp: string, td: string): Promise<void> {
-  const metricsLeft = requireText(
-    await readRel(tp, "src/contracts/metrics-contract.ts"),
-    "metrics-contract.ts missing on one side of the pair",
+  const metricsLeft = await mirrorSource(
+    tp,
+    "src/contracts/metrics-contract.ts",
   );
   const metricsRight = requireText(
     await readRel(td, "src/contracts/metrics-contract.ts"),
-    "metrics-contract.ts missing on one side of the pair",
+    "metrics-contract.ts missing on the daemon",
   );
-  if (stripHeaderDocblock(metricsLeft) !== stripHeaderDocblock(metricsRight)) {
-    fail("metrics-contract.ts body drifted (below the header docblock)");
-  }
+  if (metricsLeft == null) return;
+  mirrorEqual(
+    stripHeaderDocblock(metricsLeft),
+    stripHeaderDocblock(metricsRight),
+    "metrics-contract.ts body drifted (below the header docblock)",
+  );
 }
 
 async function checkHostname(tp: string, td: string): Promise<void> {
-  const hostnameLeft = requireText(
-    await readRel(tp, "src/contracts/commands/hostname.ts"),
-    "hostname sources missing on one side of the pair",
+  const hostnameLeft = await mirrorSource(
+    tp,
+    "src/contracts/commands/hostname.ts",
   );
   const hostnameRight = requireText(
     await readRel(td, "src/contracts/commands-contracts.ts"),
-    "hostname sources missing on one side of the pair",
+    "hostname sources missing on the daemon",
   );
-  requireEqual(
+  if (hostnameLeft == null) return;
+  mirrorEqual(
     extractConst(hostnameLeft, "HOSTNAME_RE"),
     extractConst(hostnameRight, "HOSTNAME_RE"),
     "HOSTNAME_RE drifted",
   );
-  requireEqual(
+  mirrorEqual(
     extractConst(hostnameLeft, "HOSTNAME_MAX_LENGTH"),
     extractConst(hostnameRight, "HOSTNAME_MAX_LENGTH"),
     "HOSTNAME_MAX_LENGTH drifted",
@@ -268,9 +377,9 @@ async function checkHostname(tp: string, td: string): Promise<void> {
 
 /** The signed-session byte rules and the v2 sign-in proof tags must be identical on both sides. */
 async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
-  const envelopeLeft = requireText(
-    await readRel(tp, "src/lib/panel-identity/frame-envelope.ts"),
-    "frame-envelope.ts missing on the instance",
+  const envelopeLeft = await mirrorSource(
+    tp,
+    "src/lib/panel-identity/frame-envelope.ts",
   );
   const envelopeRight = requireText(
     await readRel(td, "src/instance/panel-identity-frames.ts"),
@@ -285,42 +394,39 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
       "SIG_SUFFIX_MARKER",
     ]
   ) {
-    requireEqual(
-      extractConst(envelopeLeft, name),
+    mirrorEqual(
+      envelopeLeft == null ? null : extractConst(envelopeLeft, name),
       extractConst(envelopeRight, name),
       `${name} drifted`,
     );
   }
-  const proofLeft = requireText(
-    await readRel(tp, "src/daemon/authn/proof-version.ts"),
-    "proof-version.ts missing on the instance",
-  );
+  const proofLeft = await mirrorSource(tp, "src/daemon/authn/proof-version.ts");
   const proofRight = requireText(
     await readRel(td, "src/crypto/keys.ts"),
     "keys.ts missing on the daemon",
   );
   for (const name of ["ENROLL_PROOF_V2_TAG", "AUTH_PROOF_V2_TAG"]) {
-    requireEqual(
-      extractConst(proofLeft, name),
+    mirrorEqual(
+      proofLeft == null ? null : extractConst(proofLeft, name),
       extractConst(proofRight, name),
       `${name} drifted`,
     );
   }
   // Daemon-signed requests and the attach proof (pinned here only: the
-  // control plane ships first, so its drift check cannot require them yet).
+  // daemon ships first, so the control plane's check does not pin them).
   const pairs: ReadonlyArray<[string, string]> = [
     ["src/daemon/authn/request-signature.ts", "REQUEST_PREFIX"],
     ["src/daemon/authn/attach-proof.ts", "ATTACH_PREFIX"],
     ["src/daemon/authn/pin-report.ts", "PIN_REPORT_PREFIX"],
     ["src/daemon/authn/pin-report.ts", "PIN_PASSKEYS_REPORT_PREFIX"],
   ];
-  const sources = await Promise.all(pairs.map(([file]) => readRel(tp, file)));
-  for (const [index, [file, name]] of pairs.entries()) {
-    const left = requireText(
-      sources[index],
-      `${file} missing on the instance`,
-    );
-    requireEqual(
+  const sources = await Promise.all(
+    pairs.map(([file]) => mirrorSource(tp, file)),
+  );
+  for (const [index, [, name]] of pairs.entries()) {
+    const left = sources[index];
+    if (left == null) continue;
+    mirrorEqual(
       extractConst(left, name),
       extractConst(proofRight, name),
       `${name} drifted`,
@@ -330,11 +436,13 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
 
 /** The key-set vectors are one file in both repos: the TypeScript and tp-host verifiers must agree. */
 async function checkKeysetVectors(tp: string, td: string): Promise<void> {
-  requireEqual(
-    requireText(
-      await readRel(tp, "src/test-fixtures/keyset-statement-vectors.json"),
-      "keyset-statement-vectors.json missing on the instance",
-    ),
+  const left = await mirrorSource(
+    tp,
+    "src/test-fixtures/keyset-statement-vectors.json",
+  );
+  if (left == null) return;
+  mirrorEqual(
+    left,
     requireText(
       await readRel(td, "src/testing/keyset-statement-vectors.json"),
       "keyset-statement-vectors.json missing on the daemon",
@@ -344,15 +452,13 @@ async function checkKeysetVectors(tp: string, td: string): Promise<void> {
 }
 
 async function checkMachineKey(tp: string, td: string): Promise<void> {
-  const mkLeft = requireText(
-    await readRel(tp, "src/lib/machine-key.ts"),
-    "machine-key.ts missing on one side of the pair",
-  );
+  const mkLeft = await mirrorSource(tp, "src/lib/machine-key.ts");
   const mkRight = requireText(
     await readRel(td, "src/host/machine-key.ts"),
     "machine-key.ts missing on one side of the pair",
   );
-  requireEqual(
+  if (mkLeft == null) return;
+  mirrorEqual(
     extractConst(mkLeft, "TURBOPANEL_MACHINE_ID_NAMESPACE"),
     extractConst(mkRight, "TURBOPANEL_MACHINE_ID_NAMESPACE"),
     "TURBOPANEL_MACHINE_ID_NAMESPACE drifted",
@@ -370,13 +476,7 @@ async function checkUpdateChannels(tp: string, td: string): Promise<void> {
   );
   const channelsLeft = extractArrayConst(channelsLeftSrc, "UPDATE_CHANNELS");
   const channelsRight = updateChannelsFromType(channelsRightSrc);
-  requireJoinedEqual(
-    channelsLeft,
-    channelsRight,
-    `UPDATE_CHANNELS drifted (${channelsLeft?.join(",")} vs ${
-      channelsRight?.join(",")
-    })`,
-  );
+  requireSubset(channelsLeft, channelsRight, "UPDATE_CHANNELS");
 }
 
 async function checkReportedIp(tp: string, td: string): Promise<void> {
@@ -390,51 +490,45 @@ async function checkReportedIp(tp: string, td: string): Promise<void> {
   );
   const ipLeft = extractTypeFields(ipLeftSrc, "ServerReportedIp");
   const ipRight = extractTypeFields(ipRightSrc, "ServerReportedIp");
-  requireJoinedEqual(
-    ipLeft,
-    ipRight,
-    `ServerReportedIp fields drifted (${ipLeft?.join(",")} vs ${
-      ipRight?.join(",")
-    })`,
-  );
+  requireSubset(ipLeft, ipRight, "ServerReportedIp fields");
 }
 
 async function checkLayoutVectors(tp: string, td: string): Promise<void> {
-  const left = requireText(
-    await readRel(tp, "src/contracts/layout-vectors.json"),
-    "layout-vectors.json missing on the instance",
-  );
+  const left = await mirrorSource(tp, "src/contracts/layout-vectors.json");
   const right = requireText(
     await readRel(td, "src/contracts/layout-vectors.json"),
     "layout-vectors.json missing on the daemon",
   );
-  if (left !== right) fail("layout-vectors.json drifted between checkouts");
+  if (left == null) return;
+  mirrorEqual(left, right, "layout-vectors.json drifted between checkouts");
 }
 
 async function checkSlotMapping(tp: string, td: string): Promise<void> {
-  const slotLeftTypes = requireText(
-    await readRel(tp, "src/contracts/topology-types.ts"),
-    "topology slot-mapping sources missing on one side of the pair",
+  const slotLeftTypes = await mirrorSource(
+    tp,
+    "src/contracts/topology-types.ts",
   );
   const slotRightTypes = requireText(
     await readRel(td, "src/contracts/topology-types.ts"),
     "topology slot-mapping sources missing on one side of the pair",
   );
-  const slotLeftMap = requireText(
-    await readRel(tp, "src/contracts/topology-slot-mapping.ts"),
-    "topology slot-mapping sources missing on one side of the pair",
+  const slotLeftMap = await mirrorSource(
+    tp,
+    "src/contracts/topology-slot-mapping.ts",
   );
   const slotRightMap = requireText(
     await readRel(td, "src/contracts/topology-slot-mapping.ts"),
     "topology slot-mapping sources missing on one side of the pair",
   );
-  requireEqual(
-    extractConst(slotLeftTypes, "MAX_NIC_SLOTS"),
+  mirrorEqual(
+    slotLeftTypes == null ? null : extractConst(slotLeftTypes, "MAX_NIC_SLOTS"),
     extractConst(slotRightTypes, "MAX_NIC_SLOTS"),
     "MAX_NIC_SLOTS drifted",
   );
-  requireJoinedEqual(
-    extractArrayConst(slotLeftMap, "FILESYSTEM_ROLE_PRIORITY"),
+  mirrorJoinedEqual(
+    slotLeftMap == null
+      ? null
+      : extractArrayConst(slotLeftMap, "FILESYSTEM_ROLE_PRIORITY"),
     extractArrayConst(slotRightMap, "FILESYSTEM_ROLE_PRIORITY"),
     "FILESYSTEM_ROLE_PRIORITY drifted",
   );
@@ -1082,6 +1176,71 @@ export function snapshotDataDrift(left: string, right: string): string | null {
   );
 }
 
+type SnapshotPin = {
+  instance?: unknown;
+  daemon?: unknown;
+  fields?: { name: string; required?: boolean }[];
+};
+
+/** Why the daemon's pin of one type does not cover the control plane's, or null. */
+function typePinDrift(
+  typeName: string,
+  pin: SnapshotPin,
+  theirs: SnapshotPin,
+): string | null {
+  for (const key of ["instance", "daemon"] as const) {
+    if (pin[key] !== theirs[key]) return `$.${typeName}.${key} differs`;
+  }
+  const daemonFields = new Map(
+    (theirs.fields ?? []).map((field) => [field.name, field]),
+  );
+  for (const field of pin.fields ?? []) {
+    const found = daemonFields.get(field.name);
+    if (!found) {
+      return `${typeName}.${field.name} is pinned on the control plane but not here; merge the daemon change first`;
+    }
+    const differs = firstDataDifference(
+      field,
+      found,
+      `$.${typeName}.fields.${field.name}`,
+    );
+    if (differs) return `${differs} differs between the snapshots`;
+    daemonFields.delete(field.name);
+  }
+  const required = [...daemonFields.values()].find((extra) => extra.required);
+  return required
+    ? `${typeName}.${required.name} is a required field only the daemon pins; a field the control plane does not know yet must be optional`
+    : null;
+}
+
+/**
+ * Daemon first: every type and field the control plane pins must be pinned
+ * the same way in the daemon's snapshot. The daemon may pin more types, and
+ * more fields when they are optional. Returns why not, or null.
+ */
+export function snapshotSubsetDrift(
+  left: string,
+  right: string,
+): string | null {
+  const instance = parseSnapshot(left, "instance") as Record<
+    string,
+    SnapshotPin
+  >;
+  const daemon = parseSnapshot(right, "daemon") as Record<
+    string,
+    SnapshotPin
+  >;
+  for (const [typeName, pin] of Object.entries(instance)) {
+    const theirs = daemon[typeName];
+    if (!isPlainObject(theirs)) {
+      return `${typeName} is pinned on the control plane but not here; merge the daemon change first`;
+    }
+    const drift = typePinDrift(typeName, pin, theirs);
+    if (drift) return drift;
+  }
+  return null;
+}
+
 function parseSnapshot(text: string, side: string): unknown {
   try {
     return JSON.parse(text);
@@ -1179,16 +1338,15 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
   );
   let differsAt: string | null = null;
   try {
-    differsAt = snapshotDataDrift(left, right);
+    differsAt = snapshotSubsetDrift(left, right);
   } catch (error) {
     fail((error as Error).message);
   }
   if (differsAt) {
-    fail(
-      `contract-field-snapshot.json drifted between checkouts at ${differsAt}`,
-    );
+    fail(`contract-field-snapshot.json: ${differsAt}`);
   }
   const snapshot = JSON.parse(left) as Record<string, ContractPin>;
+  const daemonSnapshot = JSON.parse(right) as Record<string, ContractPin>;
   // Reads are independent (readRel never throws); the checks below still run
   // in snapshot order so the first failure reported is unchanged.
   const sources = await Promise.all(
@@ -1209,7 +1367,11 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     const instanceFields = extractFieldSpecs(instanceSrc, typeName);
     const daemonFields = extractFieldSpecs(daemonSrc, typeName);
     assertFieldsCovered(instanceFields, pin.fields, `${typeName} instance`);
-    assertFieldsCovered(daemonFields, pin.fields, `${typeName} daemon`);
+    assertFieldsCovered(
+      daemonFields,
+      daemonSnapshot[typeName].fields,
+      `${typeName} daemon`,
+    );
     if (!instanceFields || !daemonFields) fail(`${typeName} fields missing`);
     assertRequiredSuperset(instanceFields, daemonFields, typeName);
   }
@@ -1222,7 +1384,7 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     await readRel(td, "src/instance/version-wire.ts"),
     "daemon version-wire.ts missing",
   );
-  requireEqual(
+  mirrorEqual(
     extractConst(instanceWire, "INSTANCE_VERSION_HEADER"),
     extractConst(daemonWire, "INSTANCE_VERSION_HEADER"),
     "INSTANCE_VERSION_HEADER drifted",
@@ -1234,20 +1396,22 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     requireText(await readRel(td, "deno.json"), "daemon deno.json missing"),
   );
   if (floors) fail(floors);
-  requireEqual(
-    extractObjectLiteral(instanceWire, "DAEMON_FEATURE_MIN_VERSIONS"),
-    extractObjectLiteral(daemonWire, "DAEMON_FEATURE_MIN_VERSIONS"),
-    "DAEMON_FEATURE_MIN_VERSIONS drifted",
-  );
-  requireEqual(
-    extractObjectLiteral(instanceWire, "INSTANCE_FEATURE_MIN_VERSIONS"),
-    extractObjectLiteral(daemonWire, "INSTANCE_FEATURE_MIN_VERSIONS"),
-    "INSTANCE_FEATURE_MIN_VERSIONS drifted",
-  );
-  requireJoinedEqual(
+  for (
+    const name of [
+      "DAEMON_FEATURE_MIN_VERSIONS",
+      "INSTANCE_FEATURE_MIN_VERSIONS",
+    ]
+  ) {
+    const drift = mapDriftFromDaemon(
+      extractObjectLiteral(instanceWire, name),
+      extractObjectLiteral(daemonWire, name),
+    );
+    if (drift) fail(`${name}: ${drift}`);
+  }
+  requireSubset(
     extractArrayConst(instanceWire, "DAEMON_WIRE_FEATURES"),
     extractArrayConst(daemonWire, "DAEMON_WIRE_FEATURES"),
-    "DAEMON_WIRE_FEATURES drifted",
+    "DAEMON_WIRE_FEATURES",
   );
 }
 
@@ -1296,7 +1460,7 @@ export async function runContractDriftCheck(
   await checkExpandOnly(tp, td);
 
   console.log(
-    "check-contract-drift: metrics, hostname, machine-key, channels, ServerReportedIp, slot-mapping, folder name vectors, signed-session bytes, expand-only fields agree.",
+    "check-contract-drift: the control plane relies on nothing this daemon lacks (features, feature floors, channels, ServerReportedIp, expand-only fields); byte mirrors checked (notices above, if any).",
   );
   return "ok";
 }

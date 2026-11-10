@@ -7,8 +7,12 @@ import {
   fieldPinDrift,
   floorWithinVersionDrift,
   main,
+  mapDriftFromDaemon,
+  missingFromDaemon,
+  objectLiteralEntries,
   runContractDriftCheck,
   snapshotDataDrift,
+  snapshotSubsetDrift,
   versionFloorsDrift,
 } from "./check-contract-drift.ts";
 
@@ -124,11 +128,29 @@ test("the committed snapshot matches both checkouts' normalized field types", as
     string,
     { instance: string; daemon: string; fields: ContractFieldPin[] }
   >;
+  // Daemon first: the control plane may pin fewer types and fields.
+  const instanceSnapshot = JSON.parse(
+    await Deno.readTextFile(
+      join(sibling, "scripts/contract-field-snapshot.json"),
+    ),
+  ) as Record<string, { instance: string; fields: ContractFieldPin[] }>;
   for (const [typeName, pin] of Object.entries(snapshot)) {
     const daemonSrc = await Deno.readTextFile(join(ROOT, pin.daemon));
-    const instanceSrc = await Deno.readTextFile(join(sibling, pin.instance));
     assertEquals(extractFieldSpecs(daemonSrc, typeName), pin.fields);
-    assertEquals(extractFieldSpecs(instanceSrc, typeName), pin.fields);
+    const theirs = instanceSnapshot[typeName];
+    if (theirs) {
+      const instanceSrc = await Deno.readTextFile(
+        join(sibling, theirs.instance),
+      );
+      assertEquals(
+        fieldPinDrift(
+          extractFieldSpecs(instanceSrc, typeName),
+          theirs.fields,
+          typeName,
+        ),
+        null,
+      );
+    }
     assertEquals(
       fieldPinDrift(
         extractFieldSpecs(daemonSrc, typeName),
@@ -289,5 +311,67 @@ test("versionFloorsDrift holds each floor against the peer repo's deno.json", ()
   assertEquals(
     versionFloorsDrift(instanceWire, daemonWire, "{}", json("0.1.18")),
     "MIN_SUPPORTED_INSTANCE_VERSION: the peer deno.json version is not X.Y.Z (got null)",
+  );
+});
+
+// Daemon first: this daemon may be ahead of the control plane, never behind.
+test("more wire features here pass; a control plane feature this daemon lacks is named", () => {
+  assertEquals(missingFromDaemon(["a-v1"], ["a-v1", "b-v1"]), []);
+  assertEquals(missingFromDaemon(["a-v1", "c-v1"], ["a-v1"]), ["c-v1"]);
+});
+
+test("feature floors: every control plane key must be here with the same value", () => {
+  assertEquals(objectLiteralEntries("{ a: 0.1.1, b: 0.2.0, }"), [
+    ["a", "0.1.1"],
+    ["b", "0.2.0"],
+  ]);
+  assertEquals(objectLiteralEntries("{}"), []);
+  assertEquals(objectLiteralEntries("{ nope }"), null);
+  assertEquals(
+    mapDriftFromDaemon("{ a: 0.1.1 }", "{ a: 0.1.1, b: 0.2.0 }"),
+    null,
+  );
+  assertStringIncludes(
+    mapDriftFromDaemon("{ c: 0.3.0 }", "{ a: 0.1.1 }") ?? "",
+    "c is not in this daemon's map",
+  );
+  assertStringIncludes(
+    mapDriftFromDaemon("{ a: 0.1.2 }", "{ a: 0.1.1 }") ?? "",
+    "a is 0.1.2 on the control plane but 0.1.1 here",
+  );
+  assertStringIncludes(mapDriftFromDaemon(null, "{}") ?? "", "missing");
+});
+
+test("snapshot: this daemon may pin more types and optional fields, never fewer or different", () => {
+  const a = { name: "a", required: true, type: "string" };
+  const b = { name: "b", required: false, type: "number" };
+  const pin = (fields: object[]) =>
+    JSON.stringify({ T: { instance: "i.ts", daemon: "d.ts", fields } });
+  assertEquals(snapshotSubsetDrift(pin([a]), pin([a, b])), null);
+  assertEquals(
+    snapshotSubsetDrift(
+      pin([a]),
+      JSON.stringify({
+        ...JSON.parse(pin([a])),
+        U: { instance: "x", daemon: "y", fields: [] },
+      }),
+    ),
+    null,
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a, b]), pin([a])) ?? "",
+    "T.b is pinned on the control plane but not here",
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a]), "{}") ?? "",
+    "T is pinned on the control plane",
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a]), pin([a, { ...b, required: true }])) ?? "",
+    "must be optional",
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a]), pin([{ ...a, type: "number" }])) ?? "",
+    "$.T.fields.a.type differs",
   );
 });
