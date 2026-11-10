@@ -1,0 +1,26 @@
+# The Daemon's Own ACME Client (`src/deploy/acme/`) — AGENTS.md
+
+Parent context: `../AGENTS.md` (certificate orders for hosted names, proof forwarding).
+
+Every organization Let's Encrypt certificate is ordered by a daemon on a server that runs the service, never by the control plane, and High Availability never talks to Let's Encrypt. This folder is the client those orders use: a port of the control plane's `src/lib/acme` (ES256 account key, JWS, CSR, renewal information with `replaces`), with no new dependencies (`@std/encoding/base64url`, Web Crypto, `node:crypto` for reading the issued leaf).
+
+**Not wired in yet.** Today's server-placed order (`../tenant-acme-issue.ts`) still starts the one-shot issuer unit. The entry point for the switch is `issueCertificateOverHttp01(layout, request, socketPath, deps)` in `issue.ts`: call it from `runOrder` in place of starting the unit and waiting for pairs, after the routes are applied and proved and while the window lock is held (it does not take the lock itself), passing `tenantAcmeSocketPath(layout, requestId)` (it does not import `tenant-acme-issue.ts`, so the caller can import it). It serves the answers on that `tenant-acme-<request>.sock` (through `withProofAnswerServer` in `../instance-acme-http01.ts`, which answers connections side by side so one silent peer cannot stall the others; `tp-host setfacl` and the hosting Caddy routes are unchanged), and returns one chain and key for every name, its expiry and renewal hints, or a plain failure. It never throws and never writes or logs the pair; the raw failure goes to the daemon log, the outcome carries plain words only (`LocalAcmeError` marks this server's own refusals, whose text may be shown as is).
+
+| File | Role |
+| --- | --- |
+| `client.ts` | `AcmeClient` (one request per call, `badNonce` retried once), `AcmeError` codes with the authority's `Retry-After`, `fetchRenewalInfo` (never throws) |
+| `session.ts` | Process-wide directory and spare-nonce cache keyed by the `fetch` in use; `Retry-After` parsing |
+| `jws.ts`, `csr.ts`, `der.ts` | Signing, key authorization and DNS-01 value, certificate request with every name in one SAN, the small DER reader/writer |
+| `renewal-id.ts` | RFC 9773 identifier: base64url AKI key id, a dot, base64url serial **as the DER content, leading zero kept** (the RFC's own example) |
+| `order.ts` | `runAcmeOrder`: one order, one certificate, a pluggable `ChallengeSolver` (`http-01` today; a `dns-01` solver gets the TXT value) |
+| `http01.ts` | `Http01Answers` (token to key authorization) and `withHttp01Answers` on the proof socket |
+| `account-store.ts` | This server's one account per directory |
+| `issue.ts` | The entry point, failure wording |
+
+Rules:
+
+- **Only the authority's own host.** The daemon's `--allow-net` stays unscoped for other reasons (`../../permissions/daemon-permissions.ts`), so the limit is in code: `authorityUrl` refuses any address that is not `https:` on the directory's host (directory entries, order, authorization, finalize and certificate links, the account address), redirects are refused, and production uses only the two Let's Encrypt directories (`daemonAcmeDirectoryUrl`). `deps.directoryUrl` exists for tests. Plain public trust; never the Platform CA client.
+- **The control plane owns the schedule.** Nothing here keeps state between orders or retries an order. Inside one order only safe things are retried: a stale nonce, a `replaces` refused as `alreadyReplaced` (sent again without it), and up to two transient read failures in a row while polling (the third ends the order). Polls wait what `Retry-After` says, between 1 and 10 seconds, within a 3-minute order budget.
+- **Failures in plain words.** `plainDaemonAcmeFailure` reuses the sentences in `../instance-acme-failure.ts`; a rate limit says "rate limited" (the control plane's one-hour wait keys on those words) and carries the authority's wait. A failed check is prefixed with its name. On failure the authorizations still pending are deactivated; a closed account is forgotten so the next order registers again.
+- **Account storage.** `<state>/tenant-acme/account/<directory host>.json` (folder 0700, file 0600, renamed into place, one writer at a time). The key is saved before it is registered, so a crash in between gets the same account back. `sweepTenantAcme` clears `requests/` and `caddy/certificates/` only, so the account survives restarts; `scripts/purge.sh` removes the state tree whole (pinned in `scripts/purge.test.ts`).
+- **Tests are host-free.** `src/testing/fake-acme-ca.ts` is an in-process authority that verifies nonces, addresses and signatures, validates HTTP-01 through a callback (one test reads the real proof socket in a temp folder), checks the request's names and signature and signs a leaf with an AKI and a high-bit serial. No network, no real state folder.

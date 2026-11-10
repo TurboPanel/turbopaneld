@@ -56,7 +56,7 @@ Read the matching file before editing that area. Paths are relative to the repo 
 | `src/host/` | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes |
 | `src/metrics/` | `src/metrics/AGENTS.md` | `/proc` collector, schema v3 contract, sensors, live-mode leases |
 | `src/logs/` | `src/logs/AGENTS.md` | Streamed command transcripts, redaction, spool and upload |
-| `src/deploy/` | `src/deploy/AGENTS.md` | Tenant deploy, Compose, Traefik, hosting Caddy, deploy hooks; nested `release/`, `native/`, `site/`, `cron/`, `ssh/` guides |
+| `src/deploy/` | `src/deploy/AGENTS.md` | Tenant deploy, Compose, Traefik, hosting Caddy, deploy hooks; nested `release/`, `native/`, `site/`, `cron/`, `ssh/`, `acme/` guides |
 | `src/managed/` | `src/managed/AGENTS.md` | Managed engines, shared ProxySQL ingress, engine registry |
 | `src/backups/` | `src/backups/AGENTS.md` | Scheduled backups |
 | `src/tunnels/` | `src/tunnels/AGENTS.md` | Tunnel connectors as their own services, token copies, readiness |

@@ -306,7 +306,8 @@ export const DAEMON_DENY_NET: readonly string[] = [
  * other permission may be unscoped on a production path.
  *
  * - `net`: the control-plane origin is operator configuration, ACME probes
- *   dial tenant domains, metrics scrape container addresses, and ProxySQL
+ *   dial tenant domains, the daemon's own ACME client reaches the Let's
+ *   Encrypt directory host (kept to that host in code, `deploy/acme/client.ts`), metrics scrape container addresses, and ProxySQL
  *   listens on a configured bind — Deno has no wildcard or CIDR host grant,
  *   so a static list cannot express it. `--deny-net` closes the metadata
  *   endpoints instead.
