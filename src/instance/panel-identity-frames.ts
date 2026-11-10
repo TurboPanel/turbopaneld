@@ -14,6 +14,7 @@
  */
 import { decodeBase64Url, encodeBase64Url } from "@std/encoding/base64url";
 import type { PanelIdentityPin } from "./panel-identity-pin.ts";
+import { PANEL_BOUND_SESSION_FEATURE } from "./version-wire.ts";
 
 export const HELLO_PREFIX = "tp-hello\n";
 export const FRAME_PREFIX = "tp-frame\n";
@@ -27,7 +28,15 @@ export const MAX_CLOCK_SKEW_MS = 300_000;
 /** How long a pinned daemon waits for the signed hello before it hangs up. */
 export const HELLO_TIMEOUT_MS = 30_000;
 
-const ENVELOPE_FIELDS = ["sessionId", "seq", "iat", "kid", "sig"] as const;
+const ENVELOPE_FIELDS = [
+  "sessionId",
+  "seq",
+  "iat",
+  "kid",
+  "forServer",
+  "forKey",
+  "sig",
+] as const;
 const SIG_RE = /^[A-Za-z0-9_-]+$/;
 const textEncoder = new TextEncoder();
 
@@ -36,6 +45,13 @@ export interface PanelSigningKey {
   kid: string;
   key: CryptoKey;
   keyset: number;
+  /**
+   * The verified identity document advertised `boundSessions: 1`: a hello
+   * that does not name this server and key is refused, whether or not this
+   * daemon's offer reached the control plane. Frames that name nothing are
+   * still accepted: they carry the hello's session id.
+   */
+  boundSessions?: boolean;
 }
 
 export type FrameCheck<T> = { ok: true; value: T } | {
@@ -43,8 +59,16 @@ export type FrameCheck<T> = { ok: true; value: T } | {
   reason: string;
 };
 
+/** The server and daemon key this daemon is: what a bound session must name. */
+export interface SessionBinding {
+  serverId: string;
+  keyId: string;
+}
+
 export interface VerifiedHello {
   sessionId: string;
+  /** True when the hello named this server and key (`forServer`, `forKey`). */
+  bound: boolean;
   /** Fingerprint of the control plane key that signed the hello. */
   kid: string;
   heartbeatSeconds: number | undefined;
@@ -61,8 +85,36 @@ export function newHelloNonce(): string {
   return encodeBase64Url(crypto.getRandomValues(new Uint8Array(32)));
 }
 
-export function helloNonceFrame(nonce: string): string {
-  return JSON.stringify({ type: "hello-nonce", nonce });
+/** `offerBinding` adds the feature list that asks for a hello and frames naming this server and key. */
+export function helloNonceFrame(nonce: string, offerBinding = false): string {
+  return JSON.stringify(
+    offerBinding
+      ? { type: "hello-nonce", nonce, features: [PANEL_BOUND_SESSION_FEATURE] }
+      : { type: "hello-nonce", nonce },
+  );
+}
+
+/**
+ * Whether a signed hello or frame names this server and key. `named` is
+ * `true`/`false` for a complete or absent pair and an error for anything
+ * else: half a pair, wrong types, or another server or key.
+ */
+function checkBinding(
+  record: Record<string, unknown>,
+  binding: SessionBinding | undefined,
+): FrameCheck<boolean> {
+  const server = record.forServer;
+  const key = record.forKey;
+  if (server === undefined && key === undefined) {
+    return { ok: true, value: false };
+  }
+  if (typeof server !== "string" || typeof key !== "string") {
+    return fail("binding is incomplete");
+  }
+  if (!binding) return fail("binding is not expected");
+  if (server !== binding.serverId) return fail("signed for another server");
+  if (key !== binding.keyId) return fail("signed for another daemon key");
+  return { ok: true, value: true };
 }
 
 /** The unsigned bytes and the signature, or null when the frame carries no trailing signature. */
@@ -129,13 +181,18 @@ function iatFresh(iat: unknown, nowMs: number): boolean {
     Math.abs(iat * 1000 - nowMs) <= MAX_CLOCK_SKEW_MS;
 }
 
-function fail<T>(reason: string): FrameCheck<T> {
+function fail<T>(reason: string): { ok: false; reason: string } {
   return { ok: false, reason };
 }
 
 function helloFields(
   hello: Record<string, unknown>,
-  ctx: { nonce: string; signing: PanelSigningKey; pin: PanelIdentityPin },
+  ctx: {
+    nonce: string;
+    signing: PanelSigningKey;
+    pin: PanelIdentityPin;
+    binding?: SessionBinding;
+  },
   nowMs: number,
 ): FrameCheck<VerifiedHello> {
   if (hello.type !== "hello") return fail("not a hello");
@@ -154,6 +211,11 @@ function helloFields(
   ) {
     return fail("bad sessionId");
   }
+  const named = checkBinding(hello, ctx.binding);
+  if (!named.ok) return named;
+  if (ctx.signing.boundSessions && !named.value) {
+    return fail("control plane requires bound sessions");
+  }
   const heartbeat = hello.heartbeatSeconds;
   const urls = Array.isArray(hello.urls)
     ? hello.urls.filter((u): u is string => typeof u === "string")
@@ -162,6 +224,7 @@ function helloFields(
     ok: true,
     value: {
       sessionId,
+      bound: named.value,
       kid: ctx.signing.kid,
       heartbeatSeconds: typeof heartbeat === "number" ? heartbeat : undefined,
       urls,
@@ -177,6 +240,7 @@ export async function verifyHello(
     signing: PanelSigningKey;
     pin: PanelIdentityPin;
     nowMs: number;
+    binding?: SessionBinding;
   },
 ): Promise<FrameCheck<VerifiedHello>> {
   const split = splitSignature(raw);
@@ -196,6 +260,22 @@ export async function verifyHello(
 }
 
 /**
+ * A frame that names a server and key must name this one, and only a session
+ * whose hello named them may carry such frames. A frame that names nothing is
+ * fine: it carries the hello's random session id, which only verifies here.
+ */
+function checkFrameBinding(
+  frame: Record<string, unknown>,
+  ctx: { session: { bound?: boolean }; binding?: SessionBinding },
+): FrameCheck<boolean> {
+  const named = checkBinding(frame, ctx.binding);
+  if (named.ok && named.value && !(ctx.session.bound ?? false)) {
+    return fail("binding differs from the hello's");
+  }
+  return named;
+}
+
+/**
  * Check one enveloped frame and return the message without its envelope.
  * The frame is parsed to read its `type` (part of the signed input), then the
  * signature is checked before anything in it is used.
@@ -203,10 +283,11 @@ export async function verifyHello(
 export async function verifyEnvelopedFrame(
   raw: string,
   ctx: {
-    session: { sessionId: string; lastSeq: number };
+    session: { sessionId: string; lastSeq: number; bound?: boolean };
     signing: PanelSigningKey;
     pin: PanelIdentityPin;
     nowMs: number;
+    binding?: SessionBinding;
   },
 ): Promise<FrameCheck<Record<string, unknown>>> {
   const split = splitSignature(raw);
@@ -234,6 +315,8 @@ export async function verifyEnvelopedFrame(
     return fail("key is not pinned");
   }
   if (!iatFresh(frame.iat, ctx.nowMs)) return fail("iat out of range");
+  const binding = checkFrameBinding(frame, ctx);
+  if (!binding.ok) return binding;
   const message = { ...frame };
   for (const field of ENVELOPE_FIELDS) delete message[field];
   return { ok: true, value: message };
