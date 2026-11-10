@@ -71,6 +71,10 @@ jobs:
     if: github.ref == 'refs/heads/trunk'
     uses: ./.github/workflows/verify.yml
     secrets: inherit
+    # verify.yml's contract-drift job lists PRs (the half-merged twin look).
+    permissions:
+      contents: read
+      pull-requests: read
 
   publish:
     # Signs the canary manifest on every trunk merge: environment secret

@@ -318,6 +318,11 @@ jobs:
   contract-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # pull-requests: the half-merged twin look lists the open and merged PRs
+    # of both repositories (scripts/half-merged-twin.ts).
+    permissions:
+      contents: read
+      pull-requests: read
     concurrency:
       group: daemon-contract-drift-${{ github.event_name }}-${{ (github.head_ref == 'trunk' || github.head_ref == 'staging') && github.run_id || github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' && github.head_ref != 'trunk' && github.head_ref != 'staging' }}
