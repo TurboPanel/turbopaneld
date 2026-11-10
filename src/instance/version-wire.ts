@@ -126,6 +126,7 @@ export const DAEMON_WIRE_FEATURES = [
   "signed-ha-events-v1",
   "panel-keyset-key-signature-v1",
   "acme-issue-one-cert-v1",
+  "tunnel-lock-follow-v1",
 ] as const;
 
 /**
@@ -192,6 +193,15 @@ export const TUNNEL_STATUS_FEATURE: DaemonWireFeature = "tunnel-status-v1";
  */
 export const TUNNEL_STATUS_FACTS_FEATURE: DaemonWireFeature =
   "tunnel-status-facts-v1";
+/**
+ * `server.tunnel.routes` may carry `inbound`: every tunnel name whose site runs
+ * on this server, with the servers allowed to forward it. The daemon sets the
+ * lock and trusted peers of those names' site blocks from it without a deploy,
+ * and a deploy takes the stored peers too. Without the feature the control
+ * plane leaves the lock to the site's next deploy.
+ */
+export const TUNNEL_LOCK_FOLLOW_FEATURE: DaemonWireFeature =
+  "tunnel-lock-follow-v1";
 
 /**
  * This daemon honours `credentials[].kind: "backup"` on `managed.apply`: it

@@ -416,6 +416,159 @@ test("an empty table on a host that never had one touches nothing", async () => 
   });
 });
 
+/** A deployed site whose only name is a locked tunnel name, let in from `peers`. */
+function lockedSite(environmentId: string, hostname: string, peers: string[]) {
+  const payload = envPayload(environmentId, hostname);
+  payload.hostings[0] = {
+    ...payload.hostings[0]!,
+    tunnel: { hostnames: [hostname], peers },
+  } as never;
+  return payload;
+}
+
+/** A table for a server that only runs the site: no routes, just who may forward to it. */
+function inboundTable(hash: string, peers: string[]): TunnelRoutesPayload {
+  return table({
+    hash,
+    routes: [],
+    peerAddresses: peers,
+    inbound: [{ hostname: "site.example.com", peers }],
+  });
+}
+
+const LOCK_LINE = "@tp_outside not remote_ip 127.0.0.0/8 ::1";
+
+test("a table with a new carrier lets it in on the site's lock without a deploy, with one reload", async () => {
+  await withHost(async ({ layout, sitesDir, calls }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    const before = calls.length;
+    const result = await applyTunnelRoutes(
+      layout,
+      inboundTable(HASH_1, ["10.0.0.5", "10.0.0.6"]),
+      deps,
+    );
+    assertEquals(result.applied, true);
+    const site = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    assertStringIncludes(site, `${LOCK_LINE} 10.0.0.5 10.0.0.6\n`);
+    assertStringIncludes(
+      site,
+      "trusted_proxies 127.0.0.0/8 ::1 10.0.0.5 10.0.0.6",
+    );
+    const reloads = calls.slice(before).filter((a) => a.includes("reload"));
+    assertEquals(reloads.length, 1);
+    // The same table again: nothing to do, nothing run.
+    const settled = calls.length;
+    const again = await applyTunnelRoutes(
+      layout,
+      inboundTable(HASH_1, ["10.0.0.5", "10.0.0.6"]),
+      deps,
+    );
+    assertEquals(again.applied, false);
+    assertEquals(calls.length, settled);
+  });
+});
+
+test("a removed carrier is shut out, and a table naming only the site's own names is kept", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    await applyTunnelRoutes(
+      layout,
+      {
+        hash: HASH_2,
+        routes: [],
+        peerAddresses: [],
+        inbound: [{ hostname: "site.example.com", peers: [] }],
+      },
+      deps,
+    );
+    const site = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    assertStringIncludes(site, `${LOCK_LINE}\n`);
+    assertEquals(site.includes("10.0.0.5"), false);
+    assertEquals((await readTunnelState(hostingDir))?.inbound?.length, 1);
+  });
+});
+
+test("a later deploy takes the peers of the stored table over the ones it was sent", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(
+      layout,
+      inboundTable(HASH_1, ["10.0.0.5", "10.0.0.6"]),
+      deps,
+    );
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    assertStringIncludes(
+      await Deno.readTextFile(join(sitesDir, "env-1.caddy")),
+      `${LOCK_LINE} 10.0.0.5 10.0.0.6\n`,
+    );
+  });
+});
+
+test("a table from an older control plane (no inbound) leaves the deployed lock alone", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    const before = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    await applyTunnelRoutes(
+      layout,
+      table({ routes: [], peerAddresses: ["10.0.0.6"] }),
+      { decryptSecrets: decrypt, grantRead: noGrant },
+    );
+    assertEquals(
+      await Deno.readTextFile(join(sitesDir, "env-1.caddy")),
+      before,
+    );
+  });
+});
+
+test("a refused set leaves the site's lock, the forward file and the stored table as they were", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir, refuse }) => {
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    refuse.tunnel = true;
+    await assertRejects(() =>
+      applyTunnelRoutes(
+        layout,
+        table({
+          inbound: [{ hostname: "site.example.com", peers: ["10.0.0.6"] }],
+        }),
+        { decryptSecrets: decrypt, grantRead: noGrant },
+      )
+    );
+    assertStringIncludes(
+      await Deno.readTextFile(join(sitesDir, "env-1.caddy")),
+      `${LOCK_LINE} 10.0.0.5\n`,
+    );
+    assertEquals(await exists(join(sitesDir, TUNNEL_SITE_FILE)), false);
+    assertEquals(await readTunnelState(hostingDir), undefined);
+  });
+});
+
 /** A CA and a leaf for the peer name, made with the host's `openssl`. */
 async function makePeerMaterial(
   dir: string,

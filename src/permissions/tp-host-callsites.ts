@@ -1331,6 +1331,17 @@ const SITES: CallSite[] = [
     'src/tunnels/connector-service.ts|mustSystemctl(io,["enable",nextUnit])',
     { argv: ["systemctl", "enable", TUNNEL_UNIT_B] },
   ),
+  // A resend starts an installed connector that is stopped or failed, on either slot.
+  tpHost(
+    'src/tunnels/connector-service.ts|mustSystemctl(io,["start",unit])',
+    { argv: ["systemctl", "start", TUNNEL_UNIT] },
+    { argv: ["systemctl", "start", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-active",unit])',
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT] },
+    { argv: ["systemctl", "is-active", TUNNEL_UNIT_B] },
+  ),
   tpHost(
     'src/tunnels/connector-service.ts|mustSystemctl(io,["start",nextUnit])',
     { argv: ["systemctl", "start", TUNNEL_UNIT_B] },
@@ -1358,6 +1369,7 @@ const SITES: CallSite[] = [
   tpHost(
     'src/tunnels/connector-service.ts|systemctl(io,["reset-failed",unit])',
     { argv: ["systemctl", "reset-failed", TUNNEL_UNIT] },
+    { argv: ["systemctl", "reset-failed", TUNNEL_UNIT_B] },
   ),
   tpHost("src/tunnels/connector-service.ts|systemctl(io,args)", {
     argv: ["systemctl", "daemon-reload"],

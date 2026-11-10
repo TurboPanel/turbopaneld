@@ -490,6 +490,30 @@ export async function controlConnector(
   });
 }
 
+/**
+ * Start an installed connector whose service is stopped or failed (stopped by
+ * hand, or given up on by systemd after repeated crashes). A unit that is
+ * running or still starting is left alone, so a resend never bounces it.
+ * Returns true when it was started.
+ */
+export async function startStoppedConnector(
+  io: ConnectorIo,
+  id: string,
+): Promise<boolean> {
+  assertTunnelId(id);
+  return await serialized(async () => {
+    const record = await readRecord(io, id);
+    if (!record) return false;
+    const unit = tunnelUnitName(id, record.slot);
+    const state = await systemctl(io, ["is-active", unit]);
+    const status = mapConnectorStatus(state.stdout.split("\n")[0] ?? "", null);
+    if (status !== "stopped" && status !== "failed") return false;
+    await systemctl(io, ["reset-failed", unit]);
+    await mustSystemctl(io, ["start", unit]);
+    return true;
+  });
+}
+
 /** The service state and the connector's own readiness, as one status. */
 export async function connectorStatus(
   io: ConnectorIo,

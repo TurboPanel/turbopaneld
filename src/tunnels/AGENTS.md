@@ -107,8 +107,13 @@ The control plane tells each carrying server which organization tunnels to run
 (feature `tunnel-connector-v1`, `src/commands/tunnel-connectors.ts`). Each entry
 is the provider's tunnel id plus the run token as a `tpdaemon.` envelope; the
 handler unseals only the tokens of tunnels that have no connector yet, then
-calls `installConnector`. A connector that already runs is left as it is, so a
-resend never restarts it. `remove` entries call `removeConnector`. Only the ids
+calls `installConnector`. A connector that already runs (or is still starting)
+is left as it is, so a resend never restarts it. One that is installed but
+whose service is stopped or failed (stopped by hand, or given up on by systemd
+after repeated crashes; `Restart=always` covers a plain crash) is started again
+(`startStoppedConnector`: `reset-failed`, then `start`, no new token), so a
+resend repairs it; a start the host refuses fails the command so the list is
+sent again. `remove` entries call `removeConnector`. Only the ids
 named in the command are touched, and the contract refuses `instance` and
 `default`, so the instance's own tunnel and legacy token files are never
 reached from here. One tunnel failing does not stop the others; the command
