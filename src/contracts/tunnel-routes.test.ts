@@ -59,6 +59,49 @@ test("server.tunnel.routes refuses bad tables", () => {
   }
 });
 
+test("server.tunnel.routes parses inbound names, with or without peers, and alone", () => {
+  const withInbound = {
+    ...GOOD,
+    inbound: [
+      { hostname: "site.example.com", peers: ["10.0.0.5", "fd00::5"] },
+      { hostname: "solo.example.com", peers: [] },
+    ],
+  };
+  assertEquals(parseTunnelRoutesPayload(withInbound), withInbound);
+  const alone = {
+    hash: "c".repeat(64),
+    routes: [],
+    peerAddresses: [],
+    inbound: [{ hostname: "solo.example.com", peers: [] }],
+  };
+  assertEquals(parseTunnelRoutesPayload(alone), alone);
+});
+
+test("server.tunnel.routes refuses bad inbound names", () => {
+  const entry = { hostname: "site.example.com", peers: ["10.0.0.5"] };
+  const bad: unknown[] = [
+    { ...GOOD, inbound: {} },
+    { ...GOOD, inbound: [{ ...entry, hostname: "not a name" }] },
+    { ...GOOD, inbound: [{ ...entry, peers: ["10.0.0.0/24"] }] },
+    { ...GOOD, inbound: [{ ...entry, peers: ["10.0.0.5", "10.0.0.5"] }] },
+    { ...GOOD, inbound: [{ hostname: entry.hostname }] },
+    {
+      ...GOOD,
+      inbound: [entry, { ...entry, hostname: "SITE.example.com" }],
+    },
+    {
+      ...GOOD,
+      inbound: [{
+        ...entry,
+        peers: Array.from({ length: 65 }, (_, i) => `10.0.1.${i}`),
+      }],
+    },
+  ];
+  for (const value of bad) {
+    assertThrows(() => parseTunnelRoutesPayload(value), TypeError);
+  }
+});
+
 test("server.tunnel.routes result parses", () => {
   const result = {
     hash: "a".repeat(64),

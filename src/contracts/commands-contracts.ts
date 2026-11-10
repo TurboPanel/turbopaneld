@@ -7037,6 +7037,17 @@ export type TunnelPeerMaterial = {
   notAfter?: string;
 };
 
+/**
+ * A tunnel name whose site runs on this server, with the exact addresses of the
+ * other servers that carry it (empty when only this server does). The lock on
+ * that name's site block follows these peers without a deploy (feature
+ * `tunnel-lock-follow-v1`).
+ */
+export type TunnelInbound = {
+  hostname: string;
+  peers: string[];
+};
+
 /** Must stay in sync with the instance `server.tunnel.routes` shape. */
 export type TunnelRoutesPayload = {
   /** Lower-case sha256 of the desired state. */
@@ -7048,6 +7059,11 @@ export type TunnelRoutesPayload = {
   listenAddresses?: string[];
   /** Required when `routes` or `peerAddresses` is not empty. */
   peerMaterial?: TunnelPeerMaterial;
+  /**
+   * Every tunnel name whose site runs here, with who may forward it. Absent
+   * (an older control plane) = the locks stay as the last deploy wrote them.
+   */
+  inbound?: TunnelInbound[];
 };
 
 /** Must stay in sync with the instance `server.tunnel.routes` shape. */
@@ -7148,6 +7164,33 @@ function parseTunnelPeerMaterial(value: unknown): TunnelPeerMaterial {
   return material;
 }
 
+function parseTunnelInbound(value: unknown): TunnelInbound {
+  if (!isRecord(value) || !isValidHostname(value.hostname)) {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  const peers = parseTunnelAddressList(
+    value.peers,
+    "server.tunnel.routes inbound peers",
+    0,
+    MAX_TUNNEL_ADDRESSES,
+  );
+  return { hostname: value.hostname as string, peers };
+}
+
+function parseTunnelInboundList(value: unknown): TunnelInbound[] {
+  if (!Array.isArray(value) || value.length > MAX_TUNNEL_ROUTES) {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  const inbound = value.map(parseTunnelInbound);
+  if (
+    new Set(inbound.map((entry) => entry.hostname.toLowerCase())).size !==
+      inbound.length
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  return inbound;
+}
+
 /** Parse `server.tunnel.routes`. */
 export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
   if (!isRecord(value)) {
@@ -7189,6 +7232,9 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
   }
   if (value.peerMaterial !== undefined) {
     payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (value.inbound !== undefined) {
+    payload.inbound = parseTunnelInboundList(value.inbound);
   }
   if (
     (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial

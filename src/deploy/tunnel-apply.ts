@@ -30,7 +30,9 @@ import {
   tunnelPeerPaths,
 } from "./tunnel-caddy.ts";
 import {
+  type OwnSiteFile,
   peerMaterialId,
+  plannedRelocks,
   readTunnelState,
   removeTunnelState,
   renderStoredTunnelFile,
@@ -144,6 +146,8 @@ async function unchangedResult(
   const filesOk = prior.peerId === undefined ||
     await peerFilesPresent(hostingDir, prior.peerId);
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
+  // A site deployed since (or written by an older daemon) may hold other peers.
+  if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
   return {
     hash: payload.hash,
     applied: false,
@@ -153,18 +157,23 @@ async function unchangedResult(
   };
 }
 
-/** Judge, swap in and reload the new file; nothing happens when it is unchanged. */
+/**
+ * Judge, swap in and reload the new tunnel file together with the site files
+ * whose tunnel lock changed, with one reload; nothing happens when neither
+ * changed.
+ */
 async function swapTunnelFile(
   layout: LayoutPaths,
   paths: { hostingDir: string; sitesDir: string; livePath: string },
   contents: string,
   live: string | undefined,
+  relocks: readonly OwnSiteFile[],
   grantRead: (hostingDir: string) => Promise<void>,
 ): Promise<void> {
-  // Nothing to judge or reload when the file was never there and stays so.
-  if (contents === (live ?? "") || (contents === "" && live === undefined)) {
-    return;
-  }
+  // The file was never there and stays so, or it already holds this text.
+  const tunnelSame = contents === (live ?? "") ||
+    (contents === "" && live === undefined);
+  if (tunnelSame && relocks.length === 0) return;
   await validateHostingCaddyCandidate(
     layout,
     paths.hostingDir,
@@ -172,11 +181,20 @@ async function swapTunnelFile(
     TUNNEL_SITE_FILE,
     contents,
     grantRead,
+    { sites: relocks },
   );
   if (contents !== "") await enableHostingCaddy();
-  await activateHostingSites([{ live: paths.livePath, contents }]);
+  await activateHostingSites([
+    ...(tunnelSame ? [] : [{ live: paths.livePath, contents }]),
+    ...relocks.map((site) => ({
+      live: join(paths.sitesDir, site.file),
+      contents: site.contents,
+    })),
+  ]);
   // Caddy no longer loads anything from it (the empty file loaded).
-  if (contents === "") await Deno.remove(paths.livePath).catch(() => {});
+  if (!tunnelSame && contents === "") {
+    await Deno.remove(paths.livePath).catch(() => {});
+  }
 }
 
 function tunnelStateFor(
@@ -191,6 +209,7 @@ function tunnelStateFor(
       ? { listenAddresses: payload.listenAddresses }
       : {}),
     ...(peerId === undefined ? {} : { peerId }),
+    ...(payload.inbound ? { inbound: payload.inbound } : {}),
   };
 }
 
@@ -203,8 +222,10 @@ async function applyTunnelRoutesLocked(
   const sitesDir = join(hostingDir, "sites");
   const livePath = join(sitesDir, TUNNEL_SITE_FILE);
   await Deno.mkdir(sitesDir, { recursive: true, mode: 0o750 });
+  // Names that run here still need their lock kept current, so a table that
+  // only lists them is not empty.
   const empty = payload.routes.length === 0 &&
-    payload.peerAddresses.length === 0;
+    payload.peerAddresses.length === 0 && (payload.inbound?.length ?? 0) === 0;
   const live = await readTextIfPresent(livePath);
   const prior = await readTunnelState(hostingDir);
 
@@ -233,11 +254,13 @@ async function applyTunnelRoutesLocked(
 
   try {
     const rendered = await renderStoredTunnelFile(hostingDir, sitesDir, state);
+    const relocks = await plannedRelocks(sitesDir, state);
     await swapTunnelFile(
       layout,
       { hostingDir, sitesDir, livePath },
       rendered.contents,
       live,
+      relocks,
       deps.grantRead ?? grantHostingCaddyRead,
     );
     await (empty
@@ -246,7 +269,7 @@ async function applyTunnelRoutesLocked(
     await prunePeerMaterial(hostingDir, peerId);
     logInfo(
       "tunnels",
-      `tunnel forwarding now holds ${rendered.forwarded.length} name(s), ${rendered.dropped.length} served here`,
+      `tunnel forwarding now holds ${rendered.forwarded.length} name(s), ${rendered.dropped.length} served here; ${relocks.length} site file(s) took new tunnel peers`,
     );
     return {
       hash: payload.hash,

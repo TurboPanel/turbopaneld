@@ -6,10 +6,14 @@
  * without waiting for the control plane.
  */
 import { join } from "@std/path";
-import type { TunnelRoute } from "../contracts/commands-contracts.ts";
+import type {
+  TunnelInbound,
+  TunnelRoute,
+} from "../contracts/commands-contracts.ts";
 import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import { snippetSiteAddresses } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
+import { inboundPeers, relockSiteText } from "./tunnel-lock.ts";
 import {
   type RenderedTunnelFile,
   renderTunnelFile,
@@ -26,6 +30,8 @@ export type TunnelState = {
   peerAddresses: string[];
   listenAddresses?: string[];
   peerId?: string;
+  /** Tunnel names that run here and who may forward them (absent from an older control plane). */
+  inbound?: TunnelInbound[];
 };
 
 async function readTextIfPresent(path: string): Promise<string | undefined> {
@@ -175,4 +181,50 @@ export async function peerMaterialId(
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0"))
     .join("").slice(0, 16);
+}
+
+/** `contents` with the tunnel peers of the stored table; as it was when there is no table or no `inbound`. */
+export function relockWithStoredPeers(
+  state: TunnelState | undefined,
+  contents: string,
+): string {
+  if (!state?.inbound) return contents;
+  return relockSiteText(
+    contents,
+    inboundPeers(state.inbound),
+    state.listenAddresses ?? [],
+  );
+}
+
+/**
+ * The site files whose tunnel lock differs from the stored table, with their
+ * new text. The daemon's own reserved files are never touched. Empty when the
+ * table has no `inbound`.
+ */
+export async function plannedRelocks(
+  sitesDir: string,
+  state: TunnelState,
+): Promise<OwnSiteFile[]> {
+  if (!state.inbound) return [];
+  let entries: Deno.DirEntry[];
+  try {
+    entries = await Array.fromAsync(Deno.readDir(sitesDir));
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  const files = entries
+    .filter((entry) =>
+      entry.isFile && entry.name.endsWith(".caddy") &&
+      !isDaemonReservedHostingSite(entry.name)
+    )
+    .map((entry) => entry.name)
+    .toSorted((a, b) => a.localeCompare(b));
+  const texts = await Promise.all(
+    files.map((file) => Deno.readTextFile(join(sitesDir, file))),
+  );
+  return files.flatMap((file, i) => {
+    const next = relockWithStoredPeers(state, texts[i]!);
+    return next === texts[i] ? [] : [{ file, contents: next }];
+  });
 }
