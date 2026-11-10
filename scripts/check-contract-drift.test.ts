@@ -1,14 +1,20 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  constantDrift,
   ContractDriftError,
   type ContractFieldPin,
   extractFieldSpecs,
   fieldPinDrift,
   floorWithinVersionDrift,
   main,
+  mapDriftFromDaemon,
+  markedWidening,
+  missingFromDaemon,
+  objectLiteralEntries,
   runContractDriftCheck,
   snapshotDataDrift,
+  snapshotSubsetDrift,
   versionFloorsDrift,
 } from "./check-contract-drift.ts";
 
@@ -124,11 +130,29 @@ test("the committed snapshot matches both checkouts' normalized field types", as
     string,
     { instance: string; daemon: string; fields: ContractFieldPin[] }
   >;
+  // Daemon first: the control plane may pin fewer types and fields.
+  const instanceSnapshot = JSON.parse(
+    await Deno.readTextFile(
+      join(sibling, "scripts/contract-field-snapshot.json"),
+    ),
+  ) as Record<string, { instance: string; fields: ContractFieldPin[] }>;
   for (const [typeName, pin] of Object.entries(snapshot)) {
     const daemonSrc = await Deno.readTextFile(join(ROOT, pin.daemon));
-    const instanceSrc = await Deno.readTextFile(join(sibling, pin.instance));
     assertEquals(extractFieldSpecs(daemonSrc, typeName), pin.fields);
-    assertEquals(extractFieldSpecs(instanceSrc, typeName), pin.fields);
+    const theirs = instanceSnapshot[typeName];
+    if (theirs) {
+      const instanceSrc = await Deno.readTextFile(
+        join(sibling, theirs.instance),
+      );
+      assertEquals(
+        fieldPinDrift(
+          extractFieldSpecs(instanceSrc, typeName),
+          theirs.fields,
+          typeName,
+        ),
+        null,
+      );
+    }
     assertEquals(
       fieldPinDrift(
         extractFieldSpecs(daemonSrc, typeName),
@@ -289,5 +313,247 @@ test("versionFloorsDrift holds each floor against the peer repo's deno.json", ()
   assertEquals(
     versionFloorsDrift(instanceWire, daemonWire, "{}", json("0.1.18")),
     "MIN_SUPPORTED_INSTANCE_VERSION: the peer deno.json version is not X.Y.Z (got null)",
+  );
+});
+
+// Daemon first: this daemon may be ahead of the control plane, never behind.
+test("more wire features here pass; a control plane feature this daemon lacks is named", () => {
+  assertEquals(missingFromDaemon(["a-v1"], ["a-v1", "b-v1"]), []);
+  assertEquals(missingFromDaemon(["a-v1", "c-v1"], ["a-v1"]), ["c-v1"]);
+});
+
+test("feature floors: every control plane key must be here with the same value", () => {
+  assertEquals(objectLiteralEntries("{ a: 0.1.1, b: 0.2.0, }"), [
+    ["a", "0.1.1"],
+    ["b", "0.2.0"],
+  ]);
+  assertEquals(objectLiteralEntries("{}"), []);
+  assertEquals(objectLiteralEntries("{ nope }"), null);
+  assertEquals(
+    mapDriftFromDaemon("{ a: 0.1.1 }", "{ a: 0.1.1, b: 0.2.0 }"),
+    null,
+  );
+  assertStringIncludes(
+    mapDriftFromDaemon("{ c: 0.3.0 }", "{ a: 0.1.1 }") ?? "",
+    "c is not in this daemon's map",
+  );
+  assertStringIncludes(
+    mapDriftFromDaemon("{ a: 0.1.2 }", "{ a: 0.1.1 }") ?? "",
+    "a is 0.1.2 on the control plane but 0.1.1 here",
+  );
+  assertStringIncludes(mapDriftFromDaemon(null, "{}") ?? "", "missing");
+});
+
+test("snapshot: this daemon may pin more types and optional fields, never fewer or different", () => {
+  const a = { name: "a", required: true, type: "string" };
+  const b = { name: "b", required: false, type: "number" };
+  const pin = (fields: object[]) =>
+    JSON.stringify({ T: { instance: "i.ts", daemon: "d.ts", fields } });
+  assertEquals(snapshotSubsetDrift(pin([a]), pin([a, b])), null);
+  assertEquals(
+    snapshotSubsetDrift(
+      pin([a]),
+      JSON.stringify({
+        ...JSON.parse(pin([a])),
+        U: { instance: "x", daemon: "y", fields: [] },
+      }),
+    ),
+    null,
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a, b]), pin([a])) ?? "",
+    "T.b is pinned on the control plane but not here",
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a]), "{}") ?? "",
+    "T is pinned on the control plane",
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a]), pin([a, { ...b, required: true }])) ?? "",
+    "must be optional",
+  );
+  assertStringIncludes(
+    snapshotSubsetDrift(pin([a]), pin([{ ...a, type: "number" }])) ?? "",
+    "$.T.fields.a.type differs",
+  );
+});
+
+test("named constants: a shared value must agree, a name only this daemon has is fine", () => {
+  assertEquals(
+    constantDrift("tp-hello-v1", "tp-hello-v1", "HELLO_PREFIX"),
+    null,
+  );
+  assertEquals(constantDrift(null, "tp-new-v1", "REQUEST_PREFIX"), null);
+  assertStringIncludes(
+    constantDrift("tp-hello-v1", "tp-hello-v2", "HELLO_PREFIX") ?? "",
+    "must hold the same value",
+  );
+  assertStringIncludes(
+    constantDrift("x", null, "HELLO_PREFIX") ?? "",
+    "missing on the daemon",
+  );
+});
+
+test("snapshot: a daemon pin that widens on purpose still covers the control plane's", () => {
+  const pin = { name: "v", required: true, type: "4 | 6" };
+  const wide = { ...pin, type: "4 | 6 | 8", expansion: true };
+  assertEquals(markedWidening(pin, wide), true);
+  assertEquals(markedWidening(pin, { ...wide, expansion: undefined }), false);
+  assertEquals(markedWidening(pin, { ...wide, required: false }), false);
+  assertEquals(markedWidening(pin, { ...wide, type: "4" }), false);
+  const snap = (field: object) =>
+    JSON.stringify({
+      T: { instance: "i.ts", daemon: "d.ts", fields: [field] },
+    });
+  assertEquals(snapshotSubsetDrift(snap(pin), snap(wide)), null);
+  assertStringIncludes(
+    snapshotSubsetDrift(snap(pin), snap({ ...pin, type: "4 | 6 | 8" })) ?? "",
+    "differs",
+  );
+});
+
+/**
+ * A control plane checkout built from this daemon's own sources, so the whole
+ * check runs here without the sibling repo: every pinned type, constant and
+ * mirror the check reads from the control plane side, at its control plane
+ * path. `drop` leaves files out; `tweak` edits one after it is written.
+ */
+async function fakeControlPlane(
+  opts: {
+    drop?: string[];
+    tweak?: Record<string, (text: string) => string>;
+  } = {},
+): Promise<string> {
+  const root = await Deno.makeTempDir();
+  const files = new Map<string, string>();
+  const add = async (to: string, from: string) => {
+    const text = await Deno.readTextFile(join(ROOT, from));
+    files.set(to, (files.get(to) ?? "") + text + "\n");
+  };
+  await add(
+    "src/contracts/metrics-contract.ts",
+    "src/contracts/metrics-contract.ts",
+  );
+  await add(
+    "src/contracts/commands/hostname.ts",
+    "src/contracts/commands-contracts.ts",
+  );
+  await add(
+    "src/lib/panel-identity/frame-envelope.ts",
+    "src/instance/panel-identity-frames.ts",
+  );
+  for (
+    const to of [
+      "src/daemon/authn/proof-version.ts",
+      "src/daemon/authn/request-signature.ts",
+      "src/daemon/authn/attach-proof.ts",
+      "src/daemon/authn/pin-report.ts",
+    ]
+  ) await add(to, "src/crypto/keys.ts");
+  await add(
+    "src/test-fixtures/keyset-statement-vectors.json",
+    "src/testing/keyset-statement-vectors.json",
+  );
+  await add("src/lib/machine-key.ts", "src/host/machine-key.ts");
+  await add(
+    "src/contracts/server-addresses.ts",
+    "src/contracts/server-reported-ip.ts",
+  );
+  await add(
+    "src/contracts/layout-vectors.json",
+    "src/contracts/layout-vectors.json",
+  );
+  await add(
+    "src/contracts/topology-types.ts",
+    "src/contracts/topology-types.ts",
+  );
+  await add(
+    "src/contracts/topology-slot-mapping.ts",
+    "src/contracts/topology-slot-mapping.ts",
+  );
+  await add(
+    "scripts/contract-field-snapshot.json",
+    "scripts/contract-field-snapshot.json",
+  );
+  const snapshot = JSON.parse(
+    await Deno.readTextFile(join(ROOT, "scripts/contract-field-snapshot.json")),
+  ) as Record<string, { instance: string; daemon: string }>;
+  const pairs = new Set(
+    Object.values(snapshot).map((pin) => `${pin.instance}\n${pin.daemon}`),
+  );
+  for (const pair of pairs) {
+    const [to, from] = pair.split("\n");
+    await add(to, from);
+  }
+  const channels = (await Deno.readTextFile(join(ROOT, "src/update/types.ts")))
+    .match(/export type UpdateChannel =([^;]*);/)?.[1] ?? "";
+  files.set(
+    "src/contracts/update-channel.ts",
+    `export const UPDATE_CHANNELS = [${channels.split("|").join(",")}];\n`,
+  );
+  await add("src/lib/version-wire.ts", "src/instance/version-wire.ts");
+  files.set(
+    "src/lib/version-wire.ts",
+    files.get("src/lib/version-wire.ts") +
+      'export const MIN_SUPPORTED_DAEMON_VERSION = "0.0.1";\n',
+  );
+  files.set("deno.json", JSON.stringify({ version: "99.0.0" }));
+  for (const [rel, text] of files) {
+    if (opts.drop?.includes(rel)) continue;
+    const path = join(root, rel);
+    await Deno.mkdir(join(path, ".."), { recursive: true });
+    await Deno.writeTextFile(path, opts.tweak?.[rel]?.(text) ?? text);
+  }
+  return root;
+}
+
+test("a control plane that is behind this daemon passes the whole check", async () => {
+  const same = await fakeControlPlane();
+  // Behind: daemon-only names missing, a whole-file mirror that differs, and
+  // fewer features than this daemon lists. All of it is a notice at most.
+  const behind = await fakeControlPlane({
+    drop: [
+      "src/daemon/authn/request-signature.ts",
+      "src/contracts/metrics-contract.ts",
+    ],
+    tweak: {
+      "src/contracts/layout-vectors.json": (text) => `${text} `,
+      "src/lib/version-wire.ts": (text) =>
+        text.replace(
+          /(export const DAEMON_WIRE_FEATURES = \[)\s*"[^"]+",/,
+          "$1",
+        ),
+    },
+  });
+  try {
+    assertEquals(
+      await runContractDriftCheck({ sibling: same, requireSibling: true }),
+      "ok",
+    );
+    assertEquals(
+      await runContractDriftCheck({ sibling: behind, requireSibling: true }),
+      "ok",
+    );
+  } finally {
+    await Deno.remove(same, { recursive: true });
+    await Deno.remove(behind, { recursive: true });
+  }
+});
+
+test("verify.yml compares a queued trunk build with control plane trunk as of its commit", () => {
+  const verify = Deno.readTextFileSync(
+    join(ROOT, ".github/workflows/verify.yml"),
+  );
+  const job = verify.slice(verify.indexOf("\n  contract-drift:\n"));
+  assertStringIncludes(
+    job,
+    "- name: Pick the control plane trunk commit to compare with",
+  );
+  assertStringIncludes(job, "commits?sha=trunk&until=${at}&per_page=1");
+  assertStringIncludes(job, "ref: ${{ steps.sibling.outputs.ref }}");
+  // A pull request into trunk stays strict: compared with the current trunk.
+  assertStringIncludes(
+    job,
+    "AS_OF: ${{ github.event_name != 'pull_request' || (github.head_ref == 'trunk' && github.base_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository) }}",
   );
 });

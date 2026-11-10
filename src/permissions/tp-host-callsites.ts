@@ -920,16 +920,6 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","start",unit]',
-    {
-      argv: [
-        "systemctl",
-        "start",
-        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
-      ],
-    },
-  ),
-  tpHost(
     'src/deploy/tenant-acme-issue.ts|["-n","systemctl","stop",unit]',
     {
       argv: [
@@ -956,10 +946,10 @@ const SITES: CallSite[] = [
         "tp",
         "--",
         STAGED,
-        `${CONF}/tls/instance-acme/panel.example.com.key`,
+        `${STATE}/tls/certs/letsencrypt-panel.example.com.key`,
       ],
       // The daemon creates the directory first (as itself).
-      setup: dir(`${CONF}/tls/instance-acme`),
+      setup: dir(`${STATE}/tls/certs`),
     },
   ),
   tpHost(
@@ -968,9 +958,9 @@ const SITES: CallSite[] = [
       argv: [
         "chown",
         "tpcaddy:tp",
-        `${CONF}/tls/instance-acme/panel.example.com.key`,
+        `${STATE}/tls/certs/letsencrypt-panel.example.com.key`,
       ],
-      setup: file(`${CONF}/tls/instance-acme/panel.example.com.key`),
+      setup: file(`${STATE}/tls/certs/letsencrypt-panel.example.com.key`),
     },
   ),
   tpHost(
@@ -979,9 +969,9 @@ const SITES: CallSite[] = [
       argv: [
         "chmod",
         "0600",
-        `${CONF}/tls/instance-acme/panel.example.com.key`,
+        `${STATE}/tls/certs/letsencrypt-panel.example.com.key`,
       ],
-      setup: file(`${CONF}/tls/instance-acme/panel.example.com.key`),
+      setup: file(`${STATE}/tls/certs/letsencrypt-panel.example.com.key`),
     },
   ),
   tpHost('src/deploy/instance-acme-http01.ts|["-n","cat","--",path]', {
@@ -1022,20 +1012,20 @@ const SITES: CallSite[] = [
     setup: file(ACME_CERT),
   }),
   tpHost('src/deploy/instance-acme-http01.ts|["-n","tee",path]', {
-    argv: ["tee", `${CONF}/instance-acme/Caddyfile`],
+    argv: ["tee", `${CONF}/caddy/instance-acme.json`],
     stdin: "{\n}\n",
-    setup: dir(`${CONF}/instance-acme`),
+    setup: dir(`${CONF}/caddy`),
   }),
   tpHost(
     'src/deploy/instance-acme-http01.ts|["-n","chown",`root:${INSTANCE_ACME_CERT_GROUP}`,path]',
     {
-      argv: ["chown", "root:tp", `${CONF}/instance-acme/Caddyfile`],
-      setup: file(`${CONF}/instance-acme/Caddyfile`),
+      argv: ["chown", "root:tp", `${CONF}/caddy/instance-acme.json`],
+      setup: file(`${CONF}/caddy/instance-acme.json`),
     },
   ),
   tpHost('src/deploy/instance-acme-http01.ts|["-n","chmod","0640",path]', {
-    argv: ["chmod", "0640", `${CONF}/instance-acme/Caddyfile`],
-    setup: file(`${CONF}/instance-acme/Caddyfile`),
+    argv: ["chmod", "0640", `${CONF}/caddy/instance-acme.json`],
+    setup: file(`${CONF}/caddy/instance-acme.json`),
   }),
 
   // --- native apps ----------------------------------------------------------

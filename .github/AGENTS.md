@@ -77,38 +77,50 @@ to the repo root.
   `scripts/scan-secrets.sh --all` over every tracked file (the pre-commit hook
   only sees staged files, so a flagged line in a file nobody staged is caught
   here, and a stale `.secretscan-allowlist` entry is warned about). Its
-  `contract-drift` job checks out `TurboPanel/turbopanel` (same-named branch,
-  else trunk) beside this repo and runs `check:contract-drift` with
-  `TURBOPANEL_REQUIRE_SIBLING=1`, so a missing sibling fails instead of
-  skipping. **Contract sibling override.** The `contract-drift` job in
-  `.github/workflows/verify.yml` picks the `turbopanel` branch to check out with
-  `scripts/resolve-sibling-ref.ts`: the same-named branch in the TurboPanel org,
-  else trunk, and always trunk for promotion pull requests (unchanged default).
-  A pull request (from a fork, or a twin with another name) may name a different
-  org branch with one line `Sibling-Branch: <branch>` (at the start of a line)
-  in its description. The description is untrusted: it is re-read from the API
-  (so an edit counts on a re-run) and reaches the resolver only through the
-  environment, the value must match `^[A-Za-z0-9._/-]{1,100}$` with no `..`,
-  leading `-` or `.lock` ending, and a named branch that does not exist fails
-  the job. The job summary names the ref used and, for a twin, says to merge the
-  turbopanel pull request before the turbopaneld one. The control plane
-  repository keeps a twin of the resolver; change both together. Tests:
-  `scripts/resolve-sibling-ref.test.ts`. `scripts/scan-secrets.sh`,
-  `scripts/scan-secrets.patterns` and `scripts/scan-secrets.selftest.sh` are
-  byte-identical in turbopanel, turbopaneld, ui, website and dev: change all
-  five together (each repo keeps a copy because the pre-commit hook runs it
-  locally). The rules in the patterns file cover private key blocks, vendor
-  tokens, JWTs, connection URLs with credentials, secret-looking assignments and
-  forbidden file names (dotenv files, `*.pem`, `*.key`, daemon identity files,
-  …); the scanner reports the rule id and location, never the matching text.
-  `--all` scans the tree; `--range BASE..HEAD` scans every line the PR's commits
-  added, so a secret added and removed inside a PR is still caught (CI runs it
-  on PRs into trunk). Allowlist entries in `.secretscan-allowlist` are
-  `path:full line text` (or `@path exact/file` for a forbidden file name), each
-  needs a `# reason:` comment above it, and wildcards are rejected. The
-  self-test builds its fixtures at run time from fragments; dev's
-  `src/lib/scan-secrets.test.ts` runs it and, with the siblings checked out in
-  dev CI, fails if any copy drifts.
+  `contract-drift` job checks out `TurboPanel/turbopanel` **trunk**, always
+  (never a same-named branch or another pull request's code), comparing a pull
+  request into trunk with the current control plane trunk, and a trunk push, a
+  manual run or the Release Candidate PR with control plane trunk as it was when
+  the commit under test landed (a build that waited in the queue would otherwise
+  be red for control plane changes its successors already match), beside this
+  repo and runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a
+  missing sibling fails instead of skipping. **Daemon first.** Wire changes
+  merge into the daemon's trunk first, then the control plane's, so the check is
+  one-way: this daemon may be ahead (extra `DAEMON_WIRE_FEATURES`, extra
+  feature-floor entries, extra update channels or `ServerReportedIp` fields,
+  extra snapshot types, extra optional snapshot fields), and it is red only when
+  the control plane relies on something this daemon lacks or pins a shared entry
+  differently. Old control planes ignore daemon features they do not know, which
+  is what makes a daemon that is ahead safe. Named constants both sides use
+  (signed-session prefixes, proof tags, `HOSTNAME_RE`, `HOSTNAME_MAX_LENGTH`,
+  `MAX_NIC_SLOTS`, the machine-key namespace, `INSTANCE_VERSION_HEADER`) must
+  hold the same value on both sides, since a peer that disagrees rejects the
+  other's bytes; a name only this daemon has yet is a notice. Whole-file mirrors
+  (metrics contract body, key-set and folder name vectors) and
+  `FILESYSTEM_ROLE_PRIORITY` only print a notice here when they differ; the
+  control plane's `contract-twin` job is red when its own pull request changes
+  its copy (per file) to something other than daemon trunk's. Removing goes the
+  other way: this check is red if the daemon drops a feature, floor or pin the
+  control plane still has. A snapshot pin this daemon widens on purpose
+  (`expansion: true`, same requiredness, wider type) still covers the control
+  plane's; that is safe only because the control plane parses daemon-sent fields
+  tolerantly (an unknown key or value is dropped, never a reason to refuse the
+  message). Tests: `scripts/check-contract-drift.test.ts`.
+  `scripts/scan-secrets.sh`, `scripts/scan-secrets.patterns` and
+  `scripts/scan-secrets.selftest.sh` are byte-identical in turbopanel,
+  turbopaneld, ui, website and dev: change all five together (each repo keeps a
+  copy because the pre-commit hook runs it locally). The rules in the patterns
+  file cover private key blocks, vendor tokens, JWTs, connection URLs with
+  credentials, secret-looking assignments and forbidden file names (dotenv
+  files, `*.pem`, `*.key`, daemon identity files, …); the scanner reports the
+  rule id and location, never the matching text. `--all` scans the tree;
+  `--range BASE..HEAD` scans every line the PR's commits added, so a secret
+  added and removed inside a PR is still caught (CI runs it on PRs into trunk).
+  Allowlist entries in `.secretscan-allowlist` are `path:full line text` (or
+  `@path exact/file` for a forbidden file name), each needs a `# reason:`
+  comment above it, and wildcards are rejected. The self-test builds its
+  fixtures at run time from fragments; dev's `src/lib/scan-secrets.test.ts` runs
+  it and, with the siblings checked out in dev CI, fails if any copy drifts.
 - **CI gate:** `.github/workflows/verify.yml` is the canonical quality gate —
   reusable via `workflow_call`, the trunk `publish` job `needs: verify`, and
   promotion re-verifies artifact hashes only (no new compile from source).
@@ -174,10 +186,13 @@ promote workflows and their `dev-ref` at one sha, the composite actions and
 The Promote OK check (the `gh-promote-ok.yml` and `gh-promote-ok-recheck.yml`
 calls in `promote-ok.yml` and `promote-ok-recheck.yml`, with their `dev-ref`) is
 its own pin group, so a fix to it can ship without moving the rest of the chain.
-The check looks once and ends in seconds; the recheck re-runs it when the trunk
-build or Publish Release Candidate finishes, one recheck at a time (queued in
-order, none dropped). The plain `promote.yml` form below is **break-glass
-only**.
+The check looks once and ends in seconds and is a check run, not a job: the
+evaluation writes `promote-ok` through the Checks API (success when ready,
+pending while the trunk build, the canary or the rc is still being made, red
+only when it can never pass), and the recheck looks again and updates it when
+the trunk build or Publish Release Candidate finishes, one recheck at a time
+(queued in order, none dropped). The plain `promote.yml` form below is
+**break-glass only**.
 
 **Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a
 tested build up a channel — `to=rc` turns a canary build (`source` = build id,

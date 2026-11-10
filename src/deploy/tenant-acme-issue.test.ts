@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import type { AcmeIssueRequestMessage } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { writeFixtureLeafPair } from "../testing/openssl-fixture-leaf.ts";
+import { createFakeCa, FAKE_CA_DIRECTORY } from "../testing/fake-acme-ca.ts";
 import type {
   CommandResult,
   InstanceAcmeCommand,
@@ -11,6 +12,9 @@ import {
   instanceAcmeIssuerKey,
   LETS_ENCRYPT_STAGING_DIRECTORY_URL,
 } from "./instance-acme-issuer.ts";
+import type { DaemonIssueOutcome } from "./acme/issue.ts";
+import { Http01Answers } from "./acme/http01.ts";
+import type { ChallengeSolver } from "./acme/order.ts";
 import {
   connectWithin,
   issueTenantCertificates,
@@ -19,14 +23,17 @@ import {
   rawProofGet,
   sweepTenantAcme,
   tenantAcmeCertificateRoot,
-  tenantAcmeConfigPath,
-  tenantAcmeIssuerConfig,
-  tenantAcmeLogPath,
   tenantAcmeSocketPath,
   tenantAcmeUnit,
   type TenantIssueDeps,
 } from "./tenant-acme-issue.ts";
 
+/**
+ * Jest/Mocha-shaped alias for {@link Deno.test}.
+ *
+ * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
+ * reports Deno suites as empty; keep this alias so analysis sees real tests.
+ */
 const test = Deno.test.bind(Deno);
 
 const NOW = Date.parse("2026-10-01T00:00:00.000Z");
@@ -72,28 +79,37 @@ function ok(): CommandResult {
 type Harness = {
   layout: LayoutPaths;
   calls: string[];
-  stopped: string[];
-  reports: Array<{ hostname: string; requestId: string }>;
+  ordered: string[][];
+  reports: Array<
+    { hostname: string; requestId: string; certificatePem: string }
+  >;
   deps: TenantIssueDeps;
 };
 
-/** What the stub issuer "obtains" when started: a fixture pair per name. */
+const ISSUED: DaemonIssueOutcome = {
+  ok: true,
+  certificatePem:
+    "-----BEGIN CERTIFICATE-----\nAA==\n-----END CERTIFICATE-----\n",
+  privateKeyPem:
+    "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----\n",
+  notAfterIso: "2027-09-23T00:00:00.000Z",
+  renewal: { certId: null, window: null, retryAfterMs: null },
+};
+
+/** The order is stubbed: what the daemon's own client hands back. */
 async function withHarness(
   fn: (h: Harness, root: string) => Promise<void>,
   opts: {
-    names?: string[];
     answer?: (address: string) => boolean;
-    log?: string;
+    outcome?: DaemonIssueOutcome;
     reportError?: unknown;
-    issue?: boolean;
   } = {},
 ): Promise<void> {
   const root = await Deno.makeTempDir({ prefix: "tp-tenant-acme-" });
   const layout = layoutUnder(root);
   const calls: string[] = [];
-  const stopped: string[] = [];
+  const ordered: string[][] = [];
   const reports: Harness["reports"] = [];
-  const names = opts.names ?? [HOST];
   const run: InstanceAcmeCommand = (program, args) => {
     calls.push(`${program} ${args.join(" ")}`);
     return Promise.resolve(ok());
@@ -101,7 +117,6 @@ async function withHarness(
   const deps: TenantIssueDeps = {
     run,
     now: () => NOW,
-    sleep: () => Promise.resolve(),
     nonce: () => "n0nce",
     localAddresses: () => ["198.51.100.4", "fe80::1"],
     proofGet: (address, _host, path) => {
@@ -114,37 +129,25 @@ async function withHarness(
     },
     applyRoutes: () => Promise.resolve({ ok: true }),
     preflightServer: (_socket, _nonce, _run, body) => body(),
-    startUnit: async (unit) => {
-      calls.push(`start ${unit}`);
-      if (opts.issue === false) return;
-      for (const name of names) {
-        await writeFixtureLeafPair(
-          join(tenantAcmeCertificateRoot(layout), ISSUER_KEY, name),
-          name,
-          "20260923000000Z",
-          "20270923000000Z",
-        );
-      }
+    issueOwn: (_layout, req, socketPath) => {
+      ordered.push([...req.names, socketPath]);
+      return Promise.resolve(opts.outcome ?? ISSUED);
     },
-    isUnitActive: () => Promise.resolve(false),
-    stopUnit: (unit) => {
-      stopped.push(unit);
-      return Promise.resolve(null);
-    },
-    readLog: () => Promise.resolve(opts.log ?? ""),
     report: (input) => {
       if (opts.reportError !== undefined) {
         return Promise.reject(opts.reportError);
       }
-      reports.push({ hostname: input.hostname, requestId: input.requestId });
-      // The pair goes out; nothing else about it is kept here.
-      assertStringIncludes(input.certificatePem, "BEGIN CERTIFICATE");
+      reports.push({
+        hostname: input.hostname,
+        requestId: input.requestId,
+        certificatePem: input.certificatePem,
+      });
       assertStringIncludes(input.privateKeyPem, "PRIVATE KEY");
       return Promise.resolve({ stored: true });
     },
   };
   try {
-    await fn({ layout, calls, stopped, reports, deps }, root);
+    await fn({ layout, calls, ordered, reports, deps }, root);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -154,28 +157,10 @@ async function exists(path: string): Promise<boolean> {
   return await Deno.stat(path).then(() => true, () => false);
 }
 
-test("the issuer config covers the request's names with this server's account and a per-request socket", () => {
-  const layout = layoutUnder("/x");
-  const config = tenantAcmeIssuerConfig(
-    layout,
-    request({ names: [OTHER, HOST], directory: "staging" }),
-  );
-  const text = JSON.stringify(config);
-  assertStringIncludes(text, LETS_ENCRYPT_STAGING_DIRECTORY_URL);
-  assertStringIncludes(text, "ops@example.com");
-  assertStringIncludes(text, `unix/${tenantAcmeSocketPath(layout, "req_1")}`);
-  assertStringIncludes(text, tenantAcmeLogPath(layout, "req_1"));
-  assertStringIncludes(text, '"tls-alpn":{"disabled":true}');
+test("the unit name an older release used is still known to the sweep", () => {
   assertEquals(
     tenantAcmeUnit("req_1"),
     "turbopanel-tenant-acme@req_1.service",
-  );
-  const production = JSON.stringify(
-    tenantAcmeIssuerConfig(layout, request({ directory: "production" })),
-  );
-  assertStringIncludes(
-    production,
-    "https://acme-v02.api.letsencrypt.org/directory",
   );
 });
 
@@ -224,58 +209,31 @@ test("localProofAddresses starts at loopback and drops link-local and duplicates
   );
 });
 
-test("a good order reports one pair per name with the request id, then cleans up", async () => {
+test("one certificate for every name is reported once per name with the request id", async () => {
   await withHarness(async (h) => {
-    const { layout } = h;
     const outcome = await issueTenantCertificates(
-      layout,
+      h.layout,
       request({ names: [HOST, OTHER] }),
       h.deps,
     );
-    assertEquals(outcome.ok, true);
-    if (outcome.ok) {
-      assertEquals(outcome.notAfterIso, "2027-09-23T00:00:00.000Z");
-      assertEquals(outcome.skippedHelpers, []);
-    }
-    assertEquals(h.reports, [
-      { hostname: HOST, requestId: "req_1" },
-      { hostname: OTHER, requestId: "req_1" },
-    ]);
-    assertEquals(h.stopped, ["turbopanel-tenant-acme@req_1.service"]);
-    // The pair, the request's files and the stored certificates are gone.
-    assertEquals(
-      await exists(join(tenantAcmeCertificateRoot(layout), ISSUER_KEY, HOST)),
-      false,
-    );
-    assertEquals(await exists(tenantAcmeConfigPath(layout, "req_1")), false);
-    assertEquals(await exists(tenantAcmeLogPath(layout, "req_1")), false);
-    // The socket is opened for hosting Caddy once the issuer is up.
-    assert(
-      h.calls.some((c) =>
-        c.includes("setfacl") && c.includes("tenant-acme-req_1.sock")
-      ),
-    );
-  }, { names: [HOST, OTHER] });
-});
-
-test("leftover certificates for the names are cleared before the order", async () => {
-  await withHarness(async (h) => {
-    const stale = join(tenantAcmeCertificateRoot(h.layout), ISSUER_KEY, HOST);
-    await writeFixtureLeafPair(
-      stale,
+    assertEquals(outcome, {
+      ok: true,
+      notAfterIso: "2027-09-23T00:00:00.000Z",
+      skippedHelpers: [],
+    });
+    // One order, on this request's proof socket, for both names.
+    assertEquals(h.ordered, [[
       HOST,
-      "20260923000000Z",
-      "20270923000000Z",
-    );
-    let startedWithStale = true;
-    const start = h.deps.startUnit!;
-    h.deps.startUnit = async (unit, run) => {
-      startedWithStale = await exists(stale);
-      await start(unit, run);
-    };
-    const outcome = await issueTenantCertificates(h.layout, request(), h.deps);
-    assertEquals(outcome.ok, true);
-    assertEquals(startedWithStale, false);
+      OTHER,
+      tenantAcmeSocketPath(h.layout, "req_1"),
+    ]]);
+    assertEquals(h.reports.map((r) => [r.hostname, r.requestId]), [
+      [HOST, "req_1"],
+      [OTHER, "req_1"],
+    ]);
+    assertEquals(h.reports[0]!.certificatePem, h.reports[1]!.certificatePem);
+    // No issuer unit is started any more.
+    assert(!h.calls.some((c) => c.includes("systemctl")), h.calls.join("\n"));
   });
 });
 
@@ -294,42 +252,28 @@ test("a server that does not answer its own check fails before the authority is 
     if (!outcome.ok) {
       assertStringIncludes(outcome.reason, "did not answer the check");
     }
-    assert(!h.calls.some((c) => c.startsWith("start ")));
-    assertEquals(h.stopped, []);
+    assertEquals(h.ordered, []);
   }, { answer: () => false });
 });
 
-test("an authority failure becomes a plain reason, and the issuer is still stopped and cleaned", async () => {
-  const log =
-    '{"level":"error","msg":"could not get certificate from issuer","error":"acme: error: 429 :: POST :: urn:ietf:params:acme:error:rateLimited :: too many certificates"}';
+test("the client's plain failure is passed on as is, rate limits in the words the control plane waits on", async () => {
   await withHarness(async (h) => {
     const outcome = await issueTenantCertificates(h.layout, request(), h.deps);
-    assertEquals(outcome.ok, false);
-    if (!outcome.ok) {
-      assertStringIncludes(outcome.reason, "rate limited");
-      assert(/rate ?limit/i.test(outcome.reason));
-      assert(!outcome.reason.includes("urn:ietf"));
-    }
-    assertEquals(h.stopped.length, 1);
-    assertEquals(h.reports, []);
-    assertEquals(await exists(tenantAcmeConfigPath(h.layout, "req_1")), false);
-  }, { log, issue: false });
-});
-
-test("an issuer that never produces a pair times out with a plain reason", async () => {
-  await withHarness(async (h) => {
-    let ticks = 0;
-    h.deps.now = () => NOW + (ticks++) * 100_000;
-    const outcome = await issueTenantCertificates(h.layout, request(), {
-      ...h.deps,
-      timeoutMs: 180_000,
+    assertEquals(outcome, {
+      ok: false,
+      reason:
+        "Let's Encrypt has rate limited this name; it will be retried in about an hour (a week for repeated certificates)",
     });
-    assertEquals(outcome.ok, false);
-    if (!outcome.ok) {
-      assertStringIncludes(outcome.reason, "did not finish in time");
-    }
-    assertEquals(h.stopped.length, 1);
-  }, { issue: false });
+    assertEquals(h.reports, []);
+  }, {
+    outcome: {
+      ok: false,
+      code: "rate_limited",
+      reason:
+        "Let's Encrypt has rate limited this name; it will be retried in about an hour (a week for repeated certificates)",
+      retryAfterMs: 600_000,
+    },
+  });
 });
 
 test("a pair the control plane refuses fails the order with the status and no pair text", async () => {
@@ -340,10 +284,6 @@ test("a pair the control plane refuses fails the order with the status and no pa
       assertStringIncludes(outcome.reason, "status 404");
       assert(!outcome.reason.includes("PRIVATE KEY"));
     }
-    assertEquals(
-      await exists(join(tenantAcmeCertificateRoot(h.layout), ISSUER_KEY, HOST)),
-      false,
-    );
   }, { reportError: Object.assign(new Error("x"), { status: 404 }) });
 });
 
@@ -362,33 +302,40 @@ test("a request past its start-by time or with an unsafe id is refused untouched
     );
     assertEquals(unsafe.ok, false);
     assertEquals(h.calls, []);
+    assertEquals(h.ordered, []);
   });
 });
 
-test("a re-send while this request's issuer is running touches nothing", async () => {
+test("the whole path against an in-process authority: one certificate names both names", async () => {
   await withHarness(async (h) => {
-    const live = join(tenantAcmeCertificateRoot(h.layout), ISSUER_KEY, HOST);
-    await writeFixtureLeafPair(
-      live,
-      HOST,
-      "20260923000000Z",
-      "20270923000000Z",
+    const answers = new Http01Answers();
+    const ca = await createFakeCa({
+      http01: (_name, token) =>
+        Promise.resolve(
+          answers.answer(`/.well-known/acme-challenge/${token}`).body,
+        ),
+    });
+    const { issueOwn: _stub, ...rest } = h.deps;
+    const outcome = await issueTenantCertificates(
+      h.layout,
+      request({ names: [HOST, OTHER] }),
+      {
+        ...rest,
+        acme: {
+          fetch: ca.fetch,
+          directoryUrl: FAKE_CA_DIRECTORY,
+          sleep: () => Promise.resolve(),
+          serveAnswers: <T>(
+            _socket: string,
+            _run: unknown,
+            work: (solver: ChallengeSolver) => Promise<T>,
+          ) => work(answers.solver),
+        },
+      },
     );
-    const socket = tenantAcmeSocketPath(h.layout, "req_1");
-    await Deno.mkdir(h.layout.runDir, { recursive: true });
-    await Deno.writeTextFile(socket, "live");
-    const outcome = await issueTenantCertificates(h.layout, request(), {
-      ...h.deps,
-      isUnitActive: () => Promise.resolve(true),
-    });
-    assertEquals(outcome, {
-      ok: false,
-      reason: "an order for this request is already running",
-    });
-    assertEquals(await exists(live), true);
-    assertEquals(await exists(socket), true);
-    assertEquals(h.stopped, []);
-    assert(!h.calls.some((c) => c.startsWith("start ")));
+    assertEquals(outcome.ok, true);
+    assertEquals(ca.issued, [[HOST, OTHER]]);
+    assertEquals(h.reports.length, 2);
   });
 });
 
@@ -416,7 +363,13 @@ test("the start-up sweep stops issuers and clears requests, stored pairs and soc
     await Deno.mkdir(join(layout.stateDir, "tenant-acme", "requests"), {
       recursive: true,
     });
-    await Deno.writeTextFile(tenantAcmeConfigPath(layout, "old"), "{}");
+    const oldConfig = join(
+      layout.stateDir,
+      "tenant-acme",
+      "requests",
+      "old.json",
+    );
+    await Deno.writeTextFile(oldConfig, "{}");
     await Deno.mkdir(layout.runDir, { recursive: true });
     await Deno.writeTextFile(tenantAcmeSocketPath(layout, "old"), "");
     await Deno.writeTextFile(join(layout.runDir, "instance.sock"), "");
@@ -439,7 +392,7 @@ test("the start-up sweep stops issuers and clears requests, stored pairs and soc
       "turbopanel-tenant-acme@old2.service",
     ]);
     assertEquals(await exists(pair), false);
-    assertEquals(await exists(tenantAcmeConfigPath(layout, "old")), false);
+    assertEquals(await exists(oldConfig), false);
     assertEquals(await exists(tenantAcmeSocketPath(layout, "old")), false);
     assertEquals(await exists(join(layout.runDir, "instance.sock")), true);
     assertEquals(await exists(account), true);

@@ -52,11 +52,17 @@ type Order = {
 };
 
 export type FakeCaOptions = {
-  /** What a fetch of `http://<name>/.well-known/acme-challenge/<token>` answers; null is a refused connection. */
+  /**
+   * What a fetch of `http://<name>/.well-known/acme-challenge/<token>` answers;
+   * null is a refused connection.
+   */
   http01?: (name: string, token: string) => Promise<string | null>;
   /** Refuse new orders with a rate-limit error and this `Retry-After`. */
   rateLimitOrders?: string;
-  /** Refuse an order that names a certificate it replaces, with this problem (for example `alreadyReplaced`). */
+  /**
+   * Refuse an order that names a certificate it replaces, with this problem
+   * (for example `alreadyReplaced`).
+   */
   refuseReplaces?: string;
   /** Answer the first nonce-bearing request with a stale-nonce error. */
   staleNonceOnce?: boolean;
@@ -68,7 +74,10 @@ export type FakeCaOptions = {
   pollRetryAfter?: string;
   /** Names whose authorization is already valid when the order opens. */
   alreadyValid?: string[];
-  /** Offers renewal information; the window is what it suggests for any certificate. */
+  /**
+   * Offers renewal information; the window is what it suggests for any
+   * certificate.
+   */
   renewalWindow?: { start: Date; end: Date };
   /** Order addresses point at this host instead of the authority's own. */
   orderHost?: string;
@@ -76,6 +85,10 @@ export type FakeCaOptions = {
   certificateBody?: string;
   /** The issued leaf leaves out this name. */
   dropName?: string;
+  /**
+   * An order whose checks all passed reads with this status instead of `ready`.
+   */
+  readyAs?: string;
 };
 
 export type FakeCa = {
@@ -96,7 +109,12 @@ export type FakeCa = {
   renewalAsked: string[];
   /** The `replaces` field of each new order, in order. */
   orderReplaces: (string | undefined)[];
-  /** From now on every request signed by an existing account is refused as deactivated. */
+  /** The `Accept` header of each certificate download. */
+  certificateAccept: (string | null)[];
+  /**
+   * From now on every request signed by an existing account is refused as
+   * deactivated.
+   */
   deactivateAccounts: () => void;
   /** The next `count` authorization reads answer a server error. */
   failAuthzReads: (count: number) => void;
@@ -143,7 +161,10 @@ function derSignatureToRaw(der: Uint8Array): Uint8Array {
   return concat(fix(r), fix(s));
 }
 
-/** The names in a request for a certificate, after checking its signature, and its public key. */
+/**
+ * The names in a request for a certificate, after checking its signature, and
+ * its public key.
+ */
 async function verifyCsr(
   csr: Uint8Array,
 ): Promise<{ names: string[]; spki: Uint8Array }> {
@@ -165,7 +186,8 @@ async function verifyCsr(
     raw(info) as BufferSource,
   );
   if (!ok) throw new TypeError("the request signature is wrong");
-  // attributes > attribute > set > extensions > extension > octet string > general names
+  // attributes > attribute > set > extensions > extension > octet string >
+  // general names
   const attribute = children(attrs)[0];
   const extensionSet = attribute ? children(attribute)[1] : undefined;
   const extensions = extensionSet ? children(extensionSet)[0] : undefined;
@@ -223,7 +245,10 @@ async function mintLeaf(
 type Signed = { kid: string | null; jwk: Jwk; payload: unknown };
 type ReplyHeaders = Record<string, string>;
 
-/** Make a fresh authority. Its account, order and token ids count up, so tests stay deterministic. */
+/**
+ * Make a fresh authority. Its account, order and token ids count up, so tests
+ * stay deterministic.
+ */
 export async function createFakeCa(
   options: FakeCaOptions = {},
 ): Promise<FakeCa> {
@@ -242,6 +267,7 @@ export async function createFakeCa(
   const deactivatedAuthz: string[] = [];
   const renewalAsked: string[] = [];
   const orderReplaces: (string | undefined)[] = [];
+  const certificateAccept: (string | null)[] = [];
   const deactivatedAccounts = new Set<string>();
   const nonces = new Set<string>();
   let stale = options.staleNonceOnce === true;
@@ -284,6 +310,19 @@ export async function createFakeCa(
       });
     }
     if (header.url !== url) return problem("malformed", "wrong url", 400);
+    // As the protocol says: a key names itself only to register; after that, by
+    // account.
+    const registering = new URL(url).pathname === "/acct";
+    if (
+      registering !== (header.jwk !== undefined) || (registering && header.kid)
+    ) {
+      return problem(
+        "malformed",
+        registering ? "register with the key itself" : "sign with the account",
+        400,
+        { "Replay-Nonce": freshNonce() },
+      );
+    }
     const jwk = header.jwk ??
       (header.kid ? accounts.get(header.kid) : undefined);
     if (!jwk) return problem("accountDoesNotExist", "unknown account", 400);
@@ -351,7 +390,9 @@ export async function createFakeCa(
     const states = order.authz.map((a) =>
       a.holdReads > 0 ? "pending" : a.state
     );
-    let status = states.every((s) => s === "valid") ? "ready" : "pending";
+    let status = states.every((s) => s === "valid")
+      ? (options.readyAs ?? "ready")
+      : "pending";
     if (states.some((s) => s === "invalid" || s === "deactivated")) {
       status = "invalid";
     }
@@ -406,7 +447,8 @@ export async function createFakeCa(
   };
 
   const account = (signed: Signed, headers: ReplyHeaders): Response => {
-    // A key the authority already knows gets its account back, as the protocol says.
+    // A key the authority already knows gets its account back, as the protocol
+    // says.
     const known = [...accounts].find(([, k]) =>
       k.x === signed.jwk.x && k.y === signed.jwk.y
     );
@@ -598,6 +640,9 @@ export async function createFakeCa(
         headers: { "Replay-Nonce": freshNonce() },
       });
     }
+    if (path.startsWith("/cert/")) {
+      certificateAccept.push(new Headers(init?.headers).get("accept"));
+    }
     return await handlePost(
       url,
       typeof init?.body === "string" ? init.body : "",
@@ -615,6 +660,7 @@ export async function createFakeCa(
     deactivated: deactivatedAuthz,
     renewalAsked,
     orderReplaces,
+    certificateAccept,
     keyId,
     deactivateAccounts: () => {
       for (const id of accounts.keys()) deactivatedAccounts.add(id);

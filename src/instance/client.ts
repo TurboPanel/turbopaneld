@@ -257,6 +257,7 @@ import {
   MANAGED_HEALTH_REPORT_FEATURE,
   REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
+  SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
   TLS_CAPTURE_FEATURE,
   TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
@@ -2394,7 +2395,12 @@ export class InstanceClient {
         onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),
         reportSigning: {
           key: () => this.#daemonSigningKey,
-          enabled: () => this.instanceSupports(SIGNED_REPORTS_FEATURE),
+          enabled: (type) =>
+            this.instanceSupports(
+              type === "managed-ha-event"
+                ? SIGNED_HA_EVENTS_FEATURE
+                : SIGNED_REPORTS_FEATURE,
+            ),
           known: () => this.#peerFeaturesKnown,
         },
         now,
