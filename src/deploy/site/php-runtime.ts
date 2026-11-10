@@ -177,9 +177,15 @@ type SitePhpModeSite = Pick<
 
 /**
  * The per-site mode a site's PHP runs in, or `null` for a site that keeps the
- * shared php-fpm master: a site without PHP, an nginx or Apache site that
- * names no mode (the control plane always sends one once it has resolved it),
- * or a Caddy site (Caddy serves no PHP in the new layout).
+ * shared php-fpm master: a site without PHP, an nginx site that names no mode
+ * (the control plane always sends one once it has resolved it), or a Caddy site
+ * (Caddy serves no PHP in the new layout).
+ *
+ * An Apache PHP site (alone or behind nginx) never keeps the shared master: its
+ * runtime is walled off from other sites by a per-runtime site key, so one that
+ * names no mode runs FastCGI, the control plane's default, with a warning
+ * (logged once). The existing rule that a mode needs a principal then refuses
+ * Apache PHP without a Hosting Account.
  *
  * nginx, Apache and nginx in front of Apache cannot run lsphp; asking for it
  * is refused rather than quietly served some other way. OpenLiteSpeed has no
@@ -196,13 +202,18 @@ export function sitePhpRuntimeMode(
     return openlitespeedPhpMode(site, environmentId);
   }
   const mode = site.php?.mode;
-  if (mode === undefined) return null;
-  if (
-    site.engine !== "nginx" && site.engine !== "apache" &&
-    site.engine !== "nginx+apache"
-  ) {
-    return null;
+  const apache = site.engine === "apache" || site.engine === "nginx+apache";
+  if (mode === undefined) {
+    if (!apache || !siteHasPhp(site)) return null;
+    warnModeOnce(
+      site,
+      environmentId,
+      "nomode",
+      `Apache PHP site names no mode; running it as ${OLS_DEFAULT_PHP_MODE}`,
+    );
+    return OLS_DEFAULT_PHP_MODE;
   }
+  if (site.engine !== "nginx" && !apache) return null;
   if (mode === "fastcgi" || mode === "fpm") return mode;
   throw new Error(
     `site ${site.composeServiceName}: PHP mode ${mode} needs OpenLiteSpeed, not ${site.engine}`,
@@ -211,6 +222,11 @@ export function sitePhpRuntimeMode(
 
 /** The control plane's default mode for a new PHP site. */
 const OLS_DEFAULT_PHP_MODE: SitePhpRuntimeMode = "fastcgi";
+
+/** A site that names any PHP hint has PHP (same test as `siteNeedsPhp`). */
+function siteHasPhp(site: SitePhpModeSite): boolean {
+  return site.php !== undefined && Object.keys(site.php).length > 0;
+}
 
 const warnedModes = new Set<string>();
 
@@ -561,6 +577,43 @@ export function sitePhpSocketUnit(spec: SitePhpRuntimeSpec): string {
   ].join("\n");
 }
 
+/** File name of the guard script inside a runtime's config folder. */
+export const SITE_PHP_GUARD_FILE = "site-guard.php";
+
+/** `<configDir>/php/sites/<id>/site-guard.php` (root-owned, like php.ini). */
+export function sitePhpGuardPath(configDir: string, id: string): string {
+  return join(sitePhpConfigDir(configDir, id), SITE_PHP_GUARD_FILE);
+}
+
+/**
+ * The guard `auto_prepend_file` runs before every script of an Apache PHP
+ * runtime: 403 unless the `TP_SITE_KEY` the vhost sent equals the key in this
+ * runtime's own `php.ini`. `get_cfg_var` reads the loaded ini file itself, so
+ * `.user.ini`, `ini_set` and a `PHP_VALUE` parameter cannot change it. tp-host
+ * pins these exact bytes (`tp_php_guard_ok`); change both together.
+ */
+export function sitePhpGuardPhp(): string {
+  return [
+    "<?php",
+    "// Managed by TurboPanel: this site's PHP serves only requests its own web server sent.",
+    "if (PHP_SAPI !== 'cli') {",
+    "    $tp_site_key = get_cfg_var('turbopanel.site_key');",
+    "    $tp_sent_key = $_SERVER['TP_SITE_KEY'] ?? null;",
+    "    if (!is_string($tp_site_key) || strlen($tp_site_key) !== 64 || !is_string($tp_sent_key) || !hash_equals($tp_site_key, $tp_sent_key)) {",
+    "        http_response_code(403);",
+    "        exit;",
+    "    }",
+    "    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY']);",
+    "}",
+    "",
+  ].join("\n");
+}
+
+/** What `sitePhpIni` needs to wire the guard into a runtime. */
+export type SitePhpGuard = Readonly<{ key: string; path: string }>;
+
+const SITE_KEY_RE = /^[0-9a-f]{64}$/;
+
 /** One ini directive, already validated by the caller. */
 export type SitePhpIniValue = Readonly<{ key: string; value: string }>;
 
@@ -668,10 +721,13 @@ export const SITE_PHP_LOCKED_INI_KEYS: readonly string[] = Object.freeze([
 function lockedIniSection(
   merged: ReadonlyMap<string, string>,
   root: string,
+  guardPath?: string,
 ): string[] {
   const lines = SITE_PHP_LOCKED_INI_KEYS
     .filter((key) => merged.has(key))
     .map((key) => `${key} = ${merged.get(key)}`);
+  // Again here, so a `.user.ini` cannot change it for scripts under the home.
+  if (guardPath !== undefined) lines.push(`auto_prepend_file = ${guardPath}`);
   return [`[PATH=${root}]`, ...lines];
 }
 
@@ -687,11 +743,27 @@ export function sitePhpIni(
   values: readonly SitePhpIniValue[],
   lockRoot: string,
   lsphp?: Pick<SitePhpRuntimeSpec, "mode" | "runtimesDir" | "series">,
+  guard?: SitePhpGuard,
 ): string {
   if (!LOCK_ROOT_RE.test(lockRoot) || /\/\.\.?(\/|$)/.test(lockRoot)) {
     throw new Error(`per-site PHP cannot lock its limits under ${lockRoot}`);
   }
+  if (guard !== undefined && !SITE_KEY_RE.test(guard.key)) {
+    throw new Error(
+      "per-site PHP site key must be 64 lowercase hex characters",
+    );
+  }
   const merged = mergedIni(values);
+  // The guard is the isolation itself: a site's own `auto_prepend_file` loses
+  // to it, and its path is allowed through `open_basedir`.
+  if (guard !== undefined) {
+    merged.set("turbopanel.site_key", guard.key);
+    merged.set("auto_prepend_file", guard.path);
+    const basedir = merged.get("open_basedir");
+    if (basedir !== undefined && basedir !== "") {
+      merged.set("open_basedir", `${basedir}:${guard.path}`);
+    }
+  }
   const lines = [
     // A detached lsphp runtime also gets its module lines first.
     ...(lsphp?.mode === "lsphp-detached" ? lsphpModuleLines(lsphp) : []),
@@ -701,7 +773,7 @@ export function sitePhpIni(
     "; TurboPanel per-site PHP",
     "[PHP]",
     ...lines,
-    ...lockedIniSection(merged, lockRoot),
+    ...lockedIniSection(merged, lockRoot, guard?.path),
     "",
   ].join("\n");
 }

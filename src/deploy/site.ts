@@ -141,6 +141,8 @@ import {
   isSitePhpRuntimeId,
   isSitePhpRuntimeOf,
   sitePhpFpmConf,
+  sitePhpGuardPath,
+  sitePhpGuardPhp,
   sitePhpIni,
   sitePhpKey,
   sitePhpLockedValues,
@@ -157,6 +159,11 @@ import {
   sitePhpUnitLimits,
   type SitePhpWebAccount,
 } from "./site/php-runtime.ts";
+import {
+  APACHE_OVERRIDE_CLASSES,
+  apacheOverrideListLine,
+} from "./site/apache-overrides.ts";
+import { cachedPhpSiteKeySecret, phpSiteKey } from "./site/php-site-key.ts";
 import {
   holdSitePhpRuntime,
   installSitePhpRuntime,
@@ -1342,7 +1349,45 @@ export type ApacheSiteConfigOpts = Readonly<{
    * nginx's `X-Forwarded-For`.
    */
   behindNginxPort?: number | null;
+  /**
+   * This site's own error log (a file under the daemon-run `sites/` log
+   * folder, never inside the site tree). Left out, Apache logs to the
+   * server-wide error log.
+   */
+  errorLogPath?: string | null;
+  /**
+   * The runtime's site key (64 lowercase hex): sent to PHP as `TP_SITE_KEY`
+   * and the PHP parameters a `.htaccess` could set are stripped. Required for
+   * a PHP site, ignored for a static one.
+   */
+  phpSiteKey?: string | null;
 }>;
+
+const PHP_SITE_KEY_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The vhost lines that bind a site to its own PHP runtime. At vhost level, not
+ * inside a `<FilesMatch>`, so they also cover `RewriteRule [P]`, `[H=]` and
+ * `SetHandler` requests from any folder; a `.htaccess` cannot undo them
+ * (`ProxyFCGISetEnvIf` is not an allowed override, and `SetEnv` / `[E=]`
+ * values are replaced or removed by these lines when the request is built).
+ */
+function apacheSiteKeyLines(siteKey: string): string[] {
+  return [
+    `  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${siteKey}"`,
+    '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
+    '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
+    '  ProxyFCGISetEnvIf "true" !PHPRC',
+    '  ProxyFCGISetEnvIf "true" !PHP_INI_SCAN_DIR',
+  ];
+}
+
+/** `lines` with `extra` placed right before the dotfile refusal, if present. */
+function linesBeforeDotfileDeny(lines: string[], extra: string[]): string[] {
+  const at = lines.findIndex((line) => line.startsWith("  <LocationMatch "));
+  if (at < 0) return [...lines, ...extra];
+  return [...lines.slice(0, at), ...extra, ...lines.slice(at)];
+}
 
 /**
  * One `SetEnv` line, or a refusal naming the variable (never its value: it may
@@ -1378,6 +1423,8 @@ function apacheVhostHead(
   site: SiteApplySpec,
   dockerBindAddress: string | null,
   behindNginxPort: number | null,
+  errorLogPath: string | null,
+  keyLines: string[],
 ): string {
   const name = site.composeServiceName;
   // `ServerTokens` is server-wide only (not valid inside a VirtualHost), so it
@@ -1386,6 +1433,9 @@ function apacheVhostHead(
   const hide = site.hideWebServerNames === true;
   const tokens = hide ? ["ServerTokens Prod"] : [];
   const signature = hide ? ["  ServerSignature Off"] : [];
+  const errorLog = errorLogPath === null
+    ? []
+    : [`  ErrorLog "${errorLogPath}"`];
   if (behindNginxPort !== null) {
     return [
       `# TurboPanel site ${name} (behind nginx)`,
@@ -1393,8 +1443,9 @@ function apacheVhostHead(
       `Listen 127.0.0.1:${behindNginxPort}`,
       `<VirtualHost 127.0.0.1:${behindNginxPort}>`,
       "  ServerName localhost",
+      ...errorLog,
       ...signature,
-      ...apacheBehindNginxLines(),
+      ...linesBeforeDotfileDeny(apacheBehindNginxLines(), keyLines),
     ].join("\n");
   }
   const addrs = [`127.0.0.1:${site.listenPort}`];
@@ -1405,8 +1456,10 @@ function apacheVhostHead(
     ...addrs.map((addr) => `Listen ${addr}`),
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
+    ...errorLog,
     ...signature,
     ...apacheForwardedLines(FORWARDED_TRUSTED_LOOPBACK),
+    ...keyLines,
     ...apacheDotfileDenyLines(),
   ].join("\n");
 }
@@ -1421,6 +1474,14 @@ export function apacheSiteConfig(
   if (siteNeedsPhp(site) && !phpFpmSocket) {
     throw new Error(
       `site Apache PHP site ${site.composeServiceName} is missing phpFpmSocket`,
+    );
+  }
+  const siteKey = opts?.phpSiteKey ?? null;
+  if (
+    siteNeedsPhp(site) && (siteKey === null || !PHP_SITE_KEY_RE.test(siteKey))
+  ) {
+    throw new Error(
+      `site Apache PHP site ${site.composeServiceName} needs a 64 hex site key`,
     );
   }
 
@@ -1447,13 +1508,16 @@ export function apacheSiteConfig(
     site,
     dockerBindAddress,
     opts?.behindNginxPort ?? null,
+    opts?.errorLogPath ?? null,
+    siteNeedsPhp(site) && siteKey !== null ? apacheSiteKeyLines(siteKey) : [],
   );
 
   return `${head}
   DocumentRoot "${documentRoot}"
   <Directory "${documentRoot}">
-    Options Indexes SymLinksIfOwnerMatch
-    AllowOverride AuthConfig FileInfo Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch
+    Options SymLinksIfOwnerMatch
+    AllowOverride ${APACHE_OVERRIDE_CLASSES}
+    AllowOverrideList ${apacheOverrideListLine()}
     Require all granted
   </Directory>${phpBlock}${setenvBlock}
 </VirtualHost>
@@ -3257,6 +3321,8 @@ function stagedList(
 /** The socket a site's vhost hands PHP to, and what reaching it took. */
 type SitePhpBackend = {
   socket: string | null;
+  /** The runtime's site key (Apache PHP runtimes only). */
+  siteKey: string | null;
   result: Omit<ApplySiteResult, "staged">;
 };
 
@@ -3275,16 +3341,35 @@ async function applySitePhpBackend(
   paths: SitePaths,
 ): Promise<SitePhpBackend> {
   const series = resolveSitePhpSeries(site);
-  if (!series) return { socket: null, result: { phpFpmStaged: [] } };
+  if (!series) {
+    return { socket: null, siteKey: null, result: { phpFpmStaged: [] } };
+  }
   const mode = sitePhpRuntimeMode(site, environmentId);
   if (mode !== null) {
+    // Only an Apache runtime carries a key: Apache reaches every per-site
+    // socket, so each runtime answers only requests that carry its own key.
+    const siteKey = SITE_PHP_WEB_ACCOUNT[site.engine] === "tpapache"
+      ? await phpSiteKey(
+        await cachedPhpSiteKeySecret(layout),
+        siteRuntimeId(environmentId, site, mode, series),
+      )
+      : null;
     const phpRuntime = await installSitePhpRuntime(
       sitePhpIo(),
-      sitePhpRuntimeFiles(layout, environmentId, site, paths, mode, series),
+      sitePhpRuntimeFiles(
+        layout,
+        environmentId,
+        site,
+        paths,
+        mode,
+        series,
+        siteKey,
+      ),
       { existing: paths.phpUnits ?? new Map(), probe: siteProbeTarget(site) },
     );
     return {
       socket: sitePhpSocketPath(phpRuntime.files.spec.id),
+      siteKey,
       result: { phpFpmStaged: [], phpRuntime },
     };
   }
@@ -3304,6 +3389,7 @@ async function applySitePhpBackend(
   );
   return {
     socket,
+    siteKey: null,
     result: { phpFpmStaged: stagedList(pool), phpSeries: series },
   };
 }
@@ -3351,6 +3437,20 @@ const SITE_PHP_WEB_ACCOUNT: Readonly<
   openlitespeed: "tpols",
 };
 
+/** The runtime id of a site's per-site PHP (one per site, mode and series). */
+function siteRuntimeId(
+  environmentId: string,
+  site: SiteApplySpec,
+  mode: SitePhpRuntimeMode,
+  series: string,
+): string {
+  return sitePhpRuntimeId(
+    sitePhpKey(environmentId, site.composeServiceName),
+    mode,
+    series,
+  );
+}
+
 /** Render one site's per-site PHP runtime (units and config). */
 function sitePhpRuntimeFiles(
   layout: LayoutPaths,
@@ -3359,6 +3459,7 @@ function sitePhpRuntimeFiles(
   paths: SitePaths,
   mode: SitePhpRuntimeMode,
   series: string,
+  siteKey: string | null,
 ): SitePhpRuntimeFiles {
   if (!site.principal) {
     throw new Error(
@@ -3369,11 +3470,7 @@ function sitePhpRuntimeFiles(
   const user = resolveSiteOwnership(site).user;
   const home = principalHomePath(layout, user);
   const spec: SitePhpRuntimeSpec = {
-    id: sitePhpRuntimeId(
-      sitePhpKey(environmentId, site.composeServiceName),
-      mode,
-      series,
-    ),
+    id: siteRuntimeId(environmentId, site, mode, series),
     mode,
     series,
     user,
@@ -3384,6 +3481,12 @@ function sitePhpRuntimeFiles(
     runtimesDir: layout.runtimesDir,
     webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };
+  const webAccount = SITE_PHP_WEB_ACCOUNT[site.engine];
+  if (siteKey !== null && webAccount !== "tpapache") {
+    throw new Error(
+      `site ${site.composeServiceName}: only an Apache PHP runtime takes a site key`,
+    );
+  }
   const values = site.php
     ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
     : [];
@@ -3403,7 +3506,15 @@ function sitePhpRuntimeFiles(
       limits: sitePhpUnitLimits(values, workers),
     }),
     socket: sitePhpSocketActivated(mode) ? sitePhpSocketUnit(spec) : null,
-    ini: sitePhpIni(values, home, spec),
+    ini: sitePhpIni(
+      values,
+      home,
+      spec,
+      siteKey === null
+        ? undefined
+        : { key: siteKey, path: sitePhpGuardPath(layout.configDir, spec.id) },
+    ),
+    guard: siteKey === null ? null : sitePhpGuardPhp(),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
         pool,
@@ -3457,6 +3568,21 @@ async function applyNginxSite(
   return { staged: stagedList(staged), ...php.result };
 }
 
+/**
+ * One error log per site, in the `sites/` folder the Apache role keeps under
+ * the Apache log folder (owned by `tpapache`, which opens the files): never
+ * inside the site tree, where the owner could rename or link the file Apache
+ * opens.
+ */
+function apacheSiteErrorLogPath(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: SiteApplySpec,
+): string {
+  const key = sitePhpKey(environmentId, site.composeServiceName);
+  return join(layout.logDir, "apache", "sites", `${key}.error.log`);
+}
+
 async function applyApacheSite(
   layout: LayoutPaths,
   environmentId: string,
@@ -3471,6 +3597,8 @@ async function applyApacheSite(
   const contents = apacheSiteConfig(site, paths.documentRoot, {
     dockerBindAddress: dockerBind,
     phpFpmSocket: php.socket,
+    phpSiteKey: php.siteKey,
+    errorLogPath: apacheSiteErrorLogPath(layout, environmentId, site),
   });
   const staged = await SITE_ENGINE_DRIVERS.apache
     .stageSiteConfig(run, configPath, contents);
@@ -3499,6 +3627,8 @@ async function applyNginxApacheSite(
     apacheSiteConfig(site, paths.documentRoot, {
       phpFpmSocket: php.socket,
       behindNginxPort: backendPort,
+      phpSiteKey: php.siteKey,
+      errorLogPath: apacheSiteErrorLogPath(layout, environmentId, site),
     }),
   );
   const front = await SITE_ENGINE_DRIVERS.nginx.stageSiteConfig(

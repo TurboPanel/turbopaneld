@@ -104,6 +104,8 @@ import {
 import { PENDING_RECORD_MARKER } from "./release-health.ts";
 import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
+import { readCapped } from "../site/app-detect.ts";
+import { checkHtaccess, htaccessWarnings } from "../site/htaccess-check.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
   readReleaseManifest,
@@ -139,6 +141,12 @@ export type AppliedRelease = {
   commitMessage?: string;
   commitAuthor?: string;
   releaseDir: string;
+  /**
+   * Apache sites only: one warning per `.htaccess` line in the release's
+   * document root that the shared Apache refuses (it answers 500 for that
+   * folder). Read from the build tree before publish; never fails a deploy.
+   */
+  htaccessWarnings?: string[];
   /**
    * image-build lane only: the OCI image this release resolved to, and the pinned
    * tools that produced it.
@@ -928,6 +936,15 @@ async function buildNativeRelease(
     // A site that would have no document root fails here, while `current` still
     // points at the last good release and nothing of this one is on disk.
     await assertSiteRootBuilt(payload, entry, nativeOutput, checkout);
+    const htaccessWarnings = await htaccessWarningsForSite(
+      payload,
+      entry,
+      nativeOutput,
+      checkout,
+    );
+    for (const warning of htaccessWarnings) {
+      logSink.onLine("stderr", warning);
+    }
     const previousReleaseId = await readCurrentReleaseId(paths, deps.runFn);
     const manifest: ReleaseManifestV1 = definedFields({
       version: 1,
@@ -1012,6 +1029,9 @@ async function buildNativeRelease(
       commitMessage: entry.commitMessage,
       commitAuthor: entry.commitAuthor,
       releaseDir,
+      htaccessWarnings: htaccessWarnings.length > 0
+        ? htaccessWarnings
+        : undefined,
       previousReleaseId,
       heldCurrent: keepCurrent || undefined,
       standaloneOutput: nativeOutput.standaloneOutput,
@@ -1022,6 +1042,63 @@ async function buildNativeRelease(
   } finally {
     if (work) await removeBuildWork(work, onOutput);
     await removeReleaseScratchDir(paths);
+  }
+}
+
+/** The site's document root inside the checkout, before publish. */
+function releaseSiteSourceDir(
+  entry: EnvironmentDeploySource,
+  outputDirectory: string | undefined,
+  root: string,
+  checkout: CheckoutResult,
+): string {
+  return join(
+    checkout.workingDir,
+    entry.subdirectory ?? "",
+    outputDirectory ?? "",
+    root,
+  );
+}
+
+/** The most of a `.htaccess` the deploy reads. */
+const HTACCESS_MAX_BYTES = 64 * 1024;
+
+/**
+ * Warnings for refused lines in an Apache site's document-root `.htaccess`.
+ * Read from the daemon-owned build tree: a published release or a managed
+ * folder is not readable by the daemon. Only a regular file is read (never a
+ * link), capped at 64 KiB; any error means no warnings. Subfolders, files a
+ * CMS writes later and managed-directory sites are not scanned (their 500s
+ * show up in the site's own error log).
+ */
+async function htaccessWarningsForSite(
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  nativeOutput: NativeAppBuildOutput,
+  checkout: CheckoutResult,
+): Promise<string[]> {
+  const site = siteForSource(payload, entry.composeServiceName);
+  if (!site || (site.engine !== "apache" && site.engine !== "nginx+apache")) {
+    return [];
+  }
+  const outputDirectory = entry.build.outputDirectory ??
+    nativeOutput.outputDirectory;
+  const sourceDir = releaseSiteSourceDir(
+    entry,
+    outputDirectory,
+    releaseSiteRoot(site, outputDirectory),
+    checkout,
+  );
+  const file = join(sourceDir, ".htaccess");
+  try {
+    if (!(await Deno.lstat(file)).isFile) return [];
+    const text = await readCapped(file, HTACCESS_MAX_BYTES);
+    return htaccessWarnings(
+      entry.composeServiceName,
+      checkHtaccess(text),
+    );
+  } catch {
+    return [];
   }
 }
 
@@ -1041,11 +1118,11 @@ async function assertSiteRootBuilt(
   const outputDirectory = entry.build.outputDirectory ??
     nativeOutput.outputDirectory;
   const root = releaseSiteRoot(site, outputDirectory);
-  const sourceDir = join(
-    checkout.workingDir,
-    entry.subdirectory ?? "",
-    outputDirectory ?? "",
+  const sourceDir = releaseSiteSourceDir(
+    entry,
+    outputDirectory,
     root,
+    checkout,
   );
   try {
     if ((await Deno.lstat(sourceDir)).isDirectory) return;

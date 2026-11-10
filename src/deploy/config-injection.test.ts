@@ -43,6 +43,11 @@ const HERE = dirname(fromFileUrl(import.meta.url));
 const GOLDENS = join(HERE, "testdata", "config-goldens");
 const TLS_DIR = "/etc/turbopanel/tls";
 const FPM_SOCKET = "/run/turbopanel/php/8.4/tp-env-phpapp.sock";
+/** Fixed fixtures for the Apache site key and per-site error log. */
+const SITE_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const ERROR_LOG =
+  "/var/log/turbopanel/apache/sites/phpapp-0123456789ab.error.log";
 
 const layout = resolveLayout(
   {
@@ -97,7 +102,7 @@ function apacheWithEnv(webEnv: Record<string, string>): string {
   return apacheSiteConfig(
     { ...apacheSite, webEnv },
     "/srv/users/u/sites/phpapp/current/public",
-    { phpFpmSocket: FPM_SOCKET },
+    { phpFpmSocket: FPM_SOCKET, phpSiteKey: SITE_KEY, errorLogPath: ERROR_LOG },
   );
 }
 

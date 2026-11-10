@@ -21,8 +21,63 @@ Docker Compose. The daemon:
    vendored — see the end of this section). Apache vhosts
    `SetHandler "proxy:unix:…|fcgi://localhost/"` (mod_proxy_fcgi — **never**
    mod_php).
+   `.htaccess` is honoured within a closed list (`site/apache-overrides.ts`, the
+   one source for the vhost, the deploy check and the tests): the classes
+   `AuthConfig Indexes Limit` and `Options=Indexes,MultiViews,SymLinksIfOwnerMatch`
+   (plus `ExecCGI`, `Includes`, `IncludesNOEXEC` so a file that switches them
+   off parses), and `AllowOverrideList` names (rewrite, redirect, headers,
+   types, filters, `SetHandler`, `SetEnv*`). Never `FileInfo`, `All` or
+   `FollowSymLinks`. Directory listing is opt-in per folder (`Options +Indexes`):
+   the vhost default is `Options SymLinksIfOwnerMatch`, and `IndexIgnore` hides
+   dotfiles. Each site has its own error log,
+   `/var/log/turbopanel/apache/sites/<site key>.error.log` (`<site key>` is
+   `sitePhpKey(environmentId, service)`, also the start of a runtime id; owned
+   by `tpapache`, never inside the site tree, where the owner could link it).
+   A refused `.htaccess` line makes Apache answer 500 for that folder and its
+   reason lands in that file.
 
-   Both engines share the pool layout: per-site FPM pools under
+   **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
+   socket path is no boundary. Every Apache PHP runtime therefore has a site
+   key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
+   daemon-only secret (`<daemonStateDir>/sites/php-site-key`, `0600`, created on
+   first use). The vhost sends it as the FastCGI parameter `TP_SITE_KEY` and,
+   at vhost level, strips `PHP_VALUE`, `PHP_ADMIN_VALUE`, `PHPRC` and
+   `PHP_INI_SCAN_DIR` (`ProxyFCGISetEnvIf "true" !NAME`), so a `.htaccess`
+   cannot set them through `SetEnv` or `[E=]`, and `ProxyFCGISetEnvIf` itself is
+   not an allowed override. The runtime's own `php.ini` holds the expected key
+   (`turbopanel.site_key`) and names `site-guard.php` (`sitePhpGuardPhp`, pinned
+   byte for byte by tp-host) as `auto_prepend_file`, in `[PHP]` and again in
+   `[PATH=<home>]`; the guard answers 403 unless the two keys match, so a
+   `RewriteRule [P]`, `[H=]` or `SetHandler` from site A to site B's socket
+   carries A's key and B refuses it. A hosting setting that names its own
+   `auto_prepend_file` loses to the guard. An Apache PHP site with no mode runs
+   FastCGI (warned once), so one with no Hosting Account is refused; nginx keeps
+   its shared master for now. A runtime with the guard behind a vhost without
+   the key answers 403 (fail closed). The first deploy of an existing site
+   changes the runtime and the vhost together, so its PHP pages can answer 403
+   for the few seconds between the PHP restart and the Apache reload. The
+   walls reach a site only when that site is deployed. Known limit: a `[P]` to a
+   FastCGI listener on loopback that is not a site runtime is not covered by the
+   key (none exists today). `AuthUserFile` may name any file `tpapache` can read;
+   Apache only checks passwords against it, so the worst case is a guessing
+   oracle against another site's password file.
+
+   **Refused `.htaccess` lines are named at deploy.** For a release-backed
+   Apache or nginx+Apache site, `htaccessWarningsForSite`
+   (`release/apply-source-releases.ts`) reads the document-root `.htaccess` from
+   the daemon-owned build tree before publish (a regular file only, 64 KiB at
+   most) and `site/htaccess-check.ts` returns one finding per refused or unknown
+   directive. Each becomes `Site <service>: .htaccess line <n>: <Directive> is
+   not allowed on this server, so Apache answers 500 for that folder.` (or "is
+   not a directive this server knows"), at most ten, in the command transcript
+   and on `warnings` of the deploy result; it never fails a deploy. Managed
+   directories, subfolders and files a CMS writes later are not scanned: their
+   500s show only in the site's error log. The front Caddy compresses Apache
+   sites (`encode zstd gzip`, `ingress.ts`), skipping a response that already
+   has a `Content-Encoding`.
+
+   Sites without a per-site mode share the pool layout (nginx keeps it; an Apache
+   PHP site always gets its own runtime, below): per-site FPM pools under
    `<configDir>/php/pools/tp-<environmentId>-<service>.conf` honoring
    validated `php.settings` via `php_admin_value[…]`. A pool is keyed
    by environment + compose service, so it belongs to exactly one site and
@@ -508,7 +563,8 @@ environment variable name is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE`
 (any case) are reserved on every engine: PHP-FPM reads them from the FastCGI
 request as ini overrides, so `resolveSiteSecretEnv` drops them (plain or sealed,
 before decrypting) and names them in the log; the control plane drops them
-first.
+first. An Apache vhost also strips them (and `PHPRC`, `PHP_INI_SCAN_DIR`)
+at vhost level, so a `.htaccess` `SetEnv` cannot bring them back.
 
 **Managed database bindings (`site-db-bindings-v1`).** A site bound to a managed
 database carries `sites[].requiredEnv` (the connection variables it cannot run

@@ -8,9 +8,12 @@ import {
 import {
   isSitePhpRuntimeOf,
   phpIniBytes,
+  SITE_PHP_GUARD_FILE,
   SITE_PHP_ID_RE,
   SITE_PHP_LOCKED_INI_KEYS,
   sitePhpFpmConf,
+  sitePhpGuardPath,
+  sitePhpGuardPhp,
   sitePhpIni,
   sitePhpKey,
   sitePhpLockedValues,
@@ -610,6 +613,7 @@ const FILES: SitePhpRuntimeFiles = {
   socket: null,
   ini: "",
   fpmConf: null,
+  guard: null,
 };
 const PROBE = { label: "web", url: "http://127.0.0.1:1/" };
 
@@ -784,4 +788,94 @@ test("a unit listing that fails reads as doubt, not as no per-site runtimes", as
     [...(await readSitePhpUnits(io(true)))?.keys() ?? []],
     ["shop-0a1b2c3d4e5f-fcgi84"],
   );
+});
+
+/** A fixed 64-hex fixture, never a real key. */
+const GUARD_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const GUARD_PATH = sitePhpGuardPath(SPEC.configDir, SPEC.id);
+
+test("the guard script is the pinned text, ends in a newline and has no closing tag", () => {
+  const php = sitePhpGuardPhp();
+  assertEquals(
+    php,
+    `<?php
+// Managed by TurboPanel: this site's PHP serves only requests its own web server sent.
+if (PHP_SAPI !== 'cli') {
+    $tp_site_key = get_cfg_var('turbopanel.site_key');
+    $tp_sent_key = $_SERVER['TP_SITE_KEY'] ?? null;
+    if (!is_string($tp_site_key) || strlen($tp_site_key) !== 64 || !is_string($tp_sent_key) || !hash_equals($tp_site_key, $tp_sent_key)) {
+        http_response_code(403);
+        exit;
+    }
+    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY']);
+}
+`,
+  );
+  assertEquals(
+    GUARD_PATH,
+    `/etc/turbopanel/php/sites/${SPEC.id}/${SITE_PHP_GUARD_FILE}`,
+  );
+});
+
+test("a runtime with a guard carries the key and the prepend file in both sections and lets open_basedir reach the guard", () => {
+  const ini = sitePhpIni(
+    [{ key: "open_basedir", value: "/srv/users/alice/site:/tmp" }],
+    SPEC.home,
+    undefined,
+    { key: GUARD_KEY, path: GUARD_PATH },
+  );
+  assertStringIncludes(ini, `turbopanel.site_key = ${GUARD_KEY}\n`);
+  const [main, locked] = ini.split("[PATH=");
+  assertStringIncludes(main, `auto_prepend_file = ${GUARD_PATH}\n`);
+  assertStringIncludes(locked, `auto_prepend_file = ${GUARD_PATH}\n`);
+  assertStringIncludes(
+    main,
+    `open_basedir = /srv/users/alice/site:/tmp:${GUARD_PATH}\n`,
+  );
+});
+
+test("a runtime without a guard has none of it, and a bad key is refused", () => {
+  const ini = sitePhpIni(
+    [{ key: "open_basedir", value: "/srv/users/alice/site:/tmp" }],
+    SPEC.home,
+  );
+  for (const word of ["turbopanel.site_key", "auto_prepend_file", "guard"]) {
+    assertEquals(ini.includes(word), false, word);
+  }
+  for (const key of ["", "abc", GUARD_KEY.toUpperCase(), `${GUARD_KEY}0`]) {
+    assertThrows(
+      () => sitePhpIni([], SPEC.home, undefined, { key, path: GUARD_PATH }),
+      Error,
+      "64 lowercase hex",
+    );
+  }
+});
+
+test("an Apache PHP site with no mode runs FastCGI and warns once; nginx keeps the shared master", () => {
+  sitePhpModeWarnings(true);
+  const php = { version: "8.4" };
+  for (const engine of ["apache", "nginx+apache"] as const) {
+    assertEquals(
+      sitePhpRuntimeMode({ composeServiceName: "shop", engine, php }, "envx"),
+      "fastcgi",
+    );
+  }
+  assertEquals(sitePhpModeWarnings().length, 1);
+  assertEquals(
+    sitePhpRuntimeMode(
+      { composeServiceName: "shop", engine: "nginx", php },
+      "envx",
+    ),
+    null,
+  );
+  // No PHP at all, or no environment to log against, stays quiet.
+  assertEquals(
+    sitePhpRuntimeMode(
+      { composeServiceName: "shop", engine: "apache" },
+      "envx",
+    ),
+    null,
+  );
+  sitePhpModeWarnings(true);
 });

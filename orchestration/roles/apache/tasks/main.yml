@@ -121,12 +121,20 @@
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
+# Where `current` points before this run moves it: the config test below puts
+# it back when the new build rejects the config.
+- name: Read where the Apache current symlink points now
+  ansible.builtin.stat:
+    path: "{{ turbopanel_vendor_dir }}/apache/current"
+  register: _apache_current_before
+
 - name: Point Apache current symlink at pinned version
   ansible.builtin.file:
     src: "{{ turbopanel_vendor_dir }}/apache/{{ apache_version }}"
     dest: "{{ turbopanel_vendor_dir }}/apache/current"
     state: link
     force: true
+  register: _apache_link
 
 - name: Ensure FHS Apache config directories
   ansible.builtin.file:
@@ -162,6 +170,17 @@
     group: "{{ apache_service_group }}"
     mode: "0750"
 
+# One error log per site (the vhost's own ErrorLog), kept apart from the
+# server-wide one. Owned by the web server account that opens the files; the
+# site owner never reaches this folder, so it cannot rename or link a log.
+- name: Ensure the per-site Apache error log directory
+  ansible.builtin.file:
+    path: "/var/log/{{ apache_logs_directory }}/sites"
+    state: directory
+    owner: "{{ apache_service_user }}"
+    group: "{{ apache_service_group }}"
+    mode: "0750"
+
 - name: Install TurboPanel Apache main config
   ansible.builtin.template:
     src: httpd.conf.j2
@@ -169,6 +188,33 @@
     owner: root
     group: "{{ apache_service_group }}"
     mode: "0640"
+  register: _apache_conf
+
+# Loading mod_autoindex (httpd.conf) would make every site whose vhost was
+# rendered before listing became opt-in list folders that have no index file:
+# those vhosts still say `Options Indexes SymLinksIfOwnerMatch`. Drop Indexes
+# from that one exact line; the next deploy of each site writes the full new
+# vhost anyway.
+- name: Find site vhosts written before listing became opt-in
+  ansible.builtin.find:
+    paths: "{{ turbopanel_config_dir }}/apache/sites"
+    patterns:
+      - "*.conf"
+      - "*.tpprev"
+    file_type: file
+    recurse: false
+    follow: false
+  register: _apache_old_vhosts
+
+- name: Drop Indexes from the default Options of those vhosts
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^(\s+)Options Indexes SymLinksIfOwnerMatch$'
+    replace: '\1Options SymLinksIfOwnerMatch'
+  loop: "{{ _apache_old_vhosts.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _apache_vhosts_fixed
 
 - name: Install turbopanel-apache systemd unit
   ansible.builtin.template:
@@ -193,6 +239,84 @@
     cmd: systemctl try-restart turbopanel-apache.service
   when: _apache_unit.changed # noqa: no-handler
   changed_when: true
+
+# A reload keeps the old master, and with it the old binary: `httpd -k graceful`
+# would load the new build's modules into it. So a new build is a restart, never
+# a reload. The config is tested first, as the account that runs the server
+# (root never parses this config), against the build `current` now names.
+- name: Check whether Apache is running
+  ansible.builtin.command:
+    cmd: systemctl is-active --quiet turbopanel-apache.service
+  register: _apache_active
+  changed_when: false
+  failed_when: false
+
+- name: Test the Apache config with the installed build
+  ansible.builtin.command:
+    cmd: >-
+      runuser -u {{ apache_service_user }} --
+      {{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t
+      -f {{ turbopanel_config_dir }}/apache/httpd.conf
+  register: _apache_test
+  changed_when: false
+  failed_when: false
+  when:
+    - _apache_link.changed or _apache_conf.changed or _apache_vhosts_fixed.changed  # noqa: no-handler
+    - _apache_active.rc == 0
+
+- name: Put the previous Apache build back after a failed config test
+  ansible.builtin.file:
+    src: "{{ _apache_current_before.stat.lnk_source }}"
+    dest: "{{ turbopanel_vendor_dir }}/apache/current"
+    state: link
+    force: true
+  when:
+    - _apache_link.changed  # noqa: no-handler
+    - (_apache_test.rc | default(0)) != 0
+    - (_apache_current_before.stat.lnk_source | default('')) | length > 0
+
+- name: Stop when the Apache config test failed
+  ansible.builtin.fail:
+    msg: >-
+      The Apache config did not pass `httpd -t` with the installed build
+      (apache_version {{ apache_version }}); the previous build is back and the
+      running server was left alone: {{ _apache_test.stderr | default('') }}
+  when: (_apache_test.rc | default(0)) != 0
+
+- name: Restart Apache onto the new build
+  ansible.builtin.command:
+    cmd: systemctl try-restart turbopanel-apache.service
+  when: _apache_link.changed and _apache_active.rc == 0 # noqa: no-handler
+  changed_when: true
+
+- name: Reload Apache after its main config or a vhost default changed
+  ansible.builtin.systemd:
+    name: turbopanel-apache
+    state: reloaded
+  when:
+    - not _apache_link.changed
+    - _apache_conf.changed or _apache_vhosts_fixed.changed  # noqa: no-handler
+    - _apache_active.rc == 0
+
+# `current` now resolves to the pin and the server runs it: a sibling version
+# left by an earlier pin is dead weight.
+- name: Find superseded Apache version directories
+  ansible.builtin.find:
+    paths: "{{ turbopanel_vendor_dir }}/apache"
+    file_type: directory
+    recurse: false
+    excludes:
+      - current
+      - "{{ apache_version }}"
+  register: _apache_stale_versions
+
+- name: Remove superseded Apache version directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _apache_stale_versions.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
 
 # The pidfile lives in the unit's own RuntimeDirectory=; logs are the unit's
 # LogsDirectory= (/var/log/turbopanel/apache). The old pidfile folder inside the

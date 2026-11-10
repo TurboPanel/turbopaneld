@@ -45,6 +45,8 @@ import type {
 import {
   sitePhpConfigDir,
   sitePhpFpmConf,
+  sitePhpGuardPath,
+  sitePhpGuardPhp,
   sitePhpIni,
   sitePhpKey,
   sitePhpRuntimeId,
@@ -3075,6 +3077,157 @@ async function installPhpConf(
   ]);
 }
 
+/** A fixed 64-hex fixture, never a real key. */
+const GUARD_TEST_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+test("per-site PHP guard: the exact guard text and an ini that names only this runtime's own guard", async () => {
+  await withPhpHost(async (host) => {
+    const dir = phpConfDir(host);
+    const made = await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      dir,
+    ]);
+    assertEquals(made.code, 0, made.stderr);
+    const guardPath = `${dir}/site-guard.php`;
+    const otherGuard = `${phpConfDir(host, "other-site")}/site-guard.php`;
+    const home = host.path("srv/users/alice");
+    const ini = (...extra: string[]) =>
+      [
+        PHP_INI,
+        `turbopanel.site_key = ${GUARD_TEST_KEY}`,
+        `auto_prepend_file = ${guardPath}`,
+        `open_basedir = ${home}/sites/${PHP_SITE}:/tmp:${guardPath}`,
+        ...extra,
+        "",
+      ].join("\n");
+
+    // The renderer's own bytes are accepted, a changed byte is not.
+    const guard = sitePhpGuardPhp();
+    const ok = await installPhpConf(host, "site-guard.php", guard);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(await Deno.readTextFile(guardPath), guard);
+    for (
+      const bad of [
+        guard.replace("403", "200"),
+        `${guard}// more\n`,
+        guard.trimEnd(),
+        `${guard}?>\n`,
+        "<?php\nsystem($_GET['c']);\n",
+      ]
+    ) {
+      assertEquals(
+        (await installPhpConf(host, "site-guard.php", bad)).code === 0,
+        false,
+        bad,
+      );
+    }
+    assertEquals(
+      (await installPhpConf(host, "site-guard.php", guard, { mode: "0644" }))
+        .code === 0,
+      false,
+      "mode",
+    );
+    assertEquals(
+      (await installPhpConf(host, "site-guard.php.tpprev", guard)).code === 0,
+      false,
+      ".tpprev is written by cp -p only",
+    );
+
+    // The rollout copy covers the guard like every config file: keep it as
+    // `.tpprev`, restore it over the live name.
+    const keepGuard = await host.run([
+      "cp",
+      "-p",
+      "--",
+      guardPath,
+      `${guardPath}.tpprev`,
+    ]);
+    assertEquals(keepGuard.code, 0, keepGuard.stderr);
+    const restoreGuard = await host.run([
+      "mv",
+      "-f",
+      "--",
+      `${guardPath}.tpprev`,
+      guardPath,
+    ]);
+    assertEquals(restoreGuard.code, 0, restoreGuard.stderr);
+    assertEquals(await Deno.readTextFile(guardPath), guard);
+    assertEquals(
+      (await host.run(["cp", "-p", "--", guardPath, `${guardPath}.other`]))
+        .code === 0,
+      false,
+      "only the .tpprev name",
+    );
+
+    // An ini that wires this runtime's own guard is accepted.
+    const accepted = await installPhpConf(host, "php.ini", ini());
+    assertEquals(accepted.code, 0, accepted.stderr);
+
+    // Another path, another site's guard, a bad key, or a foreign
+    // open_basedir entry is refused.
+    for (
+      const bad of [
+        ini("auto_prepend_file = /tmp/x.php"),
+        ini(`auto_prepend_file = ${otherGuard}`),
+        ini("turbopanel.site_key = abc"),
+        ini(`turbopanel.site_key = ${GUARD_TEST_KEY.toUpperCase()}`),
+        ini(`turbopanel.site_key = ${GUARD_TEST_KEY}0`),
+        // The fake root lives under /tmp, which an open_basedir entry may
+        // name, so the foreign guard is spelled outside it.
+        `${PHP_INI}open_basedir = ${home}/sites/${PHP_SITE}:/etc/turbopanel/php/sites/other-site/site-guard.php\n`,
+        `${PHP_INI}auto_prepend_file = ${guardPath}\n`.replace(
+          guardPath,
+          "/etc/passwd",
+        ),
+      ]
+    ) {
+      assertEquals(
+        (await installPhpConf(host, "php.ini", bad)).code === 0,
+        false,
+        bad,
+      );
+    }
+    // Without the guard path in this runtime's folder the same lines are
+    // another site's: an ini for a different site id cannot name this guard.
+    await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      phpConfDir(host, "other-site"),
+    ]);
+    await Deno.writeTextFile(host.path("tmp/conf"), ini());
+    const crossed = await host.run([
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      host.path("tmp/conf"),
+      `${phpConfDir(host, "other-site")}/php.ini`,
+    ]);
+    assertEquals(
+      crossed.code === 0,
+      false,
+      "another site's ini names this guard",
+    );
+  });
+});
+
 test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist", async () => {
   await withPhpHost(async (host) => {
     const dir = phpConfDir(host);
@@ -3470,19 +3623,29 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           dir,
         ]);
         assertEquals(made.code, 0, made.stderr);
-        const configs: Array<[string, string]> = [[
-          "php.ini",
-          sitePhpIni(
-            [
-              { key: "memory_limit", value: "256M" },
-              { key: "open_basedir", value: `${site}/current/public:/tmp` },
-              { key: "realpath_cache_ttl", value: "0" },
-              { key: "session.save_path", value: "/var/lib/php/sessions" },
-            ],
-            home,
-            spec,
-          ),
-        ]];
+        // An Apache runtime also gets the site guard and the key.
+        const guard = webAccount === "tpapache"
+          ? { key: GUARD_TEST_KEY, path: sitePhpGuardPath(spec.configDir, id) }
+          : undefined;
+        const configs: Array<[string, string]> = [
+          ...(guard
+            ? [["site-guard.php", sitePhpGuardPhp()] as [string, string]]
+            : []),
+          [
+            "php.ini",
+            sitePhpIni(
+              [
+                { key: "memory_limit", value: "256M" },
+                { key: "open_basedir", value: `${site}/current/public:/tmp` },
+                { key: "realpath_cache_ttl", value: "0" },
+                { key: "session.save_path", value: "/var/lib/php/sessions" },
+              ],
+              home,
+              spec,
+              guard,
+            ),
+          ],
+        ];
         if (mode === "fpm") {
           configs.push([
             "php-fpm.conf",

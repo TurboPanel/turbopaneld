@@ -304,7 +304,16 @@ new release name. A version bump takes two changes: first `apache_build_version`
 digest and the signer (merge, then wait for the vendor run to publish the
 release); then `apache_version` and `apache_sha256`, which hosts install. A release is never rebuilt on the host as a fallback. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
-and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
+and loads `mod_proxy` + `mod_proxy_fcgi` for PHP, plus the modules ordinary
+`.htaccess` files use: `authn_core`, `authn_file`, `auth_basic`, `authz_user`,
+`authz_groupfile` (Basic auth), `access_compat` (`Order`/`Allow`/`Deny`),
+`expires`, `filter` + `deflate` (output compression) and `autoindex` (opt-in
+listing; `IndexIgnore` hides dotfiles). Each only adds directives the vhost
+already allows by name (`src/deploy/site/apache-overrides.ts`; a test keeps the
+two in step). Never load `cgi`, `cgid`, `actions`, `include`, `ext_filter`,
+`substitute`, `sed`, `lua`, `userdir`, `info`, `status` or a `proxy_*` beyond
+`proxy` + `proxy_fcgi`: they would let a `.htaccess` run programs, rewrite
+content, reach other HTTP services or leak every vhost. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
 included, as `tpapache` (`User=`/`Group=` in the unit, none in
 `httpd.conf`). Logs live in the unit's nested
@@ -312,7 +321,16 @@ included, as `tpapache` (`User=`/`Group=` in the unit, none in
 engines' logs; systemd leaves the existing parent alone and gives the inner
 folder to `tpapache`) and the pidfile in `RuntimeDirectory=turbopanel-apache`
 (`/run/turbopanel-apache`, removed with the unit). A changed unit restarts a running server (`try-restart`);
-a reload would keep the old master. The daemon's config test is
+a reload would keep the old master. So does a new build: when `current` moves
+the role tests the config with the new binary as `tpapache` (`runuser`; root
+never parses it), puts the old link back and fails the run if the test fails
+(the running server is left alone), then restarts onto the new build and prunes
+the superseded version folders (only `current` and `apache_version` stay). A
+changed `httpd.conf` on the same build is a reload. The role also drops
+`Indexes` from the default `Options` line of vhosts rendered before listing
+became opt-in (one anchored `replace`), and creates `sites/` under the Apache
+log folder for the per-site error logs (`tpapache`-owned `0750`; no rotation
+yet). The daemon's config test is
 `sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
 pinned in sudoers. Main config includes a
 bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site

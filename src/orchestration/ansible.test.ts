@@ -1792,6 +1792,80 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
   );
 });
 
+test("the Apache role moves to a new build by restart, tests the config first, puts the link back on failure and prunes the old tree", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
+  );
+  const has = (text: string) => assert(tasks.includes(text), text);
+  has("register: _apache_link");
+  has("register: _apache_conf");
+  has("register: _apache_current_before");
+  has("register: _apache_vhosts_fixed");
+  // The config is tested as the server's own account, never as root.
+  has(
+    "runuser -u {{ apache_service_user }} --",
+  );
+  has("{{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t");
+  has("-f {{ turbopanel_config_dir }}/apache/httpd.conf");
+  assert(!tasks.includes("become_user"), "no become_user for the test");
+  // Failed test: the previous build comes back, then the play stops.
+  has("Put the previous Apache build back after a failed config test");
+  has('src: "{{ _apache_current_before.stat.lnk_source }}"');
+  has("Stop when the Apache config test failed");
+  has("ansible.builtin.fail");
+  // A new build is a restart (a reload keeps the old master); a changed
+  // config or vhost default on the same build is a reload.
+  const restart = tasks.indexOf("Restart Apache onto the new build");
+  const reload = tasks.indexOf("Reload Apache after its main config");
+  const prune = tasks.indexOf("Find superseded Apache version directories");
+  assert(restart > 0 && restart < reload && reload < prune);
+  has("systemctl try-restart turbopanel-apache.service");
+  has("- not _apache_link.changed");
+  has("_apache_conf.changed or _apache_vhosts_fixed.changed");
+  // Both the test and the reload also run for the vhost-default fix.
+  assert(
+    (tasks.match(/_apache_vhosts_fixed\.changed/g) ?? []).length >= 2,
+    "the vhost fix is treated like a config change",
+  );
+  // The prune keeps `current` and the pinned version only.
+  has('- current\n      - "{{ apache_version }}"');
+  has('paths: "{{ turbopanel_vendor_dir }}/apache"');
+  // Per-site error logs live in a sites folder the server account owns.
+  has('path: "/var/log/{{ apache_logs_directory }}/sites"');
+  has('owner: "{{ apache_service_user }}"');
+});
+
+test("the Apache role drops Indexes only from the exact default line of vhosts already on disk", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
+  );
+  const find = tasks.slice(
+    tasks.indexOf("Find site vhosts written before listing became opt-in"),
+    tasks.indexOf("Drop Indexes from the default Options of those vhosts"),
+  );
+  assert(find.includes('paths: "{{ turbopanel_config_dir }}/apache/sites"'));
+  assert(find.includes('- "*.conf"') && find.includes('- "*.tpprev"'));
+  assert(find.includes("recurse: false") && find.includes("follow: false"));
+  assert(
+    tasks.includes(
+      String.raw`regexp: '^(\s+)Options Indexes SymLinksIfOwnerMatch$'`,
+    ),
+  );
+  assert(tasks.includes(String.raw`replace: '\1Options SymLinksIfOwnerMatch'`));
+  // The regex matches the line the daemon rendered before this change and
+  // nothing else.
+  const re = /^(\s+)Options Indexes SymLinksIfOwnerMatch$/m;
+  assertEquals(
+    "  <Directory x>\n    Options Indexes SymLinksIfOwnerMatch\n".replace(
+      re,
+      "$1Options SymLinksIfOwnerMatch",
+    ),
+    "  <Directory x>\n    Options SymLinksIfOwnerMatch\n",
+  );
+  assertEquals(re.test("    Options Indexes FollowSymLinks"), false);
+  assertEquals(re.test("    Options +Indexes SymLinksIfOwnerMatch"), false);
+});
+
 test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
   const conf = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),

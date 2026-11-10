@@ -1800,8 +1800,27 @@ function formatBindDirective(bindAddress: string | readonly string[]): string {
 
 export type CaddyUpstream =
   | { kind: "traefik" }
-  | { kind: "http"; host: string; port: number }
+  | {
+    kind: "http";
+    host: string;
+    port: number;
+    /** Compress responses at the front server (an Apache site). */
+    compress?: true;
+  }
   | PeerUpstream;
+
+/**
+ * The front server's compression line for an Apache site: the shared Apache
+ * serves pages uncompressed. Caddy skips a response that already carries a
+ * `Content-Encoding`, so nothing is compressed twice.
+ */
+const CADDY_ENCODE_LINE = "encode zstd gzip";
+
+function upstreamEncodeLine(upstream: CaddyUpstream): string | null {
+  return upstream.kind === "http" && upstream.compress === true
+    ? CADDY_ENCODE_LINE
+    : null;
+}
 
 const DEFAULT_TRAEFIK_UPSTREAM: CaddyUpstream = { kind: "traefik" };
 
@@ -1893,17 +1912,21 @@ export function sortCaddySiteRoutes(
 function formatRouteHandleBlock(
   route: CaddySiteRoute,
   upstreamLine: string,
+  encodeLine: string | null = null,
 ): string {
+  const upstream = encodeLine === null
+    ? upstreamLine
+    : `${encodeLine}\n    ${upstreamLine}`;
   if (!route.pathPrefix) {
-    return `  handle {\n    ${upstreamLine}\n  }\n`;
+    return `  handle {\n    ${upstream}\n  }\n`;
   }
   const match = formatCaddyPathMatcher(route.pathPrefix);
   const raw = route.stripPrefix?.trim();
   if (raw && raw.length > 0) {
     const strip = safeUrlPath("hostings[].proxy.stripPrefix", raw);
-    return `  handle ${match} {\n    uri strip_prefix ${strip}\n    ${upstreamLine}\n  }\n`;
+    return `  handle ${match} {\n    uri strip_prefix ${strip}\n    ${upstream}\n  }\n`;
   }
-  return `  handle ${match} {\n    ${upstreamLine}\n  }\n`;
+  return `  handle ${match} {\n    ${upstream}\n  }\n`;
 }
 
 function formatRouteHandlers(
@@ -1919,7 +1942,11 @@ function formatRouteHandlers(
       trustedProxies,
     );
     const upstreamLine = hop === "https" ? https : http;
-    blocks += formatRouteHandleBlock(route, upstreamLine);
+    blocks += formatRouteHandleBlock(
+      route,
+      upstreamLine,
+      upstreamEncodeLine(route.upstream),
+    );
   }
   return blocks;
 }
@@ -2231,8 +2258,10 @@ export function siteSnippet(options: SiteSnippetOptions): string {
   } else {
     const single = effectiveRoutes[0]?.upstream ?? upstream;
     const blocks = resolveUpstreamBlocks(single, trustedProxies);
-    httpBody = `  ${blocks.http}\n`;
-    httpsBody = `  ${blocks.https}\n`;
+    const encode = upstreamEncodeLine(single);
+    const encodePrefix = encode === null ? "" : `  ${encode}\n`;
+    httpBody = `${encodePrefix}  ${blocks.http}\n`;
+    httpsBody = `${encodePrefix}  ${blocks.https}\n`;
   }
 
   let httpBlock = "";
@@ -2261,6 +2290,9 @@ ${lock}${httpsBody}}
   return httpBlock + httpsBlock;
 }
 
+/** A host-native service on loopback: a site (has an engine) or a native app. */
+type LoopbackService = { listenPort: number; engine?: string };
+
 /**
  * Where a hostname's traffic goes.
  *
@@ -2272,11 +2304,18 @@ ${lock}${httpsBody}}
  */
 function resolveHostingUpstream(
   hosting: EnvironmentDeployHosting,
-  loopbackByService: Map<string, { listenPort: number }>,
+  loopbackByService: Map<string, LoopbackService>,
 ): CaddyUpstream {
   const loopback = loopbackByService.get(hosting.composeServiceName);
   if (loopback) {
-    return { kind: "http", host: "127.0.0.1", port: loopback.listenPort };
+    const apache = loopback.engine === "apache" ||
+      loopback.engine === "nginx+apache";
+    return {
+      kind: "http",
+      host: "127.0.0.1",
+      port: loopback.listenPort,
+      ...(apache ? { compress: true as const } : {}),
+    };
   }
   return DEFAULT_TRAEFIK_UPSTREAM;
 }
@@ -2292,7 +2331,7 @@ function normalizePathPrefixFromHosting(
 
 function buildCaddySiteRoute(
   hosting: EnvironmentDeployHosting,
-  loopbackByService: Map<string, { listenPort: number }>,
+  loopbackByService: Map<string, LoopbackService>,
 ): CaddySiteRoute {
   const upstream = resolveHostingUpstream(hosting, loopbackByService);
   const pathPrefix = normalizePathPrefixFromHosting(hosting.pathPrefix);
@@ -2360,7 +2399,7 @@ function mergeHostingIntoHostnameSite(
 export function buildCaddyHostnameRoutes(
   payload: EnvironmentDeployPayload,
 ): Map<string, HostnameSite> {
-  const loopbackByService = new Map<string, { listenPort: number }>([
+  const loopbackByService = new Map<string, LoopbackService>([
     ...(payload.sites ?? []).map((
       site,
     ) => [site.composeServiceName, site] as const),

@@ -40,6 +40,7 @@ import {
 } from "./engine-driver.ts";
 import {
   isSitePhpRuntimeId,
+  SITE_PHP_GUARD_FILE,
   sitePhpConfigDir,
   sitePhpRuntimeIdsIn,
   type SitePhpRuntimeSpec,
@@ -63,6 +64,8 @@ export type SitePhpRuntimeFiles = Readonly<{
   socket: string | null;
   ini: string;
   fpmConf: string | null;
+  /** The site guard script (Apache runtimes only), written before `php.ini`. */
+  guard: string | null;
 }>;
 
 type ConfigWrite = Readonly<{ path: string; snapshotted: boolean }>;
@@ -215,7 +218,10 @@ async function installUnitFile(
 }
 
 function configFiles(files: SitePhpRuntimeFiles): Array<[string, string]> {
-  const out: Array<[string, string]> = [["php.ini", files.ini]];
+  const out: Array<[string, string]> = [];
+  // The guard first: `php.ini` names it as `auto_prepend_file`.
+  if (files.guard !== null) out.push([SITE_PHP_GUARD_FILE, files.guard]);
+  out.push(["php.ini", files.ini]);
   if (files.fpmConf !== null) out.push(["php-fpm.conf", files.fpmConf]);
   return out;
 }
