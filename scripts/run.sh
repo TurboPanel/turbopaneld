@@ -82,9 +82,11 @@ TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 # certificate. Every --cacert that must mean "this file only" also passes
 # --capath at this folder, which does not exist and so adds no roots.
 TP_NO_SYSTEM_CAPATH=/nonexistent
-# Set once trust material came in over the system roots or an unverified
-# connection during this run (see tp_learn_panel_identity).
+# Set once trust material came in, or was removed, over the system roots or
+# an unverified connection during this run (see tp_learn_panel_identity).
 TP_TRUST_FROM_OPEN_LEG=false
+# Whether this host had a stored trust file when the run began.
+TP_STORED_TRUST_AT_START=false
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -463,17 +465,25 @@ tp_pem_matches_ca_pin() {
 }
 
 # The expected list a host already carries: the installer's line in
-# daemon.env plus what an authenticated CA reconcile recorded. Empty when the
-# host has none (or it cannot be parsed).
+# daemon.env plus what an authenticated CA reconcile recorded. A host with
+# neither but with stored trust files ($3 onwards: the Platform CA and the
+# private issuer, from an install before the list existed) is held to those
+# files' own fingerprints, so an answer the stored trust did not check can
+# neither replace nor delete them; an honest CA change there needs a fresh
+# install command. Empty when the host has nothing (or it cannot be parsed).
 tp_host_ca_pin() {
   _hp_env="$1"
   _hp_reconciled="$2"
+  shift 2
   _hp_seed=""
   if [ -f "$_hp_env" ]; then
     _hp_seed="$(sed -n 's/^TURBOPANEL_INSTANCE_CA_FINGERPRINT=//p' "$_hp_env" | tail -n 1)"
   fi
   if [ -f "$_hp_reconciled" ]; then
     _hp_seed="${_hp_seed:+${_hp_seed},}$(head -n 1 "$_hp_reconciled")"
+  fi
+  if [ -z "$_hp_seed" ] && [ "$#" -gt 0 ]; then
+    _hp_seed="$(tp_pem_files_pin "$@" 2>/dev/null || true)"
   fi
   [ -n "$_hp_seed" ] || return 0
   tp_normalize_ca_pin "$_hp_seed" || true
@@ -792,6 +802,9 @@ tp_fetch_uploaded_trust() {
         # host that pins it; it stays, and the daemon still trusts it.
         tp_print_step "~" "The control plane no longer offers a private uploaded issuer over public TLS — keeping the stored one ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) this server pins"
       else
+        if [ "$_trust_leg" != stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
+          TP_TRUST_FROM_OPEN_LEG=true
+        fi
         rm -f "$UPLOADED_TRUST_PATH"
       fi
       ;;
@@ -863,6 +876,9 @@ tp_fetch_instance_ca() {
       then
         tp_print_step "~" "The control plane offers no Platform CA over this connection — keeping the one this server pins ($(tp_ca_fingerprint "$CA_PATH"))"
       else
+        if [ "$_ca_leg" != stored ] && [ -f "$CA_PATH" ]; then
+          TP_TRUST_FROM_OPEN_LEG=true
+        fi
         rm -f "$CA_PATH"
       fi
       ;;
@@ -910,6 +926,7 @@ tp_refetch_instance_ca_unpinned() {
         return 0
       fi
       tp_print_ok "Control plane now presents a publicly trusted certificate — Platform CA no longer needed (was ${_old_fp:-unknown})"
+      TP_TRUST_FROM_OPEN_LEG=true
       rm -f "$CA_PATH" "$_ca_retry"
       return 0
       ;;
@@ -3374,10 +3391,14 @@ CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
 # A host that already carries an expected CA list keeps it when this run
 # brings none, so re-running an old command cannot downgrade it to trust on
-# first use.
+# first use. A host with stored trust files but no list is held to the files
+# (tp_host_ca_pin).
 if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
-  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin")"
+  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"
   [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
+fi
+if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then
+  TP_STORED_TRUST_AT_START=true
 fi
 # Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
 # tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
@@ -3585,8 +3606,10 @@ tp_learn_panel_identity() {
   # that has none and pins none. Trust that arrived during this run over the
   # public roots or an unverified connection does not count, or whoever
   # served it could also pick the key.
+  _lp_leg="$(tp_bootstrap_leg)"
   if [ "$TP_TRUST_FROM_OPEN_LEG" = true ] ||
-    { [ "$(tp_bootstrap_leg)" = system ] && [ -n "${CA_PIN:-}" ]; }
+    { [ "$TP_STORED_TRUST_AT_START" = true ] && [ "$_lp_leg" != stored ]; } ||
+    { [ "$_lp_leg" = system ] && [ -n "${CA_PIN:-}" ]; }
   then
     tp_print_detail "Not learning a panel key: this run could not check ${HOST_URL} against trust this server already had; this server stays unpinned for now"
     return 0

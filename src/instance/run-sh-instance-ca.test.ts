@@ -851,3 +851,108 @@ test("a 404 over an unverified connection never retires a CA the host pins", asy
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+test("a host with stored trust but no fingerprint list is held to the stored files", async () => {
+  // Installed before the list existed: the stored CA and issuer stand in
+  // for it, so an answer they did not check cannot replace or delete them.
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const ca = await selfSignedCa(dir, "PlatformCA");
+    const issuer = await selfSignedCa(dir, "UploadedIssuer");
+    const listed = await selfSignedCa(dir, "ListedCA");
+    const caFp = hexFingerprint(await fingerprint(ca));
+    const issuerFp = hexFingerprint(await fingerprint(issuer));
+    const seeded = await runPinHelpers(
+      source,
+      `tp_host_ca_pin '${dir}/missing.env' '${dir}/missing-pin' '${ca}' '${issuer}'`,
+    );
+    assertEquals(seeded.status, 0, seeded.stderr);
+    assertEquals(seeded.stdout, `${caFp},${issuerFp}`);
+
+    // A list on the host still wins over the files.
+    const envFile = `${dir}/daemon.env`;
+    const listedFp = hexFingerprint(await fingerprint(listed));
+    await Deno.writeTextFile(
+      envFile,
+      `TURBOPANEL_INSTANCE_CA_FINGERPRINT=${listedFp}\n`,
+    );
+    const fromList = await runPinHelpers(
+      source,
+      `tp_host_ca_pin '${envFile}' '${dir}/missing-pin' '${ca}'`,
+    );
+    assertEquals(fromList.stdout, listedFp);
+
+    // Nothing stored and no list: still nothing.
+    const none = await runPinHelpers(
+      source,
+      `tp_host_ca_pin '${dir}/missing.env' '${dir}/missing-pin' '${dir}/no-ca.pem' '${dir}/no-issuer.pem'`,
+    );
+    assertEquals(none.stdout, "");
+
+    // The installer passes the stored files.
+    assertStringIncludes(
+      source,
+      'CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"',
+    );
+
+    // Held to that list, a different CA over the public roots is refused
+    // and a 404 over them keeps the stored one.
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(ca, caPath);
+    const replaced = await fetchCa(source, {
+      CA_PIN: seeded.stdout,
+      CA_PIN_SOURCE: "host",
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "200",
+      TP_TEST_LEAF_OK: "1",
+      TP_TEST_SERVED_CA: listed,
+    }, caPath);
+    assertEquals(replaced.status === 0, false);
+    assertEquals(await fingerprint(caPath), await fingerprint(ca));
+    const deleted = await fetchCa(source, {
+      CA_PIN: seeded.stdout,
+      CA_PIN_SOURCE: "host",
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "404",
+      TP_TEST_SERVED_CA: ca,
+    }, caPath);
+    assertEquals(deleted.status, 0, deleted.stderr);
+    assertEquals(await exists(caPath), true);
+
+    // Belt and braces for the key learning: a run that began with stored
+    // trust remembers it, and a removal over the public roots (here on a host
+    // with no files to stand in, so nothing seeds a list) is remembered as
+    // trust from an open connection.
+    assertStringIncludes(
+      source,
+      'if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then\n  TP_STORED_TRUST_AT_START=true',
+    );
+    const unlisted = await fetchCa(source, {
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "404",
+      TP_TEST_SERVED_CA: ca,
+    }, caPath);
+    assertEquals(unlisted.status, 0, unlisted.stderr);
+    assertStringIncludes(unlisted.stdout, "OPEN=true");
+    const learn = extractShellFunction(source, "tp_learn_panel_identity");
+    assertStringIncludes(learn, '[ "$TP_STORED_TRUST_AT_START" = true ]');
+    assertStringIncludes(learn, '[ "$TP_TRUST_FROM_OPEN_LEG" = true ]');
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the dev overlay's run.sh download checks the pinned file alone", async () => {
+  // That script runs as root; the system roots must not stand in for the pin.
+  const orchestrate = await Deno.readTextFile(
+    join(here, "../../orchestration/scripts/tp-orchestrate"),
+  );
+  const lines = orchestrate.split("\n").filter((line) =>
+    line.includes("--cacert") && !line.trimStart().startsWith("#")
+  );
+  assertEquals(lines.length, 2, lines.join("\n"));
+  for (const line of lines) {
+    assertStringIncludes(line, "--capath /nonexistent", line);
+  }
+});

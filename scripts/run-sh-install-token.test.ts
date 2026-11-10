@@ -58,6 +58,7 @@ async function lifted(): Promise<string> {
 
 const STUBS = `
 TP_TRUST_FROM_OPEN_LEG=\${TP_TRUST_FROM_OPEN_LEG:-false}
+TP_STORED_TRUST_AT_START=\${TP_STORED_TRUST_AT_START:-false}
 tp_bootstrap_leg() { printf '%s' "\${TP_TEST_LEG:-system}"; }
 tp_print_step() { :; }
 tp_print_ok() { :; }
@@ -577,6 +578,11 @@ test("learning on upgrade pins nothing when the document is missing, forged or n
       "trust that arrived this run over the public roots",
       await makePanel(),
       "TP_TRUST_FROM_OPEN_LEG=true",
+    ],
+    [
+      "stored trust at the start of the run that no longer checks the panel",
+      await makePanel(),
+      "TP_STORED_TRUST_AT_START=true; TP_TEST_LEG=system",
     ],
     [
       "a pinned host with no stored trust to check the panel with",

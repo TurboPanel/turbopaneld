@@ -904,14 +904,20 @@ replace a pinned CA, and a system-roots answer never deletes a pinned CA or
 issuer. Debian's curl keeps its CA folder next to `--cacert`, so every
 `run.sh` check against a stored trust file also passes
 `--capath $TP_NO_SYSTEM_CAPATH` (a folder that does not exist), and the issuer
-check runs `openssl verify -no-CApath -no-CAstore`; the overlay artifact curl
-is the one deliberate exception (signed manifest). A control plane behind a
+check runs `openssl verify -no-CApath -no-CAstore`; the overlay download
+(`tp_artifact_curl`) is the one deliberate exception (signed manifest). The
+same `--capath` rule holds for the run.sh downloads that run as root
+(`tp-orchestrate` on a dev overlay, `downloadRunScript` on a non-public
+origin). A host with stored trust files but no list is held to the files'
+own fingerprints (`tp_host_ca_pin`), so an honest CA change there needs a
+fresh install command. A control plane behind a
 public edge is handled on purpose: the CA and issuer fetches retry over the
 system roots with the list enforced, the TOKEN check falls back to them (the
 document is checked against the command's key), and `--insecure-tls` counts
 the public roots as an anchor. Learning the panel key on upgrade only uses
-trust the host already had, never trust that arrived in the same run over the
-system roots or `-k`. An
+trust the host already had, never trust that arrived or was removed in the
+same run over the system roots or `-k`, and never when the run began with
+stored trust that no longer checks the panel. An
 operator's `--instance-ca` must match a fingerprint the command gave. With no
 list anywhere the old behaviour stays and a `-k` download prints one
 "trusted on first use" line. `run.sh` then writes the fingerprints of every
