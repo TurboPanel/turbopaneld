@@ -54,7 +54,10 @@ export type AcmeErrorCode =
 /** A refusal or failure from the certificate authority. */
 export class AcmeError extends Error {
   readonly code: AcmeErrorCode;
-  /** How long to wait before asking again, when the authority said (or a rate limit). */
+  /**
+   * How long to wait before asking again, when the authority said (or a rate
+   * limit).
+   */
   readonly retryAfterMs: number | null;
   /** The HTTP status of the answer; null when there was none. */
   readonly status: number | null;
@@ -108,7 +111,9 @@ const PROBLEM_CODES: Record<string, AcmeErrorCode> = {
   serverInternal: "server",
 };
 
-/** The error code an RFC 8555 problem document names; `unknown` for any other. */
+/**
+ * The error code an RFC 8555 problem document names; `unknown` for any other.
+ */
 export function problemCode(problem: AcmeProblem | null | undefined) {
   const suffix = problem?.type?.split(":").pop() ?? "";
   return PROBLEM_CODES[suffix] ?? "unknown";
@@ -122,6 +127,29 @@ export function problemDetail(
   const detail = problem?.detail ?? fallback;
   const sub = problem?.subproblems?.find((p) => p.detail)?.detail;
   return sub ? `${detail} (${sub})` : detail;
+}
+
+/**
+ * The code of a refused signed request. Only an answer about the account
+ * itself means the account is gone: `accountDoesNotExist`, or an
+ * `unauthorized` that names the account as deactivated or revoked (a revoked
+ * certificate or a deactivated authorization is not that). A server error
+ * the problem does not explain is `server`, so a poll treats it as passing.
+ */
+export function failureCode(
+  status: number,
+  problem: AcmeProblem | null,
+): AcmeErrorCode {
+  if (status === 429) return "rate_limited";
+  const code = problemCode(problem);
+  if (code === "unauthorized") {
+    const detail = problem?.detail ?? "";
+    return /\baccount\b[^.]*\b(?:deactivated|not valid|revoked)\b/i.test(detail)
+      ? "account_gone"
+      : code;
+  }
+  if (code === "unknown" && status >= 500) return "server";
+  return code;
 }
 
 function waitAsked(code: AcmeErrorCode, response: Response): number | null {
@@ -187,9 +215,17 @@ export type AcmeAuthorization = {
 export type AcmeClientOptions = {
   directoryUrl: string;
   key: AcmeAccountKey;
-  /** Set once the account exists; found again with {@link AcmeClient.ensureAccount} otherwise. */
+  /**
+   * Set once the account exists; found again with
+   * {@link AcmeClient.ensureAccount} otherwise.
+   */
   accountUrl?: string | null;
   fetch?: typeof fetch;
+  /**
+   * Ends every request still running when it aborts (the whole order's
+   * deadline).
+   */
+  signal?: AbortSignal;
 };
 
 const networkFetch: typeof fetch = (input, init) =>
@@ -206,7 +242,10 @@ export function authorityUrl(value: unknown, host: string): string {
   } catch {
     url = null;
   }
-  if (url?.protocol !== "https:" || url.host !== host) {
+  if (
+    url?.protocol !== "https:" || url.host !== host || url.username ||
+    url.password
+  ) {
     throw new AcmeError(
       "foreign_address",
       "The certificate authority named an address outside its own site",
@@ -219,20 +258,36 @@ async function sendTimed(
   send: typeof fetch,
   url: string,
   init: RequestInit,
+  deadline?: AbortSignal,
 ): Promise<Response> {
+  if (deadline?.aborted) throw deadlineError();
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   try {
     return await send(url, {
       ...init,
       redirect: "error",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: deadline ? AbortSignal.any([timeout, deadline]) : timeout,
     });
   } catch (err) {
+    if (deadline?.aborted) throw deadlineError();
     const reason = err instanceof Error ? err.message : "request failed";
     throw new AcmeError(
       "unreachable",
       `The certificate authority could not be reached: ${reason}`,
     );
   }
+}
+
+function deadlineError(): AcmeError {
+  return new AcmeError(
+    "timeout",
+    "the certificate order did not finish in time",
+  );
+}
+
+/** Drop a body nobody reads, so its connection is released. */
+async function discard(response: Response): Promise<void> {
+  await response.body?.cancel().catch(() => undefined);
 }
 
 function optionalHttps(value: unknown): string | null {
@@ -249,14 +304,21 @@ async function loadDirectory(
   directoryUrl: string,
   send: typeof fetch,
   session: AcmeSession,
+  deadline?: AbortSignal,
 ): Promise<AcmeDirectory> {
   const cached = session.directory(directoryUrl);
   if (cached) return cached;
   const host = new URL(directoryUrl).host;
-  const response = await sendTimed(send, authorityUrl(directoryUrl, host), {
-    method: "GET",
-  });
-  if (!response.ok) throw statusError(response);
+  const response = await sendTimed(
+    send,
+    authorityUrl(directoryUrl, host),
+    { method: "GET" },
+    deadline,
+  );
+  if (!response.ok) {
+    await discard(response);
+    throw statusError(response);
+  }
   const body = (await response.json()) as Record<string, unknown> & {
     meta?: { termsOfService?: unknown };
   };
@@ -290,15 +352,28 @@ export class AcmeClient {
   readonly #key: AcmeAccountKey;
   readonly #fetch: typeof fetch;
   readonly #session: AcmeSession;
+  readonly #options: AcmeClientOptions;
+  readonly #signal: AbortSignal | undefined;
   #accountUrl: string | null;
 
   constructor(options: AcmeClientOptions) {
+    this.#options = options;
     this.#directoryUrl = options.directoryUrl;
     this.#host = new URL(options.directoryUrl).host;
     this.#key = options.key;
     this.#accountUrl = options.accountUrl ?? null;
     this.#fetch = options.fetch ?? networkFetch;
     this.#session = sessionFor(options.fetch);
+    this.#signal = options.signal;
+  }
+
+  /** The same account, with every request also ended by `signal`. */
+  withSignal(signal: AbortSignal): AcmeClient {
+    return new AcmeClient({
+      ...this.#options,
+      accountUrl: this.#accountUrl,
+      signal,
+    });
   }
 
   get accountUrl(): string | null {
@@ -307,14 +382,26 @@ export class AcmeClient {
 
   /** The authority's directory (cached for an hour). */
   directory(): Promise<AcmeDirectory> {
-    return loadDirectory(this.#directoryUrl, this.#fetch, this.#session);
+    return loadDirectory(
+      this.#directoryUrl,
+      this.#fetch,
+      this.#session,
+      this.#signal,
+    );
   }
 
   #request(url: string, init: RequestInit): Promise<Response> {
-    return sendTimed(this.#fetch, authorityUrl(url, this.#host), init);
+    return sendTimed(
+      this.#fetch,
+      authorityUrl(url, this.#host),
+      init,
+      this.#signal,
+    );
   }
 
-  /** A spare nonce from an earlier answer, or a fresh one from the authority. */
+  /**
+   * A spare nonce from an earlier answer, or a fresh one from the authority.
+   */
   async #takeNonce(): Promise<string> {
     const spare = this.#session.takeNonce(this.#directoryUrl);
     if (spare) return spare;
@@ -322,6 +409,7 @@ export class AcmeClient {
     const response = await this.#request(directory.newNonce, {
       method: "HEAD",
     });
+    await discard(response);
     if (!response.ok) throw statusError(response);
     const nonce = response.headers.get("replay-nonce");
     if (!nonce) {
@@ -334,6 +422,7 @@ export class AcmeClient {
     url: string,
     payload: unknown,
     withKid: boolean,
+    accept: string,
   ): Promise<Response> {
     const target = authorityUrl(url, this.#host);
     const nonce = await this.#takeNonce();
@@ -347,7 +436,7 @@ export class AcmeClient {
       method: "POST",
       headers: {
         "Content-Type": "application/jose+json",
-        Accept: "application/json",
+        Accept: accept,
       },
       body,
     });
@@ -366,12 +455,7 @@ export class AcmeClient {
     } catch {
       problem = null;
     }
-    const raw = response.status === 429 ? "rate_limited" : problemCode(problem);
-    // An account the authority has switched off is refused as unauthorized.
-    const code = raw === "unauthorized" &&
-        /deactivat|not valid|revoked/i.test(problem?.detail ?? "")
-      ? "account_gone"
-      : raw;
+    const code = failureCode(response.status, problem);
     const detail = problemDetail(
       problem,
       `The certificate authority answered ${response.status}`,
@@ -385,14 +469,20 @@ export class AcmeClient {
   }
 
   /** POST a signed request; a stale nonce is replaced and tried once more. */
-  async #post(url: string, payload: unknown, withKid = true) {
-    let response = await this.#postOnce(url, payload, withKid);
+  async #post(
+    url: string,
+    payload: unknown,
+    withKid = true,
+    accept = "application/json",
+  ) {
+    let response = await this.#postOnce(url, payload, withKid, accept);
     if (response.status === 400) {
       const problem = (await response.clone().json().catch(() => null)) as
         | AcmeProblem
         | null;
       if (problem?.type?.endsWith(":badNonce")) {
-        response = await this.#postOnce(url, payload, withKid);
+        await discard(response);
+        response = await this.#postOnce(url, payload, withKid, accept);
       }
     }
     if (!response.ok) throw await this.#failure(response);
@@ -412,6 +502,7 @@ export class AcmeClient {
       false,
     );
     const location = response.headers.get("location");
+    await discard(response);
     if (!location) {
       throw new AcmeError(
         "server",
@@ -440,6 +531,7 @@ export class AcmeClient {
     });
     const url = response.headers.get("location");
     if (!url) {
+      await discard(response);
       throw new AcmeError(
         "server",
         "The certificate authority sent no order address",
@@ -497,7 +589,7 @@ export class AcmeClient {
 
   /** Tell the authority the challenge answer is in place. */
   async answerChallenge(url: string): Promise<void> {
-    await this.#post(url, {});
+    await discard(await this.#post(url, {}));
   }
 
   /** Send the certificate request; returns the order as it then stands. */
@@ -514,18 +606,29 @@ export class AcmeClient {
 
   /** The certificate chain PEM of a valid order. */
   async downloadCertificate(url: string): Promise<string> {
-    const response = await this.#post(url, "");
+    const response = await this.#post(
+      url,
+      "",
+      true,
+      "application/pem-certificate-chain",
+    );
     return await response.text();
   }
 }
 
 export type RenewalWindow = { start: Date; end: Date };
 
-/** What asking the authority about a certificate's renewal time came to (RFC 9773). */
+/**
+ * What asking the authority about a certificate's renewal time came to (RFC
+ * 9773).
+ */
 export type RenewalInfo = {
   /** The suggested window; null when the authority gave none. */
   window: RenewalWindow | null;
-  /** True when the authority answered (even "unknown certificate"), false when asking failed. */
+  /**
+   * True when the authority answered (even "unknown certificate"), false when
+   * asking failed.
+   */
   answered: boolean;
   /** The `Retry-After` of the answer: how long to wait before asking again. */
   retryAfterMs: number | null;

@@ -35,15 +35,24 @@ import { buildCertificateRequest, generateCertificateKey } from "./csr.ts";
 export const ACME_ORDER_TIMEOUT_MS = 3 * 60_000;
 const MIN_POLL_MS = 1_000;
 const MAX_POLL_MS = 10_000;
-/** A poll gives up at this many transient read failures in a row (it lives through two). */
+/**
+ * A poll gives up at this many transient read failures in a row (it lives
+ * through two).
+ */
 const TRANSIENT_READS = 3;
 
 export type ChallengeSolver = {
   /** The challenge type this solver answers (`http-01`, later `dns-01`). */
   type: string;
-  /** Put the answer in place. `value` is the key authorization (HTTP-01) or the TXT value (DNS-01). */
+  /**
+   * Put the answer in place. `value` is the key authorization (HTTP-01) or the
+   * TXT value (DNS-01).
+   */
   present(challenge: SolverChallenge): Promise<void>;
-  /** Take the answer away again; called once the order is over, whatever its outcome. */
+  /**
+   * Take the answer away again; called once the order is over, whatever its
+   * outcome.
+   */
   remove(challenge: SolverChallenge): Promise<void>;
 };
 
@@ -57,7 +66,9 @@ export type OrderDeps = {
 
 export type OrderInput = {
   names: readonly string[];
-  /** Renewal-information identifier of the certificate this renews (RFC 9773). */
+  /**
+   * Renewal-information identifier of the certificate this renews (RFC 9773).
+   */
   replaces?: string;
 };
 
@@ -71,7 +82,9 @@ export type IssuedChain = {
 const DNS_NAME_RE =
   /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
 
-/** The names lowercased, each once; refused when empty or one is not a DNS name. */
+/**
+ * The names lowercased, each once; refused when empty or one is not a DNS name.
+ */
 export function orderNames(
   names: readonly string[],
   solverType: string,
@@ -84,7 +97,12 @@ export function orderNames(
       name.length > 253 || /^\d+(?:\.\d+){3}$/.test(name) ||
       !DNS_NAME_RE.test(name)
     ) {
-      throw new LocalAcmeError("rejected_name", `${raw} is not a domain name`);
+      // Off the wire: quoted and cut short, so a long or odd value stays one
+      // line.
+      throw new LocalAcmeError(
+        "rejected_name",
+        `${JSON.stringify(raw.slice(0, 80))} is not a domain name`,
+      );
     }
     if (name.startsWith("*.") && solverType !== "dns-01") {
       throw new LocalAcmeError(
@@ -100,19 +118,47 @@ export function orderNames(
   return out;
 }
 
+/**
+ * Giving up the authorizations of a failed order gets its own short budget,
+ * after the order's: together they stay well inside the issuer unit's
+ * `RuntimeMaxSec=600` even for a certificate with a hundred names.
+ */
+export const ACME_DEACTIVATE_BUDGET_MS = 30_000;
+
+/**
+ * One deadline for the whole order. `signal` ends any request still running
+ * when the time is up (real time); `check` refuses to start a step once the
+ * deadline has passed on the order's own clock (which tests drive).
+ */
 type Clock = {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   deadline: number;
+  signal: AbortSignal;
+  check: (what: string) => void;
 };
+
+function timeoutError(what: string): AcmeError {
+  return new AcmeError(
+    "timeout",
+    `the certificate authority did not finish ${what} in time`,
+  );
+}
 
 function clockFor(deps: OrderDeps): Clock {
   const now = deps.now ?? Date.now;
+  const budget = deps.timeoutMs ?? ACME_ORDER_TIMEOUT_MS;
+  const deadline = now() + budget;
+  const signal = AbortSignal.timeout(budget);
   return {
     now,
     sleep: deps.sleep ??
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
-    deadline: now() + (deps.timeoutMs ?? ACME_ORDER_TIMEOUT_MS),
+    deadline,
+    signal,
+    check: (what) => {
+      if (signal.aborted || now() >= deadline) throw timeoutError(what);
+    },
   };
 }
 
@@ -140,6 +186,7 @@ async function pollUntil<T extends { retryAfterMs: number | null }>(
   what: string,
 ): Promise<T> {
   const step = async (attempt: number, failures: number): Promise<T> => {
+    clock.check(what);
     let value: T | null = null;
     try {
       value = await read();
@@ -148,19 +195,17 @@ async function pollUntil<T extends { retryAfterMs: number | null }>(
     }
     if (value !== null && settled(value)) return value;
     const wait = pollWait(value?.retryAfterMs ?? null, attempt);
-    if (clock.now() + wait > clock.deadline) {
-      throw new AcmeError(
-        "timeout",
-        `the certificate authority did not finish ${what} in time`,
-      );
-    }
+    if (clock.now() + wait > clock.deadline) throw timeoutError(what);
     await clock.sleep(wait);
     return step(attempt + 1, value === null ? failures + 1 : 0);
   };
   return await step(0, 0);
 }
 
-/** Open the order; a `replaces` the authority refuses as already used is dropped once. */
+/**
+ * Open the order; a `replaces` the authority refuses as already used is dropped
+ * once.
+ */
 async function openOrder(
   client: AcmeClient,
   names: string[],
@@ -207,8 +252,10 @@ async function presentAll(
   solver: ChallengeSolver,
   presented: Presented[],
   solved: SolverChallenge[],
+  clock: Clock,
 ): Promise<void> {
   await forEachSequential(order.authorizations, async (authzUrl) => {
+    clock.check("putting the answers in place");
     const authz = await client.getAuthorization(authzUrl);
     if (authz.status === "valid") return;
     if (authz.status !== "pending") throw challengeError(authz, solver.type);
@@ -239,6 +286,7 @@ async function validateAll(
   clock: Clock,
 ): Promise<void> {
   await forEachSequential(presented, async (item) => {
+    clock.check("taking the answers");
     if (item.challenge.status === "pending") {
       await client.answerChallenge(item.challenge.url);
     }
@@ -276,16 +324,21 @@ async function finalizeOrder(
     "the checks",
   );
   if (ready.status === "invalid") throw orderFailure(ready);
-  const key = await generateCertificateKey();
-  let current = ready;
-  if (ready.status === "ready") {
-    const csr = await buildCertificateRequest({
-      privateKey: key.privateKey,
-      spki: key.spki,
-      names,
-    });
-    current = await client.finalize(order.url, ready.finalize, csr);
+  if (ready.status !== "ready") {
+    // Finalized before this server sent its request: the key is not ours.
+    throw new AcmeError(
+      "server",
+      "the certificate authority finished the order without this server's request",
+    );
   }
+  clock.check("the certificate");
+  const key = await generateCertificateKey();
+  const csr = await buildCertificateRequest({
+    privateKey: key.privateKey,
+    spki: key.spki,
+    names,
+  });
+  let current = await client.finalize(order.url, ready.finalize, csr);
   const done = await pollUntil(
     clock,
     async () => {
@@ -303,6 +356,7 @@ async function finalizeOrder(
       "the certificate authority did not hand over the certificate",
     );
   }
+  clock.check("handing over the certificate");
   const certificatePem = await client.downloadCertificate(done.certificate);
   if (!certificatePem.includes("-----BEGIN CERTIFICATE-----")) {
     throw new AcmeError(
@@ -313,13 +367,18 @@ async function finalizeOrder(
   return { certificatePem, privateKeyPem: key.privateKeyPem, names };
 }
 
-/** Best effort: give up the authorizations still pending, so they stop counting against limits. */
+/**
+ * Best effort: give up the authorizations still pending, so they stop counting
+ * against limits.
+ */
 async function deactivatePending(
   client: AcmeClient,
   order: AcmeOrder | null,
 ): Promise<void> {
   if (!order) return;
+  let outOfTime = false;
   await forEachSequential(order.authorizations, async (url) => {
+    if (outOfTime) return;
     try {
       const authz = await client.getAuthorization(url);
       if (authz.status === "pending") {
@@ -327,6 +386,7 @@ async function deactivatePending(
       }
     } catch (err) {
       const code = err instanceof AcmeError ? err.code : "error";
+      outOfTime = code === "timeout";
       logWarn("deploy", `giving up an ACME authorization failed (${code})`);
     }
   });
@@ -358,18 +418,22 @@ export async function runAcmeOrder(
 ): Promise<IssuedChain> {
   const names = orderNames(input.names, solver.type);
   const clock = clockFor(deps);
+  const bound = client.withSignal(clock.signal);
   const solved: SolverChallenge[] = [];
   let order: AcmeOrder | null = null;
   try {
-    order = await openOrder(client, names, input.replaces);
+    order = await openOrder(bound, names, input.replaces);
     if (order.status === "invalid") throw orderFailure(order);
     const presented: Presented[] = [];
-    await presentAll(client, order, solver, presented, solved);
-    await validateAll(client, presented, solver.type, clock);
-    return await finalizeOrder(client, order, names, clock);
+    await presentAll(bound, order, solver, presented, solved, clock);
+    await validateAll(bound, presented, solver.type, clock);
+    return await finalizeOrder(bound, order, names, clock);
   } catch (err) {
     const accountGone = err instanceof AcmeError && err.code === "account_gone";
-    if (!accountGone) await deactivatePending(client, order);
+    if (!accountGone) {
+      const budget = AbortSignal.timeout(ACME_DEACTIVATE_BUDGET_MS);
+      await deactivatePending(client.withSignal(budget), order);
+    }
     throw err;
   } finally {
     await removeAll(solver, solved);

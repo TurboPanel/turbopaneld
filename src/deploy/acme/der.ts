@@ -88,7 +88,10 @@ export const octetString = (value: Uint8Array): Uint8Array => tlv(0x04, value);
 export const oid = (value: readonly number[]): Uint8Array =>
   tlv(0x06, Uint8Array.from(value));
 
-/** A non-negative INTEGER from big-endian bytes: no leading zeros, a sign byte when needed. */
+/**
+ * A non-negative INTEGER from big-endian bytes: no leading zeros, a sign byte
+ * when needed.
+ */
 export function unsignedInteger(bytes: Uint8Array): Uint8Array {
   let start = 0;
   while (start < bytes.length - 1 && bytes[start] === 0) start += 1;
@@ -99,7 +102,9 @@ export function unsignedInteger(bytes: Uint8Array): Uint8Array {
   return tlv(0x02, padded);
 }
 
-/** Web Crypto signs ECDSA as `r || s`; X.509 wants a DER `SEQUENCE { r, s }`. */
+/**
+ * Web Crypto signs ECDSA as `r || s`; X.509 wants a DER `SEQUENCE { r, s }`.
+ */
 export function derEcdsaSignature(raw: Uint8Array): Uint8Array {
   const half = raw.length / 2;
   return sequence(
@@ -119,7 +124,10 @@ export function encodePem(label: string, der: Uint8Array): string {
   return `${lines.join("\n")}\n`;
 }
 
-/** The DER bytes of the first `label` block in `pem`, or null when there is none. */
+/**
+ * The DER bytes of the first `label` block in `pem`, or null when there is
+ * none.
+ */
 export function decodePem(pem: string, label: string): Uint8Array | null {
   const re = new RegExp(
     String
