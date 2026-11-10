@@ -2433,6 +2433,7 @@ it({
     const originalSetTimeout = globalThis.setTimeout;
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
     const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
     const sockets: MockWebSocket[] = [];
     const reconnectDelays: number[] = [];
     let restored = false;
@@ -2535,6 +2536,8 @@ it({
     });
 
     Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    // The installer reads the latest answer from the runtime folder.
+    Deno.env.set("TURBOPANEL_RUN_DIR", tempDir);
     Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
     await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
     await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
@@ -2557,6 +2560,11 @@ it({
             ? true
             : undefined,
       );
+      const parkedStatus = await Deno.readTextFile(
+        `${tempDir}/enroll-status`,
+      );
+      assertStringIncludes(parkedStatus, "state=parked\n");
+      assertStringIncludes(parkedStatus, "kind=awaiting-administrator\n");
       restored = true;
       const socket = await waitFor(
         "unpark websocket",
@@ -2564,6 +2572,11 @@ it({
       );
       socket.open();
       assertEquals(socket.readyState, MockWebSocket.OPEN);
+      await waitFor("connected status", async () => {
+        const text = await Deno.readTextFile(`${tempDir}/enroll-status`)
+          .catch(() => "");
+        return text === "state=connected\n" ? true : undefined;
+      });
       socket.close(1000, "done");
     } finally {
       client.stop();
@@ -2580,6 +2593,7 @@ it({
       });
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
       await Deno.remove(tempDir, { recursive: true });
     }
   },
@@ -7614,6 +7628,94 @@ it({
       restorePorts();
       restoreTime();
       restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "a used install key parks with a refusal the installer can read in the runtime folder",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const parkGate = new Promise<void>(() => {});
+    const restoreTime = installClientTimeSource({ delay: () => parkGate });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
+    const { restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script(
+        "/api/daemon/v1/enroll",
+        () =>
+          new Response(JSON.stringify({ error: "Invalid license" }), {
+            status: 401,
+          }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+        Deno.env.set("TURBOPANEL_RUN_DIR", fixture.dirs.runDir);
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+        });
+        try {
+          client.start();
+          const status = await waitFor("refusal status", async () => {
+            const text = await Deno.readTextFile(
+              `${fixture.dirs.runDir}/enroll-status`,
+            ).catch(() => "");
+            return text.includes("kind=permanent") ? text : undefined;
+          });
+          assertStringIncludes(status, "state=parked\n");
+          assertStringIncludes(status, "reason=401 Invalid license");
+          assertStringIncludes(
+            status,
+            "advice=this install key was already used",
+          );
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
     }
   },
 });

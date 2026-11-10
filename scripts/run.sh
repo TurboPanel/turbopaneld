@@ -1633,6 +1633,123 @@ tp_kernel_features_step() {
   "$_kf_helper" installer-step || true
 }
 
+# apt-get for the host prerequisites, output appended to the log file in $1.
+# DPkg::Lock::Timeout only waits for the dpkg lock: the package-list lock that
+# `apt-get update` takes and the archives lock for downloads fail at once
+# while a first-boot upgrade holds them. So a run that says "Could not get
+# lock" or "Unable to lock directory" is tried again, up to 60 times 5 s
+# apart and for at most 15 minutes in all (a dpkg lock wait that ran out says
+# "Could not get lock" too, after 300 s). Any other failure returns at once.
+# apt holds fcntl locks, so flock cannot wait for them; LC_ALL=C keeps the
+# messages in English so the match works on any host locale.
+tp_apt_get() {
+  _ag_log="$1"
+  shift
+  _ag_until=$(($(date +%s) + 900))
+  _ag_out="$(mktemp)" || return 1
+  _ag_try=1
+  while :; do
+    _ag_rc=0
+    LC_ALL=C apt-get -o DPkg::Lock::Timeout=300 "$@" >"$_ag_out" 2>&1 || _ag_rc=$?
+    cat "$_ag_out" >>"$_ag_log"
+    if [ "$_ag_rc" -eq 0 ] || [ "$_ag_try" -ge 60 ] \
+      || [ "$(date +%s)" -ge "$_ag_until" ] \
+      || ! grep -Eq 'Could not get lock|Unable to lock directory' "$_ag_out"; then
+      rm -f "$_ag_out"
+      return "$_ag_rc"
+    fi
+    _ag_try=$((_ag_try + 1))
+    sleep 5
+  done
+}
+
+# One `key=value` field of the daemon's enroll status file (see
+# src/instance/enroll-status.ts), "" when absent. The daemon account can
+# write that file and this runs as root: a link is ignored, only the first
+# 4 KiB are read, and control characters are dropped. Never sourced.
+tp_enroll_status_field() {
+  _esf_file="$1"
+  _esf_key="$2"
+  if [ ! -f "$_esf_file" ] || [ -L "$_esf_file" ]; then
+    return 0
+  fi
+  head -c 4096 "$_esf_file" 2>/dev/null | sed -n "s/^${_esf_key}=//p" | head -n 1 | tr -d '\000-\037\177'
+}
+
+# After a fresh start, wait for the daemon's first answer from the control
+# plane, which it writes to $RUN_DIR/enroll-status (the file is removed before
+# the daemon starts, so an old answer cannot count). A refusal fails the
+# install with the reason; the parked install stays, and re-running a fresh
+# command restages the license and lets the daemon try again. A wait for a
+# purchased size, a license or an administrator is not a refusal. No answer
+# within TURBOPANEL_ENROLL_WAIT_SECONDS (default 120, the same ceiling as
+# tp-kernel-features' enrolment wait) only prints a note: the panel may be
+# slow or unreachable for now, the release may predate the status file, or an
+# already enrolled server converges before it connects. Only a run that
+# carries a license waits (a re-run without one has nothing to enroll), and
+# --no-start (a managed update) never does: the daemon running this script
+# restarts only after it exits.
+tp_wait_for_enrollment() {
+  [ "$NO_START" != true ] || return 0
+  [ -n "${LICENSE_ID:-}" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  _we_file="$RUN_DIR/enroll-status"
+  _we_max="${TURBOPANEL_ENROLL_WAIT_SECONDS:-120}"
+  case "$_we_max" in
+    '' | *[!0-9]*) _we_max=120 ;;
+    *) ;;
+  esac
+  _we_waited=0
+  tp_print_step "▸" "Waiting for the control plane to accept this server…"
+  while :; do
+    case "$(tp_enroll_status_field "$_we_file" state)" in
+      connected)
+        tp_print_ok "The control plane accepted this server"
+        return 0
+        ;;
+      parked)
+        _we_kind="$(tp_enroll_status_field "$_we_file" kind)"
+        _we_reason="$(tp_enroll_status_field "$_we_file" reason)"
+        _we_advice="$(tp_enroll_status_field "$_we_file" advice)"
+        case "$_we_kind" in
+          permanent)
+            tp_print_error "The control plane refused this server (${_we_reason:-no reason given})."
+            tp_print_detail "${_we_advice:-Copy a fresh command from Add Server and run it here.}"
+            return 1
+            ;;
+          tls-trust)
+            tp_print_error "This server does not trust the control plane's certificate (${_we_reason:-no reason given})."
+            tp_print_detail "Copy a fresh command from Add Server and run it here; it carries the certificate details this server needs."
+            return 1
+            ;;
+          panel-identity)
+            tp_print_error "The control plane did not prove it holds the panel key this server pinned (${_we_reason:-no reason given})."
+            tp_print_detail "Check that the command was copied from the right control plane, then copy a fresh one from Add Server and run it here."
+            return 1
+            ;;
+          awaiting-seat)
+            tp_print_detail "The organization has no free server size for this server yet; once one is bought in the panel, this server joins by itself"
+            return 0
+            ;;
+          *)
+            tp_print_detail "The daemon is waiting before it joins (${_we_reason:-${_we_kind:-no reason given}}); see /var/log/turbopanel/daemon.err.log"
+            return 0
+            ;;
+        esac
+        ;;
+      *)
+        # No answer yet (or one this script does not know): keep waiting.
+        ;;
+    esac
+    if [ "$_we_waited" -ge "$_we_max" ]; then
+      tp_print_detail "No answer from the control plane yet; the daemon keeps trying. Check this server in the panel, or see /var/log/turbopanel/daemon.err.log"
+      return 0
+    fi
+    sleep 2
+    _we_waited=$((_we_waited + 2))
+  done
+}
+
 # Stop the running daemon before replacing release binaries on manual reconcile.
 # Skipped for --no-start (in-process UI update): that path must not stop the
 # caller; the daemon chdirs away and restarts itself after run.sh completes.
@@ -3207,12 +3324,12 @@ _tp_host_prereq_fail() {
   exit 1
 }
 # A fresh cloud host often runs its first-boot package upgrade (cloud-init,
-# unattended-upgrades) right when this script starts: wait up to 5 minutes
-# for the dpkg lock instead of failing at once.
+# unattended-upgrades) right when this script starts: wait for its locks
+# instead of failing at once (tp_apt_get).
 _apt_log="$(mktemp)"
 if [ -n "$_tp_host_missing" ] \
-  && { ! apt-get -o DPkg::Lock::Timeout=300 update -qq >>"$_apt_log" 2>&1 \
-    || ! apt-get -o DPkg::Lock::Timeout=300 install -y -qq sudo curl ca-certificates tar python3-minimal zstd openssl >>"$_apt_log" 2>&1; }; then
+  && { ! tp_apt_get "$_apt_log" update -qq \
+    || ! tp_apt_get "$_apt_log" install -y -qq sudo curl ca-certificates tar python3-minimal zstd openssl; }; then
   _tp_host_prereq_fail "host prerequisites failed (need:${_tp_host_missing})"
 fi
 if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
@@ -3662,6 +3779,10 @@ if [ "$INSTANCE_INSTALL" = true ]; then
   exit $?
 fi
 
+# The daemon writes its first answer from the control plane here once it
+# starts (tp_wait_for_enrollment); an answer from before this run must not count.
+rm -f "$RUN_DIR/enroll-status" 2>/dev/null || true
+
 VARS_FILE="$(mktemp)"
 trap 'rm -f "$VARS_FILE"' EXIT
 {
@@ -3740,6 +3861,10 @@ fi
 # rollback timer before that handoff; a silent start failure would leave
 # OnFailure= with no guard file.
 if ! tp_arm_update_guard; then
+  exit 1
+fi
+
+if ! tp_wait_for_enrollment; then
   exit 1
 fi
 
