@@ -328,11 +328,40 @@ jobs:
         with:
           deno-version: "2.9.8"
 
+      # Which control plane trunk commit to compare with. A pull request into
+      # trunk is compared with the current trunk. A trunk push, a manual run
+      # and the Release Candidate PR test a commit that may have waited in the
+      # queue while both trunks moved on, so they are compared with TurboPanel/turbopanel
+      # trunk as it was when this commit landed (the newest trunk commit no
+      # later than it); comparing an older commit with a newer trunk would be
+      # red for features its successors already have. If that cannot be read,
+      # the current trunk is used.
+      - name: Pick the control plane trunk commit to compare with
+        id: sibling
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIBLING_REPO: TurboPanel/turbopanel
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AS_OF: ${{ github.event_name != 'pull_request' || (github.head_ref == 'trunk' && github.base_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository) }}
+        run: |
+          ref=trunk
+          if [ "$AS_OF" = "true" ]; then
+            if at="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq .commit.committer.date)" &&
+              pick="$(gh api "repos/${SIBLING_REPO}/commits?sha=trunk&until=${at}&per_page=1" --jq '.[0].sha // empty')" &&
+              [ -n "$pick" ]; then
+              ref="$pick"
+              echo "Comparing with ${SIBLING_REPO} trunk as of ${at}: ${pick}"
+            else
+              echo "::warning::could not find ${SIBLING_REPO} trunk as of this commit; comparing with the current trunk"
+            fi
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
       - name: Check out turbopanel trunk (contract twins)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/turbopanel
-          ref: trunk
+          ref: ${{ steps.sibling.outputs.ref }}
           path: turbopanel
           fetch-depth: 1
           persist-credentials: false
