@@ -411,3 +411,131 @@ test("snapshot: a daemon pin that widens on purpose still covers the control pla
     "differs",
   );
 });
+
+/**
+ * A control plane checkout built from this daemon's own sources, so the whole
+ * check runs here without the sibling repo: every pinned type, constant and
+ * mirror the check reads from the control plane side, at its control plane
+ * path. `drop` leaves files out; `tweak` edits one after it is written.
+ */
+async function fakeControlPlane(
+  opts: {
+    drop?: string[];
+    tweak?: Record<string, (text: string) => string>;
+  } = {},
+): Promise<string> {
+  const root = await Deno.makeTempDir();
+  const files = new Map<string, string>();
+  const add = async (to: string, from: string) => {
+    const text = await Deno.readTextFile(join(ROOT, from));
+    files.set(to, (files.get(to) ?? "") + text + "\n");
+  };
+  await add(
+    "src/contracts/metrics-contract.ts",
+    "src/contracts/metrics-contract.ts",
+  );
+  await add(
+    "src/contracts/commands/hostname.ts",
+    "src/contracts/commands-contracts.ts",
+  );
+  await add(
+    "src/lib/panel-identity/frame-envelope.ts",
+    "src/instance/panel-identity-frames.ts",
+  );
+  for (
+    const to of [
+      "src/daemon/authn/proof-version.ts",
+      "src/daemon/authn/request-signature.ts",
+      "src/daemon/authn/attach-proof.ts",
+      "src/daemon/authn/pin-report.ts",
+    ]
+  ) await add(to, "src/crypto/keys.ts");
+  await add(
+    "src/test-fixtures/keyset-statement-vectors.json",
+    "src/testing/keyset-statement-vectors.json",
+  );
+  await add("src/lib/machine-key.ts", "src/host/machine-key.ts");
+  await add(
+    "src/contracts/server-addresses.ts",
+    "src/contracts/server-reported-ip.ts",
+  );
+  await add(
+    "src/contracts/layout-vectors.json",
+    "src/contracts/layout-vectors.json",
+  );
+  await add(
+    "src/contracts/topology-types.ts",
+    "src/contracts/topology-types.ts",
+  );
+  await add(
+    "src/contracts/topology-slot-mapping.ts",
+    "src/contracts/topology-slot-mapping.ts",
+  );
+  await add(
+    "scripts/contract-field-snapshot.json",
+    "scripts/contract-field-snapshot.json",
+  );
+  const snapshot = JSON.parse(
+    await Deno.readTextFile(join(ROOT, "scripts/contract-field-snapshot.json")),
+  ) as Record<string, { instance: string; daemon: string }>;
+  const pairs = new Set(
+    Object.values(snapshot).map((pin) => `${pin.instance}\n${pin.daemon}`),
+  );
+  for (const pair of pairs) {
+    const [to, from] = pair.split("\n");
+    await add(to, from);
+  }
+  const channels = (await Deno.readTextFile(join(ROOT, "src/update/types.ts")))
+    .match(/export type UpdateChannel =([^;]*);/)?.[1] ?? "";
+  files.set(
+    "src/contracts/update-channel.ts",
+    `export const UPDATE_CHANNELS = [${channels.split("|").join(",")}];\n`,
+  );
+  await add("src/lib/version-wire.ts", "src/instance/version-wire.ts");
+  files.set(
+    "src/lib/version-wire.ts",
+    files.get("src/lib/version-wire.ts") +
+      'export const MIN_SUPPORTED_DAEMON_VERSION = "0.0.1";\n',
+  );
+  files.set("deno.json", JSON.stringify({ version: "99.0.0" }));
+  for (const [rel, text] of files) {
+    if (opts.drop?.includes(rel)) continue;
+    const path = join(root, rel);
+    await Deno.mkdir(join(path, ".."), { recursive: true });
+    await Deno.writeTextFile(path, opts.tweak?.[rel]?.(text) ?? text);
+  }
+  return root;
+}
+
+test("a control plane that is behind this daemon passes the whole check", async () => {
+  const same = await fakeControlPlane();
+  // Behind: daemon-only names missing, a whole-file mirror that differs, and
+  // fewer features than this daemon lists. All of it is a notice at most.
+  const behind = await fakeControlPlane({
+    drop: [
+      "src/daemon/authn/request-signature.ts",
+      "src/contracts/metrics-contract.ts",
+    ],
+    tweak: {
+      "src/contracts/layout-vectors.json": (text) => `${text} `,
+      "src/lib/version-wire.ts": (text) =>
+        text.replace(
+          /(export const DAEMON_WIRE_FEATURES = \[)\s*"[^"]+",/,
+          "$1",
+        ),
+    },
+  });
+  try {
+    assertEquals(
+      await runContractDriftCheck({ sibling: same, requireSibling: true }),
+      "ok",
+    );
+    assertEquals(
+      await runContractDriftCheck({ sibling: behind, requireSibling: true }),
+      "ok",
+    );
+  } finally {
+    await Deno.remove(same, { recursive: true });
+    await Deno.remove(behind, { recursive: true });
+  }
+});
