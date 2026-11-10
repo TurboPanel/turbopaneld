@@ -356,6 +356,8 @@ const REFUSAL_REASONS: Record<string, string> = {
   "approval by a passkey that is not pinned": "an approval does not verify",
   // A 64-byte signature under an id pinned as ES256 is not DER at all.
   "approval under a pinned id signed by another key":
+    "signature is not strict DER",
+  "approval under a pinned id signed by another key of the same kind":
     "an approval signature is invalid",
   "assertion replayed onto another statement": "an approval does not verify",
   "applied statement replayed": "prev is not the pinned key",
