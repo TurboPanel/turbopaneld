@@ -1,9 +1,10 @@
 /**
  * `server.tunnel.connectors`: start or stop the connectors of organization
  * tunnels on this host, as the control plane's list says. A connector that
- * already runs is left as it is (a resend must not bounce it); one the list
- * removes is stopped and its token copy deleted. Only the ids named here are
- * touched, never the instance's own tunnel.
+ * already runs is left as it is (a resend must not bounce it); one that is
+ * installed but stopped or failed is started again, so a resend repairs it;
+ * one the list removes is stopped and its token copy deleted. Only the ids
+ * named here are touched, never the instance's own tunnel.
  */
 import type {
   TunnelConnectorsPayload,
@@ -16,7 +17,9 @@ import {
   installConnector,
   listConnectorIds,
   removeConnector,
+  startStoppedConnector,
 } from "../tunnels/connector-service.ts";
+import { logInfo } from "../util/logger.ts";
 
 export type TunnelConnectorsDeps = {
   decryptSecrets?: DecryptSecretsFn;
@@ -52,6 +55,19 @@ export async function handleTunnelConnectors(
     }
     await installConnector(io, entry.tunnelId, token);
   }));
+  // Installed but stopped or failed: start it again (a running one is left as it is).
+  const repairs = await Promise.allSettled(
+    unchanged.map((e) => startStoppedConnector(io, e.tunnelId)),
+  );
+  const repaired = settledIds(unchanged.map((e) => e.tunnelId), repairs);
+  repairs.forEach((outcome, index) => {
+    if (outcome.status === "fulfilled" && outcome.value) {
+      logInfo(
+        "tunnels",
+        `started the stopped connector of tunnel ${unchanged[index]!.tunnelId}`,
+      );
+    }
+  });
   // Both lists go through the connector module's own queue, one at a time.
   const removals = await Promise.allSettled(
     payload.remove.map((id) => removeConnector(io, id)),
@@ -60,7 +76,11 @@ export async function handleTunnelConnectors(
   const removed = settledIds(payload.remove, removals);
   // Report a partial failure as a failed command so the control plane repeats
   // the list; what did work is not redone (installs of running ones are no-ops).
-  const failures = [...installed.failures, ...removed.failures];
+  const failures = [
+    ...installed.failures,
+    ...repaired.failures,
+    ...removed.failures,
+  ];
   if (failures.length > 0) {
     throw new Error(`tunnel connectors: ${failures.join("; ")}`);
   }

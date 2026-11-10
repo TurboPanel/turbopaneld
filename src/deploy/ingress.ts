@@ -15,7 +15,11 @@ import {
   proofDir,
   proofImportPattern,
 } from "./acme-proof-forward.ts";
-import { plannedTunnelContents } from "./tunnel-state.ts";
+import {
+  plannedTunnelContents,
+  readTunnelState,
+  relockWithStoredPeers,
+} from "./tunnel-state.ts";
 import {
   type PeerUpstream,
   peerUpstreamText,
@@ -3065,11 +3069,25 @@ async function ensureHostingCaddyRuntimeBeforeValidate(
   await ensureHostingCaddyRuntime(layout);
 }
 
-/** Stage the reserved tunnel file in the candidate set; `undefined` leaves the live one in. */
+/** A site file staged beside the one being judged (same folder, same name as live). */
+export type StagedSiteFile = Readonly<{ file: string; contents: string }>;
+
+/**
+ * Stage the reserved tunnel file and any other changed site files in the
+ * candidate set; `undefined` leaves the live tunnel file in.
+ */
 async function stageTunnelContents(
   candidate: HostingCandidate,
   tunnelContents: string | undefined,
+  sites: readonly StagedSiteFile[] = [],
 ): Promise<void> {
+  await forEachSequential(
+    sites,
+    (site) =>
+      Deno.writeTextFile(join(candidate.sitesDir, site.file), site.contents, {
+        mode: 0o640,
+      }),
+  );
   if (tunnelContents === undefined) return;
   await Deno.writeTextFile(
     join(candidate.sitesDir, TUNNEL_SITE_FILE),
@@ -3085,9 +3103,17 @@ export async function validateHostingCaddyCandidate(
   siteFile: string,
   contents: string,
   grantRead: (hostingDir: string) => Promise<void>,
-  staged: { fallback?: string; tunnel?: string } = {},
+  staged: {
+    fallback?: string;
+    tunnel?: string;
+    sites?: readonly StagedSiteFile[];
+  } = {},
 ): Promise<void> {
-  const { fallback: fallbackContents, tunnel: tunnelContents } = staged;
+  const {
+    fallback: fallbackContents,
+    tunnel: tunnelContents,
+    sites: stagedSites,
+  } = staged;
   const candidate = await openHostingCandidate(layout, hostingDir);
   try {
     const others = (await liveSnippetNames(sitesDir)).filter((name) =>
@@ -3123,7 +3149,7 @@ export async function validateHostingCaddyCandidate(
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
-    await stageTunnelContents(candidate, tunnelContents);
+    await stageTunnelContents(candidate, tunnelContents, stagedSites);
     // After staging, so the account can read everything staged (the grant also
     // sets the folder defaults the live snippets inherit).
     await grantRead(hostingDir);
@@ -3152,7 +3178,7 @@ export async function validateHostingCaddyCandidate(
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
-    await stageTunnelContents(candidate, tunnelContents);
+    await stageTunnelContents(candidate, tunnelContents, stagedSites);
     refusal = await hostingCandidateRefusal(layout, candidate);
     if (refusal !== null) {
       throw new Error(
@@ -3509,6 +3535,19 @@ async function plannedTunnelFile(
   }
 }
 
+/** The deploy's site text with the stored table's tunnel peers; unchanged when there are none or they cannot be applied. */
+async function relockForDeploy(
+  hostingDir: string,
+  contents: string,
+): Promise<string> {
+  try {
+    return relockWithStoredPeers(await readTunnelState(hostingDir), contents);
+  } catch (err) {
+    logWarn("deploy", `tunnel name lock kept as sent: ${errorText(err)}`);
+    return contents;
+  }
+}
+
 /**
  * Write one environment's hosting snippet. The new snippet is validated as part
  * of the whole set before it touches the live include glob; when a running
@@ -3546,7 +3585,7 @@ async function rewriteHostingCaddySitesLocked(
   const hostnames = [...hostnameSites.keys()].sort((a, b) =>
     a.localeCompare(b)
   );
-  const siteContent = hostnames
+  const renderedSites = hostnames
     .map((hostname) => {
       const site = hostnameSites.get(hostname)!;
       return siteSnippet({
@@ -3565,6 +3604,9 @@ async function rewriteHostingCaddySitesLocked(
       });
     })
     .join("\n");
+  // The lock on tunnel names follows the last forwarding table, which may be
+  // newer than the peers this deploy was prepared with.
+  const siteContent = await relockForDeploy(hostingDir, renderedSites);
   const siteFile = `${payload.environmentId}.caddy`;
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
