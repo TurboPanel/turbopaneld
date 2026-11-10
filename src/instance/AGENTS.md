@@ -1196,6 +1196,14 @@ On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):
 - The control plane's key, key set and rotation passkeys move only through
   passkey-approved key-set statements, served publicly (and unsigned: they
   authenticate themselves) at `GET /api/daemon/v1/instance/identity/statements?after=n`.
+- Passkey plus old key (`panel-keyset-key-signature-v1`, announced only):
+  `rotate` and `passkeys` statements carry `keySig`, the replaced key's
+  signature over `"tp-keyset\n"` + the statement bytes; a revoke has none and
+  needs two different pinned passkeys. `parseKeysetStatements` passes `keySig`
+  through untouched; tp-host decides (see `orchestration/scripts/AGENTS.md`).
+  Statements from a control plane older than this change carry no `keySig`
+  and are refused, so key and passkey changes wait for the control plane
+  release that ships with it.
 - First fill: while the pin holds no passkeys, a verified document with a
   `rotation` block goes to `tp-host panel-identity-write` (even when the
   addresses match), which pins them once with the document's key set.

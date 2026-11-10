@@ -19,13 +19,20 @@ export type VectorApproval = {
   clientDataJSON: string;
   signature: string;
 };
+export type VectorKeySig = { pub: string; sig: string };
 export type VectorEnvelope = {
   statement: string;
   approvals: VectorApproval[];
+  /** The replaced key's signature; absent on a revoke. */
+  keySig?: VectorKeySig;
 };
 
 function envelope(
-  value: { statement: string; approvals: string[][] },
+  value: {
+    statement: string;
+    approvals: string[][];
+    keySig?: VectorKeySig;
+  },
 ): VectorEnvelope {
   return {
     statement: value.statement,
@@ -37,6 +44,7 @@ function envelope(
       clientDataJSON: clientDataJSON ?? "",
       signature: signature ?? "",
     })),
+    ...(value.keySig ? { keySig: value.keySig } : {}),
   };
 }
 

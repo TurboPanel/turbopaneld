@@ -386,8 +386,13 @@ or passkeys move afterwards: python3 checks the statement and every WebAuthn ass
 (`rpIdHash`, UP+UV, `webauthn.get`, challenge = SHA-256 of the statement bytes, origin under the
 rp id, strict DER for ES256) and the approval rules (prev = pinned key, key set above the pinned
 one, `iat` at most 300 s ahead, a pinned approval, removals approved by a passkey that stays,
-additions or an rp id move proving possession); openssl verifies every signature (`dgst -sha256`
-for ES256, `pkeyutl -rawin` for EdDSA) and any failure refuses the whole statement. It rewrites
+additions or an rp id move proving possession). Passkey plus old key (owner decision 2026-11-10):
+`rotate` and `passkeys` also need the envelope's `keySig` `{pub, sig}`, the replaced key's Ed25519
+signature over `"tp-keyset\n"` + the statement bytes, with `pub` hashing to the pinned `current=`;
+a `revoke` carries none and needs two pinned approvals with different ids; a key change keeps the
+pinned passkeys and rp id. There is no fallback for a statement without `keySig`. openssl verifies
+every signature (`dgst -sha256` for ES256, `pkeyutl -rawin` for EdDSA and `keySig`) and any failure
+refuses the whole statement. It rewrites
 `current=`, `keyset=`, `rp_id=`, `passkeys=`, empties `next=`, and moves `panel_key=` in
 `update-origin`. Both python3 checks run through `tp_python` (`python3 -I -S` from `/`: no
 `PYTHON*` variables, no site module, no import from the caller's directory), and a statement's `v`, `keyset` and `iat`
