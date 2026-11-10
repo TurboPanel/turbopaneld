@@ -64,7 +64,10 @@ export async function signEcdsaDer(
   return derEcdsaSignature(raw);
 }
 
-/** The DER request for `names`, signed with `privateKey`; `spki` is its public key. */
+/**
+ * The DER request for `names`, signed with `privateKey`; `spki` is its public
+ * key.
+ */
 export async function buildCertificateRequest(params: {
   privateKey: CryptoKey;
   spki: Uint8Array;

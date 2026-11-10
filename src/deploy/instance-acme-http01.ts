@@ -9,6 +9,7 @@
  * disabled.
  */
 
+import { writeAll } from "../util/write-all.ts";
 import { dirname, join } from "@std/path";
 import { TUNNEL_SITE_FILE } from "./tunnel-caddy.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
@@ -747,10 +748,15 @@ async function answerProofRequest(
   const path = await readRequestPath(conn);
   const response = answer(path);
   const reason = response.status === 200 ? "OK" : "Not Found";
-  const bytes = new TextEncoder().encode(response.body);
-  const head =
-    `HTTP/1.1 ${response.status} ${reason}\r\nContent-Type: text/plain\r\nContent-Length: ${bytes.length}\r\nConnection: close\r\n\r\n`;
-  await conn.write(new TextEncoder().encode(head + response.body));
+  const encoder = new TextEncoder();
+  const body = encoder.encode(response.body);
+  const head = encoder.encode(
+    `HTTP/1.1 ${response.status} ${reason}\r\nContent-Type: text/plain\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`,
+  );
+  const payload = new Uint8Array(head.length + body.length);
+  payload.set(head);
+  payload.set(body, head.length);
+  await writeAll(conn, payload);
 }
 
 async function readRequestPath(conn: Deno.Conn): Promise<string> {
