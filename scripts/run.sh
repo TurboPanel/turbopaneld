@@ -77,6 +77,16 @@ tp_curl_net_retry() {
 TP_CURL_RETRY='--retry 2 --retry-delay 3 --retry-max-time 60'
 TP_CURL_FETCH="tp_curl_net_retry -fsSL $TP_CURL_RETRY"
 TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
+# Debian's curl keeps its built-in CA folder (/etc/ssl/certs) next to
+# --cacert, so a check meant for one CA file also passes any publicly trusted
+# certificate. Every --cacert that must mean "this file only" also passes
+# --capath at this folder, which does not exist and so adds no roots.
+TP_NO_SYSTEM_CAPATH=/nonexistent
+# Set once trust material came in, or was removed, over the system roots or
+# an unverified connection during this run (see tp_learn_panel_identity).
+TP_TRUST_FROM_OPEN_LEG=false
+# Whether this host had a stored trust file when the run began.
+TP_STORED_TRUST_AT_START=false
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -369,8 +379,15 @@ tp_verify_install_token() {
   _vt_dir="$(mktemp -d)"
   _vt_curl="$(tp_instance_bootstrap_curl)"
   _vt_url="${PANEL_URLS%%,*}"
+  # The document is checked below against the key the command names, so the
+  # connection only has to reach the panel: when this host's stored trust
+  # does not verify it (a control plane now behind a public edge), the
+  # public roots may carry the request.
   # shellcheck disable=SC2086
-  if ! $_vt_curl -f -D "$_vt_dir/headers" -o "$_vt_dir/body" "${_vt_url%/}/api/daemon/v1/instance/identity" 2>/dev/null; then
+  if ! $_vt_curl -f -D "$_vt_dir/headers" -o "$_vt_dir/body" "${_vt_url%/}/api/daemon/v1/instance/identity" 2>/dev/null &&
+    { [ "$(tp_bootstrap_leg)" != stored ] ||
+      ! curl -sSL -f -D "$_vt_dir/headers" -o "$_vt_dir/body" "${_vt_url%/}/api/daemon/v1/instance/identity" 2>/dev/null; }
+  then
     tp_print_error "Could not fetch the panel's identity document from ${_vt_url}. Nothing was sent. Check that the panel is reachable and copy a fresh command from Add Server."
     rm -rf "$_vt_dir"
     return 1
@@ -448,11 +465,16 @@ tp_pem_matches_ca_pin() {
 }
 
 # The expected list a host already carries: the installer's line in
-# daemon.env plus what an authenticated CA reconcile recorded. Empty when the
-# host has none (or it cannot be parsed).
+# daemon.env plus what an authenticated CA reconcile recorded. A host with
+# neither but with stored trust files ($3 onwards: the Platform CA and the
+# private issuer, from an install before the list existed) is held to those
+# files' own fingerprints, so an answer the stored trust did not check can
+# neither replace nor delete them; an honest CA change there needs a fresh
+# install command. Empty when the host has nothing (or it cannot be parsed).
 tp_host_ca_pin() {
   _hp_env="$1"
   _hp_reconciled="$2"
+  shift 2
   _hp_seed=""
   if [ -f "$_hp_env" ]; then
     _hp_seed="$(sed -n 's/^TURBOPANEL_INSTANCE_CA_FINGERPRINT=//p' "$_hp_env" | tail -n 1)"
@@ -460,23 +482,30 @@ tp_host_ca_pin() {
   if [ -f "$_hp_reconciled" ]; then
     _hp_seed="${_hp_seed:+${_hp_seed},}$(head -n 1 "$_hp_reconciled")"
   fi
+  if [ -z "$_hp_seed" ] && [ "$#" -gt 0 ]; then
+    _hp_seed="$(tp_pem_files_pin "$@" 2>/dev/null || true)"
+  fi
   [ -n "$_hp_seed" ] || return 0
   tp_normalize_ca_pin "$_hp_seed" || true
 }
 
 # Gate for every CA or issuer document from the control plane before it is
-# installed. With CA_PIN from the install command it must match or nothing is
-# installed. With CA_PIN taken from this host's own list (CA_PIN_SOURCE=host:
-# a re-run without a fingerprint, such as an old command), downloads over the
-# unverified leg must match it, so an old command cannot replace a pinned CA;
-# a verified leg is already authenticated by that trust. Without any list,
-# today's behaviour stays, and an unverified download is called out once.
+# installed. The leg ($3) says what authenticated the download: `stored`
+# (only this host's own trust files, tp_instance_bootstrap_curl), `system`
+# (the public roots) or `insecure` (no check). With CA_PIN from the install
+# command it must match or nothing is installed. With CA_PIN taken from this
+# host's own list (CA_PIN_SOURCE=host: a re-run without a fingerprint, such as
+# an old command), only the stored leg is trusted as is; a download over the
+# system roots or an unverified connection must match the list, so neither an
+# old command nor anyone holding a public certificate for the name can
+# replace a pinned CA. Without any list, today's behaviour stays, and an
+# unverified download is called out once.
 tp_check_fetched_trust() {
   _ct_src="$1"
   _ct_what="$2"
   _ct_leg="$3"
   if [ -n "${CA_PIN:-}" ] &&
-    { [ "${CA_PIN_SOURCE:-command}" != host ] || [ "$_ct_leg" = insecure ]; }
+    { [ "${CA_PIN_SOURCE:-command}" != host ] || [ "$_ct_leg" != stored ]; }
   then
     if tp_pem_matches_ca_pin "$_ct_src"; then
       return 0
@@ -489,6 +518,9 @@ tp_check_fetched_trust() {
     tp_print_error "The ${_ct_what} downloaded from ${HOST_URL} does not match ${_ct_expected} (got $(tp_pem_files_pin "$_ct_src"); expected ${CA_PIN}). Nothing was installed. Someone may be intercepting this connection, or the panel's certificates changed. Copy a fresh command from Add Server and try again."
     return 1
   fi
+  if [ "$_ct_leg" != stored ]; then
+    TP_TRUST_FROM_OPEN_LEG=true
+  fi
   if [ "$_ct_leg" = insecure ] && [ "${TP_TOFU_WARNED:-false}" != true ]; then
     TP_TOFU_WARNED=true
     tp_print_step "~" "No CA fingerprint in the install command: the ${_ct_what} was trusted on first use over an unverified connection"
@@ -496,12 +528,17 @@ tp_check_fetched_trust() {
   return 0
 }
 
-# Which leg a control-plane trust download used (see tp_instance_bootstrap_curl).
+# Which leg tp_instance_bootstrap_curl uses right now: insecure (-k), stored
+# (only this host's own trust file) or system (no trust file yet: the public
+# roots). Read it next to the curl it describes; the files change mid-run.
 tp_bootstrap_leg() {
   if [ "${INSECURE_TLS:-false}" = true ]; then
     printf '%s' insecure
+  elif { [ -n "${UPLOADED_TRUST_PATH:-}" ] && [ -f "$UPLOADED_TRUST_PATH" ]; } ||
+    { [ -n "${CA_PATH:-}" ] && [ -f "$CA_PATH" ]; }; then
+    printf '%s' stored
   else
-    printf '%s' verified
+    printf '%s' system
   fi
 }
 
@@ -551,9 +588,21 @@ tp_installer_host_for_channel() {
   esac
 }
 
+# True when the CA file $1 alone verifies the certificate HOST_URL presents
+# (never the system roots: see TP_NO_SYSTEM_CAPATH).
 tp_ca_validates_leaf() {
   _leaf_ca="$1"
-  _code=$(tp_curl_http_code curl -sSL --cacert "$_leaf_ca" -o /dev/null "${HOST_URL%/}/api/health")
+  _code=$(tp_curl_http_code curl -sSL --cacert "$_leaf_ca" --capath "$TP_NO_SYSTEM_CAPATH" -o /dev/null "${HOST_URL%/}/api/health")
+  case "$_code" in
+    000) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# True when the public roots verify the certificate HOST_URL presents (a
+# control plane behind a public edge, such as a tunnel).
+tp_system_roots_validate_leaf() {
+  _code=$(tp_curl_http_code curl -sSL -o /dev/null "${HOST_URL%/}/api/health")
   case "$_code" in
     000) return 1 ;;
     *) return 0 ;;
@@ -619,7 +668,9 @@ tp_uploaded_trust_verifies() {
   _issuers="$(mktemp)"
   tp_trust_issuers_only "$_trust" "$_leaf_fp" "$_issuers"
   _verified=1
-  if openssl verify -verify_hostname "$_host" -partial_chain -CAfile "$_issuers" "$_leaf" >/dev/null 2>&1; then
+  # -no-CApath -no-CAstore: like curl, openssl verify would otherwise also
+  # accept a leaf the system roots sign.
+  if openssl verify -no-CApath -no-CAstore -verify_hostname "$_host" -partial_chain -CAfile "$_issuers" "$_leaf" >/dev/null 2>&1; then
     _verified=0
   fi
   rm -f "$_issuers"
@@ -655,7 +706,8 @@ tp_capture_presented_leaf() {
 # Never copied onto the Platform CA path.
 tp_install_verified_uploaded_trust() {
   _src="$1"
-  if ! tp_check_fetched_trust "$_src" "private uploaded issuer" "$(tp_bootstrap_leg)"; then
+  _src_leg="${2:-$(tp_bootstrap_leg)}"
+  if ! tp_check_fetched_trust "$_src" "private uploaded issuer" "$_src_leg"; then
     return 1
   fi
   _host="$(tp_url_host "$HOST_URL")"
@@ -697,6 +749,11 @@ tp_bootstrap_trust_anchored() {
     fi
     rm -f "$_presented"
   fi
+  # A control plane behind a public edge (a tunnel) presents a certificate
+  # the public roots verify; the daemon trusts those at runtime too.
+  if tp_system_roots_validate_leaf; then
+    return 0
+  fi
   return 1
 }
 
@@ -706,30 +763,50 @@ tp_instance_bootstrap_curl() {
     return 0
   fi
   if [ -n "${UPLOADED_TRUST_PATH:-}" ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
-    printf '%s' "curl -sSL --cacert $UPLOADED_TRUST_PATH"
+    printf '%s' "curl -sSL --cacert $UPLOADED_TRUST_PATH --capath $TP_NO_SYSTEM_CAPATH"
     return 0
   fi
   if [ -n "${CA_PATH:-}" ] && [ -f "$CA_PATH" ]; then
-    printf '%s' "curl -sSL --cacert $CA_PATH"
+    printf '%s' "curl -sSL --cacert $CA_PATH --capath $TP_NO_SYSTEM_CAPATH"
     return 0
   fi
   printf '%s' "curl -sSL"
 }
 
 tp_fetch_uploaded_trust() {
+  _trust_leg="$(tp_bootstrap_leg)"
   _curl_base="$(tp_instance_bootstrap_curl)"
   _trust_tmp="$(mktemp)"
   # shellcheck disable=SC2086
   _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+  if [ "$_trust_code" = 000 ] && [ "$_trust_leg" = stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
+    # The stored issuer does not verify the control plane any more. Ask
+    # again over the public roots (a control plane now behind a public
+    # edge): what comes back is checked against this host's list and must
+    # still sign the presented certificate before it is stored.
+    _trust_leg=system
+    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+  fi
   case "$_trust_code" in
     200)
-      if ! tp_install_verified_uploaded_trust "$_trust_tmp"; then
+      if ! tp_install_verified_uploaded_trust "$_trust_tmp" "$_trust_leg"; then
         rm -f "$_trust_tmp"
         return 1
       fi
       ;;
     404)
-      rm -f "$UPLOADED_TRUST_PATH"
+      if [ "$_trust_leg" != stored ] && [ -f "$UPLOADED_TRUST_PATH" ] &&
+        [ -n "${CA_PIN:-}" ] && [ "${CA_PIN_SOURCE:-command}" = host ]
+      then
+        # Only the stored issuer itself can say it is no longer needed on a
+        # host that pins it; it stays, and the daemon still trusts it.
+        tp_print_step "~" "The control plane no longer offers a private uploaded issuer over public TLS — keeping the stored one ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) this server pins"
+      else
+        if [ "$_trust_leg" != stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
+          TP_TRUST_FROM_OPEN_LEG=true
+        fi
+        rm -f "$UPLOADED_TRUST_PATH"
+      fi
       ;;
     000)
       # The stored issuer could not verify the control plane. It is never
@@ -776,6 +853,7 @@ tp_install_instance_ca() {
 # case: the install command named the expected CA fingerprints and the
 # fetched CA is not among them (returns 1; nothing is installed).
 tp_fetch_instance_ca() {
+  _ca_leg="$(tp_bootstrap_leg)"
   _curl_base="$(tp_instance_bootstrap_curl)"
   _ca_tmp="$(mktemp)"
   _ca_http_code=""
@@ -783,7 +861,7 @@ tp_fetch_instance_ca() {
   _ca_http_code=$(tp_curl_http_code $_curl_base -o "$_ca_tmp" "${HOST_URL%/}/api/daemon/v1/instance/ca")
   case "$_ca_http_code" in
     200)
-      if ! tp_install_instance_ca "$_ca_tmp"; then
+      if ! tp_install_instance_ca "$_ca_tmp" "$_ca_leg"; then
         rm -f "$_ca_tmp"
         return 1
       fi
@@ -792,7 +870,17 @@ tp_fetch_instance_ca() {
       # Not a Platform CA leaf. A public upload or Let's Encrypt name uses
       # the system roots. A private upload is handled by the issuer fetch
       # below — do not announce system trust until that fetch also misses.
-      rm -f "$CA_PATH"
+      # Only the stored CA itself can retire a CA this host pins.
+      if [ "$_ca_leg" != stored ] && [ -f "$CA_PATH" ] &&
+        [ -n "${CA_PIN:-}" ] && [ "${CA_PIN_SOURCE:-command}" = host ]
+      then
+        tp_print_step "~" "The control plane offers no Platform CA over this connection — keeping the one this server pins ($(tp_ca_fingerprint "$CA_PATH"))"
+      else
+        if [ "$_ca_leg" != stored ] && [ -f "$CA_PATH" ]; then
+          TP_TRUST_FROM_OPEN_LEG=true
+        fi
+        rm -f "$CA_PATH"
+      fi
       ;;
     000)
       if [ -f "$CA_PATH" ]; then
@@ -817,24 +905,37 @@ tp_fetch_instance_ca() {
 # and no longer presents a Platform CA leaf, so ask again with the system
 # roots. Nothing else is tried: the pin is never replaced from an unverified
 # (-k) fetch, since an on-path attacker would choose the replacement and its
-# leaf. The existing CA stays unless public trust authenticates a new one; a
-# real rotation is applied by the operator with --instance-ca. A CA that
-# public trust authenticated still has to match CA_PIN when the command
-# carried one.
+# leaf. The existing CA stays unless public trust serves a new one that
+# itself verifies the live certificate; a real rotation is applied by the
+# operator with --instance-ca. Such a CA still has to match CA_PIN, from the
+# command or this host's own list (the system leg), and a 404 here never
+# retires a CA this host pins.
 tp_refetch_instance_ca_unpinned() {
   _old_fp="$(tp_ca_fingerprint "$CA_PATH")"
   _ca_retry="$(mktemp)"
   _sys_code=$(tp_curl_http_code curl -sSL -o "$_ca_retry" "${HOST_URL%/}/api/daemon/v1/instance/ca")
   case "$_sys_code" in
     404)
+      if [ -n "${CA_PIN:-}" ] && [ "${CA_PIN_SOURCE:-command}" = host ]; then
+        # An answer over the public roots cannot retire a CA this server
+        # pins: anyone with a public certificate for the name could give it.
+        # The daemon trusts the stored CA alongside the system roots, so a
+        # control plane that really moved to public TLS still connects.
+        tp_print_step "~" "Control plane presents a publicly trusted certificate — keeping the Platform CA this server pins (${_old_fp:-unknown})"
+        rm -f "$_ca_retry"
+        return 0
+      fi
       tp_print_ok "Control plane now presents a publicly trusted certificate — Platform CA no longer needed (was ${_old_fp:-unknown})"
+      TP_TRUST_FROM_OPEN_LEG=true
       rm -f "$CA_PATH" "$_ca_retry"
       return 0
       ;;
     200)
+      # Only a CA that itself verifies the live certificate is a candidate,
+      # and it still has to match this server's list (the system leg).
       if tp_ca_parses "$_ca_retry" && tp_ca_validates_leaf "$_ca_retry"; then
         _install_rc=0
-        tp_install_instance_ca "$_ca_retry" verified || _install_rc=1
+        tp_install_instance_ca "$_ca_retry" system || _install_rc=1
         rm -f "$_ca_retry"
         return "$_install_rc"
       fi
@@ -845,6 +946,12 @@ tp_refetch_instance_ca_unpinned() {
   if [ -f "$_ca_retry" ] && tp_ca_parses "$_ca_retry"; then
     _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
   fi
+  if [ -n "$_new_fp" ] && [ "$_new_fp" = "$_old_fp" ]; then
+    # A control plane behind a public edge that still serves the same CA.
+    tp_print_ok "Control plane presents a publicly trusted certificate and still serves this server's Platform CA (${_old_fp}) — keeping it"
+    rm -f "$_ca_retry"
+    return 0
+  fi
   tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots. If the control plane's CA was rotated, confirm the new CA's fingerprint out of band and re-run with --instance-ca <pem>."
   rm -f "$_ca_retry"
   return 0
@@ -853,6 +960,9 @@ tp_refetch_instance_ca_unpinned() {
 # Overlay artifact downloads (TURBOPANEL_DL_BASE) follow the *instance* TLS
 # policy: platform CA via --cacert when available, else -k when INSECURE_TLS is
 # set. Public tunnel TLS uses the system store. CDN downloads use tp_release_curl.
+# This --cacert deliberately keeps curl's system roots (no TP_NO_SYSTEM_CAPATH):
+# the overlay is often reached through a public edge, and what it serves is
+# checked by the signed manifest and its digests, not by the connection.
 tp_artifact_curl() {
   if [ -z "${TURBOPANEL_DL_BASE:-}" ]; then
     tp_release_curl
@@ -3511,10 +3621,14 @@ CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
 # A host that already carries an expected CA list keeps it when this run
 # brings none, so re-running an old command cannot downgrade it to trust on
-# first use.
+# first use. A host with stored trust files but no list is held to the files
+# (tp_host_ca_pin).
 if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
-  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin")"
+  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"
   [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
+fi
+if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then
+  TP_STORED_TRUST_AT_START=true
 fi
 # Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
 # tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
@@ -3715,6 +3829,19 @@ tp_learn_panel_identity() {
   _lp_host="$(tp_pin_file_field "$INSTALL_ROOT/lib/update-origin" host)"
   if [ "${HOST_URL%/}" != "${_lp_host%/}" ]; then
     tp_print_detail "Not learning a panel key: ${HOST_URL} is not the control plane this server is enrolled with"
+    return 0
+  fi
+  # The key is only learned over trust this host already had: its stored
+  # trust files (curl checks them alone), or the public roots on a host
+  # that has none and pins none. Trust that arrived during this run over the
+  # public roots or an unverified connection does not count, or whoever
+  # served it could also pick the key.
+  _lp_leg="$(tp_bootstrap_leg)"
+  if [ "$TP_TRUST_FROM_OPEN_LEG" = true ] ||
+    { [ "$TP_STORED_TRUST_AT_START" = true ] && [ "$_lp_leg" != stored ]; } ||
+    { [ "$_lp_leg" = system ] && [ -n "${CA_PIN:-}" ]; }
+  then
+    tp_print_detail "Not learning a panel key: this run could not check ${HOST_URL} against trust this server already had; this server stays unpinned for now"
     return 0
   fi
   _lp_dir="$(mktemp -d)"

@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 
 /**
@@ -86,6 +86,28 @@ test("tp_curl_http_code preserves a successful %{http_code}", async () => {
   assertEquals(result.stdout, "200");
 });
 
+test("tp_ca_validates_leaf checks the CA file alone, never the system roots", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const curlHelper = extractShellFunction(source, "tp_curl_http_code");
+  const leafHelper = extractShellFunction(source, "tp_ca_validates_leaf");
+  const result = await evalHelper(
+    `${curlHelper}\n${leafHelper}`,
+    [
+      "HOST_URL=https://example.test",
+      "TP_NO_SYSTEM_CAPATH=/nonexistent",
+      "args=$(mktemp)",
+      "curl() { printf '%s ' \"$@\" > \"$args\"; printf '%s' '200'; }",
+      "tp_ca_validates_leaf /tmp/ca.pem && printf 'ok '",
+      'cat "$args"; rm -f "$args"',
+    ].join("\n"),
+  );
+  assertStringIncludes(result.stdout, "ok ");
+  assertStringIncludes(
+    result.stdout,
+    "--cacert /tmp/ca.pem --capath /nonexistent ",
+  );
+});
+
 test("tp_ca_validates_leaf fails when curl exits non-zero", async () => {
   const source = await Deno.readTextFile(runShPath);
   const curlHelper = extractShellFunction(source, "tp_curl_http_code");
@@ -94,6 +116,7 @@ test("tp_ca_validates_leaf fails when curl exits non-zero", async () => {
     `${curlHelper}\n${leafHelper}`,
     [
       "HOST_URL=https://example.test",
+      "TP_NO_SYSTEM_CAPATH=/nonexistent",
       "curl() { printf '%s' '000'; return 1; }",
       "if tp_ca_validates_leaf /dev/null; then",
       "  printf fail",

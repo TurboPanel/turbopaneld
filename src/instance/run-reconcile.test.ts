@@ -511,6 +511,8 @@ test("downloadRunScript uses --cacert when platform CA is provided", async () =>
       "-fsSL",
       "--cacert",
       "/etc/turbopanel/instance-ca.pem",
+      "--capath",
+      "/nonexistent",
       ...RETRY_ARGS,
       "https://huey.lan:8443/run.sh",
     ]);
