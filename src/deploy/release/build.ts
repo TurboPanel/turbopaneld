@@ -98,6 +98,14 @@ const RESERVED_BUILD_ENV_KEYS = new Set([
   "GIT_CONFIG_GLOBAL",
   "GIT_CONFIG_SYSTEM",
   "GIT_CONFIG_COUNT",
+  // The PHP package manager's own folders and series choice are the sandbox's.
+  // `COMPOSER_AUTH` is refused too: a build variable is an argument of `env(1)`
+  // inside the build and is not secret, so a registry token must not travel
+  // that way (private packages are not supported yet).
+  "COMPOSER_HOME",
+  "COMPOSER_CACHE_DIR",
+  "COMPOSER_AUTH",
+  "TURBOPANEL_PHP",
 ]);
 
 /** `LD_*` is the dynamic loader's namespace (`LD_AUDIT`, `LD_DEBUG_OUTPUT`, …). */
@@ -128,7 +136,34 @@ export type NativeBuildRuntime = {
   nodeBinDir: string;
   /** Operator's application mode; `production` when undeclared. */
   nodeEnv: string;
+  /**
+   * Set for a site that runs PHP: the site's series (a bare `php` in the build
+   * is that series) and the vendored PHP package manager's `bin` directory,
+   * which then follows the Node directory on `PATH`.
+   */
+  php?: { series: string; composerBinDir: string };
 };
+
+/** Directories after the tenant Node on a build `PATH`, with or without PHP. */
+function buildPathTail(nativeRuntime: NativeBuildRuntime): string {
+  return nativeRuntime.php
+    ? `${nativeRuntime.php.composerBinDir}:/usr/local/bin:${NATIVE_BUILD_PATH_TAIL}`
+    : NATIVE_BUILD_PATH_TAIL;
+}
+
+/** What the PHP package manager needs on top of the Node environment. */
+function phpBuildEnvironment(
+  php: NonNullable<NativeBuildRuntime["php"]>,
+  cacheDir: string,
+  homeDir: string,
+): Record<string, string> {
+  return {
+    TURBOPANEL_PHP: php.series,
+    COMPOSER_CACHE_DIR: cacheDir,
+    COMPOSER_HOME: homeDir,
+    COMPOSER_NO_INTERACTION: "1",
+  };
+}
 
 export type ReleaseBuildParams = {
   build: EnvironmentDeploySourceBuild;
@@ -143,6 +178,10 @@ export type ReleaseBuildParams = {
    * spec's `cwd` inside `sandbox.work.workDir`.
    */
   sandbox?: SandboxBuildTarget;
+  /** The site this build is for, named in PHP messages. */
+  serviceName?: string;
+  /** Test seam: whether `/usr/bin/php<series>` exists. */
+  phpCliExists?: (series: string) => Promise<boolean>;
   /**
    * Cancel signal of the deploy. Aborting it stops the running build (the
    * sandbox unit on a managed host) and throws `DeployCancelledError`.
@@ -187,7 +226,7 @@ export function buildEnvironment(
     // The vendored tenant Node leads PATH for a native-app build so `node`,
     // `npm`, `npx`, and `corepack` all resolve to the series the app runs on.
     PATH: nativeRuntime
-      ? `${nativeRuntime.nodeBinDir}:${NATIVE_BUILD_PATH_TAIL}`
+      ? `${nativeRuntime.nodeBinDir}:${buildPathTail(nativeRuntime)}`
       : daemonPath,
     HOME: workingDir,
     CI: "1",
@@ -201,6 +240,16 @@ export function buildEnvironment(
     // not stop a build to ask whether downloading yarn/pnpm is okay.
     env.COREPACK_HOME = join(workingDir, ".corepack");
     env.COREPACK_ENABLE_DOWNLOAD_PROMPT = "0";
+  }
+  if (nativeRuntime?.php) {
+    Object.assign(
+      env,
+      phpBuildEnvironment(
+        nativeRuntime.php,
+        join(workingDir, ".composer-cache"),
+        join(workingDir, ".composer-home"),
+      ),
+    );
   }
   // A name no shell can carry also cannot ride an `env NAME=value` argv.
   const tenant = Object.fromEntries(
@@ -252,7 +301,17 @@ export function sandboxBuildEnvironment(
     npm_config_cache: join(work.cacheDir, "npm"),
   };
   if (nativeRuntime) {
-    env.PATH = `${nativeRuntime.nodeBinDir}:${NATIVE_BUILD_PATH_TAIL}`;
+    env.PATH = `${nativeRuntime.nodeBinDir}:${buildPathTail(nativeRuntime)}`;
+    if (nativeRuntime.php) {
+      Object.assign(
+        env,
+        phpBuildEnvironment(
+          nativeRuntime.php,
+          join(work.cacheDir, "composer"),
+          join(work.workDir, ".composer-home"),
+        ),
+      );
+    }
     if (nativeRuntime.runtime === "deno") {
       Object.assign(env, denoBuildEnvironment(join(work.cacheDir, "deno")));
     } else {
@@ -692,6 +751,65 @@ function denoProjectFiles(
   };
 }
 
+/** The command a PHP site's build runs first when it ships `composer.json`. */
+export const PHP_DEPENDENCY_INSTALL_COMMAND =
+  "composer install --no-dev --optimize-autoloader --no-interaction --no-progress --prefer-dist";
+
+const PHP_DEPENDENCY_FAILURE_HINT =
+  "PHP dependency install failed. A missing PHP extension can be turned on in the site's PHP settings; packages from private repositories are not supported yet.";
+
+/**
+ * A PHP site's dependency install, derived from `composer.json`: development
+ * packages left out, an optimized class map, never `--no-scripts` (a framework's
+ * package discovery is the install's post-install step and writes its caches
+ * into the release while it is still writable). Not derived when the author
+ * already runs the PHP package manager in their own install or build command,
+ * or when there is no `composer.json` (a link of that name is not read).
+ */
+async function resolvePhpInstallCommand(
+  params: ReleaseBuildParams,
+): Promise<string | undefined> {
+  if (!params.nativeRuntime?.php) return undefined;
+  const authored = [params.build.installCommand, params.build.buildCommand];
+  if (authored.some((command) => command?.includes("composer"))) {
+    return undefined;
+  }
+  if (!(await regularFileExists(join(params.workingDir, "composer.json")))) {
+    return undefined;
+  }
+  params.onOutput?.(
+    "stdout",
+    "derived PHP dependency install from composer.json",
+  );
+  if (!(await regularFileExists(join(params.workingDir, "composer.lock")))) {
+    params.onOutput?.(
+      "stdout",
+      "composer.lock is missing: dependencies are resolved fresh on every build",
+    );
+  }
+  return PHP_DEPENDENCY_INSTALL_COMMAND;
+}
+
+/** The series has no command-line PHP on this server: say so before the build. */
+async function assertPhpCli(params: ReleaseBuildParams): Promise<void> {
+  const php = params.nativeRuntime?.php;
+  if (!php) return;
+  const exists = params.phpCliExists ??
+    (async (series: string) => {
+      try {
+        return (await Deno.stat(`/usr/bin/php${series}`)).isFile;
+      } catch {
+        return false;
+      }
+    });
+  if (!(await exists(php.series))) {
+    const who = params.serviceName ? `site ${params.serviceName}: ` : "";
+    throw new Error(
+      `${who}PHP ${php.series} has no command-line PHP on this server, so its PHP dependencies cannot be installed. Use the FastCGI or PHP-FPM mode for this site.`,
+    );
+  }
+}
+
 /**
  * Run `installCommand` then `buildCommand`. A missing command is a no-op — a
  * source with neither is a valid "ship the repository as-is" release — except
@@ -702,6 +820,8 @@ function denoProjectFiles(
 export async function runReleaseBuild(
   params: ReleaseBuildParams,
 ): Promise<void> {
+  const phpInstall = await resolvePhpInstallCommand(params);
+  if (phpInstall !== undefined) await assertPhpCli(params);
   const installCommand = await resolveInstallCommand(params);
   const buildCommand = await resolveBuildCommand(params);
   // After a derived install / build too: the lock they leave may not cover
@@ -711,7 +831,9 @@ export async function runReleaseBuild(
       params.build.buildCommand === undefined
     ? await deriveDenoCacheStep(params)
     : undefined;
+  // PHP dependencies first: some front-end builds read files from `vendor/`.
   const commands = [
+    phpInstall,
     installCommand,
     buildCommand,
     cacheCommand,
@@ -724,8 +846,17 @@ export async function runReleaseBuild(
     return;
   }
 
+  const phpStep = phpInstall !== undefined && commands[0] === phpInstall;
   if (params.sandbox) {
-    await runSandboxedCommands(params, params.sandbox, commands);
+    try {
+      await runSandboxedCommands(params, params.sandbox, commands);
+    } catch (err) {
+      // The runner stops at the first failure and names its step.
+      if (phpStep && /step 1 of \d+ failed/.test(errorText(err))) {
+        params.onOutput?.("stderr", PHP_DEPENDENCY_FAILURE_HINT);
+      }
+      throw err;
+    }
     return;
   }
   const env = buildEnvironment(
@@ -747,14 +878,25 @@ export async function runReleaseBuild(
   await forEachSequential(commands, async (command) => {
     throwIfAborted(params.signal, "before the build ran");
     params.onOutput?.("stdout", `$ ${command}`);
-    await execute(
-      command,
-      params.workingDir,
-      env,
-      params.onOutput,
-      params.redactSummary,
-    );
+    try {
+      await execute(
+        command,
+        params.workingDir,
+        env,
+        params.onOutput,
+        params.redactSummary,
+      );
+    } catch (err) {
+      if (phpStep && command === phpInstall) {
+        params.onOutput?.("stderr", PHP_DEPENDENCY_FAILURE_HINT);
+      }
+      throw err;
+    }
   });
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

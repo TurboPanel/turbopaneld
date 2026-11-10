@@ -14,6 +14,7 @@ import {
 } from "./apply-source-releases.ts";
 import type { SandboxedBuildParams } from "./build-sandbox.ts";
 import {
+  PHP_DEPENDENCY_INSTALL_COMMAND,
   prepareNativeAppBuildOutput,
   runReleaseBuild,
   sandboxBuildEnvironment,
@@ -527,6 +528,79 @@ test("a development checkout prepares image builds as the developer, without the
         },
       );
       assertEquals(sandboxed, false);
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a PHP site's sandboxed build derives the PHP dependency install on the site's series", async () => {
+  const fixture = await createTempLayout();
+  try {
+    await withSandboxRoot(async (_root, deps, seen) => {
+      const base = payload();
+      const site = {
+        composeServiceName: "web",
+        engine: "apache" as const,
+        root: "public",
+        listenPort: 18080,
+        php: { version: "8.3" },
+      };
+      const siteDeps: ApplySourceReleasesDeps = {
+        ...deps,
+        checkoutReleaseFn: async (params) => {
+          const workingDir = params.checkoutDir ??
+            join(params.scratchDir, "source");
+          await Deno.mkdir(workingDir);
+          await Deno.mkdir(join(workingDir, "public"));
+          await Deno.writeTextFile(join(workingDir, "composer.json"), "{}");
+          return { workingDir, commitSha: "abc123" };
+        },
+        runReleaseBuildFn: (params) =>
+          runReleaseBuild({
+            ...params,
+            phpCliExists: () => Promise.resolve(true),
+            ...(params.sandbox
+              ? {
+                sandbox: {
+                  ...params.sandbox,
+                  run: (run) => {
+                    seen.sandboxRuns.push(run);
+                    return Promise.resolve();
+                  },
+                },
+              }
+              : {}),
+          }),
+      };
+      await applySourceReleases(
+        resolveLayout(fixture.env),
+        {
+          ...base,
+          nativeAppServices: [],
+          sites: [site],
+          sourceMaterial: (base.sourceMaterial ?? []).map((entry) => ({
+            ...entry,
+            build: { kind: "native", buildCommand: "true" },
+          })),
+        } as EnvironmentDeployPayload,
+        siteDeps,
+      );
+      const run = seen.sandboxRuns[0];
+      if (!run) throw new TypeError("expected a sandboxed run");
+      const fields = specLines(run.spec);
+      assertEquals(
+        (fields.get("run") ?? []).map(decode),
+        [PHP_DEPENDENCY_INSTALL_COMMAND, "true"],
+      );
+      const env = Object.fromEntries(
+        (fields.get("env") ?? []).map((line) => {
+          const [name = "", value = ""] = line.split(" ");
+          return [name, decode(value)];
+        }),
+      );
+      assertEquals(env.TURBOPANEL_PHP, "8.3");
+      assert(env.PATH?.includes("/composer/current/bin"));
     });
   } finally {
     await fixture.cleanup();

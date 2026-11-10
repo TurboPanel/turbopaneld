@@ -97,3 +97,11 @@ turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# The PHP package manager site builds use (tasks/composer.yml). Bump the version
+# and the digest together; the digest is the publisher's own .sha256sum for that
+# exact file. Never downloaded at build time.
+php_fpm_composer_version: "2.11.2"
+php_fpm_composer_sha256: "dd158c0afd41d15fac89e1b4e47b5d42911fe316c3687cd5edac98319b25d028"
+php_fpm_composer_url: "https://getcomposer.org/download/{{ php_fpm_composer_version }}/composer.phar"
+php_fpm_composer_root: "{{ turbopanel_vendor_dir }}/composer"

@@ -79,3 +79,70 @@ test("per-account pins are root-writable only", async () => {
   assertEquals(pins[1], "0750");
   assertStringIncludes(tasks, "owner: root");
 });
+
+/**
+ * Run the template against a fake `/usr/bin`: every series is a script that
+ * prints its own name. The rendered series list is gone, so what is on disk is
+ * all the dispatcher knows.
+ */
+async function runDispatcher(
+  installed: string[],
+  env: Record<string, string>,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-php-dispatcher-" });
+  try {
+    const bin = join(dir, "bin");
+    await Deno.mkdir(bin);
+    for (const name of installed) {
+      const path = join(bin, name);
+      await Deno.writeTextFile(path, `#!/bin/sh\necho "${name}"\n`);
+      await Deno.chmod(path, 0o755);
+    }
+    const rendered = (await template())
+      .replaceAll("/usr/bin", bin)
+      .replaceAll("{{ turbopanel_config_dir }}", join(dir, "etc"));
+    const script = join(dir, "php");
+    await Deno.writeTextFile(script, rendered);
+    const out = await new Deno.Command("sh", {
+      args: [script],
+      clearEnv: true,
+      env: { PATH: "/usr/bin:/bin", ...env },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      code: out.code,
+      stdout: new TextDecoder().decode(out.stdout).trim(),
+      stderr: new TextDecoder().decode(out.stderr).trim(),
+    };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+test("the dispatcher finds every series on disk, not only the last run's", async () => {
+  const installed = ["php8.3", "php8.4", "php8.10"];
+  assertEquals((await runDispatcher(installed, {})).stdout, "php8.10");
+  assertEquals(
+    (await runDispatcher(installed, { TURBOPANEL_PHP: "8.3" })).stdout,
+    "php8.3",
+  );
+  assertEquals(
+    (await runDispatcher(installed, { TURBOPANEL_PHP: "8.4" })).stdout,
+    "php8.4",
+  );
+  const missing = await runDispatcher(installed, { TURBOPANEL_PHP: "7.4" });
+  assertEquals(missing.code, 127);
+  assertStringIncludes(missing.stderr, "PHP 7.4 is not installed");
+});
+
+test("the dispatcher ignores names that are not a bare series", async () => {
+  const result = await runDispatcher(
+    ["php8.4", "php8.4-config", "php9.0.1", "php8.5-fpm"],
+    {},
+  );
+  assertEquals(result.stdout, "php8.4");
+  const none = await runDispatcher(["php8.4-config"], {});
+  assertEquals(none.code, 127);
+  assertStringIncludes(none.stderr, "no PHP version is installed");
+});

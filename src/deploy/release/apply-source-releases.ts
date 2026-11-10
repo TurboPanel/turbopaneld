@@ -50,6 +50,7 @@ import { ensureAssetFolder } from "../asset-folders.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { DeployCancelToken } from "../deploy-cancel.ts";
 import { join } from "@std/path";
+import { resolveSitePhpSeries } from "../site.ts";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -1118,6 +1119,7 @@ async function buildNativeTree(
     nativeRuntime: nativeApp
       ? nativeBuildRuntime(layout, nativeApp)
       : siteBuildRuntime(layout, payload, entry),
+    serviceName: entry.composeServiceName,
     sandbox: work
       ? definedFields({
         work,
@@ -1182,8 +1184,20 @@ function siteBuildRuntime(
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
 ): NativeBuildRuntime | undefined {
-  if (!siteForSource(payload, entry.composeServiceName)) return undefined;
-  return nativeBuildRuntime(layout, { runtime: "node" });
+  const site = siteForSource(payload, entry.composeServiceName);
+  if (!site) return undefined;
+  const base = nativeBuildRuntime(layout, { runtime: "node" });
+  // A PHP site's build also gets its series' command-line PHP and the vendored
+  // PHP package manager; the series is installed before any release is built.
+  const series = resolveSitePhpSeries(site);
+  if (series === undefined) return base;
+  return {
+    ...base,
+    php: {
+      series,
+      composerBinDir: join(layout.runtimesDir, "composer", "current", "bin"),
+    },
+  };
 }
 
 /** The author said how the app starts: a start command or a startup file. */

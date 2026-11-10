@@ -135,6 +135,10 @@
   loop_control:
     loop_var: php_fpm_series_item
 
+# The PHP package manager site builds use, vendored and digest-checked.
+- name: Vendor the PHP package manager
+  ansible.builtin.include_tasks: composer.yml
+
 # Left over from the single-series layout, where config lived directly under
 # `php/` and the unit was not templated. Removed so a host converged before
 # multi-version does not keep a second, unmanaged master around.
