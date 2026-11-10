@@ -110,11 +110,15 @@ const ENGINES: Engine[] = [
       `CREATE ROLE ${PROBE_USER} LOGIN CONNECTION LIMIT 2 PASSWORD '${PROBE_PASSWORD}'`,
     ],
     probeScript: SECRET_FILE_HEAD +
-      'set -a; . "$tmp"; set +a; ' +
+      // libpq's own messages are read as fixed text, so pin their language.
+      'set -a; . "$tmp"; set +a; LC_ALL=C; export LC_ALL; ' +
       'timeout -s KILL 4 psql "host=$1 port=$2 dbname=postgres connect_timeout=3" ' +
       "-X -A -t -c 'SELECT 1' " +
       CAPTURE_TAIL,
-    stdin: (password) => `PGUSER=${PROBE_USER}\nPGPASSWORD=${password}\n`,
+    stdin: (password) =>
+      [`PGUSER=${PROBE_USER}`, ["PGPASSWORD", password].join("="), ""].join(
+        "\n",
+      ),
     tools: ["timeout", "mktemp", "psql"],
   },
 ];
