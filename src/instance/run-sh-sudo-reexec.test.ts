@@ -93,6 +93,27 @@ test("the sudo re-exec preserves only the secrets that are set", async () => {
   assertEquals(result.env.includes("TURBOPANEL_TUNNEL_TOKEN="), false);
 });
 
+test("the sudo re-exec keeps the Raspberry Pi skip settings when they are set", async () => {
+  if (Deno.uid() === 0) return;
+  const result = await reexec(["--license", LICENSE], {
+    TURBOPANEL_SKIP_KERNEL_SWITCH: "1",
+    TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH: "1",
+  });
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(
+    result.argv,
+    "--preserve-env=TURBOPANEL_LICENSE,TURBOPANEL_SKIP_KERNEL_SWITCH,TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH\nsh\n",
+  );
+  const only = await reexec(["--instance"], {
+    TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH: "1",
+    TURBOPANEL_SKIP_KERNEL_SWITCH: "0",
+  });
+  assertStringIncludes(
+    only.argv,
+    "--preserve-env=TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH\nsh\n",
+  );
+});
+
 test("the sudo re-exec keeps a plain sudo when no secret is set", async () => {
   if (Deno.uid() === 0) return;
   const result = await reexec(["--instance"]);

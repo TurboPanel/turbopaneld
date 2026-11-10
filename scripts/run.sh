@@ -1615,12 +1615,15 @@ tp_arm_update_guard() {
   fi
 }
 
-# Last step of a first install on a Raspberry Pi running the 16 KiB kernel:
-# switch it to the 4 KiB kernel (the database proxy cannot run on 16 KiB
-# pages) and restart. Everything above is finished by now, so the daemon is
-# enabled and starts and enrols by itself after the restart. The helper does
-# nothing on any other host, honours TURBOPANEL_SKIP_KERNEL_SWITCH=1, waits
-# for the daemon to save its enrolment before it restarts, and counts down
+# Last step of a first install on a Raspberry Pi: switch a 16 KiB kernel to
+# the 4 KiB kernel (the database proxy cannot run on 16 KiB pages) and turn
+# memory limits on (the firmware boots with cgroup_disable=memory), then
+# restart once. Everything above is finished by now, so the daemon is enabled
+# and starts and enrols by itself after the restart. The helper does nothing on
+# any other host, honours TURBOPANEL_SKIP_KERNEL_SWITCH=1 (both changes) and
+# TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH=1 (memory limits only), waits for the
+# daemon to save its enrolment and to finish its first converge, waits until
+# no apt, dpkg or playbook run is going, stops the daemon, and counts down
 # where the operator can cancel. Updates (--no-start) and the control-plane
 # installs never get here, and the install's exit status is not changed.
 tp_kernel_features_step() {
@@ -3055,6 +3058,14 @@ if ! tp_is_root; then
   if [ -n "$TUNNEL_TOKEN" ]; then
     export TURBOPANEL_TUNNEL_TOKEN="$TUNNEL_TOKEN"
     _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_TUNNEL_TOKEN"
+  fi
+  # Not secrets, but sudo resets the environment and the last step
+  # (tp-kernel-features installer-step) reads them on the root side.
+  if [ "${TURBOPANEL_SKIP_KERNEL_SWITCH:-}" = "1" ]; then
+    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_SKIP_KERNEL_SWITCH"
+  fi
+  if [ "${TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH:-}" = "1" ]; then
+    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH"
   fi
   [ "$INSTANCE_INSTALL" = true ] && set -- "$@" --instance
   [ "$DAEMON_ONLY" = true ] && set -- "$@" --daemon-only

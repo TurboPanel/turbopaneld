@@ -18,10 +18,12 @@
 #   tp-kernel-features installer-step
 #       The last step of a first install (scripts/run.sh). For each feature that
 #       applies to this host: say what is about to happen in plain words, save
-#       the change, then count down and restart. Does nothing on a host the
-#       features do not apply to, when TURBOPANEL_SKIP_KERNEL_SWITCH=1, and it
-#       never restarts while an update guard is armed. Its exit status is
-#       informational: the install has already succeeded.
+#       every change, then count down and restart once for all of them. Does
+#       nothing on a host the features do not apply to, nothing at all when
+#       TURBOPANEL_SKIP_KERNEL_SWITCH=1, leaves out pi-memory-cgroup when
+#       TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH=1, and it never restarts while an
+#       update guard is armed. Its exit status is informational: the install
+#       has already succeeded.
 #
 # Features are fixed in this file; nothing the caller passes is used as a path,
 # a line of text or a command. A feature declares: an id, a platform test
@@ -34,6 +36,18 @@
 #                    /boot/firmware/config.txt (before any [section]).
 #                    Needs a reboot. Verify: `getconf PAGESIZE` prints 4096.
 #                    Undo: remove that line (the backup copy is left alone).
+#   pi-memory-cgroup Raspberry Pi firmware adds `cgroup_disable=memory` to the
+#                    kernel command line, so the memory controller is missing
+#                    from /sys/fs/cgroup/cgroup.controllers and memory limits
+#                    (MemoryMax=, container memory limits) are not enforced.
+#                    Desired state: the single line of /boot/firmware/cmdline.txt
+#                    ends with `cgroup_enable=memory` (the kernel applies the
+#                    words in order, so it wins over the firmware's word before
+#                    it) and holds no `cgroup_disable=memory` of its own.
+#                    Needs a reboot. Verify: `memory` is listed in
+#                    /sys/fs/cgroup/cgroup.controllers. Undo: put back the line
+#                    as it was before (recorded in the marker; the backup copy
+#                    is left alone).
 #
 # Two backends back the features. Only the first is used today:
 #   boot-config   edits a fixed boot file with a text transform (this file).
@@ -46,14 +60,23 @@
 # read back, and (when the daemon is installed) only once the daemon has saved
 # its enrolment (server.id, server-key-id and the saved server key file). The registration
 # key is single use, so a restart before that would leave the host unable to
-# enrol (it parked a host on 2026-10-04). `--countdown` shows one line per
-# second; Ctrl-C cancels the reboot and prints the manual command. Without a
+# enrol (it parked a host on 2026-10-04). On a first install it then waits for
+# the daemon's first setup run (daemon-converge) to finish: the daemon writes
+# /run/turbopanel/boot-converge-done when it has, and that file must be newer
+# than the installer's start marker (a restart in the middle of that run cut an
+# apt task short on 2026-11-09). Then it waits until no package tool (dpkg,
+# apt, unattended-upgrades) and no setup run (ansible-playbook) is running,
+# stops the daemon so it starts nothing new, checks once more, and only then
+# counts down. Any wait that runs out means no restart, with the manual command
+# printed instead. `--countdown` shows one line per second; Ctrl-C cancels the
+# reboot, starts the daemon again and prints the manual command. Without a
 # terminal the same lines are printed without carriage returns.
 #
 # Test mode: unprivileged runs with TP_KERNEL_TEST_PREFIX set (paths live under
 # that prefix, `reboot` is replaced by TP_KERNEL_TEST_REBOOT_CMD, the page size
-# by TP_KERNEL_TEST_PAGESIZE, sleeping is skipped). As root every one of those
-# variables is ignored.
+# by TP_KERNEL_TEST_PAGESIZE, the daemon's unit by TP_KERNEL_TEST_DAEMON_ACTIVE
+# and TP_KERNEL_TEST_SYSTEMCTL_LOG, sleeping is skipped). As root every one of
+# those variables is ignored.
 set -eu
 umask 022
 
@@ -71,7 +94,7 @@ else
   P="$TP_KERNEL_TEST_PREFIX"
 fi
 
-KF_IDS="pi-4k-pagesize"
+KF_IDS="pi-4k-pagesize pi-memory-cgroup"
 # tp-orchestrate is not on root's sudo PATH, so every command printed to a person
 # uses its full path.
 KF_CMD="/opt/turbopanel/share/orchestration/scripts/tp-orchestrate"
@@ -81,6 +104,11 @@ KF_MARKER_DIR="$P/var/lib/turbopanel-kernel"
 KF_LINE="kernel=kernel8.img"
 KF_BOOT_DIR="$P/boot/firmware"
 KF_STATE_DIR="$P/var/lib/turbopanel"
+# The daemon writes this once its first setup run on this boot has finished.
+KF_CONVERGE_DONE="$P/run/turbopanel/boot-converge-done"
+KF_DAEMON_UNIT="turbopaneld.service"
+KF_MEM_WORD="cgroup_enable=memory"
+KF_MEM_OFF_WORD="cgroup_disable=memory"
 
 # --- facts --------------------------------------------------------------------
 
@@ -169,6 +197,9 @@ kf_bootcfg_add_top() {
     tp_die "the new file does not start with $_bt_line"
   tail -n +2 "$_bt_new" | cmp -s - "$_bt_name" ||
     tp_die "the new file does not keep the old content of $_bt_file"
+  # On disk before the rename: a power cut must leave the old or the new
+  # file, never an empty one (the Pi would not boot).
+  sync || tp_die "cannot flush the new $_bt_file to disk"
   mv -T -f -- "$_bt_new" "$_bt_name" || tp_die "cannot replace $_bt_file"
   trap - EXIT
   sync || tp_die "cannot flush $_bt_file to disk"
@@ -220,6 +251,7 @@ kf_bootcfg_remove_top() {
       print raw
     }
   ' "$_br_name" > "$_br_new" || tp_die "cannot write the new $_br_file"
+  sync || tp_die "cannot flush the new $_br_file to disk"
   mv -T -f -- "$_br_new" "$_br_name" || tp_die "cannot replace $_br_file"
   trap - EXIT
   sync || tp_die "cannot flush $_br_file to disk"
@@ -325,9 +357,325 @@ kf_pi_4k_pagesize_undo() {
   printf '%s\n' "$_un_backup"
 }
 
+# --- backend: boot-cmdline -----------------------------------------------------
+
+# The first line of FILE without its newline and without one CR right before
+# it (or at the very end of a file with no newline). Any other CR stays: the
+# state check refuses such a file. The Raspberry Pi firmware reads only that
+# one line.
+kf_cmdline_line() {
+  head -n 1 "$1" | awk '{ sub(/\r$/, ""); printf "%s", $0 }'
+}
+
+# True when the first line of FILE ends in CR (before its newline, or at the
+# end of a file with no newline).
+kf_cmdline_trailing_cr() {
+  [ "$(head -n 1 "$1" | tr -d '\n' | tail -c 1 | od -An -tx1 | tr -d ' \n')" = "0d" ]
+}
+
+# True when the first line of FILE holds a control byte other than a tab and
+# that one trailing CR (a CR inside the line would be lost or misread).
+kf_cmdline_bad_bytes() {
+  _bb_n="$(head -n 1 "$1" | tr -d '\n' | LC_ALL=C tr -cd '\000-\010\013-\037\177' | wc -c)"
+  _bb_cr=0
+  if kf_cmdline_trailing_cr "$1"; then _bb_cr=1; fi
+  [ "$_bb_n" -gt "$_bb_cr" ]
+}
+
+# True when config.txt sends the firmware to another command line file
+# (cmdline=) or another folder (os_prefix=), so cmdline.txt may not be read.
+kf_bootcfg_moves_cmdline() {
+  [ -f "$KF_BOOT_DIR/config.txt" ] &&
+    grep -Eiq '^[[:space:]]*(cmdline|os_prefix)[[:space:]]*=' "$KF_BOOT_DIR/config.txt"
+}
+
+# True when FILE holds anything but blank lines after its first line.
+kf_cmdline_extra_lines() {
+  tail -n +2 "$1" | tr -d ' \t\r\n' | grep -q .
+}
+
+# Prints "list", "enable", "disable" or "none" for the memory words of LINE.
+# "list" wins: a cgroup_disable= word with a comma list that names memory was
+# written by a person on purpose. Otherwise the last of cgroup_enable=memory
+# and cgroup_disable=memory decides, the way the kernel applies its words in
+# order.
+kf_cmdline_mem_scan() {
+  printf '%s\n' "$1" | awk -v on="$KF_MEM_WORD" -v off="$KF_MEM_OFF_WORD" '
+    {
+      for (i = 1; i <= NF; i++) {
+        w = $i
+        if (w == on) last = "enable"
+        else if (w == off) last = "disable"
+        else if (w ~ /^cgroup_disable=/) {
+          v = w
+          sub(/^cgroup_disable=/, "", v)
+          n = split(v, parts, ",")
+          for (j = 1; j <= n; j++) if (parts[j] == "memory") list = 1
+        }
+      }
+    }
+    END {
+      if (list) print "list"
+      else if (last != "") print last
+      else print "none"
+    }
+  '
+}
+
+# LINE with memory limits turned on: every cgroup_disable=memory word removed
+# (then the remaining words are joined by one space, so runs of blanks become
+# one) and cgroup_enable=memory added at the end unless the line already has
+# it. Blanks at the end of the line are dropped before the word is appended;
+# a line without cgroup_disable=memory keeps its other spacing.
+kf_cmdline_enable_line() {
+  printf '%s\n' "$1" | awk -v on="$KF_MEM_WORD" -v off="$KF_MEM_OFF_WORD" '
+    {
+      line = $0
+      drop = 0
+      for (i = 1; i <= NF; i++) if ($i == off) drop = 1
+      if (drop) {
+        out = ""
+        for (i = 1; i <= NF; i++) if ($i != off) out = out (out == "" ? "" : " ") $i
+        line = out
+      }
+      n = split(line, words, /[ \t]+/)
+      for (i = 1; i <= n; i++) if (words[i] == on) { print line; next }
+      sub(/[ \t]+$/, "", line)
+      print (line == "" ? on : line " " on)
+    }
+  '
+}
+
+# The line undo writes: BEFORE when CURRENT is still exactly what apply wrote
+# (AFTER); otherwise CURRENT without its cgroup_enable=memory words (the words
+# that are left joined by one space), or CURRENT itself when it has none.
+kf_cmdline_undo_line() {
+  if [ "$1" = "$3" ]; then
+    printf '%s\n' "$2"
+    return 0
+  fi
+  printf '%s\n' "$1" | awk -v on="$KF_MEM_WORD" '
+    {
+      found = 0
+      for (i = 1; i <= NF; i++) if ($i == on) found = 1
+      if (!found) { print; next }
+      out = ""
+      for (i = 1; i <= NF; i++) if ($i != on) out = out (out == "" ? "" : " ") $i
+      print out
+    }
+  '
+}
+
+# Replace the first line of FILE with LINE and keep everything after it byte
+# for byte (the first line's own trailing CR and newline too, each only when
+# the file had it). Same steps as the config.txt edits: backup copy, temporary
+# name in the same directory, `mv -T`, read back. Prints the backup path.
+kf_cmdline_write() {
+  _cw_file="$1"
+  _cw_line="$2"
+  _cw_dir="${_cw_file%/*}"
+  _cw_name="${_cw_file##*/}"
+  CDPATH='' cd -P -- "$_cw_dir" || tp_die "cannot enter $_cw_dir"
+  [ "$(pwd -P)" = "$_cw_dir" ] || tp_die "refusing $_cw_dir: a component is a symlink"
+  [ -f "$_cw_name" ] && [ ! -L "$_cw_name" ] || tp_die "$_cw_file is not a plain file"
+  _cw_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  _cw_backup="$_cw_name.tp-backup-$_cw_stamp"
+  _cw_new=".$_cw_name.tp-new.$$"
+  _cw_n=1
+  while [ -e "$_cw_backup" ]; do
+    _cw_backup="$_cw_name.tp-backup-$_cw_stamp-$_cw_n"
+    _cw_n=$((_cw_n + 1))
+  done
+  trap 'rm -f -- "$_cw_new"' EXIT
+  cp -- "$_cw_name" "$_cw_backup" || tp_die "cannot save a backup copy of $_cw_file"
+  cmp -s -- "$_cw_name" "$_cw_backup" || tp_die "the backup does not match $_cw_file"
+  _cw_cr=""
+  if kf_cmdline_trailing_cr "$_cw_name"; then _cw_cr="$(printf '\r')"; fi
+  _cw_nl=""
+  if [ "$(head -n 1 "$_cw_name" | tail -c 1 | od -An -tx1 | tr -d ' \n')" = "0a" ]; then
+    _cw_nl=1
+  fi
+  (
+    set -C
+    : > "$_cw_new"
+  ) || tp_die "cannot create a temporary file in $_cw_dir"
+  {
+    printf '%s%s' "$_cw_line" "$_cw_cr"
+    if [ -n "$_cw_nl" ]; then printf '\n'; fi
+    tail -n +2 -- "$_cw_name"
+  } > "$_cw_new" || tp_die "cannot write the new $_cw_file"
+  [ "$(kf_cmdline_line "$_cw_new")" = "$_cw_line" ] ||
+    tp_die "the new $_cw_file does not hold the new line"
+  _cw_want=$(($(printf '%s%s' "$_cw_line" "$_cw_cr" | wc -c) + $(tail -n +2 -- "$_cw_name" | wc -c)))
+  if [ -n "$_cw_nl" ]; then
+    _cw_want=$((_cw_want + 1))
+  fi
+  [ "$(wc -c < "$_cw_new")" -eq "$_cw_want" ] ||
+    tp_die "the new file does not keep the rest of $_cw_file"
+  sync || tp_die "cannot flush the new $_cw_file to disk"
+  mv -T -f -- "$_cw_new" "$_cw_name" || tp_die "cannot replace $_cw_file"
+  trap - EXIT
+  sync || tp_die "cannot flush $_cw_file to disk"
+  [ "$(kf_cmdline_line "$_cw_name")" = "$_cw_line" ] ||
+    tp_die "$_cw_file does not read back with the new line"
+  printf '%s/%s\n' "$_cw_dir" "$_cw_backup"
+}
+
+# --- feature: pi-memory-cgroup ----------------------------------------------------
+
+# Prints STATE<TAB>reason.
+kf_pi_memory_cgroup_state() {
+  _mc_controllers="$P/sys/fs/cgroup/cgroup.controllers"
+  if [ ! -f "$_mc_controllers" ]; then
+    printf 'not-applicable\tthis server does not use the unified control group hierarchy (cgroup v2)\n'
+    return 0
+  fi
+  if tr ' \t' '\n\n' < "$_mc_controllers" | grep -qx memory; then
+    printf 'ready\tthe memory controller is on, so memory limits are enforced\n'
+    return 0
+  fi
+  case "$(kf_model)" in
+    *"Raspberry Pi"*) ;;
+    *)
+      printf 'not-applicable\tthis server is not a Raspberry Pi\n'
+      return 0
+      ;;
+  esac
+  _mc_file="$KF_BOOT_DIR/cmdline.txt"
+  if [ ! -f "$_mc_file" ] || [ -L "$_mc_file" ]; then
+    printf 'blocked\t%s is missing\n' "/boot/firmware/cmdline.txt"
+    return 0
+  fi
+  if kf_cmdline_extra_lines "$_mc_file"; then
+    printf 'blocked\t/boot/firmware/cmdline.txt has more than one line, so it is left as it is\n'
+    return 0
+  fi
+  if kf_cmdline_bad_bytes "$_mc_file"; then
+    printf 'blocked\t/boot/firmware/cmdline.txt holds control characters, so it is left as it is\n'
+    return 0
+  fi
+  _mc_line="$(kf_cmdline_line "$_mc_file")"
+  if [ -z "$(printf '%s' "$_mc_line" | tr -d ' \t')" ]; then
+    printf 'blocked\t/boot/firmware/cmdline.txt is empty, so it is left as it is\n'
+    return 0
+  fi
+  if ! printf '%s\n' "$_mc_line" | tr ' \t' '\n\n' | grep -q '^root='; then
+    printf 'blocked\t/boot/firmware/cmdline.txt has no root= setting, so it is left as it is\n'
+    return 0
+  fi
+  if kf_bootcfg_moves_cmdline; then
+    printf 'blocked\tconfig.txt points the firmware at another command line (cmdline= or os_prefix=), so cmdline.txt is left as it is\n'
+    return 0
+  fi
+  _mc_running="$(tr '\000\r\n' '   ' 2>/dev/null < "$P/proc/cmdline" || true)"
+  case "$(kf_cmdline_mem_scan "$_mc_running")" in
+    enable)
+      printf 'blocked\tthis kernel was started with cgroup_enable=memory but the memory controller is still missing, so a restart would not turn it on\n'
+      return 0
+      ;;
+    none)
+      printf 'not-applicable\tthe memory controller is missing, but not because of the Raspberry Pi boot setting (cgroup_disable=memory is not on the kernel command line)\n'
+      return 0
+      ;;
+  esac
+  case "$(kf_cmdline_mem_scan "$_mc_line")" in
+    list)
+      printf 'blocked\tcmdline.txt turns off control groups itself, so it is left as it is\n'
+      ;;
+    enable)
+      printf 'restart-needed\tmemory limits are saved in cmdline.txt; the server needs a restart\n'
+      ;;
+    *)
+      printf 'switchable\tthis server can turn on memory limits (a restart is needed)\n'
+      ;;
+  esac
+}
+
+# Prints the backup path. The marker records the line before and after, so
+# undo can put the line back exactly as it was.
+kf_pi_memory_cgroup_apply() {
+  _ma_file="$KF_BOOT_DIR/cmdline.txt"
+  _ma_marker="$KF_MARKER_DIR/pi-memory-cgroup.applied"
+  _ma_before="$(kf_cmdline_line "$_ma_file")" || return 1
+  _ma_after="$(kf_cmdline_enable_line "$_ma_before")" || return 1
+  [ -n "$_ma_after" ] && [ "$_ma_after" != "$_ma_before" ] || return 1
+  # The marker goes first, as for pi-4k-pagesize: a marker without the change
+  # is harmless, the change without a marker would never be undone.
+  mkdir -p -- "$KF_MARKER_DIR" || return 1
+  {
+    printf 'applied=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'before=%s\n' "$_ma_before"
+    printf 'after=%s\n' "$_ma_after"
+  } > "$_ma_marker" || return 1
+  _ma_backup="$(kf_cmdline_write "$_ma_file" "$_ma_after")" || {
+    if [ "$(kf_cmdline_line "$_ma_file" 2>/dev/null)" != "$_ma_after" ]; then
+      rm -f -- "$_ma_marker"
+    fi
+    return 1
+  }
+  [ -n "$_ma_backup" ] || return 1
+  printf '%s\n' "$_ma_backup"
+}
+
+# Prints the backup path, or nothing when the word is no longer there.
+# The caller has already checked that the marker exists.
+kf_pi_memory_cgroup_undo() {
+  _mu_file="$KF_BOOT_DIR/cmdline.txt"
+  _mu_marker="$KF_MARKER_DIR/pi-memory-cgroup.applied"
+  if [ ! -f "$_mu_file" ] || [ -L "$_mu_file" ]; then
+    rm -f -- "$_mu_marker"
+    return 0
+  fi
+  # Edited since with a stray control byte: leave it (and the marker) for a
+  # person to look at.
+  if kf_cmdline_bad_bytes "$_mu_file"; then return 0; fi
+  _mu_current="$(kf_cmdline_line "$_mu_file")"
+  _mu_before="$(sed -n 's/^before=//p' "$_mu_marker" | head -n 1)"
+  _mu_after="$(sed -n 's/^after=//p' "$_mu_marker" | head -n 1)"
+  _mu_new="$(kf_cmdline_undo_line "$_mu_current" "$_mu_before" "$_mu_after")"
+  if [ "$_mu_new" = "$_mu_current" ]; then
+    rm -f -- "$_mu_marker"
+    return 0
+  fi
+  _mu_backup="$(kf_cmdline_write "$_mu_file" "$_mu_new")" || return 1
+  [ -n "$_mu_backup" ] || return 1
+  rm -f -- "$_mu_marker"
+  printf '%s\n' "$_mu_backup"
+}
+
+# --- per-feature words for messages -------------------------------------------------
+
+kf_feature_file() {
+  case "$1" in
+    pi-4k-pagesize) printf '/boot/firmware/config.txt\n' ;;
+    pi-memory-cgroup) printf '/boot/firmware/cmdline.txt\n' ;;
+  esac
+}
+
+kf_feature_change() {
+  case "$1" in
+    pi-4k-pagesize) printf 'the line kernel=kernel8.img\n' ;;
+    pi-memory-cgroup) printf 'the word cgroup_enable=memory\n' ;;
+  esac
+}
+
+# True when the feature's change is in its boot file.
+kf_feature_saved() {
+  case "$1" in
+    pi-4k-pagesize)
+      [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt" 2>/dev/null)" = "kernel8-top" ]
+      ;;
+    pi-memory-cgroup)
+      [ -f "$KF_BOOT_DIR/cmdline.txt" ] &&
+        [ "$(kf_cmdline_mem_scan "$(kf_cmdline_line "$KF_BOOT_DIR/cmdline.txt" 2>/dev/null)")" = "enable" ]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 kf_needs_reboot() {
   case "$1" in
-    pi-4k-pagesize) return 0 ;;
+    pi-4k-pagesize|pi-memory-cgroup) return 0 ;;
   esac
   return 1
 }
@@ -384,9 +732,218 @@ kf_wait_enrolled() {
   done
 }
 
+# On a first install (TP_KF_ENROL_REF set), the daemon's first setup run on
+# this boot must have finished: it writes KF_CONVERGE_DONE when it has, and
+# the file must be newer than the installer's start marker. A person running
+# the command by hand on a server that is already set up does not wait here.
+kf_wait_converged() {
+  [ -n "${TP_KF_ENROL_REF:-}" ] || return 0
+  _wc_waited=0
+  _wc_max=1200
+  [ -z "$TP_TEST" ] || _wc_max="${TP_KERNEL_TEST_CONVERGE_WAIT:-0}"
+  while :; do
+    if [ -f "$KF_CONVERGE_DONE" ] && [ -f "$TP_KF_ENROL_REF" ] &&
+      [ -n "$(find "$KF_CONVERGE_DONE" -newer "$TP_KF_ENROL_REF" 2>/dev/null)" ]; then
+      return 0
+    fi
+    [ "$_wc_waited" -lt "$_wc_max" ] || return 1
+    [ "$_wc_waited" -gt 0 ] || printf 'Waiting for TurboPanel to finish setting up this server before restarting (this can take several minutes)…\n'
+    if [ -z "$TP_TEST" ]; then sleep 5; fi
+    _wc_waited=$((_wc_waited + 5))
+  done
+}
+
+# Reads one command line, one argument per line, and prints "ansible-playbook"
+# or "unattended-upgrades" when it runs one of them. Only the program counts:
+# the file name of the first argument that is not env, an interpreter
+# (python3, sh), an option or a NAME=value. So the daemon's own command line, which names
+# ansible-playbook in a permission list, and a person reading those files
+# (tail, less, an editor) never count. unattended-upgrade-shutdown counts
+# unless it is the helper that only waits (--wait-for-signal) for the whole
+# uptime.
+kf_busy_program() {
+  awk '
+    function base(p) { sub(/.*\//, "", p); return p }
+    # The program is the first argument that is not env, an interpreter, an
+    # option (-u) or a NAME=value env sets.
+    !decided && NR <= 8 {
+      p = base($0)
+      if (p == "env" || p ~ /^(python[0-9.]*|sh|dash|bash)$/ || $0 ~ /^-/ ||
+        $0 ~ /^[A-Za-z_][A-Za-z0-9_]*=/) next
+      if (p == "ansible-playbook" || p ~ /^AnsiballZ_/) what = "ansible-playbook"
+      else if (p == "unattended-upgrade") what = "unattended-upgrades"
+      else if (p == "unattended-upgrade-shutdown") shutdown = 1
+      decided = 1
+      next
+    }
+    $0 == "--wait-for-signal" { waiting = 1 }
+    END {
+      if (what != "") print what
+      else if (shutdown && !waiting) print "unattended-upgrades"
+    }
+  '
+}
+
+# Prints the name of the first package tool or setup run that is running and
+# returns 0; returns 1 when none is. A restart must never cut one short.
+kf_busy() {
+  for _bp in "$P"/proc/[0-9]*; do
+    [ -d "$_bp" ] || continue
+    _bc="$(cat "$_bp/comm" 2>/dev/null || true)"
+    case "$_bc" in
+      dpkg|dpkg-deb|dpkg-trigger|apt|apt-get|aptitude|apt.systemd.dai*)
+        printf '%s\n' "$_bc"
+        return 0
+        ;;
+    esac
+    _bw="$(tr '\000' '\n' 2>/dev/null < "$_bp/cmdline" | kf_busy_program || true)"
+    if [ -n "$_bw" ]; then
+      printf '%s\n' "$_bw"
+      return 0
+    fi
+  done
+  return 1
+}
+
+kf_wait_idle() {
+  _wi_waited=0
+  _wi_max=600
+  [ -z "$TP_TEST" ] || _wi_max="${TP_KERNEL_TEST_IDLE_WAIT:-0}"
+  while _wi_what="$(kf_busy)"; do
+    [ "$_wi_waited" -lt "$_wi_max" ] || return 1
+    [ "$_wi_waited" -gt 0 ] || printf 'Waiting for %s to finish before restarting…\n' "$_wi_what"
+    if [ -z "$TP_TEST" ]; then sleep 2; fi
+    _wi_waited=$((_wi_waited + 2))
+  done
+  return 0
+}
+
+KF_DAEMON_STOPPED=""
+
+# Stop the daemon so it starts nothing new (a playbook, an apt run) during the
+# countdown. Returns 1 when it is running and could not be stopped.
+kf_daemon_stop() {
+  if [ -n "$TP_TEST" ]; then
+    [ "${TP_KERNEL_TEST_DAEMON_ACTIVE:-}" = "1" ] || return 0
+    printf 'Stopping the TurboPanel daemon so it starts nothing new before the restart…\n'
+    KF_DAEMON_STOPPED=1
+    printf 'stop\n' >> "${TP_KERNEL_TEST_SYSTEMCTL_LOG:-/dev/null}"
+    [ "${TP_KERNEL_TEST_STOP_FAILS:-}" != "1" ] || return 1
+  else
+    command -v systemctl >/dev/null 2>&1 || return 0
+    systemctl is-active --quiet "$KF_DAEMON_UNIT" 2>/dev/null || return 0
+    printf 'Stopping the TurboPanel daemon so it starts nothing new before the restart…\n'
+    # Set first: a stop that fails may still have stopped it, so the caller
+    # always tries a start.
+    KF_DAEMON_STOPPED=1
+    systemctl stop "$KF_DAEMON_UNIT" || return 1
+  fi
+}
+
+kf_daemon_start_again() {
+  [ -n "$KF_DAEMON_STOPPED" ] || return 0
+  KF_DAEMON_STOPPED=""
+  if [ -n "$TP_TEST" ]; then
+    printf 'start\n' >> "${TP_KERNEL_TEST_SYSTEMCTL_LOG:-/dev/null}"
+  else
+    systemctl start "$KF_DAEMON_UNIT" || {
+      printf 'The TurboPanel daemon could not be started again; start it with: sudo systemctl start %s\n' "$KF_DAEMON_UNIT"
+      return 0
+    }
+  fi
+  # Output may be gone (a closed pipe, a dropped link): the start above has
+  # already happened, so a failed write changes nothing.
+  printf 'The TurboPanel daemon is running again.\n' 2>/dev/null || true
+}
+
+# Ctrl-C, a hang-up or a kill during the restart steps. The daemon is started
+# again before anything is written, because the output may be gone.
+kf_cancel() {
+  kf_daemon_start_again
+  {
+    printf '\nRestart cancelled.\n'
+    kf_manual_reboot_hint
+  } 2>/dev/null || true
+  exit "$1"
+}
+
+# Every check that has to pass before a restart, then the countdown. Any check
+# that fails means no restart and the manual command instead.
+kf_reboot_when_safe() {
+  if ! kf_wait_enrolled; then
+    printf 'This server has not finished enrolling with TurboPanel yet, so it will not restart on its own.\n'
+    kf_manual_reboot_hint
+    return 0
+  fi
+  if ! kf_wait_converged; then
+    printf 'TurboPanel has not finished setting up this server yet, so it will not restart on its own.\n'
+    printf 'Wait until the server shows as ready in TurboPanel, then restart it.\n'
+    kf_manual_reboot_hint
+    return 0
+  fi
+  if ! kf_wait_idle; then
+    printf 'Software is still being installed on this server, so it will not restart on its own.\n'
+    kf_manual_reboot_hint
+    return 0
+  fi
+  # From here on the daemon is started again on every way out except a
+  # restart handed to systemd: an error, Ctrl-C, a hang-up or a kill. SIGPIPE
+  # is ignored so a closed output (`| tee log` and Ctrl-C, a dropped ssh link)
+  # makes a write fail, `set -e` exits and the EXIT trap still runs; killed by
+  # the signal, the shell would skip it.
+  trap '' PIPE
+  trap 'kf_daemon_start_again' EXIT
+  trap 'kf_cancel 129' HUP
+  trap 'kf_cancel 130' INT
+  trap 'kf_cancel 143' TERM
+  # Known gap: a playbook or apt run the daemon starts between the idle check
+  # above and the stop below is killed with the daemon's cgroup. Checking once
+  # more right before the stop keeps that window to a few milliseconds, and
+  # the daemon holds commands until its boot converge has finished.
+  if _rs_what="$(kf_busy)"; then
+    printf '%s started just now, so this server will not restart on its own.\n' "$_rs_what"
+    kf_manual_reboot_hint
+    trap - EXIT HUP INT TERM
+    return 0
+  fi
+  if ! kf_daemon_stop; then
+    printf 'The TurboPanel daemon could not be stopped, so this server will not restart on its own.\n'
+    kf_daemon_start_again
+    kf_manual_reboot_hint
+    trap - EXIT HUP INT TERM
+    return 0
+  fi
+  if _rs_what="$(kf_busy)"; then
+    printf '%s started just now, so this server will not restart on its own.\n' "$_rs_what"
+    kf_daemon_start_again
+    kf_manual_reboot_hint
+    trap - EXIT HUP INT TERM
+    return 0
+  fi
+  kf_countdown_and_reboot "$1"
+}
+
+# Test mode only (never as root): at the first countdown line, wait until the
+# file TP_KERNEL_TEST_WAIT_FILE exists (the test's reader has closed the
+# pipe), or send this shell TP_KERNEL_TEST_SIGNAL, as a person or a dropped
+# link would.
+kf_test_countdown_hooks() {
+  if [ -n "${TP_KERNEL_TEST_WAIT_FILE:-}" ]; then
+    _th_n=0
+    while [ ! -e "$TP_KERNEL_TEST_WAIT_FILE" ] && [ "$_th_n" -lt 200 ]; do
+      sleep 0.05 2>/dev/null || sleep 1
+      _th_n=$((_th_n + 1))
+    done
+  fi
+  if [ -n "${TP_KERNEL_TEST_SIGNAL:-}" ]; then
+    kill -s "$TP_KERNEL_TEST_SIGNAL" "$$"
+  fi
+}
+
+# The caller (kf_reboot_when_safe) has set the traps that start the daemon
+# again and cancel on Ctrl-C.
 kf_countdown_and_reboot() {
   _cd_total="$1"
-  trap 'printf "\n"; printf "Restart cancelled.\n"; kf_manual_reboot_hint; exit 130' INT TERM
   _cd_tty=""
   if [ -t 1 ]; then _cd_tty=1; fi
   _cd_n="$_cd_total"
@@ -396,19 +953,31 @@ kf_countdown_and_reboot() {
     else
       printf 'Restarting in %s second(s)…\n' "$_cd_n"
     fi
-    if [ -z "$TP_TEST" ]; then sleep 1; fi
+    if [ -z "$TP_TEST" ]; then
+      sleep 1
+    elif [ "$_cd_n" = "$_cd_total" ]; then
+      kf_test_countdown_hooks
+    fi
     _cd_n=$((_cd_n - 1))
   done
   if [ -n "$_cd_tty" ]; then printf '\r%60s\r' ''; fi
   printf 'Restarting now.\n'
-  trap - INT TERM
-  sync
+  _cd_ok=""
   if [ -n "$TP_TEST" ]; then
     # shellcheck disable=SC2086
-    ${TP_KERNEL_TEST_REBOOT_CMD:-true}
+    if sync && ${TP_KERNEL_TEST_REBOOT_CMD:-true}; then _cd_ok=1; fi
+  elif sync && systemctl reboot; then
+    _cd_ok=1
+  fi
+  if [ -n "$_cd_ok" ]; then
+    # systemd has the restart now and stops the daemon itself.
+    KF_DAEMON_STOPPED=""
+    trap - EXIT HUP INT TERM
     return 0
   fi
-  systemctl reboot
+  # The restart did not start: never leave the daemon stopped.
+  kf_daemon_start_again
+  tp_die "the restart could not be started; restart this server yourself with: sudo reboot"
 }
 
 # --- verbs -------------------------------------------------------------------------
@@ -435,10 +1004,11 @@ kf_verb_status() {
 # Said when a step of the switch failed. It says what state the file is in,
 # because a failure after the replace leaves the new line in place.
 kf_apply_failed() {
-  if [ "$(kf_bootcfg_scan "$KF_BOOT_DIR/config.txt" 2>/dev/null)" = "kernel8-top" ]; then
-    tp_die "the line was written to /boot/firmware/config.txt but the switch could not be confirmed, so the server will not restart; check that file (a backup copy is next to it) or undo it with the undo command"
+  _af_file="$(kf_feature_file "$1")"
+  if kf_feature_saved "$1"; then
+    tp_die "$(kf_feature_change "$1") was written to $_af_file but the change could not be confirmed, so the server will not restart; check that file (a backup copy is next to it) or undo it with the undo command"
   fi
-  tp_die "the change could not be saved and /boot/firmware/config.txt is unchanged, so the server will not restart"
+  tp_die "the change could not be saved and $_af_file is unchanged, so the server will not restart"
 }
 
 kf_verb_apply() {
@@ -483,8 +1053,8 @@ kf_verb_apply() {
       tp_die "$_reason"
       ;;
     switchable)
-      _backup="$("$(kf_fn "$_id" apply)")" || kf_apply_failed
-      [ -n "$_backup" ] || kf_apply_failed
+      _backup="$("$(kf_fn "$_id" apply)")" || kf_apply_failed "$_id"
+      [ -n "$_backup" ] || kf_apply_failed "$_id"
       _post="$("$(kf_fn "$_id" state)")" || tp_die "cannot read back the state, so the server will not restart"
       case "$_post" in
         restart-needed*) ;;
@@ -502,35 +1072,60 @@ kf_verb_apply() {
   esac
   if kf_needs_reboot "$_id" && [ "$_state" = "restart-needed" ]; then
     if [ -z "$_reboot" ]; then
+      # The installer applies every feature first and restarts once.
+      [ -z "${KF_ONE_RESTART_LATER:-}" ] || return 0
       printf 'The change takes effect after a restart.\n'
       kf_manual_reboot_hint
       return 0
     fi
-    if ! kf_wait_enrolled; then
-      printf 'This server has not finished enrolling with TurboPanel yet, so it will not restart on its own.\n'
-      kf_manual_reboot_hint
-      return 0
-    fi
-    kf_countdown_and_reboot "$_countdown"
+    kf_reboot_when_safe "$_countdown"
   fi
 }
 
 kf_verb_undo() {
   [ $# -eq 1 ] || tp_die "undo needs exactly one feature id"
   kf_known "$1" || tp_die "unknown feature: $1"
+  _un_file="$(kf_feature_file "$1")"
+  _un_change="$(kf_feature_change "$1")"
   if [ ! -f "$KF_MARKER_DIR/$1.applied" ]; then
     printf 'kernel-feature %s changed=no\n' "$1"
-    printf 'Nothing to undo: this tool did not add the line. If you added kernel=kernel8.img yourself, remove it from /boot/firmware/config.txt by hand.\n'
+    printf 'Nothing to undo: this tool did not add %s. If you added it yourself, remove it from %s by hand.\n' "$_un_change" "$_un_file"
     return 0
   fi
-  _backup="$("$(kf_fn "$1" undo)")" || tp_die "the change could not be undone; /boot/firmware/config.txt is as it was"
+  _backup="$("$(kf_fn "$1" undo)")" || tp_die "the change could not be undone; $_un_file is as it was"
   if [ -z "$_backup" ]; then
     printf 'kernel-feature %s changed=no\n' "$1"
-    printf 'TurboPanel added the line earlier, but it is no longer at the top of /boot/firmware/config.txt (it was changed or removed since), so nothing was removed. Check that file by hand.\n'
+    printf 'TurboPanel added %s earlier, but it is no longer where it was put in %s (it was changed or removed since), so nothing was removed. Check that file by hand.\n' "$_un_change" "$_un_file"
     return 0
   fi
   printf 'kernel-feature %s changed=yes backup=%s\n' "$1" "$_backup"
   printf 'Removed. A copy of the boot settings from before is at %s. The change takes effect after the next restart.\n' "$_backup"
+}
+
+# What the installer says about a feature that is about to change.
+kf_installer_why() {
+  case "$1" in
+    pi-4k-pagesize)
+      printf 'This Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
+      ;;
+    pi-memory-cgroup)
+      printf 'This Raspberry Pi starts with memory limits turned off (cgroup_disable=memory), so memory limits on services and containers are not enforced.\n'
+      ;;
+  esac
+}
+
+kf_installer_what() {
+  case "$1" in
+    pi-4k-pagesize) printf 'switch it to the 4 KiB kernel' ;;
+    pi-memory-cgroup) printf 'turn memory limits on' ;;
+  esac
+}
+
+kf_installer_blocked() {
+  case "$1" in
+    pi-4k-pagesize) printf 'Not switching this Raspberry Pi to the 4 KiB kernel: %s.\n' "$2" ;;
+    pi-memory-cgroup) printf 'Not turning memory limits on for this Raspberry Pi: %s.\n' "$2" ;;
+  esac
 }
 
 kf_verb_installer_step() {
@@ -539,37 +1134,68 @@ kf_verb_installer_step() {
     printf 'Skipping the kernel switch (TURBOPANEL_SKIP_KERNEL_SWITCH=1).\n'
     return 0
   fi
-  _line="$(kf_pi_4k_pagesize_state)"
-  _state="${_line%%"$(printf '\t')"*}"
-  _reason="${_line#*"$(printf '\t')"}"
-  case "$_state" in
-    switchable|restart-needed) ;;
-    blocked)
-      printf 'Not switching this Raspberry Pi to the 4 KiB kernel: %s.\n' "$_reason"
-      return 0
-      ;;
-    *) return 0 ;;
-  esac
+  _todo=""
+  for _id in $KF_IDS; do
+    if [ "$_id" = "pi-memory-cgroup" ] && [ "${TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH:-}" = "1" ]; then
+      printf 'Skipping the memory limits switch (TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH=1).\n'
+      continue
+    fi
+    _line="$("$(kf_fn "$_id" state)")"
+    _state="${_line%%"$(printf '\t')"*}"
+    _reason="${_line#*"$(printf '\t')"}"
+    case "$_state" in
+      switchable|restart-needed) _todo="${_todo:+$_todo }$_id" ;;
+      blocked) kf_installer_blocked "$_id" "$_reason" ;;
+    esac
+  done
+  [ -n "$_todo" ] || return 0
   if [ "${TP_KF_FIRST_INSTALL:-}" != "1" ]; then
-    printf '\nThis Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
-    printf 'Only a first install restarts the server by itself. To switch it yourself:\n'
-    printf '  sudo %s kernel-features apply pi-4k-pagesize --reboot\n\n' "$KF_CMD"
+    printf '\n'
+    for _id in $_todo; do kf_installer_why "$_id"; done
+    printf 'Only a first install restarts the server by itself. To change it yourself:\n'
+    for _id in $_todo; do
+      printf '  sudo %s kernel-features apply %s\n' "$KF_CMD" "$_id"
+    done
+    printf 'then restart the server once: sudo reboot\n\n'
     return 0
   fi
   printf '\nInstall finished. TurboPanel is installed and set to start by itself.\n'
-  printf 'This Raspberry Pi runs the 16 KiB kernel, which the database proxy cannot use.\n'
-  printf 'TurboPanel will switch it to the 4 KiB kernel and restart this server now.\n'
-  printf 'It comes back by itself in about a minute. To skip this next time, set TURBOPANEL_SKIP_KERNEL_SWITCH=1.\n'
-  printf 'To undo it later: sudo %s kernel-features undo pi-4k-pagesize\n\n' "$KF_CMD"
+  _what=""
+  for _id in $_todo; do
+    kf_installer_why "$_id"
+    _what="${_what:+$_what and }$(kf_installer_what "$_id")"
+  done
+  printf 'TurboPanel will %s, then restart this server once.\n' "$_what"
+  printf 'It comes back by itself in about a minute. To skip this next time, set TURBOPANEL_SKIP_KERNEL_SWITCH=1'
+  case " $_todo " in
+    *" pi-memory-cgroup "*) printf ' (or TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH=1 to keep memory limits off)' ;;
+  esac
+  printf '.\n'
+  for _id in $_todo; do
+    printf 'To undo it later: sudo %s kernel-features undo %s\n' "$KF_CMD" "$_id"
+  done
+  printf '\n'
+  # Save every change first, then restart once. No `|| true`: that would
+  # switch off `set -e` inside the apply, and a failed step could then carry
+  # on to a restart. A failure here ends the script (nonzero, with a message)
+  # before any countdown.
+  KF_ONE_RESTART_LATER=1
+  # If a later change fails, say that the ones already saved still need a
+  # restart.
+  _saved=""
+  trap 'if [ -n "$_saved" ]; then printf "Already saved: %s. It takes effect after a restart.\n" "$_saved"; kf_manual_reboot_hint; fi' EXIT
+  for _id in $_todo; do
+    kf_verb_apply "$_id"
+    _saved="${_saved:+$_saved and }$_id"
+  done
+  trap - EXIT
+  KF_ONE_RESTART_LATER=""
   if [ -f "$P/run/turbopanel/update-guard.json" ]; then
     printf 'An update is still being checked, so this server will not restart on its own.\n'
-    kf_verb_apply pi-4k-pagesize
+    kf_manual_reboot_hint
     return 0
   fi
-  # No `|| true`: that would switch off `set -e` inside the apply, and a failed
-  # step could then carry on to a restart. A failure here ends the script
-  # (nonzero, with a message) before any countdown.
-  kf_verb_apply pi-4k-pagesize --reboot --countdown 10
+  kf_reboot_when_safe 10
 }
 
 _verb="${1:-}"
