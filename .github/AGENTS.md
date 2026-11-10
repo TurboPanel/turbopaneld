@@ -78,8 +78,12 @@ to the repo root.
   only sees staged files, so a flagged line in a file nobody staged is caught
   here, and a stale `.secretscan-allowlist` entry is warned about). Its
   `contract-drift` job checks out `TurboPanel/turbopanel` **trunk**, always
-  (never a same-named branch or another pull request's code), beside this repo
-  and runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a
+  (never a same-named branch or another pull request's code), comparing a pull
+  request into trunk with the current control plane trunk, and a trunk push, a
+  manual run or the Release Candidate PR with control plane trunk as it was when
+  the commit under test landed (a build that waited in the queue would otherwise
+  be red for control plane changes its successors already match), beside this
+  repo and runs `check:contract-drift` with `TURBOPANEL_REQUIRE_SIBLING=1`, so a
   missing sibling fails instead of skipping. **Daemon first.** Wire changes
   merge into the daemon's trunk first, then the control plane's, so the check is
   one-way: this daemon may be ahead (extra `DAEMON_WIRE_FEATURES`, extra

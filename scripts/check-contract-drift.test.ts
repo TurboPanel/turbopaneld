@@ -539,3 +539,21 @@ test("a control plane that is behind this daemon passes the whole check", async 
     await Deno.remove(behind, { recursive: true });
   }
 });
+
+test("verify.yml compares a queued trunk build with control plane trunk as of its commit", () => {
+  const verify = Deno.readTextFileSync(
+    join(ROOT, ".github/workflows/verify.yml"),
+  );
+  const job = verify.slice(verify.indexOf("\n  contract-drift:\n"));
+  assertStringIncludes(
+    job,
+    "- name: Pick the control plane trunk commit to compare with",
+  );
+  assertStringIncludes(job, "commits?sha=trunk&until=${at}&per_page=1");
+  assertStringIncludes(job, "ref: ${{ steps.sibling.outputs.ref }}");
+  // A pull request into trunk stays strict: compared with the current trunk.
+  assertStringIncludes(
+    job,
+    "AS_OF: ${{ github.event_name != 'pull_request' || (github.head_ref == 'trunk' && github.base_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository) }}",
+  );
+});
