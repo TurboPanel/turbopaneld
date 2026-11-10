@@ -82,6 +82,8 @@ export const TP_HOST_ONLY_VERBS: ReadonlySet<string> = new Set([
   "php-loopback-sync",
   "app-env-install",
   "app-env-remove",
+  "site-env-install",
+  "site-env-remove",
   "tunnel-env-install",
   "tunnel-env-remove",
   "tunnel-loopback-sync",

@@ -83,6 +83,13 @@ R_APPENV="$R_CONFIG/node-app-env"
 # Largest variables file tp-host will copy (NATIVE_APP_ENV_MAX_BYTES in
 # src/deploy/native/variables-runtime.ts; a test keeps the two equal).
 TP_APPENV_MAX=1048576
+# A site's variables as its cron jobs, workers and commands read them
+# (EnvironmentFile=): one folder per Linux user, so the unit's own User= decides
+# which folder a unit may name. Same arrangement as the native apps' copies; the
+# daemon stages <state>/sites/.env-stage/<id>.env and site-env-install checks it
+# and copies it (see tp_verb_site_env_install).
+R_SITEENV="$R_CONFIG/site-env"
+R_SITEENV_STAGE="$R_STATE/sites/.env-stage"
 # A tunnel connector's token as systemd reads it (EnvironmentFile=): the same
 # arrangement as the variables above, in a folder of its own. The daemon stages
 # <state>/cloudflared/tunnels/<id>.env; tunnel-env-install checks and copies it.
@@ -246,6 +253,7 @@ tp_path_class() {
   # them, so no generic verb may name this folder or anything in it.
   case "$_pc" in
     "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
+    "$R_SITEENV"|"$R_SITEENV"/*) return 1 ;;
     "$R_TUNNELENV"|"$R_TUNNELENV"/*) return 1 ;;
   esac
   # State that belongs to an engine account or to a root service, though it sits
@@ -1312,12 +1320,17 @@ tp_unit_ok() {
   _uk_backup=""
   _uk_hosting=""
   _uk_app=""
+  _uk_site=""
   [ "$_uk_name" = "turbopanel-hosting-caddy.service" ] && _uk_hosting=1
   case "$_uk_name" in
     turbopanel-app-*.service)
       _uk_app="${_uk_name#turbopanel-app-}"
       _uk_app="${_uk_app%.service}"
       ;;
+    # A site's scheduled jobs load the site's variables copy (4A); the worker
+    # and command names join this list when those units exist.
+    turbopanel-cron-*.service) _uk_site=1 ;;
+    *) ;;
   esac
   case "$_uk_name" in
     turbopanel-build-*.service|turbopanel-buildwatch-*.service) return 1 ;;
@@ -1337,7 +1350,7 @@ tp_unit_ok() {
       ;;
     *) ;;
   esac
-  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
+  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v site="${_uk_site:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -1359,6 +1372,9 @@ tp_unit_ok() {
       # Only a native app unit may load an environment file (its own
       # variables); tp_app_envfile_ok pins the one path.
       if (app == "1") ok["Service", "EnvironmentFile"] = 1
+      # A site unit may load its own variables copy;
+      # tp_site_envfile_ok pins the one path.
+      if (site == "1") ok["Service", "EnvironmentFile"] = 1
       # A native app check copy runs beside the release serving, under the
       # same account ceilings: it may ask the kernel to kill it first, never
       # to spare it (1 to 1000 only).
@@ -1454,6 +1470,7 @@ tp_unit_ok() {
   [ "$_uk_slice" = "$(tp_principal_slice "$_uk_user")" ] || return 1
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
+  [ -z "$_uk_site" ] || tp_site_envfile_ok "$_uk_file" "$_uk_user" || return 1
   return 0
 }
 
@@ -1603,6 +1620,35 @@ tp_app_envfile_ok() {
     esac
   done < "$_ae_file"
   [ "$_ae_seen" -le 1 ]
+}
+
+# A site unit's one allowed EnvironmentFile=: the site's own variables copy,
+# <config>/site-env/<the unit's own User=>/<site id>.env, and nothing else, for
+# the same reasons as tp_app_envfile_ok: systemd reads it as root and hands the
+# lines to a tenant process, so the path must sit in the folder of the unit's
+# own account (a unit can never load another account's variables) and in a
+# folder only root writes. No `-` (optional) prefix, no second line.
+tp_site_envfile_ok() {
+  _sf_file="$1"
+  _sf_user="$2"
+  _sf_seen=0
+  while IFS= read -r _sf_line || [ -n "$_sf_line" ]; do
+    case "$_sf_line" in
+      EnvironmentFile=*)
+        _sf_path="${_sf_line#EnvironmentFile=}"
+        case "$_sf_path" in
+          "$R_SITEENV/$_sf_user/"*.env) ;;
+          *) return 1 ;;
+        esac
+        _sf_id="${_sf_path#"$R_SITEENV/$_sf_user/"}"
+        _sf_id="${_sf_id%.env}"
+        tp_siteenv_id_ok "$_sf_id" || return 1
+        _sf_seen=$((_sf_seen + 1))
+        ;;
+      *) ;;
+    esac
+  done < "$_sf_file"
+  [ "$_sf_seen" -le 1 ]
 }
 
 # The hosting Caddy unit, beyond the account checks in tp_unit_ok: the vendored
@@ -5504,6 +5550,50 @@ tp_verb_app_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- site variables (EnvironmentFile=) ---------------------------------------
+# A site's cron jobs (and, later, workers and commands) load the same values
+# the web request gets. The copy is made the way a native app's is, with one
+# more level: <config>/site-env/<linux user>/<site id>.env, so tp_site_envfile_ok
+# can tie the path to the unit's own User=. The staged source is
+# <state>/sites/.env-stage/<site id>.env (the daemon's, 0600).
+
+tp_siteenv_id_ok() {
+  case "$1" in
+    ''|-*|*[!a-z0-9-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+tp_verb_site_env_install() {
+  [ $# -eq 2 ] || tp_die "site-env-install: takes a user and a site id"
+  _si_user="$1"
+  _si_id="$2"
+  tp_is_principal "$_si_user" || tp_die "site-env-install: $_si_user is not a principal"
+  tp_principal_own_group "$_si_user" || tp_die "site-env-install: $_si_user has no group of its own"
+  tp_siteenv_id_ok "$_si_id" || tp_die "site-env-install: refusing site id $_si_id"
+  tp_stage_dir
+  tp_read_staged "$_si_id" "$_si_id.env" "$R_SITEENV_STAGE" "$TP_APPENV_MAX" \
+    "$TP_STAGE/envsrc" "site variables file"
+  tp_appenv_content_ok "$TP_STAGE/envsrc" ||
+    tp_die "refusing the site variables file for $_si_id: content outside the allowed shape"
+  tp_appenv_enter "$R_SITEENV"
+  tp_appenv_enter "$R_SITEENV/$_si_user"
+  tp_put_file "$R_SITEENV/$_si_user/$_si_id.env" 600 < "$TP_STAGE/envsrc"
+}
+
+tp_verb_site_env_remove() {
+  [ $# -eq 2 ] || tp_die "site-env-remove: takes a user and a site id"
+  _sr_user="$1"
+  _sr_id="$2"
+  tp_is_principal "$_sr_user" || tp_die "site-env-remove: $_sr_user is not a principal"
+  tp_siteenv_id_ok "$_sr_id" || tp_die "site-env-remove: refusing site id $_sr_id"
+  # No folder yet: this account has had no site variables, nothing to remove.
+  tp_pin_dir "$R_SITEENV/$_sr_user" || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_SITEENV/$_sr_user: not a root-owned 0700 directory"
+  rm -f -- "./$_sr_id.env"
+}
+
 # --- tunnel connector token (EnvironmentFile=) --------------------------------
 # A tunnel's run token reaches its connector the way a native app's variables
 # reach the app (see above): the daemon stages <state>/cloudflared/tunnels/<id>.env
@@ -6208,6 +6298,8 @@ case "$_verb" in
   php-loopback-sync) tp_verb_php_loopback_sync "$@" ;;
   app-env-install) tp_verb_app_env_install "$@" ;;
   app-env-remove) tp_verb_app_env_remove "$@" ;;
+  site-env-install) tp_verb_site_env_install "$@" ;;
+  site-env-remove) tp_verb_site_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
   tunnel-loopback-sync) tp_verb_tunnel_loopback_sync "$@" ;;

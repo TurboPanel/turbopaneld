@@ -5523,3 +5523,192 @@ test("a site owner name is never a word an INI reader turns into 1 or nothing", 
     }
   });
 });
+
+// --- site-env-install / site-env-remove, and a site unit's EnvironmentFile= ---
+// A site's variables for its cron jobs: one folder per Linux user under
+// <config>/site-env, and a site unit may name only its own account's file.
+
+const SITE_ENV_ID = "web-0123456789ab";
+const SITE_ENV_STAGED =
+  `var/lib/turbopanel/sites/.env-stage/${SITE_ENV_ID}.env`;
+const SITE_ENV_COPY = `etc/turbopanel/site-env/alice/${SITE_ENV_ID}.env`;
+
+const SITE_ENV_ENTRIES = [
+  { name: "DB_HOST", value: "db.example.test" },
+  { name: "TEST_SECRET", value: 'it\'s $HOME `x` \\ "y"' },
+];
+
+async function stageSiteEnv(host: Host, text: string, id = SITE_ENV_ID) {
+  const rel = `var/lib/turbopanel/sites/.env-stage/${id}.env`;
+  await Deno.mkdir(host.path(rel.slice(0, rel.lastIndexOf("/"))), {
+    recursive: true,
+  });
+  await Deno.writeTextFile(host.path(rel), text);
+}
+
+test("site-env-install copies a checked file into the account's own root-only folder", async () => {
+  await withHost(async (host) => {
+    const text = renderNativeAppEnvFile(SITE_ENV_ENTRIES);
+    await stageSiteEnv(host, text);
+    const result = await host.run([
+      "site-env-install",
+      "alice",
+      SITE_ENV_ID,
+    ]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SITE_ENV_COPY)), text);
+    assertEquals(await modeOf(host.path(SITE_ENV_COPY)), 0o600);
+    assertEquals(
+      await modeOf(host.path("etc/turbopanel/site-env/alice")),
+      0o700,
+    );
+    assertEquals(await modeOf(host.path("etc/turbopanel/site-env")), 0o700);
+    // A later run replaces the copy.
+    await stageSiteEnv(
+      host,
+      renderNativeAppEnvFile([{ name: "A", value: "1" }]),
+    );
+    assertEquals(
+      (await host.run(["site-env-install", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    assertEquals(
+      await Deno.readTextFile(host.path(SITE_ENV_COPY)),
+      renderNativeAppEnvFile([{ name: "A", value: "1" }]),
+    );
+  });
+});
+
+test("site-env-install refuses a non-principal, a bad id, a link and a bad file", async () => {
+  await withHost(async (host) => {
+    const good = renderNativeAppEnvFile(SITE_ENV_ENTRIES);
+    await stageSiteEnv(host, good);
+    await refused(host, ["site-env-install", "root", SITE_ENV_ID]);
+    await refused(host, ["site-env-install", "nobody", SITE_ENV_ID]);
+    await refused(host, ["site-env-install", "alice"]);
+    await refused(host, ["site-env-install", "alice", SITE_ENV_ID, "extra"]);
+    for (const id of ["../web", "Web", "-web", "web.env", "a/b", ""]) {
+      await refused(host, ["site-env-install", "alice", id]);
+    }
+    // A link at the staged path to a file only root can read.
+    await Deno.remove(host.path(SITE_ENV_STAGED));
+    await Deno.symlink(host.path("outside/secret"), host.path(SITE_ENV_STAGED));
+    await refused(host, ["site-env-install", "alice", SITE_ENV_ID]);
+    // Content the daemon never writes.
+    await Deno.remove(host.path(SITE_ENV_STAGED));
+    await Deno.writeTextFile(host.path(SITE_ENV_STAGED), "A=unquoted\n");
+    await refused(host, ["site-env-install", "alice", SITE_ENV_ID]);
+    const copied = await Deno.lstat(host.path(SITE_ENV_COPY)).then(
+      () => true,
+      () => false,
+    );
+    assertEquals(copied, false);
+  });
+});
+
+test("site-env-remove deletes the copy; no folder is fine; no generic verb reaches it", async () => {
+  await withHost(async (host) => {
+    assertEquals(
+      (await host.run(["site-env-remove", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    await stageSiteEnv(host, renderNativeAppEnvFile(SITE_ENV_ENTRIES));
+    assertEquals(
+      (await host.run(["site-env-install", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    assertEquals(
+      (await host.run(["site-env-remove", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    const left = await Deno.lstat(host.path(SITE_ENV_COPY)).then(
+      () => true,
+      () => false,
+    );
+    assertEquals(left, false);
+    await refused(host, ["site-env-remove", "root", SITE_ENV_ID]);
+    await refused(host, ["site-env-remove", "alice", "../x"]);
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      host.path("tmp/staged"),
+      host.path(SITE_ENV_COPY),
+    ]);
+  });
+});
+
+test("a site's cron unit may load only its own account's variables copy", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const base = {
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    };
+    const own = host.path(SITE_ENV_COPY);
+    const name = "turbopanel-cron-env1-web-nightly.service";
+    const install = async (content: string, unit = name) =>
+      await host.run([
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stageContent(host, content),
+        host.path(`etc/systemd/system/${unit}`),
+      ]);
+    const ok = await install(
+      cronServiceContent({ ...base, environmentFile: own, phpSeries: "8.4" }),
+    );
+    assertEquals(ok.code, 0, ok.stderr);
+    const text = cronServiceContent({ ...base, environmentFile: own });
+    const bad = [
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${host.path("etc/turbopanel/site-env/bob/x.env")}`,
+      ),
+      text.replace(`EnvironmentFile=${own}`, `EnvironmentFile=-${own}`),
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${own}\nEnvironmentFile=${own}`,
+      ),
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${host.path("etc/turbopanel/daemon.env")}`,
+      ),
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${host.path("etc/turbopanel/site-env/alice/Bad.env")}`,
+      ),
+    ];
+    for (const content of bad) {
+      assertEquals((await install(content)).code === 0, false, content);
+    }
+    // The same line in a unit that is not a site unit is refused.
+    const other = await install(
+      cronServiceContent({ ...base, environmentFile: own }),
+      "turbopanel-other-env1-web.service",
+    );
+    assertEquals(other.code === 0, false);
+  });
+});

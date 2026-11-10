@@ -32,6 +32,7 @@ import {
 } from "./site.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
 import { sitePhpRuntimeChildren } from "./site/php-runtime.ts";
+import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -537,9 +538,21 @@ test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async (
   }
 });
 
-test("formatHostingEnvFile sorts keys and escapes quotes", () => {
-  const file = formatHostingEnvFile({ B: "two", A: 'say "hi"' });
-  assertEquals(file, 'A="say \\"hi\\""\nB="two"\n');
+test("formatHostingEnvFile sorts keys and renders what a shell and systemd read back", () => {
+  assertEquals(
+    formatHostingEnvFile({ B: "two", A: 'say "hi"' }),
+    "# Managed by TurboPanel — rewritten on every deploy; edits are overwritten.\n" +
+      `A='say "hi"'\nB='two'\n`,
+  );
+  const tricky = 'it\'s $HOME `x` \\ "q"';
+  assertEquals(
+    formatHostingEnvFile({ TRICKY: tricky, MULTI: "a\nb", PLAIN: "x" }),
+    renderNativeAppEnvFile([
+      { name: "MULTI", value: "a\nb" },
+      { name: "PLAIN", value: "x" },
+      { name: "TRICKY", value: tricky },
+    ]),
+  );
 });
 
 test("defaultIndexHtml includes the compose service name", () => {

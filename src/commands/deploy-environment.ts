@@ -73,6 +73,11 @@ import {
 import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import {
+  materializeSiteEnvFiles,
+  siteEnvFileId,
+  siteEnvRootPath,
+} from "../deploy/site/site-env-file.ts";
+import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
   createNoopCommandOutputSink,
@@ -150,6 +155,7 @@ import {
   pruneHoldKeysForDeploy,
   removeNamedSites,
   resolveSiteDocumentRoot,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
   siteWritableDirs,
@@ -1414,21 +1420,37 @@ async function applyDeployCronJobs(
     // The wire contract already refuses jobs without a principal; this keeps
     // the type honest rather than re-reporting it.
     if (!site.cron || site.cron.length === 0 || !principal) continue;
+    const release = releaseBindings.get(site.composeServiceName);
+    const managed = managedBindings.get(site.composeServiceName);
+    const owner = release ?? managed;
+    const phpSeries = resolveSitePhpSeries(site);
     specs.push({
       composeServiceName: site.composeServiceName,
       username: principal.username,
-      workingDirectory: resolveSiteDocumentRoot(
-        layout,
-        parsedPayload.environmentId,
-        site,
-        releaseBindings.get(site.composeServiceName),
-        managedBindings.get(site.composeServiceName),
-      ),
-      siteWritableDirs: siteCronWritableDirs(
-        layout,
-        releaseBindings.get(site.composeServiceName),
-        managedBindings.get(site.composeServiceName),
-      ),
+      // A release-backed site's jobs run in the release root (so a framework's
+      // `php artisan` works as typed); a managed-directory site's in its
+      // document root.
+      workingDirectory: release
+        ? serviceTree(layout, release).currentLink
+        : resolveSiteDocumentRoot(
+          layout,
+          parsedPayload.environmentId,
+          site,
+          release,
+          managed,
+        ),
+      siteWritableDirs: siteCronWritableDirs(layout, release, managed),
+      // The same file the site's environment step installed for this account.
+      ...(owner
+        ? {
+          environmentFile: siteEnvRootPath(
+            layout,
+            owner.username,
+            siteEnvFileId(parsedPayload.environmentId, site.composeServiceName),
+          ),
+        }
+        : {}),
+      ...(phpSeries === undefined ? {} : { phpSeries }),
       jobs: site.cron,
     });
   }
@@ -3223,6 +3245,17 @@ async function deployEnvironmentHolding(
     parsedPayload,
     siteReleaseBindings,
   );
+  // Each site's environment file (cron jobs load it), before anything runs a
+  // command or applies a site.
+  const siteEnvLines = await materializeSiteEnvFiles(
+    layout,
+    parsedPayload.environmentId,
+    sites,
+    siteReleaseBindings,
+    siteManagedBindings,
+    runtime.runPrivileged,
+  );
+  for (const line of siteEnvLines) runtime.logSink.onLine("stderr", line);
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
     appliedReleases,

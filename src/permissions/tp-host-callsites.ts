@@ -1165,6 +1165,23 @@ const SITES: CallSite[] = [
     { argv: ["app-env-remove", "svc1-new"] },
   ),
   tpHost(
+    'src/deploy/site/site-env-file.ts|["-n","site-env-install",username,siteId]',
+    {
+      argv: ["site-env-install", "alice", "web-0123456789ab"],
+      setup: file(
+        `${STATE}/sites/.env-stage/web-0123456789ab.env`,
+        renderNativeAppEnvFile([
+          { name: "DB_HOST", value: "db.example.test" },
+          { name: "TEST_SECRET", value: "it's $HOME `x`" },
+        ]),
+      ),
+    },
+  ),
+  tpHost(
+    'src/deploy/site/site-env-file.ts|["-n","site-env-remove",username,siteId]',
+    { argv: ["site-env-remove", "alice", "web-0123456789ab"] },
+  ),
+  tpHost(
     'src/deploy/native/apply-native-apps.ts|["-n","systemctl",...args]',
     { argv: ["systemctl", "restart", "turbopanel-app-svc1.service"] },
     {

@@ -173,6 +173,7 @@ import {
   type SitePhpUnitListing,
 } from "./site/php-runtime-apply.ts";
 import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
+import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
@@ -1837,19 +1838,18 @@ function openlitespeedVhostsDir(layout: LayoutPaths): string {
   return join(openlitespeedConfigDir(layout), "vhosts");
 }
 
-/** Dotenv-style file for host-native stacks (the engine apply path reads it later). */
+/**
+ * The site's variables as a file a shell can load
+ * (`set -a; . hosting.env; set +a`) and systemd's `EnvironmentFile=` reads back
+ * exactly: the native app format (single quotes, or double quotes with `\ " \``
+ * and `$` escaped), sorted by name. The owner's copy and the root copy
+ * (`deploy/site/site-env-file.ts`) are rendered by the same function.
+ */
 export function formatHostingEnvFile(env: Record<string, string>): string {
-  const keys = Object.keys(env).sort((a, b) => a.localeCompare(b));
-  const lines: string[] = [];
-  for (const key of keys) {
-    const value = env[key] ?? "";
-    const escaped = value
-      .replaceAll("\\", String.raw`\\`)
-      .replaceAll('"', String.raw`\"`)
-      .replaceAll("\n", String.raw`\n`);
-    lines.push(`${key}="${escaped}"`);
-  }
-  return `${lines.join("\n")}\n`;
+  const entries = Object.keys(env)
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({ name, value: env[name] ?? "" }));
+  return renderNativeAppEnvFile(entries);
 }
 
 /** The managed database's CA bundle, in the site's hosting folder. */
@@ -1946,7 +1946,7 @@ async function writeHostingWebMetadata(
  * the same `sudo -n install` seam every other managed config file uses, so the
  * destination's owner and mode are set by the same call that publishes it.
  */
-async function writeReleaseHostingWebMetadata(
+export async function writeReleaseHostingWebMetadata(
   layout: LayoutPaths,
   environmentId: string,
   site: SiteApplySpec,
