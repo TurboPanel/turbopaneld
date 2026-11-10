@@ -273,6 +273,16 @@ listen on 127.0.0.1 and `$PORT`. No unit setting forces this: systemd's
 directions, so they would also cut the app off from every outside service it
 calls.
 
+**Account walls.** The app runs as its account, so the account walls
+(`lib/tp-php-loopback`, see `../site/AGENTS.md`) bind it: on loopback it may
+reach the database proxy (127.0.0.1:13306, 15432), the resolver, and its own
+account's app ports (each `turbopanel-app-*.service`'s `User=` and `PORT=`,
+check copies included), nothing else, and no container by bridge address.
+The apply runs `tp-host php-loopback-sync` after the units are on disk and
+before any starts (so an app that calls its own port finds it open), after a
+check copy is retired and after apps are removed (so a port the ledger hands
+on stops opening for the old account). A failed sync only warns.
+
 **Application mode.** `appMode` renders as `Environment=NODE_ENV=<mode>` in the
 unit (default `production`; any other value matching `NATIVE_APP_MODE_RE`,
 such as `staging`, is passed as is) and rides into the release build as the same value

@@ -3624,3 +3624,71 @@ test("the default port pick skips the control plane's band", () => {
   assertEquals(pickPortDefault(() => offered.shift() ?? 0), 40_001);
   assertThrows(() => pickPortDefault(() => 18_100), Error, "18080-19799");
 });
+
+test("the account walls are reloaded once the units are on disk, before any app starts, and after removal", async () => {
+  const host = await makeTestHost();
+  try {
+    const mock = createRunMock();
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    const isSync = (args: string[]) => args.includes("php-loopback-sync");
+    const syncs = callIndexes(mock, isSync);
+    const reloads = callIndexes(
+      mock,
+      (args) => args.includes("systemctl") && args.includes("daemon-reload"),
+    );
+    const starts = callIndexes(
+      mock,
+      (args) => args.includes("systemctl") && args.includes("enable"),
+    );
+    // The app's own port opens for its account before it can call itself.
+    assertEquals(syncs.length, 1);
+    assertEquals(syncs[0]! > reloads[0]!, true);
+    assertEquals(starts[0]! > syncs[0]!, true);
+
+    // Removal: the port goes back to the ledger, so the walls are rebuilt
+    // once the units are gone.
+    const removal = createRunMock();
+    assertEquals(
+      await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+        run: removal.run,
+        systemdUnitDir: host.unitDir,
+      }),
+      1,
+    );
+    const removeSyncs = callIndexes(removal, isSync);
+    const removeReloads = callIndexes(
+      removal,
+      (args) => args.includes("systemctl") && args.includes("daemon-reload"),
+    );
+    assertEquals(removeSyncs.length, 1);
+    assertEquals(removeSyncs[0]! > removeReloads.at(-1)!, true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a refused reload of the account walls only warns: the deploy goes on", async () => {
+  const host = await makeTestHost();
+  try {
+    const mock = createRunMock();
+    const originalRun = mock.run;
+    mock.run = async (command, args) => {
+      if (args.includes("php-loopback-sync")) return fail("nft refused");
+      return await originalRun(command, args);
+    };
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    assertEquals(result.applied, ["web"]);
+  } finally {
+    await host.cleanup();
+  }
+});

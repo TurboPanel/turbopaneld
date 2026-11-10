@@ -1235,6 +1235,27 @@ addresses are trusted per `reverse_proxy` (loopback and peers), never
 server-wide. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
 
+**The lock follows the table** (feature `tunnel-lock-follow-v1`). The table may
+carry `inbound`: every tunnel name whose site runs here, with the exact
+addresses of the other servers that carry it (empty when none does). The
+daemon stores it with the table and `tunnel-lock.ts` rewrites, in the HTTPS
+block of each listed name, only the lines it wrote itself: the
+`@tp_outside not remote_ip` lock and every `trusted_proxies` line get exactly
+those peers (loopback always first), so a new carrier is let in and a removed
+one is shut out without a site deploy. A block with no lock never gets one,
+and nothing is ever opened: an absent or empty `inbound` leaves the deployed
+lock as it is. A bound site (`bind` holding loopback) also gets this server's
+own `listenAddresses` added once it has peers, as a deploy would; nothing is
+taken out of a `bind`. `tunnel-apply.ts` judges the changed site files together
+with the forward file in one candidate set and reloads once; a refusal leaves
+every file and the stored table as they were. A table that lists only
+`inbound` names is kept, not treated as empty. A deploy takes the stored peers
+for its tunnel names too (`relockWithStoredPeers`), so a deploy prepared before
+a placement change never puts the old peers back; the same table resent after
+a deploy is checked against the site files, not only the forward file. Site
+files written by an older daemon have the same lines, so they follow the first
+table that carries `inbound` with no deploy.
+
 ## Deploy Hooks
 
 - **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the

@@ -389,13 +389,14 @@ function phpFpmExec(spec: SitePhpRuntimeSpec): string {
  *   (6070) listeners, every site's vhost and Apache backend port (which would
  *   bypass the edge and spoof `X-Forwarded-For`), Traefik's PROXY-protocol
  *   entrypoints and the HA orchestrator API. The port filter is
- *   `tp-php-loopback`: an nftables table that refuses, per site owner's Linux
- *   user, every loopback destination but 127.0.0.1:13306 and the resolver
- *   stub. The unit runs it as root in `ExecStartPre=+` and does not start when
- *   it fails (fail closed); the daemon re-runs it after installing or
- *   removing a runtime, so the user set follows the units on disk. It cannot
- *   close the gap if someone flushes the nftables ruleset while PHP runs: the
- *   next unit start, deploy or daemon boot restores it.
+ *   `tp-php-loopback`: an nftables table that refuses, for every Hosting
+ *   Account uid, every loopback destination but the database proxy
+ *   (127.0.0.1:13306, 15432), the resolver and the account's own native app
+ *   ports. The unit runs it as root in `ExecStartPre=+` and does not start
+ *   when it fails (fail closed); a boot unit and the daemon re-run it, so the
+ *   rules follow the units on disk. It cannot close the gap if someone
+ *   flushes the nftables ruleset: the next unit start, deploy or daemon boot
+ *   restores it.
  * - `link-local` (169.254/16, fe80::/10) and `fc00::/7` (ULA, which holds
  *   AWS's IPv6 metadata `fd00:ec2::254`): cloud metadata.
  * - `multicast` and `0.0.0.0/8` (which Linux routes to the host itself).

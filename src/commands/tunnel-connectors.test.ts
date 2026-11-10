@@ -80,6 +80,22 @@ test("a new tunnel gets its connector, and the token is on no command line", asy
   });
 });
 
+/** The same io, with `systemctl is-active` answering `state`. */
+function unitIn(io: ConnectorIo, calls: string[], state: string): ConnectorIo {
+  return {
+    ...io,
+    run: (command, args): Promise<RunResult> => {
+      calls.push([command, ...args].join(" "));
+      const active = args.includes("is-active");
+      return Promise.resolve({
+        success: !active || state === "active",
+        stdout: active ? `${state}\n` : "",
+        stderr: "",
+      });
+    },
+  };
+}
+
 test("a connector that already runs is left alone and its token is not unsealed again", async () => {
   await withIo(async (io, calls) => {
     await handleTunnelConnectors(payload(), "now", {
@@ -89,12 +105,71 @@ test("a connector that already runs is left alone and its token is not unsealed 
     calls.length = 0;
     const seen: string[][] = [];
     const result = await handleTunnelConnectors(payload(), "now", {
-      io,
+      io: unitIn(io, calls, "active"),
       decryptSecrets: unseal(seen),
     });
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
     assertEquals(seen, []);
-    assertEquals(calls, []);
+    // Only asked whether it runs: nothing started, stopped or restarted.
+    assertEquals(calls.length, 1);
+    assert(calls[0]!.includes("is-active"));
+  });
+});
+
+for (const state of ["inactive", "failed"]) {
+  test(`a connector whose service is ${state} is started again by a resend, with no new token`, async () => {
+    await withIo(async (io, calls) => {
+      await handleTunnelConnectors(payload(), "now", {
+        io,
+        decryptSecrets: unseal(),
+      });
+      calls.length = 0;
+      const seen: string[][] = [];
+      const result = await handleTunnelConnectors(payload(), "now", {
+        io: unitIn(io, calls, state),
+        decryptSecrets: unseal(seen),
+      });
+      assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
+      assertEquals(seen, []);
+      const unit = `turbopanel-tunnel-${ID_A}`;
+      const start = calls.findIndex((c) =>
+        c.includes(" start ") && c.includes(unit)
+      );
+      const reset = calls.findIndex((c) =>
+        c.includes("reset-failed") && c.includes(unit)
+      );
+      assert(reset >= 0 && start > reset);
+      assertEquals(calls.filter((c) => c.includes("restart")), []);
+    });
+  });
+}
+
+test("a stopped connector the host refuses to start fails the command so it is sent again", async () => {
+  await withIo(async (io) => {
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    const refusing: ConnectorIo = {
+      ...io,
+      run: (_command, args) =>
+        Promise.resolve(
+          args.includes("is-active")
+            ? { success: false, stdout: "inactive\n", stderr: "" }
+            : args.includes("start")
+            ? { success: false, stdout: "", stderr: "refused" }
+            : { success: true, stdout: "", stderr: "" },
+        ),
+    };
+    await assertRejects(
+      () =>
+        handleTunnelConnectors(payload(), "now", {
+          io: refusing,
+          decryptSecrets: unseal(),
+        }),
+      Error,
+      ID_A,
+    );
   });
 });
 
@@ -250,7 +325,9 @@ test("a tunnel moved to its second unit by an update is still present, so a rese
     });
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
     assertEquals(seen, []);
-    assertEquals(calls, []);
+    // Only asked whether the unit it runs on now (the second one) runs.
+    assertEquals(calls.length, 1);
+    assert(calls[0]!.includes(`is-active turbopanel-tunnel-${ID_A}-b.service`));
   });
 });
 
