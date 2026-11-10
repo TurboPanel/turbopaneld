@@ -238,8 +238,14 @@ mountpoints kept on purpose are left off that list. It also lists packages
 kept and why (a Docker or PHP package whose purge would have dragged others
 along); a note that other packages stay installed by design; that
 `/etc/systemd/timesyncd.conf` is left as written; a reboot only when Docker
-bridges or chains could not be removed; and the commands to install a daemon or
-a self-hosted control plane again.
+bridges or chains could not be removed; the Raspberry Pi boot settings
+`tp-kernel-features` added and left on purpose (`kernel=kernel8.img` in
+`config.txt`, `cgroup_enable=memory` in `cmdline.txt`, each only with its
+marker in `/var/lib/turbopanel-kernel`), with how to undo each by hand (the
+undo command is gone with `/opt/turbopanel`) and where the
+`/boot/firmware/*.tp-backup-*` copies are (`tp_note_kernel_boot_line`; the
+purge never edits those files or removes the markers); and the commands to
+install a daemon or a self-hosted control plane again.
 
 ## Installer script hosting
 

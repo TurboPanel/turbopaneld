@@ -4006,15 +4006,27 @@ tp_print_reinstall_commands() {
   tp_say "  curl -fsSL https://turbopanel.sh | sh"
 }
 
-# The Raspberry Pi 4 KiB page-size line tp-kernel-features adds stays: taking
-# it out changes the kernel the board boots. Its marker stays too, so a later
-# `tp-kernel-features undo` still knows the line was TurboPanel's and not the
-# operator's.
+# The Raspberry Pi boot settings tp-kernel-features adds stay: the 4 KiB
+# page-size line in config.txt (taking it out changes the kernel the board
+# boots) and the cgroup_enable=memory word in cmdline.txt (taking it out turns
+# memory limits off). Their markers and the backup copies stay too, so the
+# operator can undo either by hand: the kernel-features undo command lived
+# under /opt/turbopanel and is gone with this purge.
 tp_note_kernel_boot_line() {
-  [ -f "$TP_KERNEL_MARKER_DIR/pi-4k-pagesize.applied" ] || return 0
-  [ -f "$TP_PI_BOOT_CONFIG" ] || return 0
-  grep -qx '[[:space:]]*kernel=kernel8.img[[:space:]]*' "$TP_PI_BOOT_CONFIG" 2>/dev/null || return 0
-  tp_say "The Raspberry Pi boot setting kernel=kernel8.img in $TP_PI_BOOT_CONFIG was left on purpose; to undo it, delete that line from $TP_PI_BOOT_CONFIG, then reboot."
+  _kb_noted=false
+  if [ -f "$TP_KERNEL_MARKER_DIR/pi-4k-pagesize.applied" ] && [ -f "$TP_PI_BOOT_CONFIG" ] &&
+    grep -qx '[[:space:]]*kernel=kernel8.img[[:space:]]*' "$TP_PI_BOOT_CONFIG" 2>/dev/null; then
+    tp_say "The Raspberry Pi boot setting kernel=kernel8.img in $TP_PI_BOOT_CONFIG was left on purpose; to undo it, delete that line from $TP_PI_BOOT_CONFIG, then reboot."
+    _kb_noted=true
+  fi
+  if [ -f "$TP_KERNEL_MARKER_DIR/pi-memory-cgroup.applied" ] && [ -f "$TP_PI_BOOT_CMDLINE" ] &&
+    head -n 1 "$TP_PI_BOOT_CMDLINE" 2>/dev/null | tr ' \t\r' '\n\n\n' | grep -qx 'cgroup_enable=memory'; then
+    tp_say "The Raspberry Pi boot setting cgroup_enable=memory in $TP_PI_BOOT_CMDLINE was left on purpose (it turns memory limits on); to undo it, remove that word from the one line in $TP_PI_BOOT_CMDLINE (keep it a single line), then reboot."
+    _kb_noted=true
+  fi
+  if [ "$_kb_noted" = true ]; then
+    tp_say "The copies from before each change are kept as $TP_PI_BOOT_DIR/*.tp-backup-<time> (copy one back over its file to restore it exactly), and $TP_KERNEL_MARKER_DIR records what TurboPanel changed; delete them once you no longer need them."
+  fi
 }
 
 # The fabric's and Docker's forwarding drop-ins are gone, but the running
@@ -4263,7 +4275,9 @@ TP_SYSTEMD_DIRS="/etc/systemd/system /usr/local/lib/systemd/system /lib/systemd/
 TP_DAEMON_ENV=/etc/turbopanel/daemon.env
 TP_RESUME_DIR=/var/lib/turbopanel-purge
 TP_KERNEL_MARKER_DIR=/var/lib/turbopanel-kernel
-TP_PI_BOOT_CONFIG=/boot/firmware/config.txt
+TP_PI_BOOT_DIR=/boot/firmware
+TP_PI_BOOT_CONFIG=$TP_PI_BOOT_DIR/config.txt
+TP_PI_BOOT_CMDLINE=$TP_PI_BOOT_DIR/cmdline.txt
 TP_IP_FORWARD_FILE=/proc/sys/net/ipv4/ip_forward
 TP_PURGE_MARKER=$TP_RESUME_DIR/purge-in-progress
 TP_RESUME_MANIFEST=$TP_RESUME_DIR/resume-manifest
