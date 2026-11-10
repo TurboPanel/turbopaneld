@@ -136,6 +136,16 @@ const ADDITIONAL_HOST_ACCOUNT_NAMES = [
   "unbound",
   "chrony",
   "ntp",
+  // Words an INI reader (php-fpm, php.ini) turns into 1 or an empty value, so
+  // a pool naming one would run as uid or gid 1, or as nobody at all.
+  "yes",
+  "no",
+  "on",
+  "off",
+  "true",
+  "false",
+  "none",
+  "null",
   "lightdm",
   "gdm",
   "pulse",

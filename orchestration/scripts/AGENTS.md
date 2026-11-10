@@ -47,6 +47,35 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `60-turbopanel.conf`, `/etc/wireguard/tp0.conf`,
     `/etc/sysctl.d/99-turbopanel-*.conf`, `rm` of `/var/lib/systemd/timers/stamp-turbopanel-*.timer` (a deleted timer's stamp file, nothing else in that folder), operator storage under
     `/mnt|/media|/data|/srv` for principal-owned volumes);
+  - below the config root, lets the generic write verbs (`install`,
+    `install -d`, `mkdir`, `tee`, `cp -p`, `mv`, `rm`, `chown`, `chmod`)
+    touch only what the daemon really writes (`tp_config_write_ok`, an
+    allow-list): its leaves and loose files, the engine config folders
+    (`nginx`, `apache`, `openlitespeed`, `site-caddy`), files in
+    `php/<series>/pools/`, `instance/runtime.env` and
+    `caddy/instance-acme.json` / `caddy/instance-acme-settings.json`.
+    Everything else is root's (the system stack's scripts and the backup job
+    root runs on a timer under `system/`, the control plane's other config, a
+    php-fpm series folder and its `conf.d`), and so is the config root itself.
+    `install -d -m 0750` of `instance` itself is allowed only without an owner. A
+    `pools` folder is made only as `install -d -m 0750 -o root -g
+    tpapache|tpols`, re-owned only by that same `install -d` (to the other master group), never removed or chmodded, holds no folder, and a pool file is
+    always root-owned. A new folder the daemon needs under the config root
+    goes on that list in the same change, with its reader named;
+  - checks a shared php-fpm master's pool file (`tp_phppool_ok`): only the
+    directives `phpFpmPoolConfig` renders, no `[global]`, and `user`,
+    `group`, `listen.owner`, `listen.group` each exactly once per pool; the
+    workers run as a site owner with its own group (`tp_principal_own_group`)
+    or as one web server account (`ENGINE_USERS`) with the group of that
+    name, and the socket belongs to one web server account, owner and group
+    the same; `listen` is exactly `<run>/php/<series>/<pool>.sock` (the
+    pool file's own series) and `listen.mode` is `0660`, because the root
+    master removes, binds and re-owns whatever path is named there. Never
+    root, `tp`, another account's group, a system group (`disk`, `shadow`,
+    `docker`, ...) or a word an INI reader turns into 1 or an empty value
+    (`yes`, `on`, `none`, ...; site owner names refuse these too). The
+    daemon's own files there (`instance/runtime.env`, the two issuer files,
+    the loose files) are never made folders;
   - pins every path (`cd -P` + `pwd -P` equality, so no component is a
     symlink) and works relative to the pinned directory; writes go through a
     root-only 0700 scratch directory and `mv -T`; root reads are checked on

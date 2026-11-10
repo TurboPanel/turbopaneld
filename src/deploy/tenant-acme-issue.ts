@@ -61,7 +61,12 @@ export function tenantAcmeUnit(requestId: string): string {
   return `${TENANT_ACME_SERVICE_PREFIX}${requestId}.service`;
 }
 
-/** The issuer's storage; its `caddy/acme` folder holds this server's one account. */
+/**
+ * Server-placed order state: `account/` holds this server's ACME accounts (one
+ * per contact address); `requests/` and `caddy/` are what an older release's
+ * one-shot issuer left, cleared by the start-up sweep (its `caddy/acme`
+ * account folder is kept and no longer used).
+ */
 export function tenantAcmeDataDir(layout: LayoutPaths): string {
   return join(layout.stateDir, "tenant-acme");
 }
@@ -451,12 +456,14 @@ async function cleanUp(
 }
 
 /**
- * At start-up, before any request is taken: a daemon restart (the hourly update
- * check restarts it) can leave an issuer running with nobody to stop it, which
- * would keep retrying after its proof routes expire and leave a private key on
- * disk. Stop every issuer unit and delete the per-request config and logs, the
- * stored certificates and keys and the leftover sockets. The shared account
- * store (`caddy/acme`) stays, so the server keeps its one ACME account.
+ * At start-up, before any request is taken: clear what an older release's
+ * one-shot issuer may have left. A daemon updated from such a release can find
+ * an issuer unit still running with nobody to stop it, which would keep
+ * retrying after its proof routes expire and leave a private key on disk. Stop
+ * every `turbopanel-tenant-acme@*` unit and delete the per-request config and
+ * logs, the certificates and keys it stored and the leftover request sockets.
+ * The accounts stay: `account/` (this daemon's own client, one per contact
+ * address) and the old issuer's `caddy/acme`.
  */
 export async function sweepTenantAcme(
   layout: LayoutPaths,

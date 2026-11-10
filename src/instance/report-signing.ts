@@ -1,5 +1,7 @@
 /**
  * Daemon-signed reports on a signed session. The control plane acts on a
+ * `managed-ha-event` only when it is signed (it fences and promotes database
+ * members), and on a
  * `command-outcome` (a fabric reconcile result carries this host's
  * TurboFabric public key, which it hands to other servers) and on a
  * `fabric-peers-report` (peer health it reads as liveness), so on a signed
@@ -21,10 +23,15 @@
 import { signChallenge } from "../crypto/keys.ts";
 import { REPORT_PREFIX, SIG_SUFFIX_MARKER } from "./panel-identity-frames.ts";
 
-/** The frames this daemon signs on a signed session. */
+/**
+ * The frames this daemon signs on a signed session. `managed-ha-event` (dead
+ * primary and boot-hold reports) is signed only for a control plane that
+ * lists `signed-ha-events-v1`; that control plane acts on no unsigned one.
+ */
 export const SIGNED_REPORT_TYPES: ReadonlySet<string> = new Set([
   "command-outcome",
   "fabric-peers-report",
+  "managed-ha-event",
 ]);
 
 /** Envelope members a signed report carries; a report may not use these names. */
@@ -65,6 +72,11 @@ function reportRecord(data: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/** The report type of `data` (one of {@link SIGNED_REPORT_TYPES}), or null. */
+export function reportTypeOf(data: string): string | null {
+  return (reportRecord(data)?.type as string | undefined) ?? null;
 }
 
 /**
