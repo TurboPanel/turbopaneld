@@ -142,7 +142,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
-   mode `0600`, dir `0700`). Files are only written before `up`. Once the new release is up (and its
+   mode `0444`, dir `0700`: any user inside the one container a file is bound
+   into can read it, so images with a fixed non-root user work, while the
+   private folder stops host accounts; a tool that refuses a world-readable key
+   file needs a per-service owner, which is not done yet). Files are only
+   written before `up`. Once the new release is up (and its
    post-deploy hooks passed; for a sequential deploy, after the health gate),
    `pruneStaleSecretFiles` removes every file in that directory that is not in
    the deploy's secret plan (a detached binding's old password, a removed
@@ -579,7 +583,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
 - **Secrets:** durable `compose.yaml` must not be the long-term secret store.
   Compiled YAML references Compose standalone `secrets.file` paths under
   `/run/turbopanel/deployments/<projectId>/<environmentId>/secrets/` (mode
-  `0600`). Values arrive as `tpdaemon` envelopes in `variableMaterial[]`.
+  `0444` in a `0700` folder, see step 6). Values arrive as `tpdaemon`
+  envelopes in `variableMaterial[]`.
   After JWT session, `rehydrateLocalDeployments` (`rehydrate-deployments.ts`)
   calls `POST /api/daemon/v1/deployments/secrets/rehydrate`, decrypts via
   `/secrets/decrypt`, rewrites files, then `docker compose up -d` (first
