@@ -207,11 +207,18 @@ goes). Fire-and-forget and read-only. It exists because the control plane's
 `relay.metadata.observed` only moved on a reconcile, so healthy tunnels read
 as stale minutes after each apply.
 
-**Signed reports (`signed-reports-v1`).** On a signed session (pinned
-server, control plane hello verified) and only with a control plane that lists
-the feature, `SignedPanelSession` signs every `command-outcome` and
-`fabric-peers-report` with the daemon key at the one place all sends pass
-(`signed-session.ts`, helpers in `report-signing.ts`). Bytes: the message plus
+**Signed reports (`signed-reports-v1`, `signed-ha-events-v1`).** On a signed
+session (pinned server, control plane hello verified) and only with a control
+plane that lists the feature, `SignedPanelSession` signs every `command-outcome`
+and `fabric-peers-report` with the daemon key, and every `managed-ha-event`
+(dead-primary and boot-hold reports) when the control plane lists
+`signed-ha-events-v1` (`enabled(type)` in `client.ts`). Such a control plane
+acts on no unsigned `managed-ha-event`, so a server that is not pinned, or a
+daemon older than this, no longer fails over automatically and its held
+primaries are not released after an unclean boot. The event is held until the
+attach frame's feature list is known, like the other reports. Signing happens
+at the one place all sends pass (`signed-session.ts`, helpers in
+`report-signing.ts`). Bytes: the message plus
 `{sessionId, iat, kid}` (kid = the daemon key id) is serialized once, signed as
 `"tp-report\n" + type + "\n" + bytes`, and `,"sig":"<base64url>"}` replaces
 the final `}`, the same split rule as the control plane's frames;

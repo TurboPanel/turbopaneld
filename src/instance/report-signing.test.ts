@@ -23,6 +23,14 @@ const OUTCOME = JSON.stringify({
   result: { publicKey: "fabric-key" },
   at: "2026-11-05T12:00:00.000Z",
 });
+const HA_EVENT = JSON.stringify({
+  type: "managed-ha-event",
+  managedId: "00000000-0000-4000-8000-0000000000aa",
+  instanceHost: "10.0.0.5",
+  instancePort: 3306,
+  evidence: { spanMs: 20_000 },
+  at: "2026-11-05T12:00:00.000Z",
+});
 const PEERS = JSON.stringify({
   type: "fabric-peers-report",
   peers: [],
@@ -93,6 +101,7 @@ test("a frame that is not a report is left as it is", async () => {
   assertEquals(mayBeSignedReport(hello), false);
   assertEquals(mayBeSignedReport(OUTCOME), true);
   assertEquals(mayBeSignedReport(PEERS), true);
+  assertEquals(mayBeSignedReport(HA_EVENT), true);
 });
 
 test("a report that already uses an envelope member is not signed", async () => {
@@ -120,7 +129,8 @@ class RecordingSocket extends MockWebSocket {
 
 async function verifiedSession(options: {
   key: ReportSigningKey | undefined;
-  enabled: boolean;
+  /** Whether the control plane takes reports signed; per report type when a function. */
+  enabled: boolean | ((type: string) => boolean);
   /** Whether the attach frame's feature list has arrived; absent = no hold. */
   known?: () => boolean;
   recording?: boolean;
@@ -140,7 +150,10 @@ async function verifiedSession(options: {
     onPong: () => {},
     reportSigning: {
       key: () => options.key,
-      enabled: () => options.enabled,
+      enabled: (type) =>
+        typeof options.enabled === "function"
+          ? options.enabled(type)
+          : options.enabled,
       ...(options.known ? { known: options.known } : {}),
     },
     now: () => NOW_MS,
@@ -259,4 +272,49 @@ test("held reports past the bound are dropped", async () => {
   h.session.peerFeaturesKnown();
   await h.session.settled();
   assertEquals(h.sent().length, MAX_HELD_REPORTS);
+});
+
+test("a managed-ha-event is signed for a control plane that takes it signed", async () => {
+  const key = await generateDaemonKeypair();
+  const asked: string[] = [];
+  const h = await verifiedSession({
+    key,
+    enabled: (type) => {
+      asked.push(type);
+      return type === "managed-ha-event";
+    },
+  });
+  const socket = h.ws as unknown as WebSocket;
+  socket.send(HA_EVENT);
+  socket.send(OUTCOME);
+  await waitFor("two frames", () => h.sent().length === 2);
+  const [event, outcome] = h.sent();
+  assertEquals(await verifies(key.publicJwk, event!), true);
+  assertEquals(JSON.parse(splitSignature(event!)!.unsigned).sessionId, "s1");
+  // The outcome's own feature is not listed: it goes out as before.
+  assertEquals(outcome, OUTCOME);
+  assertEquals(asked, ["managed-ha-event", "command-outcome"]);
+});
+
+test("a managed-ha-event goes out as before for a control plane that does not list it", async () => {
+  const key = await generateDaemonKeypair();
+  const h = await verifiedSession({
+    key,
+    enabled: (type) => type !== "managed-ha-event",
+  });
+  (h.ws as unknown as WebSocket).send(HA_EVENT);
+  assertEquals(h.sent(), [HA_EVENT]);
+});
+
+test("a managed-ha-event sent before the feature list arrives is held, then sent signed", async () => {
+  const key = await generateDaemonKeypair();
+  let known = false;
+  const h = await verifiedSession({ key, enabled: true, known: () => known });
+  (h.ws as unknown as WebSocket).send(HA_EVENT);
+  assertEquals(h.sent(), []);
+  known = true;
+  h.session.peerFeaturesKnown();
+  await h.session.settled();
+  assertEquals(h.sent().length, 1);
+  assertEquals(await verifies(key.publicJwk, h.sent()[0]!), true);
 });
