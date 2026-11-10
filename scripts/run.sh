@@ -1158,7 +1158,8 @@ tp_resolve_channel_manifest() {
 
 # Print "<major> <minor> <patch>" for a semver (optional leading v), or nothing.
 tp_semver_base() {
-  _svb="$(printf '%s' "$1" | tr -d '[:space:]')"
+  _svb_in="$1"
+  _svb="$(printf '%s' "$_svb_in" | tr -d '[:space:]')"
   _svb="${_svb#v}"
   printf '%s' "$_svb" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || return 0
   _svb="${_svb%%+*}"
@@ -1168,13 +1169,15 @@ tp_semver_base() {
 
 # Compare two unsigned decimal strings of any length: prints -1, 0 or 1.
 tp_decimal_cmp() {
-  _dca="$(printf '%s' "$1" | sed 's/^0*//')"
-  _dcb="$(printf '%s' "$2" | sed 's/^0*//')"
-  if [ "${#_dca}" -ne "${#_dcb}" ]; then
-    [ "${#_dca}" -lt "${#_dcb}" ] && printf '%s' "-1" || printf '%s' "1"
-    return 0
-  fi
-  if [ "$_dca" = "$_dcb" ]; then
+  _dc_left="$1"
+  _dc_right="$2"
+  _dca="$(printf '%s' "$_dc_left" | sed 's/^0*//')"
+  _dcb="$(printf '%s' "$_dc_right" | sed 's/^0*//')"
+  if [ "${#_dca}" -lt "${#_dcb}" ]; then
+    printf '%s' "-1"
+  elif [ "${#_dca}" -gt "${#_dcb}" ]; then
+    printf '%s' "1"
+  elif [ "$_dca" = "$_dcb" ]; then
     printf '%s' "0"
   elif [ "$(printf '%s\n%s\n' "$_dca" "$_dcb" | LC_ALL=C sort | head -1)" = "$_dca" ]; then
     printf '%s' "-1"
@@ -1185,12 +1188,15 @@ tp_decimal_cmp() {
 
 # Milliseconds since the epoch for an ISO 8601 time, or nothing.
 tp_epoch_ms() {
-  case "$1" in
+  _ems_in="$1"
+  case "$_ems_in" in
     "" | *[!0-9TZ:.+-]*) return 0 ;;
+    *) ;;
   esac
-  _ems="$(date -u -d "$1" '+%s%3N' 2>/dev/null)" || return 0
+  _ems="$(date -u -d "$_ems_in" '+%s%3N' 2>/dev/null)" || return 0
   case "$_ems" in
     "" | *[!0-9-]*) return 0 ;;
+    *) ;;
   esac
   printf '%s' "$_ems"
 }
@@ -1199,32 +1205,40 @@ tp_epoch_ms() {
 #                              <want commit> <want version> <want builtAt>
 # Exit 0: want is older than have. 1: it is not. 2: no evidence either way.
 tp_daemon_build_older() {
-  [ -n "$1" ] && [ "$1" = "$4" ] && return 1
-  _dbo_have="$(tp_semver_base "$2")"
-  _dbo_want="$(tp_semver_base "$5")"
+  _dbo_have_commit="$1"
+  _dbo_have_version="$2"
+  _dbo_have_built="$3"
+  _dbo_want_commit="$4"
+  _dbo_want_version="$5"
+  _dbo_want_built="$6"
+  if [ -n "$_dbo_have_commit" ] && [ "$_dbo_have_commit" = "$_dbo_want_commit" ]; then
+    return 1
+  fi
+  _dbo_have="$(tp_semver_base "$_dbo_have_version")"
+  _dbo_want="$(tp_semver_base "$_dbo_want_version")"
   if [ -n "$_dbo_have" ] && [ -n "$_dbo_want" ]; then
-    # shellcheck disable=SC2086
-    set -- "$1" "$2" "$3" "$4" "$5" "$6" $_dbo_have $_dbo_want
     for _dbo_i in 1 2 3; do
-      case "$_dbo_i" in
-        1) _dbo_c="$(tp_decimal_cmp "${10}" "$7")" ;;
-        2) _dbo_c="$(tp_decimal_cmp "${11}" "$8")" ;;
-        3) _dbo_c="$(tp_decimal_cmp "${12}" "$9")" ;;
-      esac
+      _dbo_c="$(tp_decimal_cmp "$(printf '%s' "$_dbo_want" | cut -d' ' -f"$_dbo_i")" \
+        "$(printf '%s' "$_dbo_have" | cut -d' ' -f"$_dbo_i")")"
       [ "$_dbo_c" = "-1" ] && return 0
       [ "$_dbo_c" = "1" ] && return 1
     done
   fi
-  _dbo_have_at="$(tp_epoch_ms "$3")"
-  _dbo_want_at="$(tp_epoch_ms "$6")"
-  [ -n "$_dbo_have_at" ] && [ -n "$_dbo_want_at" ] || return 2
+  _dbo_have_at="$(tp_epoch_ms "$_dbo_have_built")"
+  _dbo_want_at="$(tp_epoch_ms "$_dbo_want_built")"
+  if [ -z "$_dbo_have_at" ] || [ -z "$_dbo_want_at" ]; then
+    return 2
+  fi
   [ "$_dbo_want_at" -lt "$_dbo_have_at" ] && return 0
   return 1
 }
 
 # One record field, as written by tp_write_daemon_build_floor.
+# Usage: tp_floor_field <record> <key>
 tp_floor_field() {
-  sed -n "s/^$2=//p" "$1" | head -1
+  _ff_file="$1"
+  _ff_key="$2"
+  sed -n "s/^$_ff_key=//p" "$_ff_file" | head -1
 }
 
 # Print "commit version builtAt" (tab-separated) for the floor: the record
@@ -1239,8 +1253,10 @@ tp_read_daemon_build_floor() {
       "$(tp_floor_field "$_rdf_file" builtAt)"
     return 0
   fi
-  [ -x "$_rdf_bin" ] && [ ! -L "$_rdf_bin" ] || return 0
-  _rdf_line="$("$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
+  if [ ! -x "$_rdf_bin" ] || [ -L "$_rdf_bin" ]; then
+    return 0
+  fi
+  _rdf_line="$(timeout 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
   # turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
   printf '%s' "$_rdf_line" | sed -n 's/^turbopaneld v\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}(.*,[[:space:]]*\([^,)[:space:]]\{1,\}\))[[:space:]]*$/\2\t\1\t\3/p' | head -1
 }
@@ -1248,11 +1264,16 @@ tp_read_daemon_build_floor() {
 # Refuse a target older than the floor. Usage:
 #   tp_check_daemon_build_floor <record> <installed binary> <commit> <version> <builtAt>
 tp_check_daemon_build_floor() {
+  _cdf_record="$1"
+  _cdf_bin="$2"
+  _cdf_want_commit="$3"
+  _cdf_want_version="$4"
+  _cdf_want_built="$5"
   if [ "${ALLOW_DOWNGRADE:-false}" = true ]; then
     tp_print_styled_line "1;33" "*** --allow-downgrade: the daemon build floor is not enforced for this run ***" >&2
     return 0
   fi
-  _cdf_floor="$(tp_read_daemon_build_floor "$1" "$2")"
+  _cdf_floor="$(tp_read_daemon_build_floor "$_cdf_record" "$_cdf_bin")"
   [ -n "$_cdf_floor" ] || return 0
   _cdf_tab="$(printf '\t')"
   _cdf_have_commit="${_cdf_floor%%"$_cdf_tab"*}"
@@ -1260,20 +1281,22 @@ tp_check_daemon_build_floor() {
   _cdf_have_version="${_cdf_rest%%"$_cdf_tab"*}"
   _cdf_have_built="${_cdf_rest#*"$_cdf_tab"}"
   _cdf_rc=0
-  tp_daemon_build_older "$_cdf_have_commit" "$_cdf_have_version" "$_cdf_have_built" "$3" "$4" "$5" || _cdf_rc=$?
+  tp_daemon_build_older "$_cdf_have_commit" "$_cdf_have_version" "$_cdf_have_built" \
+    "$_cdf_want_commit" "$_cdf_want_version" "$_cdf_want_built" || _cdf_rc=$?
   case "$_cdf_rc" in
     1) return 0 ;;
     2)
       # A signed release manifest always carries builtAt; one without it is
       # not something to install over a known build.
-      if [ -n "$(tp_epoch_ms "$_cdf_have_built")" ] && [ -z "$(tp_epoch_ms "$5")" ]; then
+      if [ -n "$(tp_epoch_ms "$_cdf_have_built")" ] && [ -z "$(tp_epoch_ms "$_cdf_want_built")" ]; then
         echo "run.sh: refusing a daemon release without a build time over the installed build ${_cdf_have_version:-$_cdf_have_commit}" >&2
         return 1
       fi
       return 0
       ;;
+    *) ;;
   esac
-  echo "run.sh: refusing to install daemon ${4:-$3} (built ${5:-unknown}): it is older than the installed build ${_cdf_have_version:-$_cdf_have_commit} (built ${_cdf_have_built:-unknown}). To roll back on purpose, run this installer as root with --allow-downgrade." >&2
+  echo "run.sh: refusing to install daemon ${_cdf_want_version:-$_cdf_want_commit} (built ${_cdf_want_built:-unknown}): it is older than the installed build ${_cdf_have_version:-$_cdf_have_commit} (built ${_cdf_have_built:-unknown}). To roll back on purpose, run this installer as root with --allow-downgrade." >&2
   return 1
 }
 
@@ -1281,17 +1304,27 @@ tp_check_daemon_build_floor() {
 # lib folder; values are limited to the characters a build identity uses.
 # Usage: tp_write_daemon_build_floor <record> <commit> <version> <builtAt>
 tp_write_daemon_build_floor() {
+  _wdf_record="$1"
   _wdf_commit="$2"
   _wdf_version="$3"
   _wdf_built="$4"
-  case "$_wdf_commit" in "" | *[!0-9A-Za-z._-]*) return 0 ;; esac
-  case "$_wdf_version" in *[!0-9A-Za-z.+-]*) _wdf_version="" ;; esac
-  case "$_wdf_built" in *[!0-9TZ:.+-]*) _wdf_built="" ;; esac
-  _wdf_dir="$(dirname "$1")"
+  case "$_wdf_commit" in
+    "" | *[!0-9A-Za-z._-]*) return 0 ;;
+    *) ;;
+  esac
+  case "$_wdf_version" in
+    *[!0-9A-Za-z.+-]*) _wdf_version="" ;;
+    *) ;;
+  esac
+  case "$_wdf_built" in
+    *[!0-9TZ:.+-]*) _wdf_built="" ;;
+    *) ;;
+  esac
+  _wdf_dir="$(dirname "$_wdf_record")"
   mkdir -p "$_wdf_dir" || return 1
   _wdf_tmp="$(mktemp "$_wdf_dir/.installed-build.XXXXXX")" || return 1
   if ! printf 'commit=%s\nversion=%s\nbuiltAt=%s\n' "$_wdf_commit" "$_wdf_version" "$_wdf_built" > "$_wdf_tmp" \
-    || ! chmod 0644 "$_wdf_tmp" || ! mv -f "$_wdf_tmp" "$1"; then
+    || ! chmod 0644 "$_wdf_tmp" || ! mv -f "$_wdf_tmp" "$_wdf_record"; then
     rm -f "$_wdf_tmp"
     return 1
   fi
@@ -1767,8 +1800,14 @@ tp_arm_update_guard() {
   # after the deadline. update-guard.json below is the daemon's read-only copy.
   _root_record="$(tp_prod_home)/lib/update-guard-armed"
   _boot_id="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
-  case "$_boot_id" in *[!0-9a-f-]*) _boot_id="" ;; esac
-  case "$_previous_commit" in *[!0-9A-Za-z._-]*) _previous_commit="" ;; esac
+  case "$_boot_id" in
+    *[!0-9a-f-]*) _boot_id="" ;;
+    *) ;;
+  esac
+  case "$_previous_commit" in
+    *[!0-9A-Za-z._-]*) _previous_commit="" ;;
+    *) ;;
+  esac
   mkdir -p "$(dirname "$_root_record")"
   if ! _root_tmp="$(mktemp "$(dirname "$_root_record")/.update-guard-armed.XXXXXX")"; then
     tp_print_error "Failed to write update guard record $_root_record"
