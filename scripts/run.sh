@@ -1430,11 +1430,12 @@ tp_install_verified_binary_and_orchestration() {
 
   mkdir -p "$_home/bin" "$_home/share/orchestration"
   # Keep exactly one previous generation beside the new one (update-rollback,
-  # Road to 0.1.x): bin/turbopaneld.prev and share/orchestration.prev. A
-  # rollback is a re-run of this script pinned to the previous release's
-  # manifest (--manifest-url, or TURBOPANEL_MANIFEST_URL in daemon.env); the
-  # .prev copies are the offline emergency — swap them back by hand when the
-  # rail itself is unreachable.
+  # Road to 0.1.x): bin/turbopaneld.prev and share/orchestration.prev. The
+  # update guard moves them back after a failed update (root's armed record
+  # only). Any other rollback is an operator running this script as root with
+  # --manifest-url <older release> --allow-downgrade (the build floor refuses
+  # it otherwise), or swapping the .prev copies back by hand when the rail
+  # itself is unreachable.
   tp_emit_update_stage installing
   if [ -f "$_home/bin/$_binary_name" ]; then
     rm -f "$_home/bin/$_binary_name.prev"

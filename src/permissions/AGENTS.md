@@ -109,7 +109,11 @@ it regresses:
 - **Install root ownership** — `/opt/turbopanel`, `bin/`, `lib/`, `share/`,
   `share/orchestration` and every vendored runtime are `root:tp 0750`
   (`turbopanel-user`, `daemon-layout`); `daemon-install.yml` no longer chowns
-  the vendor or orchestration trees to `tp`. Two exceptions let other accounts
+  the vendor or orchestration trees to `tp`. Root keeps its update records in
+  `lib/` for that reason: `installed-build` (the daemon build floor) and
+  `update-guard-armed` (the only record the rollback guard acts on); tp-host
+  refuses `systemctl` verbs other than `is-*` on `turbopaneld-update-guard*`
+  (`src/update/AGENTS.md`, Root build floor). Two exceptions let other accounts
   traverse without listing (an `other:x` ACL, like `vendor/` itself):
   `vendor/cloudflared` and the Caddy folders `vendor/caddy` and
   `vendor/caddy/<version>` (`caddy` role), because the hosting Caddy account

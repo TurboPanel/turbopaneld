@@ -11,6 +11,13 @@ import {
   RUN_SH_PATH,
 } from "../testing/run-sh-manifest-verifier.ts";
 import { isRollback, type TargetBuild } from "./freshness.ts";
+import { TEST_RELEASE_SIGNING_KEY_PEM } from "../testing/release-signing-fixture.ts";
+import {
+  daemonReleaseFilename,
+  generateChannelManifest,
+  jsReleaseFilename,
+  orchestrationReleaseFilename,
+} from "../../scripts/generate-channel-manifest.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -288,4 +295,120 @@ test("purge removes root's update records with the install tree", async () => {
   const source = await Deno.readTextFile(RUN_SH_PATH);
   assertStringIncludes(source, 'INSTALL_ROOT="/opt/turbopanel"');
   assertStringIncludes(source, '"$(tp_prod_home)/lib/update-guard-armed"');
+});
+
+/**
+ * A top-level function up to its closing line. The manifest readers carry
+ * unbalanced braces inside their patterns, so brace counting cannot cut them.
+ */
+function topLevelFunction(source: string, name: string): string {
+  const start = source.indexOf(`\n${name}() {\n`);
+  if (start < 0) throw new TypeError(`missing ${name} in run.sh`);
+  const end = source.indexOf("\n}\n", start + 1);
+  if (end < 0) throw new TypeError(`unclosed ${name} in run.sh`);
+  return source.slice(start + 1, end + 2);
+}
+
+/** A signed manifest exactly as the release jobs write it. */
+async function publishedManifest(version?: string): Promise<string> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-floor-manifest-" });
+  try {
+    for (
+      const name of [
+        daemonReleaseFilename("amd64", version),
+        daemonReleaseFilename("arm64", version),
+        jsReleaseFilename(version),
+        orchestrationReleaseFilename(version),
+      ]
+    ) {
+      await Deno.writeFile(join(dir, name), new Uint8Array([1, 2, 3]));
+    }
+    const written: string[] = [];
+    await generateChannelManifest({
+      publishDir: dir,
+      outputPath: join(dir, "manifest.json"),
+      buildId: "build-7",
+      commit: "abcdef0123456789abcdef0123456789abcdef01",
+      builtAt: "2026-11-01T02:03:04.000Z",
+      channel: version ? "release" : "canary",
+      ...(version ? { version } : {}),
+      artifactBaseUrl:
+        "https://github.com/TurboPanel/turbopaneld/releases/download/canary",
+      signingKeyPem: TEST_RELEASE_SIGNING_KEY_PEM,
+      writeTextFile: (_path, json) => {
+        written.push(json);
+        return Promise.resolve();
+      },
+    });
+    return written[0];
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+test("run.sh reads the build identity of a published manifest", async () => {
+  const source = await Deno.readTextFile(RUN_SH_PATH);
+  const resolve = [
+    'TP_MANIFEST_SHA_FIELD="sha256"',
+    ...[
+      "tp_resolve_linux_arch",
+      "tp_manifest_compact",
+      "tp_manifest_field",
+      "tp_manifest_artifact_field",
+      "tp_manifest_binary_artifact_field",
+      "tp_resolve_channel_manifest",
+    ].map((name) => topLevelFunction(source, name)),
+    'tp_resolve_channel_manifest "$1"',
+    'printf \'%s|%s|%s\' "$_manifest_commit" "$_manifest_version" "$_manifest_built_at"',
+  ].join("\n");
+  for (const version of ["0.1.19", undefined]) {
+    const manifest = await publishedManifest(version);
+    const out = await new Deno.Command("sh", {
+      args: ["-eu", "-c", resolve, "sh", manifest],
+      env: { PATH: "/usr/bin:/bin" },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+    assertEquals(
+      new TextDecoder().decode(out.stdout),
+      `abcdef0123456789abcdef0123456789abcdef01|${
+        version ?? ""
+      }|2026-11-01T02:03:04.000Z`,
+    );
+  }
+});
+
+test("tp-orchestrate accepts the real installer and refuses one without the floor", async () => {
+  const helper = await Deno.readTextFile(
+    join(RUN_SH_PATH, "..", "..", "orchestration", "scripts", "tp-orchestrate"),
+  );
+  const check = extractShellFunction(
+    helper,
+    "tp_require_build_floor_installer",
+  );
+  const dir = await Deno.makeTempDir({ prefix: "tp-floor-installer-" });
+  try {
+    const old = join(dir, "old-run.sh");
+    await Deno.writeTextFile(old, "#!/bin/sh\necho old installer\n");
+    for (const [script, ok] of [[RUN_SH_PATH, true], [old, false]] as const) {
+      const copy = join(dir, "run.sh.copy");
+      await Deno.copyFile(script, copy);
+      const out = await new Deno.Command("sh", {
+        args: [
+          "-eu",
+          "-c",
+          `tp_die() { printf '%s\\n' "$1" >&2; exit 1; }\n${check}\n_script="$1"\ntp_require_build_floor_installer`,
+          "sh",
+          copy,
+        ],
+        env: { PATH: "/usr/bin:/bin" },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      assertEquals(out.code === 0, ok, new TextDecoder().decode(out.stderr));
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
