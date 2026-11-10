@@ -2433,6 +2433,7 @@ it({
     const originalSetTimeout = globalThis.setTimeout;
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
     const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
     const sockets: MockWebSocket[] = [];
     const reconnectDelays: number[] = [];
     let restored = false;
@@ -2535,6 +2536,8 @@ it({
     });
 
     Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    // The installer reads the latest answer from the runtime folder.
+    Deno.env.set("TURBOPANEL_RUN_DIR", tempDir);
     Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
     await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
     await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
@@ -2557,6 +2560,11 @@ it({
             ? true
             : undefined,
       );
+      const parkedStatus = await Deno.readTextFile(
+        `${tempDir}/enroll-status`,
+      );
+      assertStringIncludes(parkedStatus, "state=parked\n");
+      assertStringIncludes(parkedStatus, "kind=awaiting-administrator\n");
       restored = true;
       const socket = await waitFor(
         "unpark websocket",
@@ -2564,6 +2572,11 @@ it({
       );
       socket.open();
       assertEquals(socket.readyState, MockWebSocket.OPEN);
+      await waitFor("connected status", async () => {
+        const text = await Deno.readTextFile(`${tempDir}/enroll-status`)
+          .catch(() => "");
+        return text === "state=connected\n" ? true : undefined;
+      });
       socket.close(1000, "done");
     } finally {
       client.stop();
@@ -2580,6 +2593,7 @@ it({
       });
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
       await Deno.remove(tempDir, { recursive: true });
     }
   },

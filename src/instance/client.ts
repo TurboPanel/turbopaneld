@@ -150,6 +150,7 @@ import {
 import { DaemonJwksClient } from "./jwks-client.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import { enrollDaemon } from "./enroll.ts";
+import { type EnrollStatus, writeEnrollStatus } from "./enroll-status.ts";
 import { decodeBase64 } from "@std/encoding/base64";
 import { getBuildInfo } from "../build-info.ts";
 import {
@@ -1700,6 +1701,22 @@ export class InstanceClient {
     }
   }
 
+  /** Tell the installer how the latest attempt went (see enroll-status.ts). */
+  async #reportEnrollStatus(status: EnrollStatus): Promise<void> {
+    try {
+      await writeEnrollStatus(
+        resolveLayout(Deno.env.toObject()).runDir,
+        status,
+      );
+    } catch (err) {
+      logDebug(
+        "instance",
+        "could not write the enroll status file:",
+        sanitizeForLog(err),
+      );
+    }
+  }
+
   #serverIdentityDir(): string {
     return this.#identityDir ?? resolveServerIdDir();
   }
@@ -1718,6 +1735,14 @@ export class InstanceClient {
     this.#parkedReason = reason;
     this.#parkedKind = kind;
     this.#forceEnrollPending = false;
+    await this.#reportEnrollStatus({
+      state: "parked",
+      kind,
+      reason,
+      ...(kind === "permanent"
+        ? { advice: permanentRejectionAdvice(reason) }
+        : {}),
+    });
     if (kind === "awaiting-license") {
       // Expected on every fresh self-hosted install: not an error, and never
       // the hour-long permanent-park backoff.
@@ -2336,6 +2361,8 @@ export class InstanceClient {
     this.#urlSessionOpened = true;
     this.#helloUrlsChecked = false;
     this.#hadStableSession = true;
+    // Not awaited: the socket's handlers attach below without a gap.
+    void this.#reportEnrollStatus({ state: "connected" });
     // The feature list arrives with this socket's attach frame, after the
     // observers below attach: until then nothing may read it as "unsupported".
     this.#peerFeaturesKnown = false;

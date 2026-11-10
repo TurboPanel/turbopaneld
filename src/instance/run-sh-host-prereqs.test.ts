@@ -1,6 +1,10 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
-import { RUN_SH_PATH as runShPath } from "../testing/run-sh-manifest-verifier.ts";
+import {
+  extractShellFunction,
+  RUN_SH_PATH as runShPath,
+} from "../testing/run-sh-manifest-verifier.ts";
+import { realTool } from "../testing/real-tool.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -22,29 +26,16 @@ async function prereqBlock(): Promise<string> {
   return text.slice(from, to);
 }
 
-/** Resolve a real tool so it can be linked into the sandbox PATH. */
-async function realTool(name: string): Promise<string> {
-  for (const dir of ["/usr/bin", "/bin"]) {
-    try {
-      await Deno.stat(join(dir, name));
-      return join(dir, name);
-    } catch {
-      // try the next directory
-    }
-  }
-  throw new Error(`${name} not found`);
-}
-
 /**
- * Run the prerequisites block with a PATH holding only `cat`, `rm`, `mktemp`
- * and stubs for the listed commands, so a real `sudo` on the machine running
- * the test cannot leak in. `apt-get` always succeeds without installing and
- * records its arguments.
+ * Run the prerequisites block with a PATH holding only `cat`, `rm`, `mktemp`,
+ * `grep`, `date` and stubs for the listed commands, so a real `sudo` on the
+ * machine running the test cannot leak in. `apt-get` always succeeds without
+ * installing and records its arguments.
  */
 async function runBlock(present: string[]) {
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-prereqs-" });
   try {
-    for (const name of ["cat", "rm", "mktemp"]) {
+    for (const name of ["cat", "rm", "mktemp", "grep", "date"]) {
       await Deno.symlink(await realTool(name), join(dir, name));
     }
     for (const name of present) {
@@ -62,6 +53,7 @@ async function runBlock(present: string[]) {
     const script = [
       'tp_print_error() { printf "ERR %s\\n" "$1" >&2; }',
       "tp_print_ok() { :; }",
+      extractShellFunction(await Deno.readTextFile(runShPath), "tp_apt_get"),
       await prereqBlock(),
       'echo "reached-end"',
     ].join("\n");
