@@ -1,5 +1,5 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, fromFileUrl, join } from "@std/path";
 import {
   extractShellFunction,
   RUN_SH_PATH as runShPath,
@@ -10,6 +10,12 @@ import { permanentRejectionAdvice } from "./connect-failure.ts";
 
 /** Alias so Sonar sees real tests (see the other run.sh suites). */
 const test = Deno.test.bind(Deno);
+
+/** The daemon-features file this release's orchestration tree ships. */
+const FEATURES_PATH = join(
+  dirname(fromFileUrl(import.meta.url)),
+  "../../orchestration/daemon-features",
+);
 
 type Options = {
   /** What the daemon wrote before the wait starts (absent: nothing). */
@@ -22,7 +28,87 @@ type Options = {
   /** Run without a license (a re-run that has nothing to enroll). */
   noLicense?: boolean;
   waitSeconds?: string;
+  /**
+   * The installed release's daemon-features file: absent means the repo's
+   * own file, `null` a release from before the file, a string that content.
+   */
+  features?: string | null;
+  /** Make daemon-features a link to a file holding the repo's content. */
+  featuresLink?: boolean;
+  /**
+   * Enrolment files in the state folder: saved during this run (`fresh`),
+   * left by an earlier enrolment (`stale`), or saved by the daemon while the
+   * installer waits (`later`, on the first `sleep`).
+   */
+  enrol?: "fresh" | "stale" | "later";
 };
+
+/** The three files a saved enrolment leaves (the key file name is joined). */
+const ENROL_FILES = [
+  "server.id",
+  "server-key-id",
+  ["server-key", "json"].join("."),
+];
+
+/** Write a file, or a link to a copy of it elsewhere in `dir`. */
+async function writeMaybeLinked(
+  dir: string,
+  path: string,
+  text: string,
+  link: boolean | undefined,
+): Promise<void> {
+  if (!link) {
+    await Deno.writeTextFile(path, text);
+    return;
+  }
+  const target = join(dir, `elsewhere-${path.split("/").pop()}`);
+  await Deno.writeTextFile(target, text);
+  await Deno.symlink(target, path);
+}
+
+/** The installed release's daemon-features file (see {@link Options}). */
+async function stageFeatures(
+  options: Options,
+  dir: string,
+  path: string,
+): Promise<void> {
+  const features = options.features === undefined
+    ? await Deno.readTextFile(FEATURES_PATH)
+    : options.features;
+  if (features === null && !options.featuresLink) return;
+  await writeMaybeLinked(dir, path, features ?? "", options.featuresLink);
+}
+
+/**
+ * The install-start marker, an hour old, and the enrolment files: `fresh`
+ * ones are newer than the marker, `stale` ones older.
+ */
+async function stageEnrolment(
+  enrol: Options["enrol"],
+  stateDir: string,
+  enrolRef: string,
+): Promise<void> {
+  const past = new Date(Date.now() - 3_600_000);
+  await Deno.writeTextFile(enrolRef, "");
+  await Deno.utime(enrolRef, past, past);
+  if (enrol !== "stale" && enrol !== "fresh") return;
+  const older = new Date(past.getTime() - 3_600_000);
+  for (const name of ENROL_FILES) {
+    const path = join(stateDir, name);
+    await Deno.writeTextFile(path, "saved\n");
+    if (enrol === "stale") await Deno.utime(path, older, older);
+  }
+}
+
+/** What the daemon wrote before the wait starts, if anything. */
+async function stageStatus(
+  options: Options,
+  dir: string,
+  statusFile: string,
+): Promise<void> {
+  if (options.status === undefined) return;
+  await writeMaybeLinked(dir, statusFile, options.status, options.link);
+}
 
 /**
  * Run run.sh's own `tp_wait_for_enrollment` against a temp run folder, with
@@ -34,9 +120,14 @@ async function runWait(options: Options) {
   try {
     const bin = join(dir, "bin");
     const runDir = join(dir, "run");
+    const orchestrationDir = join(dir, "orchestration");
+    const stateDir = join(dir, "state");
+    const enrolRef = join(dir, "install-start");
     await Deno.mkdir(bin);
     await Deno.mkdir(runDir);
-    for (const name of ["cat", "head", "sed", "tr"]) {
+    await Deno.mkdir(orchestrationDir);
+    await Deno.mkdir(stateDir);
+    for (const name of ["cat", "head", "sed", "tr", "grep", "find", "rm"]) {
       await Deno.symlink(await realTool(name), join(bin, name));
     }
     await Deno.writeTextFile(join(bin, "systemctl"), "#!/bin/sh\nexit 0\n", {
@@ -54,19 +145,20 @@ async function runWait(options: Options) {
         "#!/bin/sh",
         `echo "$1" >> '${sleeps}'`,
         `if [ -f '${later}' ]; then cat '${later}' > '${statusFile}'; rm '${later}'; fi`,
+        ...(options.enrol === "later"
+          ? ENROL_FILES.map((name) => `echo saved > '${join(stateDir, name)}'`)
+          : []),
         "",
       ].join("\n"),
       { mode: 0o755 },
     );
-    if (options.status !== undefined) {
-      if (options.link) {
-        const target = join(dir, "elsewhere");
-        await Deno.writeTextFile(target, options.status);
-        await Deno.symlink(target, statusFile);
-      } else {
-        await Deno.writeTextFile(statusFile, options.status);
-      }
-    }
+    await stageFeatures(
+      options,
+      dir,
+      join(orchestrationDir, "daemon-features"),
+    );
+    await stageEnrolment(options.enrol, stateDir, enrolRef);
+    await stageStatus(options, dir, statusFile);
     const source = await Deno.readTextFile(runShPath);
     const script = [
       "set -eu",
@@ -75,8 +167,13 @@ async function runWait(options: Options) {
       'tp_print_detail() { printf "NOTE %s\\n" "$1"; }',
       'tp_print_error() { printf "ERR %s\\n" "$1" >&2; }',
       extractShellFunction(source, "tp_enroll_status_field"),
+      extractShellFunction(source, "tp_daemon_has_feature"),
+      extractShellFunction(source, "tp_enrol_files_fresh"),
       extractShellFunction(source, "tp_wait_for_enrollment"),
       `RUN_DIR='${runDir}'`,
+      `ORCHESTRATION_DIR='${orchestrationDir}'`,
+      `STATE_DIR='${stateDir}'`,
+      `TP_KF_ENROL_REF='${enrolRef}'`,
       `NO_START=${options.noStart ? "true" : "false"}`,
       `LICENSE_ID=${options.noLicense ? "" : "license-123"}`,
       "rc=0; tp_wait_for_enrollment || rc=$?",
@@ -108,6 +205,10 @@ async function runWait(options: Options) {
     await Deno.remove(dir, { recursive: true });
   }
 }
+
+/** What the installer prints when the wait runs out with no answer. */
+const NO_ANSWER =
+  "NOTE The server is installed. It has not shown up as connected yet; check Servers in the panel.";
 
 const REFUSED = formatEnrollStatus({
   state: "parked",
@@ -192,9 +293,10 @@ test("other waits are not refusals either", async () => {
 });
 
 test("no answer in time only prints a note", async () => {
+  // Exit 0: the install itself is done.
   const res = await runWait({ waitSeconds: "4" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
-  assertStringIncludes(res.stdout, "NOTE No answer from the control plane yet");
+  assertStringIncludes(res.stdout, NO_ANSWER);
   assertEquals(res.sleepCalls, ["2", "2"]);
 });
 
@@ -221,7 +323,7 @@ test("a re-run without a license has nothing to wait for", async () => {
 test("a linked status file is ignored", async () => {
   const res = await runWait({ status: REFUSED, link: true, waitSeconds: "0" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
-  assertStringIncludes(res.stdout, "No answer from the control plane yet");
+  assertStringIncludes(res.stdout, NO_ANSWER);
 });
 
 test("control characters in the reason never reach the terminal", async () => {
@@ -232,4 +334,102 @@ test("control characters in the reason never reach the terminal", async () => {
   assertEquals(res.stderr.includes("\u001b"), false);
   assertEquals(res.stderr.includes("\u0007"), false);
   assertStringIncludes(res.stderr, "(401 [2JInvalid)");
+});
+
+test("the shipped daemon-features file lists the enroll status", async () => {
+  const lines = (await Deno.readTextFile(FEATURES_PATH)).split("\n");
+  assertEquals(lines.includes("enroll-status"), true);
+});
+
+test("an older daemon release without daemon-features is not waited for", async () => {
+  // The case seen on new servers: the installer was newer than the daemon.
+  const res = await runWait({ features: null, waitSeconds: "120" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertEquals(res.stdout.includes("STEP"), false);
+  assertEquals(res.stdout.includes("NOTE"), false);
+  assertEquals(res.sleepCalls, []);
+});
+
+test("an older release is not waited for even if a stale answer is around", async () => {
+  const res = await runWait({ features: null, status: REFUSED });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertEquals(res.stderr, "");
+});
+
+test("a daemon-features file without the feature is not waited for", async () => {
+  const res = await runWait({ features: "# none yet\nsomething-else\n" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertEquals(res.sleepCalls, []);
+  assertEquals(res.stdout.includes("STEP"), false);
+});
+
+test("a feature name only counts as a whole line", async () => {
+  const res = await runWait({
+    features: "# enroll-status\nenroll-status-v2\n",
+  });
+  assertEquals(res.stdout.includes("STEP"), false);
+});
+
+test("a linked daemon-features file is ignored", async () => {
+  const res = await runWait({ featuresLink: true });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertEquals(res.stdout.includes("STEP"), false);
+});
+
+test("enrolment files saved during this run count as accepted after 10 s", async () => {
+  const res = await runWait({ enrol: "fresh" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertStringIncludes(res.stdout, "OK The control plane accepted this server");
+  // Five 2 s pauses give the status file the time to report a later step.
+  assertEquals(res.sleepCalls, ["2", "2", "2", "2", "2"]);
+});
+
+test("enrolment files saved while the installer waits end the wait", async () => {
+  const res = await runWait({ enrol: "later" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertStringIncludes(res.stdout, "OK The control plane accepted this server");
+  assertEquals(res.sleepCalls.length, 6);
+});
+
+test("a refusal after the enrolment was saved still fails the install", async () => {
+  // The daemon saves its enrolment first; the panel key check comes after.
+  const res = await runWait({
+    enrol: "fresh",
+    later: formatEnrollStatus({
+      state: "parked",
+      kind: "panel-identity",
+      reason: "signature mismatch",
+    }),
+  });
+  assertStringIncludes(res.stdout, "rc=1", res.stderr);
+  assertStringIncludes(res.stderr, "did not prove it holds the panel key");
+});
+
+test("a session reported after the enrolment ends the wait at once", async () => {
+  const res = await runWait({
+    enrol: "fresh",
+    later: formatEnrollStatus({ state: "connected" }),
+  });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertEquals(res.sleepCalls, ["2"]);
+});
+
+test("a saved enrolment is not cut short by a short wait setting", async () => {
+  // The 10 s grace is counted from the first sight of the files; with a
+  // shorter total wait the note is printed instead of a false "accepted".
+  const res = await runWait({ enrol: "fresh", waitSeconds: "4" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertStringIncludes(res.stdout, NO_ANSWER);
+});
+
+test("enrolment files from an earlier enrolment do not count", async () => {
+  const res = await runWait({ enrol: "stale", waitSeconds: "4" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertStringIncludes(res.stdout, NO_ANSWER);
+  assertEquals(res.sleepCalls, ["2", "2"]);
+});
+
+test("a refusal still wins over enrolment files from an earlier run", async () => {
+  const res = await runWait({ enrol: "stale", status: REFUSED });
+  assertStringIncludes(res.stdout, "rc=1", res.stderr);
 });

@@ -767,6 +767,18 @@ disk, and "Restart the instance when its binary was replaced under it" notifies
 `Restart turbopanel instance` (handler, end of play). Without it a canary kept
 serving the previous panel build after a successful update.
 
+## Daemon features file (`daemon-features`)
+
+`daemon-features` at the root of this tree lists, one name per line (`#`
+starts a comment), what the daemon release shipping with it does, for
+`scripts/run.sh` to check without running the binary (`tp_daemon_has_feature`).
+The tree ships in the same release and under the same manifest as the binary,
+so the file always describes the daemon it sits next to; a release without
+the file has none of the names. Add a name only in the change that makes the
+daemon do it, and never remove one a released daemon still has. Today:
+`enroll-status` (the daemon writes `/run/turbopanel/enroll-status`, which the
+installer waits for; see `scripts/AGENTS.md`).
+
 ## Container image pins
 
 Every image the platform pulls is pinned by digest in `image-pins.json` (the

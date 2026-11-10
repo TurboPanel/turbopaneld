@@ -1,0 +1,8 @@
+# Features of the daemon release this orchestration tree ships with, one per
+# line, read by scripts/run.sh (tp_daemon_has_feature) without running the
+# binary. The file sits in the same release, under the same manifest, as the
+# binary. Only add a name once the daemon in this tree does what it says.
+#
+# enroll-status: the daemon writes /run/turbopanel/enroll-status
+# (src/instance/enroll-status.ts), so the installer can wait for its answer.
+enroll-status
