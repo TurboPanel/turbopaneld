@@ -397,6 +397,7 @@ async function fetchUploadedTrust(vars: string[]) {
           "tp_print_error() { printf 'ERR %s\\n' \"$1\" >&2; }",
           'tp_install_verified_uploaded_trust() { echo "install leg=$2"; }',
           "tp_curl_http_code() {",
+          "  echo FETCH >&2",
           '  case " $* " in *" --cacert "*) printf 000 ;; *) printf "%s" "$SYSTEM_CODE" ;; esac',
           "}",
           ...vars,
@@ -444,4 +445,18 @@ test("a stored issuer that verifies nothing over either leg is kept and stops th
   const out = await fetchUploadedTrust(["SYSTEM_CODE=000"]);
   assertEquals(out.status === 0, false);
   assertStringIncludes(out.stderr, "keeping it");
+});
+
+test("a fresh install behind a public edge, with only the new CA stored, makes no second issuer request", async () => {
+  // The CA came in over the public roots a moment ago; the issuer fetch
+  // then uses it alone, gets no answer, and there is no issuer to keep.
+  const out = await fetchUploadedTrust([
+    "SYSTEM_CODE=200",
+    'CA_PATH="$UPLOADED_TRUST_PATH.ca"',
+    'mv "$UPLOADED_TRUST_PATH" "$CA_PATH"',
+  ]);
+  assertEquals(out.status, 0, out.stderr);
+  assertEquals(out.stderr.split("FETCH").length - 1, 1);
+  assertEquals(out.stdout.includes("install leg="), false);
+  assertStringIncludes(out.stdout, "removed");
 });

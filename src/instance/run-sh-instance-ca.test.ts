@@ -152,6 +152,7 @@ async function fetchCa(
     helpers,
     "tp_fetch_instance_ca",
     "printf 'RC=%s\\n' \"$?\"",
+    "printf 'OPEN=%s\\n' \"$TP_TRUST_FROM_OPEN_LEG\"",
   ].join("\n");
   const out = await new Deno.Command("sh", {
     args: ["-c", script],
@@ -772,4 +773,81 @@ test("an operator-supplied --instance-ca is checked against a fingerprint the co
   );
   assertStringIncludes(branch, 'tp_pem_matches_ca_pin "$INSTANCE_CA"');
   assertStringIncludes(branch, "exit 1");
+});
+
+test("trust from the public roots or an unverified connection is remembered for the key learning", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const served = await selfSignedCa(dir, "PlatformCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    const system = await fetchCa(source, {
+      TP_TEST_SYSTEM: "200",
+      TP_TEST_SERVED_CA: served,
+    }, caPath);
+    assertStringIncludes(system.stdout, "OPEN=true");
+    await Deno.remove(caPath);
+    const insecure = await fetchCa(source, {
+      INSECURE_TLS: "true",
+      TP_TEST_INSECURE: "200",
+      TP_TEST_SERVED_CA: served,
+    }, caPath);
+    assertStringIncludes(insecure.stdout, "OPEN=true");
+    const stored = await fetchCa(source, {
+      TP_TEST_PINNED: "200",
+      TP_TEST_SERVED_CA: served,
+    }, caPath);
+    assertEquals(stored.calls, ["pinned"]);
+    assertStringIncludes(stored.stdout, "OPEN=false");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a host behind a public edge that still serves the same CA keeps it with a plain note", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "PlatformCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(old, caPath);
+    const before = await fingerprint(caPath);
+    const out = await fetchCa(source, {
+      CA_PIN: hexFingerprint(before),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "200",
+      // The stored CA does not sign the public edge's certificate.
+      TP_TEST_LEAF_OK: "0",
+      TP_TEST_SERVED_CA: old,
+    }, caPath);
+    assertEquals(out.status, 0, out.stderr);
+    assertStringIncludes(out.stdout, "still serves this server's Platform CA");
+    assertEquals(out.stdout.includes("--instance-ca"), false);
+    assertEquals(await fingerprint(caPath), before);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a 404 over an unverified connection never retires a CA the host pins", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "PlatformCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(old, caPath);
+    const out = await fetchCa(source, {
+      INSECURE_TLS: "true",
+      CA_PIN: hexFingerprint(await fingerprint(old)),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_INSECURE: "404",
+      TP_TEST_SERVED_CA: old,
+    }, caPath);
+    assertEquals(out.status, 0, out.stderr);
+    assertStringIncludes(out.stdout, "keeping the one this server pins");
+    assertEquals(await exists(caPath), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });

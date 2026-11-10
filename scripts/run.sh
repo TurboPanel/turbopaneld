@@ -857,7 +857,14 @@ tp_fetch_instance_ca() {
       # Not a Platform CA leaf. A public upload or Let's Encrypt name uses
       # the system roots. A private upload is handled by the issuer fetch
       # below — do not announce system trust until that fetch also misses.
-      rm -f "$CA_PATH"
+      # Only the stored CA itself can retire a CA this host pins.
+      if [ "$_ca_leg" != stored ] && [ -f "$CA_PATH" ] &&
+        [ -n "${CA_PIN:-}" ] && [ "${CA_PIN_SOURCE:-command}" = host ]
+      then
+        tp_print_step "~" "The control plane offers no Platform CA over this connection — keeping the one this server pins ($(tp_ca_fingerprint "$CA_PATH"))"
+      else
+        rm -f "$CA_PATH"
+      fi
       ;;
     000)
       if [ -f "$CA_PATH" ]; then
@@ -921,6 +928,12 @@ tp_refetch_instance_ca_unpinned() {
   _new_fp=""
   if [ -f "$_ca_retry" ] && tp_ca_parses "$_ca_retry"; then
     _new_fp="$(tp_ca_fingerprint "$_ca_retry")"
+  fi
+  if [ -n "$_new_fp" ] && [ "$_new_fp" = "$_old_fp" ]; then
+    # A control plane behind a public edge that still serves the same CA.
+    tp_print_ok "Control plane presents a publicly trusted certificate and still serves this server's Platform CA (${_old_fp}) — keeping it"
+    rm -f "$_ca_retry"
+    return 0
   fi
   tp_print_step "~" "Could not verify the control plane's Platform CA (existing ${_old_fp:-unknown}; fetched ${_new_fp:-unknown}) — keeping the existing CA; the daemon trusts it alongside the system roots. If the control plane's CA was rotated, confirm the new CA's fingerprint out of band and re-run with --instance-ca <pem>."
   rm -f "$_ca_retry"
