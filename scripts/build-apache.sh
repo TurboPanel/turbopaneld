@@ -25,7 +25,7 @@ pin() {
   key="$1"
   sed -n "s/^${key}: \"\\(.*\\)\"\$/\\1/p" "$DEFAULTS" | head -n 1
 }
-HTTPD_VER="$(pin apache_version)"
+HTTPD_VER="$(pin apache_build_version)"
 APR_VER="$(pin apache_apr_version)"
 APU_VER="$(pin apache_apr_util_version)"
 HTTPD_SHA="$(pin apache_httpd_sha256)"
@@ -50,11 +50,11 @@ STAGE="$TMP/stage"
 mkdir -p "$STAGE" "$OUT_DIR"
 OUT_DIR="$(CDPATH= cd -- "$OUT_DIR" && pwd)"
 
-# ASF release-manager key fingerprints for these exact releases: the signers
-# of httpd-2.4.63 (Jim Jagielski) and of apr-1.7.5 / apr-util-1.6.3 (Eric
-# Covener), read from the VALIDSIG of each .asc against the ASF KEYS files.
-# Bump them with the versions.
-HTTPD_SIGNER="A93D62ECC3C8EA12DB220EC934EA76E6791485A8"
+# ASF release-manager key fingerprints for these exact releases: the signer
+# of httpd-2.4.70, read from the VALIDSIG of httpd-2.4.70.tar.gz.asc against the
+# ASF KEYS file, and of apr-1.7.5 / apr-util-1.6.3 (Eric Covener). Bump them
+# with the versions.
+HTTPD_SIGNER="65B2D44FE74BD5E3DE3AC3F082781DE46D5954FA"
 APR_SIGNER="65B2D44FE74BD5E3DE3AC3F082781DE46D5954FA"
 
 GNUPGHOME="$TMP/gnupg"
