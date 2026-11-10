@@ -8,8 +8,8 @@
  * `panel-identity`. Silence (no hello in time) is a plain timeout instead:
  * not hearing back is not a failed proof.
  *
- * Once the hello verified, `command-outcome` and `fabric-peers-report` are
- * signed with the daemon key when {@link SignedSessionOptions.reportSigning}
+ * Once the hello verified, `command-outcome`, `fabric-peers-report` and
+ * `managed-ha-event` are signed with the daemon key when {@link SignedSessionOptions.reportSigning}
  * allows it (`report-signing.ts`). Signing is async, so while one is being
  * signed every later send waits behind it and the frames keep their order.
  * A report sent before the attach frame says what the control plane supports
@@ -33,6 +33,7 @@ import { PanelIdentityError } from "./panel-identity-trust.ts";
 import {
   mayBeSignedReport,
   type ReportSigningKey,
+  reportTypeOf,
   signReportFrame,
 } from "./report-signing.ts";
 
@@ -75,13 +76,14 @@ export interface SignedSessionOptions {
   onPong: () => void;
   /**
    * Sign reports on this session: `key` is the daemon key (none = unsigned)
-   * and `enabled` says whether the control plane lists `signed-reports-v1`.
+   * and `enabled(type)` says whether the control plane takes that report
+   * signed (`signed-reports-v1`; `signed-ha-events-v1` for `managed-ha-event`).
    * `known` is false until this socket's attach frame (with the feature list)
    * arrived; reports wait for it. Absent = every frame goes out as before.
    */
   reportSigning?: {
     key: () => ReportSigningKey | undefined;
-    enabled: () => boolean;
+    enabled: (type: string) => boolean;
     known?: () => boolean;
   };
   now?: () => number;
@@ -211,7 +213,9 @@ export class SignedPanelSession {
     const signer = this.#options.reportSigning;
     const session = this.#session;
     if (typeof data !== "string" || !signer || !session) return undefined;
-    if (!mayBeSignedReport(data) || !signer.enabled()) return undefined;
+    if (!mayBeSignedReport(data)) return undefined;
+    const type = reportTypeOf(data);
+    if (type === null || !signer.enabled(type)) return undefined;
     const key = signer.key();
     if (!key) return undefined;
     const nowMs = (this.#options.now ?? Date.now)();
