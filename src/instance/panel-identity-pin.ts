@@ -5,7 +5,9 @@
  * it; later changes go through `tp-host panel-identity-write`.
  *
  * The file is `key=value` lines: `current`, `next`, `keyset`, `urls`,
- * `pinned_by`, `updated`. A server installed with `--unsafe-no-panel-key` has
+ * `pinned_by`, `updated`, and (optional, written once the server learned them)
+ * `rp_id` and `passkeys`: the rotation passkeys whose approval moves the pin
+ * (`<pkid>.<es256|eddsa>.<base64url raw key>`, comma separated). A server installed with `--unsafe-no-panel-key` has
  * `pinned_by=unsafe` and an empty `current`: nothing is pinned for it.
  * Fingerprints are base64url (no padding) SHA-256 digests, 43 characters.
  */
@@ -25,6 +27,17 @@ export type PanelIdentityPin = {
   urls: string[];
   pinnedBy: PanelPinnedBy;
   updated: string;
+  /** WebAuthn relying party id of the rotation passkeys; "" until learned. */
+  rpId: string;
+  /** Rotation passkeys that approve key changes; empty until learned. */
+  passkeys: RotationPasskey[];
+};
+
+/** One pinned rotation passkey: `id` is base64url SHA-256 of its credential id. */
+export type RotationPasskey = {
+  id: string;
+  alg: "ES256" | "EdDSA";
+  pub: string;
 };
 
 const FINGERPRINT = /^[A-Za-z0-9_-]{43}$/;
@@ -41,8 +54,15 @@ const KEYS = [
   "pinned_by",
   "updated",
 ] as const;
+/** Lines a pin from before rotation passkeys does not have; absent reads as empty. */
+const OPTIONAL_KEYS = ["rp_id", "passkeys"] as const;
+const ALL_KEYS: ReadonlySet<string> = new Set([...KEYS, ...OPTIONAL_KEYS]);
+const RP_ID = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
+const PASSKEY_ENTRY = /^([A-Za-z0-9_-]{43})\.(es256|eddsa)\.([A-Za-z0-9_-]+)$/;
 
-type PinFields = Record<(typeof KEYS)[number], string>;
+type PinFields =
+  & Record<(typeof KEYS)[number], string>
+  & Record<(typeof OPTIONAL_KEYS)[number], string>;
 
 function fields(text: string): PinFields {
   const map = new Map<string, string>();
@@ -51,7 +71,7 @@ function fields(text: string): PinFields {
     const at = line.indexOf("=");
     if (at < 1) throw new TypeError(`panel-identity: bad line "${line}"`);
     const key = line.slice(0, at);
-    if (!(KEYS as readonly string[]).includes(key) || map.has(key)) {
+    if (!ALL_KEYS.has(key) || map.has(key)) {
       throw new TypeError(`panel-identity: unexpected key "${key}"`);
     }
     map.set(key, line.slice(at + 1));
@@ -64,7 +84,45 @@ function fields(text: string): PinFields {
     }
     found[key] = value;
   }
+  for (const key of OPTIONAL_KEYS) found[key] = map.get(key) ?? "";
   return found as PinFields;
+}
+
+/** Parse a `passkeys=` value; throws on any malformed entry. */
+export function parseRotationPasskeys(line: string): RotationPasskey[] {
+  if (line === "") return [];
+  const entries = line.split(",").map((entry) => {
+    const match = PASSKEY_ENTRY.exec(entry);
+    if (!match) {
+      throw new TypeError("panel-identity: passkeys holds a bad entry");
+    }
+    const [, id, alg, pub] = match;
+    return {
+      id: id!,
+      alg: alg === "es256" ? "ES256" : "EdDSA",
+      pub: pub!,
+    } as const;
+  });
+  if (entries.length > 5) {
+    throw new TypeError("panel-identity: more than five passkeys");
+  }
+  return entries;
+}
+
+/** Code-unit order, the same order the control plane and tp-host sort by. */
+function byCodeUnits(a: RotationPasskey, b: RotationPasskey): number {
+  if (a.id === b.id) return 0;
+  return a.id < b.id ? -1 : 1;
+}
+
+/** The `passkeys=` line for a set, sorted by id (what the pin report hashes). */
+export function rotationPasskeysLine(
+  passkeys: readonly RotationPasskey[],
+): string {
+  return [...passkeys]
+    .sort(byCodeUnits)
+    .map((p) => `${p.id}.${p.alg === "ES256" ? "es256" : "eddsa"}.${p.pub}`)
+    .join(",");
 }
 
 /** Parse the pin file; throws a TypeError naming the first problem. */
@@ -92,6 +150,13 @@ export function parsePanelIdentityPin(text: string): PanelIdentityPin {
   if (!/^\d+$/.test(values.keyset)) {
     throw new TypeError("panel-identity: keyset is not an integer");
   }
+  if (values.rp_id !== "" && !RP_ID.test(values.rp_id)) {
+    throw new TypeError("panel-identity: rp_id is not a host name");
+  }
+  const passkeys = parseRotationPasskeys(values.passkeys);
+  if ((passkeys.length > 0) !== (values.rp_id !== "")) {
+    throw new TypeError("panel-identity: rp_id and passkeys go together");
+  }
   return {
     current,
     next: next === "" ? null : next,
@@ -99,6 +164,8 @@ export function parsePanelIdentityPin(text: string): PanelIdentityPin {
     urls: values.urls === "" ? [] : values.urls.split(","),
     pinnedBy: pinnedBy as PanelPinnedBy,
     updated: values.updated,
+    rpId: values.rp_id,
+    passkeys,
   };
 }
 

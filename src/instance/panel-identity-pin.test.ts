@@ -5,6 +5,7 @@ import {
   panelPinReport,
   parsePanelIdentityPin,
   readPanelIdentityPin,
+  rotationPasskeysLine,
 } from "./panel-identity-pin.ts";
 
 /** Alias so Sonar sees real tests (see src/AGENTS.md). */
@@ -34,10 +35,45 @@ test("the pin file parses into its six fields", () => {
     urls: ["https://a.example", "https://b.example:8443"],
     pinnedBy: "install",
     updated: "2026-11-01T00:00:00Z",
+    rpId: "",
+    passkeys: [],
   });
   const bare = parsePanelIdentityPin(pinText({ next: "", urls: "" }));
   assertEquals(bare.next, null);
   assertEquals(bare.urls, []);
+});
+
+const PK_ES = `${"c".repeat(43)}.es256.${"B".repeat(87)}`;
+const PK_ED = `${"d".repeat(43)}.eddsa.${"C".repeat(43)}`;
+
+test("rotation passkeys and their rp id parse together; old pins have none", () => {
+  const pin = parsePanelIdentityPin(
+    pinText({ rp_id: "cp.example.test", passkeys: `${PK_ES},${PK_ED}` }),
+  );
+  assertEquals(pin.rpId, "cp.example.test");
+  assertEquals(pin.passkeys, [
+    { id: "c".repeat(43), alg: "ES256", pub: "B".repeat(87) },
+    { id: "d".repeat(43), alg: "EdDSA", pub: "C".repeat(43) },
+  ]);
+  assertEquals(
+    rotationPasskeysLine([...pin.passkeys].reverse()),
+    `${PK_ES},${PK_ED}`,
+  );
+  assertEquals(
+    parsePanelIdentityPin(pinText({ rp_id: "", passkeys: "" })).passkeys,
+    [],
+  );
+  for (
+    const bad of [
+      { rp_id: "cp.example.test", passkeys: "" },
+      { rp_id: "", passkeys: PK_ES },
+      { rp_id: "CP.example", passkeys: PK_ES },
+      { rp_id: "cp.example.test", passkeys: `${PK_ES},nope` },
+      { rp_id: "cp.example.test", passkeys: Array(6).fill(PK_ED).join(",") },
+    ]
+  ) {
+    assertThrows(() => parsePanelIdentityPin(pinText(bad)), TypeError);
+  }
 });
 
 test("an unsafe pin has no current key and nothing else may", () => {

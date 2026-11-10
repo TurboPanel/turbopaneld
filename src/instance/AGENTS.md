@@ -1018,11 +1018,12 @@ form still works and, on a fresh install, pins nothing and writes no pin file.
   argument, stdin is the signature header line then the exact identity body; it
   follows the pinned current key only (urls, next, keyset) and rewrites
   `hosts=` in `lib/update-origin` to the same list (an empty list is refused).
-  With `statement`,
-  stdin is a rotation or revoke statement carrying `signers` (public keys); each
-  must hash to the fingerprint pinned for its role (old current, offline next),
-  `keyset` must rise and the new current key must be the pinned next key. A
-  rotation also rewrites `panel_key=` in `lib/update-origin`.
+  Once rotation passkeys are pinned (or the document fills them) `next=` stays
+  empty, in `run.sh` too, and `pinAccepts` ignores it: only a statement moves
+  the key.
+  With `statement`, stdin is a passkey-approved key-set envelope (see
+  **Key rotation** below); it rewrites `current=`, `keyset=`, `rp_id=`,
+  `passkeys=` and `panel_key=` in `lib/update-origin`.
 - A host installed before panel keys (an update origin, no pin file) learns
   the key on its first managed update with no TOKEN: once the trust files are
   in place, `tp_learn_panel_identity` fetches the identity document from
@@ -1041,6 +1042,12 @@ form still works and, on a fresh install, pins nothing and writes no pin file.
 - `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
   contains that flag; after an older installer ran it restores the `panel_key=`
   line it dropped, so a move back to an older release does not break the pin.
+- The pin may also hold `rp_id=` and `passkeys=` (the rotation passkeys), absent
+  on pins from before them. The parser accepts both or neither. A daemon
+  rolled back below this release cannot parse a pin that has them and parks
+  `panel-identity` (break glass only: signed manifests refuse a downgrade);
+  a reinstall with a fresh command recovers it. `run.sh` writes them at install
+  from the verified document and carries them over on a refresh.
 - `src/instance/panel-identity-pin.ts` reads and parses the file. Its
   presence (with a non-empty `current`) turns the signed session on; the
   unsigned feature list never does (`readEnforcedPin`, a pin file that exists
@@ -1144,6 +1151,52 @@ On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):
   The control plane holds its outbox until that hello arrives. The prefixes
   are pinned by `deno task check:contract-drift`.
 
+## Key rotation (`panel-keyset-statements-v1`)
+
+- The control plane's key, key set and rotation passkeys move only through
+  passkey-approved key-set statements, served publicly (and unsigned: they
+  authenticate themselves) at `GET /api/daemon/v1/instance/identity/statements?after=n`.
+- First fill: while the pin holds no passkeys, a verified document with a
+  `rotation` block goes to `tp-host panel-identity-write` (even when the
+  addresses match), which pins them once with the document's key set.
+- Catch-up (`keyset-chain.ts`): on a `panel-identity` connect failure (a hello,
+  document or signed answer under a key this server does not hold), or a
+  document with a higher key set, the daemon fetches the chain from the address
+  in use (at most once a minute per address, unless the last fetch applied a
+  statement), hands each statement whose `prev` is its pinned key to
+  `tp-host panel-identity-write statement` in order and re-reads the pin after
+  each. A server offline for weeks catches up the same way; one that never
+  learned the passkeys cannot follow a rotation and needs a fresh install
+  command. What follows a catch-up that applied something depends on where it
+  started:
+  - From a connect failure: the verified key is dropped, the backoff is reset
+    and the next attempt comes after the ordinary reconnect wait (jittered,
+    250 ms up to the initial backoff). It proves the identity document afresh
+    under the new pin before anything else is sent. Nothing applied: the old
+    failover and park rules.
+  - From a document (the connect path, or the background re-check a signed
+    hello starts): the document is fetched and verified again under the new
+    pin inside the same check, with no second catch-up, so the check never
+    ends pinned without a verified key. Once the document is at the pinned key
+    set, its address list is followed as usual. A failure of that second
+    fetch fails the check like any other document failure.
+  - A higher key set that was not followed (asked within the last minute, or
+    nothing applied) is logged. The key just verified under the pin stays in
+    use, and the document's address list waits: root takes addresses only
+    from a document at the pinned key set. The next document check tries again.
+- A pinned server never opens a socket without a control plane key verified
+  against its pin (`pinnedSessionKey`, checked after the identity check and
+  again before the upgrade request). The attempt fails as a plain retryable
+  error; there is no fallback to the unsigned session.
+- The identity document and the chain are fetched without a token, so both are
+  bounded: `PUBLIC_GET_TIMEOUT_MS` (15 s for headers and body together) and a
+  size cap, past which the body is dropped unread (`IDENTITY_DOCUMENT_MAX_BYTES`,
+  the 64 KiB root accepts; `KEYSET_CHAIN_MAX_BYTES`, one page of 100 statements
+  of 16 KiB).
+- With passkeys pinned the signed hello's `keyset` is not compared (the High
+  Availability hello carries its secret's number); its `kid` must still be the
+  pinned key.
+
 ## Signed pin report
 
 On the first presence hello of a signed session the daemon replaces the
@@ -1154,7 +1207,11 @@ pinnedBy + "\n" + current + "\n" + keyset + "\n" + iat`
 (`signPinReport`, `src/crypto/keys.ts`; prefix pinned in
 `scripts/check-contract-drift.ts`). The signature does not name the control
 plane's key, so a control plane can verify a report from a server pinned to
-another key and alarm on it. Without the daemon key or a pin the hello keeps
+another key and alarm on it. It also carries `passkeys` (base64url SHA-256 of
+the pin's `passkeys=` line, "" with none) with a second signature
+`passkeysSig` over `"tp-panel-pin-passkeys\n" + sessionId + "\n" + serverId +
+"\n" + keyId + "\n" + passkeys + "\n" + iat`, so the control plane can alarm on
+a passkey set that is not its own. Without the daemon key or a pin the hello keeps
 the unsigned report. An older control plane ignores the two extra fields.
 
 ## Sealed enroll license

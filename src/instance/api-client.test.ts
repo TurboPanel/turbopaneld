@@ -20,8 +20,11 @@ import {
   MAX_COMMAND_LOG_CHUNK_BYTES,
   MAX_SECRETS_DECRYPT_BATCH,
   MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS,
+  readTextCapped,
 } from "./api-client.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
+import { KEYSET_CHAIN_MAX_BYTES } from "./keyset-chain.ts";
+import { IDENTITY_DOCUMENT_MAX_BYTES } from "./panel-identity-cache.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1208,4 +1211,219 @@ test({
       restore();
     }
   },
+});
+
+test({
+  name: "the key-set chain is fetched without a token and parsed strictly",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    const captures: Captured[] = [];
+    try {
+      const path = "/api/daemon/v1/instance/identity/statements?after=2";
+      api.script(
+        path,
+        captureInit(path, captures, () =>
+          new Response(
+            JSON.stringify({
+              statements: [{ statement: "AA", approvals: [] }, { nope: 1 }],
+            }),
+            { status: 200 },
+          )),
+      );
+      const client = new DaemonApiClient({
+        config: INSTANCE_CONFIG,
+        getToken: () => Promise.reject(new Error("no token here")),
+      });
+      assertEquals(await client.getKeysetStatements(2), [
+        { statement: "AA", approvals: [] },
+      ]);
+      assertEquals(captures.map((c) => [c.method, c.authorization]), [
+        ["GET", null],
+      ]);
+    } finally {
+      restore();
+    }
+  },
+});
+
+const IDENTITY_PATH = "/api/daemon/v1/instance/identity";
+const CHAIN_PATH = "/api/daemon/v1/instance/identity/statements?after=1";
+
+function publicClient(timeoutMs?: number): DaemonApiClient {
+  return new DaemonApiClient({
+    config: INSTANCE_CONFIG,
+    getToken: () => Promise.reject(new Error("no token here")),
+    ...(timeoutMs === undefined ? {} : { publicGetTimeoutMs: timeoutMs }),
+  });
+}
+
+/** A body of `bytes` bytes sent in pieces, counting how many pieces were read. */
+function piecewiseBody(bytes: number, pulled: { pieces: number }) {
+  const piece = new Uint8Array(16 * 1024).fill(0x20);
+  let left = bytes;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (left <= 0) return controller.close();
+      pulled.pieces += 1;
+      controller.enqueue(piece.subarray(0, Math.min(piece.length, left)));
+      left -= piece.length;
+    },
+  });
+}
+
+test({
+  name:
+    "the identity document and the key-set chain are refused past their size caps without reading the rest",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      const pulled = { pieces: 0 };
+      api.script(
+        CHAIN_PATH,
+        () =>
+          new Response(piecewiseBody(64 * 1024 * 1024, pulled), {
+            status: 200,
+          }),
+      );
+      api.script(
+        IDENTITY_PATH,
+        () =>
+          new Response("x".repeat(IDENTITY_DOCUMENT_MAX_BYTES + 1), {
+            status: 200,
+            headers: { "x-turbopanel-signature": "kid:sig" },
+          }),
+      );
+      const client = publicClient();
+      const chainError = await assertRejects(
+        () => client.getKeysetStatements(1),
+        DaemonApiError,
+        `answered more than ${KEYSET_CHAIN_MAX_BYTES} bytes`,
+      );
+      // The 64 MiB answer was dropped just past the cap, not buffered.
+      assertEquals(chainError.status, 200);
+      assertEquals(
+        pulled.pieces <= Math.ceil(KEYSET_CHAIN_MAX_BYTES / (16 * 1024)) + 2,
+        true,
+      );
+      await assertRejects(
+        () => client.getPanelIdentityDocument(),
+        DaemonApiError,
+        `answered more than ${IDENTITY_DOCUMENT_MAX_BYTES} bytes`,
+      );
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "an identity document at the size cap is read whole, and an error answer keeps its status",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      const body = "y".repeat(IDENTITY_DOCUMENT_MAX_BYTES);
+      api.script(
+        IDENTITY_PATH,
+        () =>
+          new Response(body, {
+            status: 200,
+            headers: { "x-turbopanel-signature": "kid:sig" },
+          }),
+      );
+      api.script(
+        CHAIN_PATH,
+        () =>
+          new Response(JSON.stringify({ error: "database unavailable" }), {
+            status: 503,
+          }),
+      );
+      const client = publicClient();
+      assertEquals(await client.getPanelIdentityDocument(), {
+        body,
+        signature: "kid:sig",
+      });
+      const err = await assertRejects(
+        () => client.getKeysetStatements(1),
+        DaemonApiError,
+        "database unavailable",
+      );
+      assertEquals(err.status, 503);
+    } finally {
+      restore();
+    }
+  },
+});
+
+test({
+  name:
+    "the identity document and the key-set chain give up on a control plane that does not answer or stalls mid-body",
+  permissions: { net: true },
+  fn: async () => {
+    const api = createFakeInstanceApi();
+    const restore = api.install();
+    try {
+      // Headers never arrive: the fetch is aborted by the client's own timer.
+      api.script(
+        IDENTITY_PATH,
+        (init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal!.reason),
+            );
+          }),
+      );
+      // Headers arrive, the body never ends.
+      api.script(
+        CHAIN_PATH,
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('{"statements":['));
+              },
+            }),
+            { status: 200 },
+          ),
+      );
+      const client = publicClient(20);
+      const silent = await assertRejects(
+        () => client.getPanelIdentityDocument(),
+        DOMException,
+        "within 20 ms",
+      );
+      assertEquals(silent.name, "TimeoutError");
+      // A timeout is a network failure, retried; it is never proof of a wrong key.
+      assertEquals(classifyConnectFailure(silent).kind, "transient");
+      const stalled = await assertRejects(
+        () => client.getKeysetStatements(1),
+        DOMException,
+        "within 20 ms",
+      );
+      assertEquals(stalled.name, "TimeoutError");
+    } finally {
+      restore();
+    }
+  },
+});
+
+test("readTextCapped decodes a body split inside a character and treats no body as empty", async () => {
+  const bytes = new TextEncoder().encode("né");
+  const split = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes.subarray(0, 2));
+      controller.enqueue(bytes.subarray(2));
+      controller.close();
+    },
+  });
+  assertEquals(await readTextCapped(new Response(split), 3), "né");
+  assertEquals(await readTextCapped(new Response(null), 0), "");
+  assertEquals(await readTextCapped(new Response("abcd"), 3), null);
 });

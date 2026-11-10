@@ -41,6 +41,7 @@ export interface TestPanel {
       nowMs: number;
       keyset?: number;
       urls?: string[];
+      rotation?: unknown;
       /** Add `boundSessions: 1` to the signed body, as a current control plane does. */
       boundSessions?: boolean;
     },
@@ -115,6 +116,8 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
       urls: ["https://panel.example.test"],
       pinnedBy: "install",
       updated: "2026-11-01T00:00:00Z",
+      rpId: "",
+      passkeys: [],
       ...overrides,
     }),
     async identityFetch(opts = { nowMs: Date.now() }) {
@@ -128,6 +131,7 @@ export async function createTestPanel(keyset = 1): Promise<TestPanel> {
         }],
         seal: { kid: sealKid, alg: "X25519", pub: encodeBase64Url(sealPub) },
         keyset: opts.keyset ?? keyset,
+        ...(opts.rotation === undefined ? {} : { rotation: opts.rotation }),
         urls: opts.urls ?? [],
         issued: new Date(opts.nowMs).toISOString(),
         expires: new Date(opts.nowMs + 30 * DAY_MS).toISOString(),

@@ -51,6 +51,7 @@ import {
   sitePhpUnitLimits,
 } from "../deploy/site/php-runtime.ts";
 import { PROD_RUNTIME_DIR_DEFAULT, resolveLayout } from "../paths/layout.ts";
+import { keysetVectors } from "../testing/keyset-vectors.ts";
 
 /** A path tp-host's test harness must create before the sample runs. */
 export type CallSiteSetup = {
@@ -328,6 +329,21 @@ const PANEL_DOCUMENT = JSON.stringify({
 });
 const PANEL_DOCUMENT_SIG =
   "Uqusqn3j0gH5iDtJFek-lbPIaL39mkqUY_8UdzuvWmpS9TQk7kNDXuxO9Ze0i0j4g0FiGySMSEBNBxHHrWKhDg";
+const KEYSET_PIN = [
+  `current=${keysetVectors.pin.current}`,
+  "next=",
+  `keyset=${keysetVectors.pin.keyset}`,
+  "urls=https://panel.example.com",
+  "pinned_by=install",
+  "updated=2026-11-01T00:00:00Z",
+  `rp_id=${keysetVectors.pin.rpId}`,
+  `passkeys=${
+    keysetVectors.pin.passkeys.map((p) =>
+      `${p.id}.${p.alg === "ES256" ? "es256" : "eddsa"}.${p.pub}`
+    ).join(",")
+  }`,
+  "",
+].join("\n");
 const PANEL_PIN = [
   `current=${PANEL_KID}`,
   "next=",
@@ -1243,6 +1259,22 @@ const SITES: CallSite[] = [
       },
     },
   }),
+
+  // The first statement of the shared key-set vectors, applied to their pin.
+  tpHost(
+    'src/instance/panel-pin-write.ts|["-n","panel-identity-write","statement"]',
+    {
+      argv: ["panel-identity-write", "statement"],
+      stdin: JSON.stringify(keysetVectors.chain[0]),
+      setup: {
+        files: {
+          [`${P}/opt/turbopanel/lib/panel-identity`]: KEYSET_PIN,
+          [`${P}/opt/turbopanel/lib/update-origin`]:
+            `host=https://panel.example.com\nhosts=https://panel.example.com\npanel_key=${keysetVectors.pin.current}\n`,
+        },
+      },
+    },
+  ),
 
   // --- tunnel connectors ----------------------------------------------------
   tpHost(

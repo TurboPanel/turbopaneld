@@ -57,6 +57,16 @@ export function panelUrlCandidates(
   return out;
 }
 
+/** True when a document carries a `rotation` block with passkeys (first fill). */
+export function identityDocumentHasRotation(body: string): boolean {
+  try {
+    const rotation = JSON.parse(body)?.rotation;
+    return Array.isArray(rotation?.passkeys) && rotation.passkeys.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /** The `urls` of an identity document body, or null when absent, empty or malformed. */
 export function identityDocumentUrls(body: string): string[] | null {
   let doc: unknown;

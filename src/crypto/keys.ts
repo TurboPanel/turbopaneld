@@ -183,6 +183,8 @@ export const REQUEST_PREFIX = "tp-request\n";
 export const ATTACH_PREFIX = "tp-attach\n";
 /** Prefix of the signed pin report on that hello; pinned like {@link REQUEST_PREFIX}. */
 export const PIN_REPORT_PREFIX = "tp-panel-pin\n";
+/** Second signature of the pin report: the pinned rotation passkeys hash. */
+export const PIN_PASSKEYS_REPORT_PREFIX = "tp-panel-pin-passkeys\n";
 /** Header that carries a request signature. */
 export const DAEMON_SIGNATURE_HEADER = "x-turbopanel-daemon-signature";
 
@@ -318,12 +320,36 @@ export function buildPinReportSigningInput(params: {
   ].join("\n");
 }
 
+/**
+ * `"tp-panel-pin-passkeys\n" + sessionId + "\n" + serverId + "\n" + keyId +
+ * "\n" + passkeys + "\n" + iat`, where `passkeys` is base64url SHA-256 of the
+ * pin's `passkeys=` line ("" with none). A separate signature, so a control
+ * plane that does not know the field still verifies the first one.
+ */
+export function buildPinPasskeysSigningInput(params: {
+  sessionId: string;
+  serverId: string;
+  keyId: string;
+  passkeys: string;
+  iat: number;
+}): string {
+  return [
+    `${PIN_PASSKEYS_REPORT_PREFIX}${params.sessionId}`,
+    params.serverId,
+    params.keyId,
+    params.passkeys,
+    String(params.iat),
+  ].join("\n");
+}
+
 export interface SignedPinReport {
   pinnedBy: string;
   current: string;
   keyset: number;
   iat: number;
   sig: string;
+  passkeys?: string;
+  passkeysSig?: string;
 }
 
 export async function signPinReport(
@@ -334,21 +360,40 @@ export async function signPinReport(
     pinnedBy: string;
     current: string;
     keyset: number;
+    /** Hash of the pinned rotation passkeys ("" with none); omitted, no second signature. */
+    passkeys?: string;
   },
   nowMs: number = Date.now(),
 ): Promise<SignedPinReport> {
   const iat = Math.floor(nowMs / 1000);
   const input = buildPinReportSigningInput({
-    ...report,
+    sessionId: report.sessionId,
+    serverId: report.serverId,
+    pinnedBy: report.pinnedBy,
+    current: report.current,
+    keyset: report.keyset,
     keyId: key.keyId,
     iat,
   });
-  return {
+  const signed: SignedPinReport = {
     pinnedBy: report.pinnedBy,
     current: report.current,
     keyset: report.keyset,
     iat,
     sig: await signChallenge(key.privateJwk, input),
+  };
+  if (report.passkeys === undefined) return signed;
+  const passkeysInput = buildPinPasskeysSigningInput({
+    sessionId: report.sessionId,
+    serverId: report.serverId,
+    keyId: key.keyId,
+    passkeys: report.passkeys,
+    iat,
+  });
+  return {
+    ...signed,
+    passkeys: report.passkeys,
+    passkeysSig: await signChallenge(key.privateJwk, passkeysInput),
   };
 }
 

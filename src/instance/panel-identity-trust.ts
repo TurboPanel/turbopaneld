@@ -36,6 +36,26 @@ export class PanelIdentityError extends Error {
   }
 }
 
+/**
+ * What a session to the control plane is opened with: null without a pin (the
+ * plain session), or the pin and a control plane key verified against it. A
+ * pinned server without such a key throws, so it can never fall back to the
+ * unsigned session. The error is a plain one, retried with backoff like a
+ * network failure: the next connect verifies the identity document afresh.
+ */
+export function pinnedSessionKey<K extends { kid: string }>(
+  pin: PanelIdentityPin | null,
+  key: K | undefined,
+): { pin: PanelIdentityPin; signing: K } | null {
+  if (!pin) return null;
+  if (!key || !pinAccepts(pin, key.kid)) {
+    throw new Error(
+      "this server is pinned to a control plane key but holds no verified key for this address; not connecting",
+    );
+  }
+  return { pin, signing: key };
+}
+
 /** Kept equal to the control plane's `SIGNED_DAEMON_RESPONSE_PATHS`. */
 export const SIGNED_RESPONSE_ROUTES: ReadonlySet<string> = new Set([
   "/api/daemon/v1/instance/ca",

@@ -9,10 +9,17 @@ import { logWarn } from "../util/logger.ts";
 import { mapSequential } from "../util/sequential.ts";
 import { retryTransient, type RetryView } from "../util/retry-fetch.ts";
 import {
+  IDENTITY_DOCUMENT_MAX_BYTES,
   IDENTITY_DOCUMENT_PATH,
   type PanelIdentityFetch,
   type PanelSealKey,
 } from "./panel-identity-cache.ts";
+import {
+  KEYSET_CHAIN_MAX_BYTES,
+  KEYSET_STATEMENTS_PATH,
+  type KeysetEnvelope,
+  parseKeysetStatements,
+} from "./keyset-chain.ts";
 import { type InstanceConfig, instanceUrl } from "./sockets.ts";
 import { INSTANCE_VERSION_HEADER } from "./version-wire.ts";
 import { DAEMON_SIGNATURE_HEADER } from "../crypto/keys.ts";
@@ -51,6 +58,8 @@ export interface DaemonApiClientOptions {
   onInstanceVersion?: (version: string | null) => void;
   /** Wait between rate-limit retries; tests inject a no-op. Defaults to a timer. */
   sleep?: (ms: number) => Promise<void>;
+  /** Longest wait for an answer that needs no token; tests shorten it. */
+  publicGetTimeoutMs?: number;
   /** Present on the authenticated client; without it only plaintext answers are understood. */
   sealing?: DaemonSealingContext;
   /** The control plane's sealing key, for secrets this daemon sends up; null when unknown. */
@@ -144,6 +153,13 @@ export const MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS = 16 * 1024;
  * JavaScript string units.
  */
 export const MAX_COMMAND_LOG_CHUNK_BYTES = 256 * 1024;
+
+/**
+ * Longest wait, headers and body together, for an answer that needs no token
+ * (the identity document, the key-set chain): asked before the control plane
+ * has proven anything, so it must not hold the connect loop.
+ */
+export const PUBLIC_GET_TIMEOUT_MS = 15_000;
 
 /** Command ids are opaque control-plane ids — never interpolate anything else into the path. */
 const COMMAND_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
@@ -615,13 +631,64 @@ export class DaemonApiClient {
 
   /** The signed identity document, as the raw body plus its signature header. */
   async getPanelIdentityDocument(): Promise<PanelIdentityFetch> {
-    const response = await this.#request(IDENTITY_DOCUMENT_PATH, {
-      method: "GET",
-    });
-    return {
-      body: await response.text(),
-      signature: response.headers.get("x-turbopanel-signature"),
-    };
+    const { body, headers } = await this.#publicGet(
+      IDENTITY_DOCUMENT_PATH,
+      IDENTITY_DOCUMENT_MAX_BYTES,
+    );
+    return { body, signature: headers.get("x-turbopanel-signature") };
+  }
+
+  /** The control plane's key-set chain above `after` (public, self-authenticating). */
+  async getKeysetStatements(after: number): Promise<KeysetEnvelope[]> {
+    const { body } = await this.#publicGet(
+      `${KEYSET_STATEMENTS_PATH}?after=${after}`,
+      KEYSET_CHAIN_MAX_BYTES,
+    );
+    return parseKeysetStatements(body);
+  }
+
+  /**
+   * A GET that needs no token (the identity document, the key-set chain). The
+   * other side has proven nothing yet, so the wait (headers and body
+   * together) and the size of the answer are both bounded.
+   */
+  async #publicGet(
+    path: string,
+    maxBytes: number,
+  ): Promise<{ body: string; headers: Headers }> {
+    const route = path.split("?")[0];
+    const timeoutMs = this.#options.publicGetTimeoutMs ??
+      PUBLIC_GET_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () =>
+        controller.abort(
+          new DOMException(
+            `no answer from ${route} within ${timeoutMs} ms`,
+            "TimeoutError",
+          ),
+        ),
+      timeoutMs,
+    );
+    try {
+      const response = await this.#attempt(path, {
+        method: "GET",
+        signal: controller.signal,
+      }, {});
+      const body = await readTextCapped(response, maxBytes, controller.signal);
+      if (!response.ok) {
+        throw apiErrorOf(response.status, parseJsonOrNull(body ?? ""));
+      }
+      if (body === null) {
+        throw new DaemonApiError(
+          response.status,
+          `${route} answered more than ${maxBytes} bytes`,
+        );
+      }
+      return { body, headers: response.headers };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /**
@@ -852,23 +919,13 @@ export class DaemonApiClient {
   }
 
   async #toApiError(response: Response): Promise<DaemonApiError> {
+    let body: unknown = null;
     try {
-      const body = await response.json() as {
-        error?: string;
-        nextSeq?: unknown;
-      };
-      if (typeof body.error === "string" && body.error.trim().length > 0) {
-        const nextSeq =
-          Number.isInteger(body.nextSeq) && response.status === 409
-            ? body.nextSeq as number
-            : undefined;
-        return new DaemonApiError(response.status, body.error, nextSeq);
-      }
+      body = await response.json();
     } catch {
       // ignored
     }
-
-    return new DaemonApiError(response.status, `HTTP ${response.status}`);
+    return apiErrorOf(response.status, body);
   }
 
   #fetch(
@@ -880,5 +937,63 @@ export class DaemonApiClient {
       return fetch(url, { ...init, client: this.#options.httpClient });
     }
     return fetch(url, init);
+  }
+}
+
+/** The error an answer's JSON body names, or the bare status. */
+function apiErrorOf(status: number, body: unknown): DaemonApiError {
+  const named = typeof body === "object" && body !== null
+    ? body as { error?: unknown; nextSeq?: unknown }
+    : {};
+  if (typeof named.error === "string" && named.error.trim().length > 0) {
+    const nextSeq = Number.isInteger(named.nextSeq) && status === 409
+      ? named.nextSeq as number
+      : undefined;
+    return new DaemonApiError(status, named.error, nextSeq);
+  }
+  return new DaemonApiError(status, `HTTP ${status}`);
+}
+
+function parseJsonOrNull(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A response body as text, read in pieces and given up (null, stream
+ * cancelled) once it passes `maxBytes`, so an oversized answer is never held
+ * in memory. An abort of `signal` while reading rejects with its reason.
+ */
+export async function readTextCapped(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const reader = response.body?.getReader();
+  if (!reader) return "";
+  const onAbort = () => {
+    reader.cancel(signal?.reason).catch(() => {});
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  const decoder = new TextDecoder();
+  let text = "";
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) return text + decoder.decode();
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        return null;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
   }
 }

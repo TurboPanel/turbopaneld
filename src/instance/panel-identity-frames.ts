@@ -75,9 +75,15 @@ export interface VerifiedHello {
   urls: string[];
 }
 
-/** True when `kid` is one of the fingerprints this server pinned. */
+/**
+ * True when `kid` is one of the fingerprints this server pinned. Once rotation
+ * passkeys are pinned only the current key counts: a key moves only by an
+ * approved statement, never by a `next=` a document named.
+ */
 export function pinAccepts(pin: PanelIdentityPin, kid: string): boolean {
-  return kid !== "" && (kid === pin.current || kid === pin.next);
+  if (kid === "") return false;
+  if (kid === pin.current) return true;
+  return pin.passkeys.length === 0 && kid === pin.next;
 }
 
 /** 32 random bytes, base64url: the challenge the control plane's hello must echo. */
@@ -201,7 +207,13 @@ function helloFields(
     return fail("key is not pinned");
   }
   if (!iatFresh(hello.iat, nowMs)) return fail("iat out of range");
-  if (typeof hello.keyset !== "number" || hello.keyset < ctx.pin.keyset) {
+  // Once rotation passkeys are pinned, approved statements own the key set (a
+  // High Availability hello carries its secret's number); the key must still
+  // be the pinned one.
+  if (
+    typeof hello.keyset !== "number" ||
+    (ctx.pin.passkeys.length === 0 && hello.keyset < ctx.pin.keyset)
+  ) {
     return fail("keyset lower than pinned");
   }
   const sessionId = hello.sessionId;
