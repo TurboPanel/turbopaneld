@@ -76,6 +76,17 @@ export class AcmeError extends Error {
   }
 }
 
+/**
+ * A refusal this daemon raised itself (a name it will not order, a check the
+ * authority does not offer): its message is plain words and may be shown as is.
+ */
+export class LocalAcmeError extends AcmeError {
+  constructor(code: AcmeErrorCode, message: string) {
+    super(code, message);
+    this.name = "LocalAcmeError";
+  }
+}
+
 export type AcmeProblem = {
   type?: string;
   detail?: string;

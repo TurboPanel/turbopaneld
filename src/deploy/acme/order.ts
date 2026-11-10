@@ -25,6 +25,7 @@ import {
   type AcmeClient,
   AcmeError,
   type AcmeOrder,
+  LocalAcmeError,
   problemCode,
   problemDetail,
 } from "./client.ts";
@@ -60,7 +61,12 @@ export type OrderInput = {
   replaces?: string;
 };
 
-export type IssuedChain = { certificatePem: string; privateKeyPem: string };
+export type IssuedChain = {
+  certificatePem: string;
+  privateKeyPem: string;
+  /** The names as ordered: folded to lowercase, each once. */
+  names: string[];
+};
 
 const DNS_NAME_RE =
   /^(?:\*\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/;
@@ -75,10 +81,10 @@ export function orderNames(
     const name = raw.trim().toLowerCase().replace(/\.$/, "");
     const ipv4 = /^\d+(?:\.\d+){3}$/.test(name);
     if (ipv4 || !DNS_NAME_RE.test(name) || name.length > 253) {
-      throw new AcmeError("rejected_name", `${raw} is not a domain name`);
+      throw new LocalAcmeError("rejected_name", `${raw} is not a domain name`);
     }
     if (name.startsWith("*.") && solverType !== "dns-01") {
-      throw new AcmeError(
+      throw new LocalAcmeError(
         "unsupported",
         `${name} is a wildcard name, which can only be checked through DNS`,
       );
@@ -86,7 +92,7 @@ export function orderNames(
     if (!out.includes(name)) out.push(name);
   }
   if (out.length === 0) {
-    throw new AcmeError("rejected_name", "the order names no domain");
+    throw new LocalAcmeError("rejected_name", "the order names no domain");
   }
   return out;
 }
@@ -208,7 +214,7 @@ async function presentAll(
     );
     const name = authz.identifier.value;
     if (!challenge) {
-      throw new AcmeError(
+      throw new LocalAcmeError(
         "unsupported",
         `the certificate authority offered no ${solver.type} check for ${name}`,
       );
@@ -301,7 +307,7 @@ async function finalizeOrder(
       "the certificate authority sent something that is not a certificate",
     );
   }
-  return { certificatePem, privateKeyPem: key.privateKeyPem };
+  return { certificatePem, privateKeyPem: key.privateKeyPem, names };
 }
 
 /** Best effort: give up the authorizations still pending, so they stop counting against limits. */

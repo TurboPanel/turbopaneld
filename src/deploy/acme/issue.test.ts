@@ -5,14 +5,14 @@ import { createFakeCa, FAKE_CA_DIRECTORY } from "../../testing/fake-acme-ca.ts";
 import type { CommandResult } from "../instance-acme-http01.ts";
 import { sweepTenantAcme, tenantAcmeSocketPath } from "../tenant-acme-issue.ts";
 import { acmeAccountPath } from "./account-store.ts";
-import { AcmeError } from "./client.ts";
-import { Http01Answers } from "./http01.ts";
+import { AcmeError, LocalAcmeError } from "./client.ts";
+import { Http01Answers, withHttp01Answers } from "./http01.ts";
 import {
   checkIssuedLeaf,
   daemonAcmeDirectoryUrl,
   type DaemonIssueDeps,
   type DaemonIssueRequest,
-  issueCertificateOverHttp01,
+  issueCertificateOverHttp01 as issueOn,
   plainDaemonAcmeFailure,
   RATE_LIMITED_REASON,
 } from "./issue.ts";
@@ -43,6 +43,20 @@ function request(over: Partial<DaemonIssueRequest> = {}): DaemonIssueRequest {
     contactEmail: "ops@example.com",
     ...over,
   };
+}
+
+/** The entry point on this request's proof socket, as the order path will call it. */
+function issueCertificateOverHttp01(
+  layout: LayoutPaths,
+  req: DaemonIssueRequest,
+  deps: DaemonIssueDeps,
+) {
+  return issueOn(
+    layout,
+    req,
+    tenantAcmeSocketPath(layout, req.requestId),
+    deps,
+  );
 }
 
 const okRun = (): Promise<CommandResult> =>
@@ -252,17 +266,16 @@ test("a leaf that leaves out a name is refused", async () => {
   });
 });
 
-test("an unusable request id is refused before anything is done", async () => {
+test("names are checked against the leaf as ordered, folded", async () => {
   await withRoot(async (root) => {
+    const { ca, deps } = await answeringCa(new Http01Answers());
     const outcome = await issueCertificateOverHttp01(
       layoutUnder(root),
-      request({ requestId: "../x" }),
-      { fetch: () => Promise.reject(new Error("must not be called")) },
+      request({ names: ["Example.com.", " www.example.com"] }),
+      deps,
     );
-    assertEquals(outcome.ok, false);
-    if (!outcome.ok) {
-      assertEquals(outcome.reason, "the request id is not usable");
-    }
+    if (!outcome.ok) throw new TypeError(outcome.reason);
+    assertEquals(ca.issued, [["example.com", "www.example.com"]]);
   });
 });
 
@@ -287,7 +300,9 @@ test("every failure has a plain sentence", () => {
     [new AcmeError("account_gone", "x"), "account was closed"],
     [new AcmeError("foreign_address", "x"), "outside its own site"],
     [new AcmeError("rejected_name", "x", null, 400), "public domain"],
-    [new AcmeError("unsupported", "ours, plain"), "ours, plain"],
+    // An authority's refusal without a status still never shows its raw text.
+    [new AcmeError("rejected_name", "raw detail"), "public domain"],
+    [new LocalAcmeError("unsupported", "ours, plain"), "ours, plain"],
     [
       new AcmeError("malformed", "invalid contact mailto", null, 400),
       "contact",
@@ -298,7 +313,9 @@ test("every failure has a plain sentence", () => {
   for (const [err, words] of cases) {
     assertStringIncludes(plainDaemonAcmeFailure(err).reason, words, err.code);
   }
-  assertEquals(plainDaemonAcmeFailure(new Error("x")).code, "unknown");
+  const local = plainDaemonAcmeFailure(new Error("EACCES writing a file"));
+  assertEquals(local.code, "unknown");
+  assertStringIncludes(local.reason, "this server could not run");
 });
 
 test("a leaf that cannot be read or does not match its key is refused", async () => {
@@ -357,5 +374,21 @@ test("the start-up sweep keeps the account and clears only the request files", a
     });
     assertEquals(await exists(path), true);
     assertEquals(await exists(requests), false);
+  });
+});
+
+test("a peer that sends nothing does not hold up the next check", async () => {
+  await withRoot(async (root) => {
+    const socket = tenantAcmeSocketPath(layoutUnder(root), "req_2");
+    const body = await withHttp01Answers(socket, okRun, async (solver) => {
+      await solver.present({ name: "a.example", token: "tok", value: "tok.k" });
+      const silent = await Deno.connect({ transport: "unix", path: socket });
+      try {
+        return await socketGet(socket, "tok");
+      } finally {
+        silent.close();
+      }
+    });
+    assertEquals(body, "tok.k");
   });
 });

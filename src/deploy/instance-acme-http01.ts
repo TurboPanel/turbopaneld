@@ -707,24 +707,37 @@ export async function withProofAnswerServer<T>(
   }
 }
 
+/**
+ * Answer every connection side by side, so one peer that sends nothing cannot
+ * hold up the authority's other checks; whatever is still open when the
+ * listener closes is closed with it.
+ */
 async function acceptProofRequests(
   listener: Deno.Listener,
   answer: ProofAnswer,
 ): Promise<void> {
-  let conn: Deno.Conn;
+  const open = new Set<Deno.Conn>();
+  const closeQuietly = (conn: Deno.Conn) => {
+    open.delete(conn);
+    try {
+      conn.close();
+    } catch {
+      // already closed
+    }
+  };
   try {
-    conn = await listener.accept();
+    for await (const conn of listener) {
+      open.add(conn);
+      // A peer that went away mid-request costs nothing but its own answer.
+      answerProofRequest(conn, answer).catch(() => undefined).finally(() =>
+        closeQuietly(conn)
+      );
+    }
   } catch {
-    return;
-  }
-  try {
-    await answerProofRequest(conn, answer);
-  } catch {
-    // A peer that went away mid-request costs nothing but its own answer.
+    // The listener was closed.
   } finally {
-    conn.close();
+    for (const conn of open) closeQuietly(conn);
   }
-  return acceptProofRequests(listener, answer);
 }
 
 async function answerProofRequest(

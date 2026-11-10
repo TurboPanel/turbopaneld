@@ -5,7 +5,8 @@
  *
  * The caller keeps everything it does today around the order: it holds the
  * order window lock, routes the proof path for the names to this request's
- * socket (`applyProofRoutes`), proves the routes, and afterwards reports the
+ * socket (`applyProofRoutes`; the caller passes that socket's path,
+ * `tenantAcmeSocketPath`), proves the routes, and afterwards reports the
  * pair and withdraws the routes. This call serves the answers on that socket,
  * uses this server's one account for the directory (made on first use, see
  * `account-store.ts`), runs the order for every name in one certificate, and
@@ -28,14 +29,17 @@ import {
   LETS_ENCRYPT_DIRECTORY_URL,
   LETS_ENCRYPT_STAGING_DIRECTORY_URL,
 } from "../instance-acme-issuer.ts";
-import { tenantAcmeSocketPath } from "../tenant-acme-issue.ts";
 import { acmeAccountClient, forgetAcmeAccount } from "./account-store.ts";
-import { AcmeError, type AcmeErrorCode, fetchRenewalInfo } from "./client.ts";
+import { logWarn } from "../../util/logger.ts";
+import {
+  AcmeError,
+  type AcmeErrorCode,
+  fetchRenewalInfo,
+  LocalAcmeError,
+} from "./client.ts";
 import { withHttp01Answers } from "./http01.ts";
 import { type ChallengeSolver, type OrderDeps, runAcmeOrder } from "./order.ts";
 import { renewalCertId } from "./renewal-id.ts";
-
-const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 export type DaemonIssueRequest =
   & Pick<
@@ -101,6 +105,9 @@ export const RATE_LIMITED_REASON =
 const GENERIC_REASON =
   "Let's Encrypt could not issue a certificate; it will be retried later";
 
+const LOCAL_REASON =
+  "this server could not run the certificate order; see the daemon log for details";
+
 function sentence(err: AcmeError): string {
   switch (err.code) {
     case "rate_limited":
@@ -124,8 +131,8 @@ function sentence(err: AcmeError): string {
       return "Let's Encrypt named an address outside its own site, so the order was stopped";
     case "rejected_name":
     case "unsupported":
-      // Either the authority refused the name or this server did; ours are plain already.
-      return err.status === null
+      // A refusal this server raised is plain already; the authority's never is.
+      return err instanceof LocalAcmeError
         ? err.message
         : plainInstanceAcmeProblem("rejected-identifier");
     case "malformed":
@@ -144,7 +151,7 @@ export function plainDaemonAcmeFailure(err: unknown): {
   retryAfterMs: number | null;
 } {
   if (!(err instanceof AcmeError)) {
-    return { code: "unknown", reason: GENERIC_REASON, retryAfterMs: null };
+    return { code: "unknown", reason: LOCAL_REASON, retryAfterMs: null };
   }
   const text = sentence(err);
   const reason = err.identifier && !text.startsWith(err.identifier)
@@ -209,25 +216,18 @@ async function renewalHints(
 
 /** Order one certificate for every name in the request over the HTTP proof. Never throws. */
 export async function issueCertificateOverHttp01(
-  layout: LayoutPaths,
+  layout: Pick<LayoutPaths, "stateDir">,
   request: DaemonIssueRequest,
+  socketPath: string,
   deps: DaemonIssueDeps = {},
 ): Promise<DaemonIssueOutcome> {
-  if (!SAFE_REQUEST_ID_RE.test(request.requestId)) {
-    return {
-      ok: false,
-      code: "unsupported",
-      reason: "the request id is not usable",
-      retryAfterMs: null,
-    };
-  }
   const directoryUrl = deps.directoryUrl ??
     daemonAcmeDirectoryUrl(request.directory);
   const serve = deps.serveAnswers ?? withHttp01Answers;
   const fetchOption = deps.fetch ? { fetch: deps.fetch } : {};
   try {
     const chain = await serve(
-      tenantAcmeSocketPath(layout, request.requestId),
+      socketPath,
       deps.run ?? defaultCommand,
       async (solver) => {
         const client = await acmeAccountClient(layout, {
@@ -249,15 +249,28 @@ export async function issueCertificateOverHttp01(
     const notAfterIso = checkIssuedLeaf(
       chain.certificatePem,
       chain.privateKeyPem,
-      request.names,
+      chain.names,
     );
     const renewal = await renewalHints(
       chain.certificatePem,
       directoryUrl,
       deps.fetch,
     );
-    return { ok: true, ...chain, notAfterIso, renewal };
+    return {
+      ok: true,
+      certificatePem: chain.certificatePem,
+      privateKeyPem: chain.privateKeyPem,
+      notAfterIso,
+      renewal,
+    };
   } catch (err) {
+    // The raw text stays in the daemon log; the outcome carries plain words only.
+    const code = err instanceof AcmeError ? err.code : "local";
+    const raw = err instanceof Error ? err.message : String(err);
+    logWarn(
+      "deploy",
+      `certificate order ${request.requestId} failed (${code}): ${raw}`,
+    );
     if (err instanceof AcmeError && err.code === "account_gone") {
       await forgetAcmeAccount(layout, directoryUrl).catch(() => undefined);
     }
