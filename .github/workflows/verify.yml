@@ -165,39 +165,14 @@ jobs:
         run: deno task check:orchestration
 
       # assets.test.ts requires scripts/download-caddy.mjs and fails when it is
-      # missing. A single-repo checkout does not include that file. Prefer the
-      # same-named branch on TurboPanel/turbopanel so a paired PR is compared
-      # with its own pin; otherwise use trunk. PRs into staging/live use trunk
-      # (see contract-drift below).
-      - name: Resolve instance checkout ref
-        id: instance-ref
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          REF="$HEAD_REF"
-          # Never staging/live: not as the head (a staging → trunk PR), not as
-          # the base (the promotion PRs), not as the pushed branch.
-          case "$REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          case "$BASE_REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
-            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=trunk" >> "$GITHUB_OUTPUT"
-          fi
-
+      # missing. A single-repo checkout does not include that file, so it is
+      # read from TurboPanel/turbopanel trunk (never another pull request's
+      # branch).
       - name: Check out instance Caddy downloader
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/turbopanel
-          ref: ${{ steps.instance-ref.outputs.ref }}
+          ref: trunk
           fetch-depth: 1
           path: .ci-instance-caddy-pin
           persist-credentials: false
@@ -305,16 +280,14 @@ jobs:
         uses: TurboPanel/dev/.github/actions/sonar-new-issues@2db1bbfa3cff89a52fac3ee4a53bd495dc1c79b1 # dev#47
 
   # The contract twins (commands, cell messages, version-wire, the field
-  # snapshot) are compared against the turbopanel checkout of the same-named
-  # branch (else trunk; never turbopanel's staging or live), so a daemon-only change that drifts fails here rather
-  # than turning turbopanel red after it merges. Mirrors turbopanel's
-  # contract-twin job.
-  #
-  # PRs into staging/live (the automatic promotion PRs) have `staging` or
-  # `trunk` as their head, carrying commits that were checked against
-  # turbopanel trunk. Pairing them with turbopanel's staging/live would
-  # compare the new daemon with the older control plane (the daemon ships
-  # first by design), so those PRs compare against turbopanel trunk too.
+  # snapshot) are checked against TurboPanel/turbopanel trunk, always (never
+  # another pull request's branch, never staging or live). Wire changes merge
+  # daemon first, then control plane, so the rule is one-way: this daemon may
+  # be ahead of the control plane (extra features, optional fields), and it
+  # is red only when the control plane relies on something this daemon does
+  # not have. Byte mirrors only give a notice here; the control plane's
+  # contract-twin job holds its own copy to daemon trunk's
+  # (scripts/check-contract-drift.ts).
   contract-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -355,58 +328,16 @@ jobs:
         with:
           deno-version: "2.9.8"
 
-      - name: Resolve turbopanel checkout ref
-        id: instance-ref
-        working-directory: turbopaneld
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          EVENT_BODY: ${{ github.event.pull_request.body }}
-          SIBLING_REPO: TurboPanel/turbopanel
-        run: |
-          # The same-named branch, else trunk. Never staging/live: not as the
-          # head (a staging → trunk PR), not as the base (the promotion PRs),
-          # not as the pushed branch. A pull request may name the sibling
-          # branch instead with a `Sibling-Branch: <branch>` line in its
-          # description (a fork PR, or a twin with another name); the branch
-          # must exist in the org repo. The description is read fresh so an
-          # edit counts on a re-run, and it only reaches the resolver through
-          # the environment.
-          PR_BODY="$EVENT_BODY"
-          if [ -n "$PR_NUMBER" ]; then
-            PR_BODY="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.body // ""')" || PR_BODY="$EVENT_BODY"
-          fi
-          export PR_BODY
-          resolver() {
-            deno run --no-prompt --no-lock --allow-env=HEAD_REF,BASE_REF,PR_BODY,SIBLING_REPO,REF,SOURCE scripts/resolve-sibling-ref.ts "$@"
-          }
-          resolved="$(resolver)" || { printf '%s\n' "$resolved"; exit 1; }
-          CANDIDATE="$(printf '%s\n' "$resolved" | sed -n 's/^candidate=//p')"
-          SOURCE="$(printf '%s\n' "$resolved" | sed -n 's/^source=//p')"
-          if gh api "repos/${SIBLING_REPO}/branches/${CANDIDATE}" --silent; then
-            REF="$CANDIDATE"
-          elif [ "$SOURCE" = override ]; then
-            echo "::error title=Sibling-Branch::the branch named in the description does not exist in ${SIBLING_REPO}; a maintainer has to push it there first"
-            exit 1
-          else
-            REF=trunk
-            SOURCE=trunk-fallback
-          fi
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          REF="$REF" SOURCE="$SOURCE" resolver summary >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check out turbopanel (contract twins)
+      - name: Check out turbopanel trunk (contract twins)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/turbopanel
-          ref: ${{ steps.instance-ref.outputs.ref }}
+          ref: trunk
           path: turbopanel
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Check contract drift against turbopanel
+      - name: Check the contract against turbopanel trunk (daemon first)
         working-directory: turbopaneld
         env:
           TURBOPANEL_REQUIRE_SIBLING: "1"

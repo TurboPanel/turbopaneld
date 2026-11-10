@@ -89,7 +89,7 @@ playbook runs. A late success runs the fabric, forwarding and PHP steps; the
 Docker monitor is wired into the sentinel at start-up, so it still waits for
 the next restart. `runtimeVerification()` reads `verified`, `retrying` or
 `not-verified`; it is not on the wire yet (a presence field would be an
-expand-only twin: panel first, then daemon).
+expand-only twin: daemon first, then control plane).
 
 ## Runtime Integrity
 

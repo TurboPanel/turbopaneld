@@ -984,8 +984,10 @@ in the same change, and record why in this section and in
 `../turbopanel/AGENTS.md` → Versions on the wires. Never raise either floor
 silently. A release that introduces a new wire message leaves both floors
 where they are. Each new message is feature-gated: the peer advertises
-support in `features[]` (`DAEMON_WIRE_FEATURES`, kept equal in both
-`version-wire.ts` files) and the daemon checks `InstanceClient.instanceSupports()`
+support in `features[]` (`DAEMON_WIRE_FEATURES`; this list may be longer than
+the control plane's, never shorter: wire changes merge daemon first, then
+control plane, the contract check fails a control plane that lists a feature
+this daemon lacks, and an older control plane ignores names it does not know) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
 ignored by a peer that does not list the feature. `command-progress` (the
@@ -1006,7 +1008,8 @@ when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
 
-`DAEMON_FEATURE_MIN_VERSIONS` (kept equal in both `version-wire.ts` files) is
+`DAEMON_FEATURE_MIN_VERSIONS` (every control plane entry must be here with the
+same value; this daemon may have more, since it merges first) is
 the peer-version feature gate — not the metrics hardware-profile capability
 plan. A panel-visible admin feature that depends on a daemon-rendered artifact
 adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does
