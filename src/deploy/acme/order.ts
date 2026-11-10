@@ -35,7 +35,7 @@ import { buildCertificateRequest, generateCertificateKey } from "./csr.ts";
 export const ACME_ORDER_TIMEOUT_MS = 3 * 60_000;
 const MIN_POLL_MS = 1_000;
 const MAX_POLL_MS = 10_000;
-/** Consecutive transient read failures a poll lives through. */
+/** A poll gives up at this many transient read failures in a row (it lives through two). */
 const TRANSIENT_READS = 3;
 
 export type ChallengeSolver = {
@@ -79,8 +79,11 @@ export function orderNames(
   const out: string[] = [];
   for (const raw of names) {
     const name = raw.trim().toLowerCase().replace(/\.$/, "");
-    const ipv4 = /^\d+(?:\.\d+){3}$/.test(name);
-    if (ipv4 || !DNS_NAME_RE.test(name) || name.length > 253) {
+    // Length first: names come off the wire.
+    if (
+      name.length > 253 || /^\d+(?:\.\d+){3}$/.test(name) ||
+      !DNS_NAME_RE.test(name)
+    ) {
       throw new LocalAcmeError("rejected_name", `${raw} is not a domain name`);
     }
     if (name.startsWith("*.") && solverType !== "dns-01") {
