@@ -57,6 +57,8 @@ async function lifted(): Promise<string> {
 }
 
 const STUBS = `
+TP_TRUST_FROM_OPEN_LEG=\${TP_TRUST_FROM_OPEN_LEG:-false}
+tp_bootstrap_leg() { printf '%s' "\${TP_TEST_LEG:-system}"; }
 tp_print_step() { :; }
 tp_print_ok() { :; }
 tp_print_detail() { :; }
@@ -237,6 +239,46 @@ test("a TOKEN signed by the panel's key verifies against its document", async ()
   const result = await run(verifyScript(token, panel.fingerprint), panel);
   assertEquals(result.code, 0, result.stderr);
   assertStringIncludes(result.stdout, "keyset=4");
+});
+
+test("the TOKEN check falls back to the public roots when stored trust does not verify the panel", async () => {
+  // The document is checked against the key the command names, so a
+  // control plane now behind a public edge still passes.
+  const panel = await makePanel({ keyset: 2 });
+  const token = await makeToken(panel);
+  const result = await run(
+    [
+      "TP_TEST_LEG=stored",
+      "tp_instance_bootstrap_curl() { printf 'strictcurl'; }",
+      "strictcurl() { return 60; }",
+      'curl() { fakecurl "$@"; }',
+      verifyScript(token, panel.fingerprint),
+    ].join("\n"),
+    panel,
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertStringIncludes(result.stdout, "keyset=2");
+});
+
+test("the TOKEN check only falls back when this host's stored trust was tried", async () => {
+  const panel = await makePanel();
+  const token = await makeToken(panel);
+  const result = await run(
+    [
+      "TP_TEST_LEG=system",
+      "tp_instance_bootstrap_curl() { printf 'strictcurl'; }",
+      "strictcurl() { return 60; }",
+      "curl() { echo 'second fetch' >&2; return 1; }",
+      verifyScript(token, panel.fingerprint),
+    ].join("\n"),
+    panel,
+  );
+  assert(result.code !== 0);
+  assertEquals(result.stderr.includes("second fetch"), false);
+  assertStringIncludes(
+    result.stderr,
+    "Could not fetch the panel's identity document",
+  );
 });
 
 test("the TOKEN payload is never a process argument", async () => {
@@ -530,6 +572,16 @@ test("learning on upgrade pins nothing when the document is missing, forged or n
       "another control plane than the enrolled one",
       await makePanel(),
       "HOST_URL=https://other.example.test",
+    ],
+    [
+      "trust that arrived this run over the public roots",
+      await makePanel(),
+      "TP_TRUST_FROM_OPEN_LEG=true",
+    ],
+    [
+      "a pinned host with no stored trust to check the panel with",
+      await makePanel(),
+      `TP_TEST_LEG=system; CA_PIN=${"ab".repeat(32)}`,
     ],
   ];
   for (const [label, panel, vars] of cases) {

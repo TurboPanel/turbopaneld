@@ -896,9 +896,22 @@ Platform CA or private issuer `run.sh` is about to install — over `-k`, the
 pinned leg, or the system-roots refetch — must have every certificate in that
 list, or the install stops and nothing is written (`tp_check_fetched_trust`).
 A host that already carries a list (`daemon.env` plus
-`<state>/tls/instance-ca-pin`) keeps it when a run brings none: downloads over
-the `-k` leg must match it, so re-running an old command cannot downgrade a
-pinned host; verified legs are authenticated by that trust already. An
+`<state>/tls/instance-ca-pin`) keeps it when a run brings none: only a
+download that this host's own stored trust file verified (the `stored` leg)
+is taken as is; one over the system roots or `-k` must match the list, so
+neither an old command nor anyone with a public certificate for the name can
+replace a pinned CA, and a system-roots answer never deletes a pinned CA or
+issuer. Debian's curl keeps its CA folder next to `--cacert`, so every
+`run.sh` check against a stored trust file also passes
+`--capath $TP_NO_SYSTEM_CAPATH` (a folder that does not exist), and the issuer
+check runs `openssl verify -no-CApath -no-CAstore`; the overlay artifact curl
+is the one deliberate exception (signed manifest). A control plane behind a
+public edge is handled on purpose: the CA and issuer fetches retry over the
+system roots with the list enforced, the TOKEN check falls back to them (the
+document is checked against the command's key), and `--insecure-tls` counts
+the public roots as an anchor. Learning the panel key on upgrade only uses
+trust the host already had, never trust that arrived in the same run over the
+system roots or `-k`. An
 operator's `--instance-ca` must match a fingerprint the command gave. With no
 list anywhere the old behaviour stays and a `-k` download prints one
 "trusted on first use" line. `run.sh` then writes the fingerprints of every

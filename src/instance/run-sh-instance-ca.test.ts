@@ -85,6 +85,8 @@ async function fingerprint(path: string): Promise<string> {
  * answers with the code its env var names and serves TP_TEST_SERVED_CA on 200.
  */
 const CURL_STUB = [
+  "TP_NO_SYSTEM_CAPATH=/nonexistent",
+  "TP_TRUST_FROM_OPEN_LEG=false",
   "tp_curl_http_code() {",
   '  _out=""; _mode=system; _prev=""',
   '  for _a in "$@"; do',
@@ -629,24 +631,137 @@ test("an old command on a pinned host is checked against the CA it already trust
   }
 });
 
-test("a host's own list does not block a CA that a verified connection serves", async () => {
+test("a host's own list blocks a different CA that only the public roots vouch for", async () => {
+  // No stored trust file yet: the fetch can only be checked by the public
+  // roots, which anyone holding a certificate for the name passes.
   const source = await Deno.readTextFile(runShPath);
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
   try {
     const old = await selfSignedCa(dir, "OldPlatformCA");
     const next = await selfSignedCa(dir, "NextPlatformCA");
     const caPath = `${dir}/instance-ca.pem`;
-    const out = await fetchCa(source, {
+    const refused = await fetchCa(source, {
       CA_PIN: hexFingerprint(await fingerprint(old)),
       CA_PIN_SOURCE: "host",
       TP_TEST_SYSTEM: "200",
       TP_TEST_SERVED_CA: next,
     }, caPath);
-    assertEquals(out.status, 0, out.stderr);
-    assertEquals(await fingerprint(caPath), await fingerprint(next));
+    assertEquals(refused.status === 0, false);
+    assertStringIncludes(refused.stderr, "the CA this server already trusts");
+    assertEquals(await exists(caPath), false);
+    assertEquals(refused.calls, ["system"]);
+
+    const matching = await fetchCa(source, {
+      CA_PIN: hexFingerprint(await fingerprint(old)),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_SYSTEM: "200",
+      TP_TEST_SERVED_CA: old,
+    }, caPath);
+    assertEquals(matching.status, 0, matching.stderr);
+    assertEquals(await fingerprint(caPath), await fingerprint(old));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+test("a CA that the stored Platform CA itself vouches for may rotate past the host's list", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "OldPlatformCA");
+    const next = await selfSignedCa(dir, "NextPlatformCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(old, caPath);
+    const out = await fetchCa(source, {
+      CA_PIN: hexFingerprint(await fingerprint(old)),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_PINNED: "200",
+      TP_TEST_SERVED_CA: next,
+    }, caPath);
+    assertEquals(out.status, 0, out.stderr);
+    assertEquals(await fingerprint(caPath), await fingerprint(next));
+    assertEquals(out.calls, ["pinned"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("an answer over the public roots never retires a Platform CA the host pins", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "OldPlatformCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(old, caPath);
+    const before = await fingerprint(caPath);
+    const out = await fetchCa(source, {
+      CA_PIN: hexFingerprint(before),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "404",
+      TP_TEST_SERVED_CA: old,
+    }, caPath);
+    assertEquals(out.status, 0, out.stderr);
+    assertStringIncludes(
+      out.stdout,
+      "keeping the Platform CA this server pins",
+    );
+    assertEquals(await fingerprint(caPath), before);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a CA fetched over the public roots must match the host's list even when it signs the live leaf", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
+  try {
+    const old = await selfSignedCa(dir, "OldPlatformCA");
+    const other = await selfSignedCa(dir, "OtherCA");
+    const caPath = `${dir}/instance-ca.pem`;
+    await Deno.copyFile(old, caPath);
+    const before = await fingerprint(caPath);
+    const out = await fetchCa(source, {
+      CA_PIN: hexFingerprint(before),
+      CA_PIN_SOURCE: "host",
+      TP_TEST_PINNED: "000",
+      TP_TEST_SYSTEM: "200",
+      TP_TEST_LEAF_OK: "1",
+      TP_TEST_SERVED_CA: other,
+    }, caPath);
+    assertEquals(out.status === 0, false);
+    assertStringIncludes(out.stderr, "the CA this server already trusts");
+    assertEquals(await fingerprint(caPath), before);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("every --cacert that checks a control plane's trust file turns off the system roots", async () => {
+  // Debian's curl keeps its CA folder next to --cacert; only --capath at a
+  // folder that does not exist makes the file the only trust.
+  const source = await Deno.readTextFile(runShPath);
+  assertStringIncludes(source, "TP_NO_SYSTEM_CAPATH=/nonexistent\n");
+  const lenient = extractShellFunction(source, "tp_artifact_curl");
+  const lines = source.split("\n").filter((line) =>
+    line.includes("--cacert") && !line.trimStart().startsWith("#") &&
+    !lenient.includes(line)
+  );
+  assertEquals(lines.length >= 3, true, lines.join("\n"));
+  for (const line of lines) {
+    assertStringIncludes(line, "--capath", line);
+  }
+  // The overlay download is the one deliberate exception, and says why.
+  assertStringIncludes(
+    source,
+    "This --cacert deliberately keeps curl's system roots",
+  );
+});
+
+test("the private issuer check ignores the system roots", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const verify = extractShellFunction(source, "tp_uploaded_trust_verifies");
+  assertStringIncludes(verify, "openssl verify -no-CApath -no-CAstore");
 });
 
 test("an operator-supplied --instance-ca is checked against a fingerprint the command gave", async () => {
