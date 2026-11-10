@@ -11,6 +11,7 @@ import {
   AcmeClient,
   AcmeError,
   authorityUrl,
+  failureCode,
   fetchRenewalInfo,
   problemCode,
 } from "./client.ts";
@@ -414,6 +415,83 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
     const other = await acmeAccountClient(layout, options);
     assert(other.accountUrl);
     assertEquals(ca.accounts.size, 4);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("only an answer about the account itself means the account is gone", () => {
+  const unauthorized = (detail: string) => ({
+    type: "urn:ietf:params:acme:error:unauthorized",
+    detail,
+  });
+  assertEquals(
+    failureCode(
+      403,
+      unauthorized('Account is not valid, has status "deactivated"'),
+    ),
+    "account_gone",
+  );
+  assertEquals(
+    failureCode(400, {
+      type: "urn:ietf:params:acme:error:accountDoesNotExist",
+    }),
+    "account_gone",
+  );
+  assertEquals(
+    failureCode(403, unauthorized("The certificate has been revoked")),
+    "unauthorized",
+  );
+  assertEquals(
+    failureCode(403, unauthorized("Authorization has been deactivated")),
+    "unauthorized",
+  );
+  // A server error the problem does not explain is retried by a poll.
+  assertEquals(failureCode(502, null), "server");
+  assertEquals(failureCode(400, null), "unknown");
+  assertEquals(failureCode(429, null), "rate_limited");
+});
+
+test("an address carrying a user name or password is refused", () => {
+  assertThrows(
+    () => authorityUrl("https://user:pw@ca.test/order", "ca.test"),
+    AcmeError,
+  );
+  assertThrows(
+    () => authorityUrl("https://user@ca.test/order", "ca.test"),
+    AcmeError,
+  );
+});
+
+test("a key that never registered cannot order", async () => {
+  const ca = await createFakeCa();
+  const client = await clientWith(ca.fetch);
+  const err = await assertRejects(
+    () => client.newOrder(["example.com"]),
+    AcmeError,
+  );
+  assertEquals(err.code, "malformed");
+});
+
+test("forgetting the account waits for a registration in flight", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-forget-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const options = { directoryUrl: FAKE_CA_DIRECTORY, fetch: ca.fetch };
+    const [client] = await Promise.all([
+      acmeAccountClient(layout, options),
+      forgetAcmeAccount(layout, FAKE_CA_DIRECTORY),
+    ]);
+    assert(client.accountUrl);
+    // The forget ran after the save, so nothing half-written is left behind.
+    let left = true;
+    try {
+      await Deno.stat(acmeAccountPath(layout, FAKE_CA_DIRECTORY));
+    } catch {
+      left = false;
+    }
+    assertEquals(left, false);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

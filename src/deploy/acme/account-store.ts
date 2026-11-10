@@ -11,6 +11,7 @@
 import { join } from "@std/path";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { withKeyedLock } from "../../util/keyed-lock.ts";
+import { writeAll } from "../../util/write-all.ts";
 import { AcmeClient } from "./client.ts";
 import { generateAccountKeyPem, importAccountKey } from "./jws.ts";
 
@@ -25,7 +26,10 @@ export function acmeAccountDir(layout: Pick<LayoutPaths, "stateDir">): string {
   return join(layout.stateDir, "tenant-acme", "account");
 }
 
-/** The file for one directory, named by its host (`acme-v02.api.letsencrypt.org.json`). */
+/**
+ * The file for one directory, named by its host
+ * (`acme-v02.api.letsencrypt.org.json`).
+ */
 export function acmeAccountPath(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
@@ -64,14 +68,33 @@ async function loadStored(
   }
 }
 
+/** Write the file whole and flushed to disk before it replaces the old one. */
 async function saveStored(path: string, value: StoredAccount): Promise<void> {
   const dir = join(path, "..");
   await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
   await Deno.chmod(dir, 0o700);
   const temp = `${path}.tpnew`;
-  await Deno.writeTextFile(temp, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const file = await Deno.open(temp, {
+    write: true,
+    create: true,
+    truncate: true,
+    mode: 0o600,
+  });
+  try {
+    await writeAll(
+      file,
+      new TextEncoder().encode(`${JSON.stringify(value)}\n`),
+    );
+    await file.sync();
+  } finally {
+    file.close();
+  }
   await Deno.chmod(temp, 0o600);
   await Deno.rename(temp, path);
+}
+
+function lockKey(path: string): string {
+  return `acme-account:${path}`;
 }
 
 export type AcmeAccountOptions = {
@@ -92,7 +115,7 @@ export function acmeAccountClient(
   options: AcmeAccountOptions,
 ): Promise<AcmeClient> {
   const path = acmeAccountPath(layout, options.directoryUrl);
-  return withKeyedLock(`acme-account:${path}`, async () => {
+  return withKeyedLock(lockKey(path), async () => {
     let stored = await loadStored(path, options.directoryUrl);
     if (!stored) {
       stored = {
@@ -119,14 +142,22 @@ export function acmeAccountClient(
   });
 }
 
-/** Forget the account so the next order registers a new one (the authority said it is gone). */
-export async function forgetAcmeAccount(
+/**
+ * Forget the account so the next order registers a new one (the authority said
+ * it is gone).
+ */
+export function forgetAcmeAccount(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
 ): Promise<void> {
-  try {
-    await Deno.remove(acmeAccountPath(layout, directoryUrl));
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  const path = acmeAccountPath(layout, directoryUrl);
+  // The same lock as loading, so a registration in flight is never undone half
+  // way.
+  return withKeyedLock(lockKey(path), async () => {
+    try {
+      await Deno.remove(path);
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  });
 }

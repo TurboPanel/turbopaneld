@@ -414,3 +414,103 @@ test("the proof socket answers only a known token on the challenge path", async 
     TypeError,
   );
 });
+
+test("the order's one deadline also bounds putting a hundred answers in place", async () => {
+  const names = Array.from({ length: 100 }, (_, i) => `n${i}.example.com`);
+  const h = await harness();
+  let at = 0;
+  // Every request to the authority costs two seconds on the order's clock.
+  const slow = new AcmeClient({
+    directoryUrl: FAKE_CA_DIRECTORY,
+    key: await importAccountKey(await generateAccountKeyPem()),
+    fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+      at += 2_000;
+      return h.ca.fetch(input, init);
+    }) as typeof fetch,
+  });
+  await slow.ensureAccount();
+  const err = await assertRejects(
+    () =>
+      runAcmeOrder(slow, { names }, h.answers.solver, {
+        now: () => at,
+        sleep: (ms) => {
+          at += ms;
+          return Promise.resolve();
+        },
+        timeoutMs: 60_000,
+      }),
+    AcmeError,
+  );
+  assertEquals(err.code, "timeout");
+  // It stopped putting answers in place well before the hundredth name.
+  assert(h.ca.orders[0]!.authz.length === 100);
+  assert(h.ca.answers.length === 0, String(h.ca.answers.length));
+  assertEquals(h.answers.size, 0);
+  // Its own short budget still gives up what was left pending.
+  assertEquals(h.ca.deactivated.length, 100);
+});
+
+test("a request still running when the time is up is ended, not waited for", async () => {
+  const h = await harness();
+  const hanging = new AcmeClient({
+    directoryUrl: FAKE_CA_DIRECTORY,
+    key: await importAccountKey(await generateAccountKeyPem()),
+    fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
+      if (!String(input).includes("/order")) return h.ca.fetch(input, init);
+      // Never answers; only the order's deadline ends it.
+      return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(new Error("aborted")),
+        );
+      });
+    }) as typeof fetch,
+  });
+  await hanging.ensureAccount();
+  const err = await assertRejects(
+    () =>
+      runAcmeOrder(hanging, { names: ["example.com"] }, h.answers.solver, {
+        timeoutMs: 50,
+      }),
+    AcmeError,
+  );
+  assertEquals(err.code, "timeout");
+});
+
+test("an order finished before this server sent its request is refused", async () => {
+  const h = await harness({ readyAs: "valid" });
+  const err = await assertRejects(
+    () =>
+      runAcmeOrder(
+        h.client,
+        { names: ["example.com"] },
+        h.answers.solver,
+        h.clock.deps,
+      ),
+    AcmeError,
+  );
+  assertEquals(err.code, "server");
+  assertEquals(h.ca.issued, []);
+});
+
+test("the certificate is asked for as a PEM chain", async () => {
+  const h = await harness();
+  await runAcmeOrder(
+    h.client,
+    { names: ["example.com"] },
+    h.answers.solver,
+    h.clock.deps,
+  );
+  assertEquals(h.ca.certificateAccept, ["application/pem-certificate-chain"]);
+});
+
+test("a bad name is quoted and cut short in the refusal", () => {
+  let message = "";
+  try {
+    orderNames([`${"x".repeat(300)}\nInjected: line`], "http-01");
+  } catch (err) {
+    message = err instanceof Error ? err.message : "";
+  }
+  assert(!message.includes("\n"), message);
+  assert(message.length < 120, String(message.length));
+});

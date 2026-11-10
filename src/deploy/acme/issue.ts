@@ -65,11 +65,16 @@ export type DaemonIssueDeps = OrderDeps & {
 };
 
 export type RenewalHints = {
-  /** What a renewal of this certificate sends as `replaces`; null when it lacks the fields. */
+  /**
+   * What a renewal of this certificate sends as `replaces`; null when it lacks
+   * the fields.
+   */
   certId: string | null;
   /** The authority's suggested window, when it gave one. */
   window: { startIso: string; endIso: string } | null;
-  /** How long the authority wants callers to wait before asking about it again. */
+  /**
+   * How long the authority wants callers to wait before asking about it again.
+   */
   retryAfterMs: number | null;
 };
 
@@ -85,7 +90,10 @@ export type DaemonIssueOutcome =
   | {
     ok: false;
     code: AcmeErrorCode;
-    /** One plain sentence; a rate limit says "rate limited" (the control plane's wait keys on it). */
+    /**
+     * One plain sentence; a rate limit says "rate limited" (the control plane's
+     * wait keys on it).
+     */
     reason: string;
     retryAfterMs: number | null;
   };
@@ -131,7 +139,8 @@ function sentence(err: AcmeError): string {
       return "Let's Encrypt named an address outside its own site, so the order was stopped";
     case "rejected_name":
     case "unsupported":
-      // A refusal this server raised is plain already; the authority's never is.
+      // A refusal this server raised is plain already; the authority's never
+      // is.
       return err instanceof LocalAcmeError
         ? err.message
         : plainInstanceAcmeProblem("rejected-identifier");
@@ -144,7 +153,10 @@ function sentence(err: AcmeError): string {
   }
 }
 
-/** Plain words for a failed order; the name is named when the failure is about one. */
+/**
+ * Plain words for a failed order; the name is named when the failure is about
+ * one.
+ */
 export function plainDaemonAcmeFailure(err: unknown): {
   code: AcmeErrorCode;
   reason: string;
@@ -160,7 +172,9 @@ export function plainDaemonAcmeFailure(err: unknown): {
   return { code: err.code, reason, retryAfterMs: err.retryAfterMs };
 }
 
-/** The leaf's expiry, after checking it names every name and matches the key. */
+/**
+ * The leaf's expiry, after checking it names every name and matches the key.
+ */
 export function checkIssuedLeaf(
   certificatePem: string,
   privateKeyPem: string,
@@ -214,7 +228,10 @@ async function renewalHints(
   };
 }
 
-/** Order one certificate for every name in the request over the HTTP proof. Never throws. */
+/**
+ * Order one certificate for every name in the request over the HTTP proof.
+ * Never throws.
+ */
 export async function issueCertificateOverHttp01(
   layout: Pick<LayoutPaths, "stateDir">,
   request: DaemonIssueRequest,
@@ -264,14 +281,19 @@ export async function issueCertificateOverHttp01(
       renewal,
     };
   } catch (err) {
-    // The raw text stays in the daemon log; the outcome carries plain words only.
+    // The raw text stays in the daemon log; the outcome carries plain words
+    // only.
     const code = err instanceof AcmeError ? err.code : "local";
     const raw = err instanceof Error ? err.message : String(err);
     logWarn(
       "deploy",
       `certificate order ${request.requestId} failed (${code}): ${raw}`,
     );
-    if (err instanceof AcmeError && err.code === "account_gone") {
+    // Only the authority's own answer about the account (an HTTP status) forgets it.
+    if (
+      err instanceof AcmeError && err.code === "account_gone" &&
+      err.status !== null
+    ) {
       await forgetAcmeAccount(layout, directoryUrl).catch(() => undefined);
     }
     return { ok: false, ...plainDaemonAcmeFailure(err) };

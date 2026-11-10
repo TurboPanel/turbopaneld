@@ -18,7 +18,10 @@ export type AcmeDirectory = {
   newOrder: string;
   /** ACME Renewal Information (RFC 9773); absent on an authority without it. */
   renewalInfo?: string;
-  /** `meta.termsOfService`: the agreement the authority asks subscribers to accept. */
+  /**
+   * `meta.termsOfService`: the agreement the authority asks subscribers to
+   * accept.
+   */
   termsOfService?: string;
 };
 
