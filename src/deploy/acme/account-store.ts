@@ -8,6 +8,7 @@
  * start-up (`requests/`, `caddy/certificates/`), never inside them, so the
  * account survives restarts. `scripts/purge.sh` removes the state tree whole.
  */
+import { createHash } from "node:crypto";
 import { join } from "@std/path";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { withKeyedLock } from "../../util/keyed-lock.ts";
@@ -27,15 +28,24 @@ export function acmeAccountDir(layout: Pick<LayoutPaths, "stateDir">): string {
 }
 
 /**
- * The file for one directory, named by its host
- * (`acme-v02.api.letsencrypt.org.json`).
+ * The file for one directory and one contact address: one account per server
+ * per organization contact (owner decision 2026-11-04), so one organization's
+ * address never sits on the account that orders for another. Named by the
+ * directory's host and, with a contact, a short hash of the lowercased
+ * address (`acme-v02.api.letsencrypt.org-<hash>.json`), so the address itself
+ * is not in a file name.
  */
 export function acmeAccountPath(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
+  contactEmail?: string,
 ): string {
   const host = new URL(directoryUrl).host.replaceAll(/[^A-Za-z0-9.-]/g, "_");
-  return join(acmeAccountDir(layout), `${host}.json`);
+  const contact = contactEmail?.trim().toLowerCase() ?? "";
+  const suffix = contact === ""
+    ? ""
+    : `-${createHash("sha256").update(contact).digest("hex").slice(0, 16)}`;
+  return join(acmeAccountDir(layout), `${host}${suffix}.json`);
 }
 
 function readStored(text: string, directoryUrl: string): StoredAccount | null {
@@ -114,7 +124,11 @@ export function acmeAccountClient(
   layout: Pick<LayoutPaths, "stateDir">,
   options: AcmeAccountOptions,
 ): Promise<AcmeClient> {
-  const path = acmeAccountPath(layout, options.directoryUrl);
+  const path = acmeAccountPath(
+    layout,
+    options.directoryUrl,
+    options.contactEmail,
+  );
   return withKeyedLock(lockKey(path), async () => {
     let stored = await loadStored(path, options.directoryUrl);
     if (!stored) {
@@ -149,8 +163,9 @@ export function acmeAccountClient(
 export function forgetAcmeAccount(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
+  contactEmail?: string,
 ): Promise<void> {
-  const path = acmeAccountPath(layout, directoryUrl);
+  const path = acmeAccountPath(layout, directoryUrl, contactEmail);
   // The same lock as loading, so a registration in flight is never undone half
   // way.
   return withKeyedLock(lockKey(path), async () => {

@@ -294,7 +294,8 @@ export async function issueCertificateOverHttp01(
       err instanceof AcmeError && err.code === "account_gone" &&
       err.status !== null
     ) {
-      await forgetAcmeAccount(layout, directoryUrl).catch(() => undefined);
+      await forgetAcmeAccount(layout, directoryUrl, request.contactEmail)
+        .catch(() => undefined);
     }
     return { ok: false, ...plainDaemonAcmeFailure(err) };
   }

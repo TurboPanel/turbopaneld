@@ -161,7 +161,7 @@ test("an order over the real proof socket issues one certificate for every name"
     assertEquals(await exists(socket), false);
     // The account stays for the next order; the certificate key is not on disk.
     const saved = await Deno.readTextFile(
-      acmeAccountPath(layout, FAKE_CA_DIRECTORY),
+      acmeAccountPath(layout, FAKE_CA_DIRECTORY, "ops@example.com"),
     );
     assertStringIncludes(saved, "https://ca.test/acct/");
     assert(!saved.includes(outcome.privateKeyPem.split("\n")[1] ?? "-"));
@@ -200,7 +200,9 @@ test("a closed account is forgotten so the next order makes a new one", async ()
     assertEquals(failed.ok, false);
     if (!failed.ok) assertEquals(failed.code, "account_gone");
     assertEquals(
-      await exists(acmeAccountPath(layout, FAKE_CA_DIRECTORY)),
+      await exists(
+        acmeAccountPath(layout, FAKE_CA_DIRECTORY, "ops@example.com"),
+      ),
       false,
     );
     assert((await issueCertificateOverHttp01(layout, request(), deps)).ok);
@@ -363,7 +365,7 @@ async function exists(path: string): Promise<boolean> {
 test("the start-up sweep keeps the account and clears only the request files", async () => {
   await withRoot(async (root) => {
     const layout = layoutUnder(root);
-    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY);
+    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY, "ops@example.com");
     await Deno.mkdir(join(path, ".."), { recursive: true });
     await Deno.writeTextFile(path, "{}");
     const requests = join(root, "state", "tenant-acme", "requests");
