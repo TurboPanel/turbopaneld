@@ -313,9 +313,10 @@ make **U** a no-op until HEAD moves. Production `release` stores the full
 ## Installer: first enroll answer and apt locks
 
 **A refused enrollment fails the install.** After the playbook starts the
-daemon (not with `--no-start`, where the calling daemon restarts only after
-`run.sh` exits), `tp_wait_for_enrollment` waits up to
-`TURBOPANEL_ENROLL_WAIT_SECONDS` (default 90) for `/run/turbopanel/enroll-status`,
+daemon, a run that carries a license (not with `--no-start`, where the
+calling daemon restarts only after `run.sh` exits) has
+`tp_wait_for_enrollment` wait up to `TURBOPANEL_ENROLL_WAIT_SECONDS`
+(default 120, as `tp-kernel-features` waits) for `/run/turbopanel/enroll-status`,
 which the daemon writes (`src/instance/enroll-status.ts`; `run.sh` removes it
 before the daemon starts, so an older answer never counts). `connected`
 passes. A park of kind `permanent` (an install command already used, or a
@@ -323,7 +324,8 @@ revoked re-enroll token), `tls-trust` or `panel-identity` exits 1 with the
 reason in plain words, before the Raspberry Pi kernel step; the parked
 install stays, and a fresh command re-run unparks it. `awaiting-seat` and the
 other waits are notes, not failures, and so is no answer in time (a slow
-panel, or a release older than the file). The file is daemon-writable and
+panel, a release older than the file, or an enrolled server that converges
+before it connects, so a re-enroll there may only get the note). The file is daemon-writable and
 read as root: `tp_enroll_status_field` ignores a link, reads 4 KiB, drops
 control characters and never sources it.
 

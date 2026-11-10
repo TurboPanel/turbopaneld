@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertThrows } from "@std/assert";
 import { join } from "@std/path";
 import {
   ENROLL_STATUS_FILE,
@@ -56,12 +56,12 @@ test("a long reason is cut to one bounded line", () => {
 test("writeEnrollStatus replaces the file in the runtime folder", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-enroll-status-" });
   try {
-    await writeEnrollStatus(dir, {
+    writeEnrollStatus(dir, {
       state: "parked",
       kind: "permanent",
       reason: "401 Invalid license",
     });
-    await writeEnrollStatus(dir, { state: "connected" });
+    writeEnrollStatus(dir, { state: "connected" });
     assertEquals(
       await Deno.readTextFile(join(dir, ENROLL_STATUS_FILE)),
       "state=connected\n",
@@ -78,7 +78,7 @@ test("writeEnrollStatus replaces the file in the runtime folder", async () => {
 test("writeEnrollStatus reports a folder it cannot write", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tp-enroll-status-" });
   try {
-    await assertRejects(() =>
+    assertThrows(() =>
       writeEnrollStatus(join(dir, "missing"), { state: "connected" })
     );
     assertEquals([...Deno.readDirSync(dir)], []);
@@ -87,8 +87,8 @@ test("writeEnrollStatus reports a folder it cannot write", async () => {
   }
 });
 
-test("writeEnrollStatus refuses a real runtime folder in a test run", async () => {
-  await assertRejects(() =>
+test("writeEnrollStatus refuses a real runtime folder in a test run", () => {
+  assertThrows(() =>
     writeEnrollStatus("/run/turbopanel", { state: "connected" })
   );
 });

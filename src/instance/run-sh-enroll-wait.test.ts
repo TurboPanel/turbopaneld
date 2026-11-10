@@ -19,6 +19,8 @@ type Options = {
   /** Make the status file a link to a file holding `status`. */
   link?: boolean;
   noStart?: boolean;
+  /** Run without a license (a re-run that has nothing to enroll). */
+  noLicense?: boolean;
   waitSeconds?: string;
 };
 
@@ -76,6 +78,7 @@ async function runWait(options: Options) {
       extractShellFunction(source, "tp_wait_for_enrollment"),
       `RUN_DIR='${runDir}'`,
       `NO_START=${options.noStart ? "true" : "false"}`,
+      `LICENSE_ID=${options.noLicense ? "" : "license-123"}`,
       "rc=0; tp_wait_for_enrollment || rc=$?",
       'echo "rc=$rc"',
     ].join("\n");
@@ -205,6 +208,12 @@ test("a bad wait length falls back to the default instead of failing", async () 
 
 test("a managed update (--no-start) never waits", async () => {
   const res = await runWait({ noStart: true, status: REFUSED });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertEquals(res.stdout.includes("STEP"), false);
+});
+
+test("a re-run without a license has nothing to wait for", async () => {
+  const res = await runWait({ noLicense: true, status: REFUSED });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
   assertEquals(res.stdout.includes("STEP"), false);
 });

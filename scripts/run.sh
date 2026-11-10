@@ -1682,16 +1682,20 @@ tp_enroll_status_field() {
 # install with the reason; the parked install stays, and re-running a fresh
 # command restages the license and lets the daemon try again. A wait for a
 # purchased size, a license or an administrator is not a refusal. No answer
-# within TURBOPANEL_ENROLL_WAIT_SECONDS (default 90) only prints a note: the
-# panel may be slow or unreachable for now, or the release may predate the
-# status file. --no-start (a managed update) never waits: the daemon running
-# this script restarts only after it exits.
+# within TURBOPANEL_ENROLL_WAIT_SECONDS (default 120, the same ceiling as
+# tp-kernel-features' enrolment wait) only prints a note: the panel may be
+# slow or unreachable for now, the release may predate the status file, or an
+# already enrolled server converges before it connects. Only a run that
+# carries a license waits (a re-run without one has nothing to enroll), and
+# --no-start (a managed update) never does: the daemon running this script
+# restarts only after it exits.
 tp_wait_for_enrollment() {
   [ "$NO_START" != true ] || return 0
+  [ -n "${LICENSE_ID:-}" ] || return 0
   command -v systemctl >/dev/null 2>&1 || return 0
   _we_file="$RUN_DIR/enroll-status"
-  _we_max="${TURBOPANEL_ENROLL_WAIT_SECONDS:-90}"
-  case "$_we_max" in '' | *[!0-9]*) _we_max=90 ;; esac
+  _we_max="${TURBOPANEL_ENROLL_WAIT_SECONDS:-120}"
+  case "$_we_max" in '' | *[!0-9]*) _we_max=120 ;; esac
   _we_waited=0
   tp_print_step "▸" "Waiting for the control plane to accept this server…"
   while :; do

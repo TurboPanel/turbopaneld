@@ -1702,12 +1702,16 @@ export class InstanceClient {
   }
 
   /** Tell the installer how the latest attempt went (see enroll-status.ts). */
-  async #reportEnrollStatus(status: EnrollStatus): Promise<void> {
+  #reportEnrollStatus(status: EnrollStatus): void {
     try {
-      await writeEnrollStatus(
-        resolveLayout(Deno.env.toObject()).runDir,
-        status,
-      );
+      let runDir: string;
+      try {
+        runDir = resolveLayout(Deno.env.toObject()).runDir;
+      } catch {
+        // The compiled daemon may read only TURBOPANEL_* variables.
+        runDir = resolveLayout().runDir;
+      }
+      writeEnrollStatus(runDir, status);
     } catch (err) {
       logDebug(
         "instance",
@@ -1735,7 +1739,7 @@ export class InstanceClient {
     this.#parkedReason = reason;
     this.#parkedKind = kind;
     this.#forceEnrollPending = false;
-    await this.#reportEnrollStatus({
+    this.#reportEnrollStatus({
       state: "parked",
       kind,
       reason,
@@ -2361,8 +2365,7 @@ export class InstanceClient {
     this.#urlSessionOpened = true;
     this.#helloUrlsChecked = false;
     this.#hadStableSession = true;
-    // Not awaited: the socket's handlers attach below without a gap.
-    void this.#reportEnrollStatus({ state: "connected" });
+    this.#reportEnrollStatus({ state: "connected" });
     // The feature list arrives with this socket's attach frame, after the
     // observers below attach: until then nothing may read it as "unsupported".
     this.#peerFeaturesKnown = false;

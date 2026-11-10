@@ -471,8 +471,8 @@ at the correct control plane, then the daemon auto-recovers`.
 **Enroll status for the installer** (`src/instance/enroll-status.ts`): every
 park writes `<runDir>/enroll-status` (`state=parked`, `kind=`, `reason=`, and
 for `permanent` the same `advice=` the park log prints), and every opened
-session writes `state=connected` (not awaited, so the socket handlers attach
-without a gap). `run.sh` removes the file before it starts the daemon and
+session writes `state=connected`. The write is synchronous (a few bytes on a
+tmpfs), so writes stay in order and none is left pending. `run.sh` removes the file before it starts the daemon and
 `tp_wait_for_enrollment` waits for it (see `scripts/AGENTS.md`). It lives in
 the runtime folder, never the root-owned state tree; values are one line with
 control characters replaced, and a failed write is only a debug log.

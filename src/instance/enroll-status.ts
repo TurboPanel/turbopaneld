@@ -49,21 +49,25 @@ export function formatEnrollStatus(status: EnrollStatus): string {
 }
 
 /**
- * Replace the status file in `runDir`. Best effort: a failure is thrown for
- * the caller to log at debug level and never stops the connect loop.
+ * Replace the status file in `runDir`. Synchronous on purpose: the file is a
+ * few bytes on a tmpfs, and a sync write keeps a park and a later session in
+ * order and leaves nothing pending behind the caller. Best effort: a failure
+ * is thrown for the caller to log at debug level and never stops the connect
+ * loop.
  */
-export async function writeEnrollStatus(
-  runDir: string,
-  status: EnrollStatus,
-): Promise<void> {
+export function writeEnrollStatus(runDir: string, status: EnrollStatus): void {
   const path = join(runDir, ENROLL_STATUS_FILE);
   assertTestRunMayWrite(path);
   const tmp = `${path}.tmp-${crypto.randomUUID().slice(0, 8)}`;
   try {
-    await Deno.writeTextFile(tmp, formatEnrollStatus(status), { mode: 0o640 });
-    await Deno.rename(tmp, path);
+    Deno.writeTextFileSync(tmp, formatEnrollStatus(status), { mode: 0o640 });
+    Deno.renameSync(tmp, path);
   } catch (err) {
-    await Deno.remove(tmp).catch(() => {});
+    try {
+      Deno.removeSync(tmp);
+    } catch {
+      // nothing was written
+    }
     throw err;
   }
 }
