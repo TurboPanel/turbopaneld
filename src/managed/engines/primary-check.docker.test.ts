@@ -165,19 +165,20 @@ const EXPECTED: Record<Family, Record<string, [number, RegExp]>> = {
   mysql: {
     healthy: [0, /mysqld is alive/],
     wrongPassword: [0, /Access denied for user/],
-    refused: [1, /Can't connect to .*\(111\)/],
-    notACa: [1, /SSL connection error/],
-    foreignCa: [1, /SSL connection error/],
-    unroutable: [1, /Can't connect to (?!.*\(111\))/],
+    refused: [1, /Can't connect to MySQL server on .*\(111\)/],
+    notACa: [1, /SSL connection error: SSL_CTX_set_default_verify_paths/],
+    foreignCa: [1, /SSL connection error: .*certificate verify failed/],
+    unroutable: [1, /Can't connect to MySQL server on .*\(110\)/],
     paused: [1, /Lost connection to/],
   },
   mariadb: {
     healthy: [0, /mysqld is alive/],
     wrongPassword: [0, /Access denied for user/],
-    refused: [1, /Can't connect to .*\(111\)/],
-    notACa: [1, /TLS\/SSL error|SSL connection error/],
-    foreignCa: [1, /TLS\/SSL error|SSL connection error/],
-    unroutable: [1, /Can't connect to (?!.*\(111\))/],
+    // The MariaDB client reports a refused connect as errno 115.
+    refused: [1, /Can't connect to server on .*\(115\)/],
+    notACa: [1, /TLS\/SSL error: no certificate or crl found/],
+    foreignCa: [1, /TLS\/SSL error: self-signed certificate/],
+    unroutable: [1, /Can't connect to server on .*\(110\)/],
     paused: [1, /Lost connection to/],
   },
   postgres: {
