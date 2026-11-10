@@ -34,6 +34,11 @@ export const KEYSET_CHAIN_MAX_BYTES = MAX_STATEMENTS_PER_PASS *
 export type KeysetEnvelope = {
   statement: string;
   approvals: unknown[];
+  /**
+   * The replaced key's signature (`panel-keyset-key-signature-v1`), carried to
+   * tp-host as served; absent on a revoke. tp-host decides what it needs.
+   */
+  keySig?: unknown;
 };
 
 export type KeysetChainDeps = {
@@ -64,10 +69,17 @@ export function parseKeysetStatements(body: string): KeysetEnvelope[] {
   if (!Array.isArray(list)) return [];
   return list.flatMap((entry) => {
     const envelope = record(entry);
-    return envelope && typeof envelope.statement === "string" &&
-        Array.isArray(envelope.approvals)
-      ? [{ statement: envelope.statement, approvals: envelope.approvals }]
-      : [];
+    if (
+      !envelope || typeof envelope.statement !== "string" ||
+      !Array.isArray(envelope.approvals)
+    ) {
+      return [];
+    }
+    return [{
+      statement: envelope.statement,
+      approvals: envelope.approvals,
+      ...(envelope.keySig === undefined ? {} : { keySig: envelope.keySig }),
+    }];
   });
 }
 

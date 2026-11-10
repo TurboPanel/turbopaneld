@@ -186,10 +186,13 @@ promote workflows and their `dev-ref` at one sha, the composite actions and
 The Promote OK check (the `gh-promote-ok.yml` and `gh-promote-ok-recheck.yml`
 calls in `promote-ok.yml` and `promote-ok-recheck.yml`, with their `dev-ref`) is
 its own pin group, so a fix to it can ship without moving the rest of the chain.
-The check looks once and ends in seconds; the recheck re-runs it when the trunk
-build or Publish Release Candidate finishes, one recheck at a time (queued in
-order, none dropped). The plain `promote.yml` form below is **break-glass
-only**.
+The check looks once and ends in seconds and is a check run, not a job: the
+evaluation writes `promote-ok` through the Checks API (success when ready,
+pending while the trunk build, the canary or the rc is still being made, red
+only when it can never pass), and the recheck looks again and updates it when
+the trunk build or Publish Release Candidate finishes, one recheck at a time
+(queued in order, none dropped). The plain `promote.yml` form below is
+**break-glass only**.
 
 **Promotion (`.github/workflows/promote.yml`, break-glass):** one click moves a
 tested build up a channel — `to=rc` turns a canary build (`source` = build id,

@@ -386,9 +386,15 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
       fetch: ca.fetch,
     };
     const client = await acmeAccountClient(layout, options);
-    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY);
-    assertEquals(
+    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY, "OPS@example.com");
+    // Named by the directory's host and a hash of the address, never the address.
+    assert(
+      /\/tenant-acme\/account\/ca\.test-[0-9a-f]{16}\.json$/.test(path),
       path,
+    );
+    assert(!path.includes("example.com"), path);
+    assertEquals(
+      acmeAccountPath(layout, FAKE_CA_DIRECTORY),
       join(root, "state", "tenant-acme", "account", "ca.test.json"),
     );
     assertEquals((await Deno.stat(path)).mode! & 0o777, 0o600);
@@ -396,8 +402,8 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
     const again = await acmeAccountClient(layout, options);
     assertEquals(again.accountUrl, client.accountUrl);
     // One account at a time, even when two orders ask together.
-    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY);
-    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY);
+    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY, options.contactEmail);
+    await forgetAcmeAccount(layout, FAKE_CA_DIRECTORY, options.contactEmail);
     const [x, y] = await Promise.all([
       acmeAccountClient(layout, options),
       acmeAccountClient(layout, options),
@@ -415,6 +421,28 @@ test("the account is kept 0600 in a 0700 folder and a damaged file is replaced",
     const other = await acmeAccountClient(layout, options);
     assert(other.accountUrl);
     assertEquals(ca.accounts.size, 4);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("each contact address gets its own account on the same server", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-contacts-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const one = await acmeAccountClient(layout, {
+      directoryUrl: FAKE_CA_DIRECTORY,
+      contactEmail: "a@example.com",
+      fetch: ca.fetch,
+    });
+    const two = await acmeAccountClient(layout, {
+      directoryUrl: FAKE_CA_DIRECTORY,
+      contactEmail: "b@example.com",
+      fetch: ca.fetch,
+    });
+    assert(one.accountUrl !== two.accountUrl);
+    assertEquals(ca.accounts.size, 2);
   } finally {
     await Deno.remove(root, { recursive: true });
   }
@@ -488,6 +516,41 @@ test("forgetting the account waits for a registration in flight", async () => {
     let left = true;
     try {
       await Deno.stat(acmeAccountPath(layout, FAKE_CA_DIRECTORY));
+    } catch {
+      left = false;
+    }
+    assertEquals(left, false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("forgetting a closed account keeps a newer one already registered in its place", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-forget-newer-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const options = { directoryUrl: FAKE_CA_DIRECTORY, fetch: ca.fetch };
+    const current = await acmeAccountClient(layout, options);
+    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY);
+    // A refusal that names an older account leaves the file alone.
+    await forgetAcmeAccount(
+      layout,
+      FAKE_CA_DIRECTORY,
+      undefined,
+      "https://ca.test/acct/older",
+    );
+    assert((await Deno.readTextFile(path)).includes(current.accountUrl!));
+    // The account that was refused is forgotten.
+    await forgetAcmeAccount(
+      layout,
+      FAKE_CA_DIRECTORY,
+      undefined,
+      current.accountUrl,
+    );
+    let left = true;
+    try {
+      await Deno.stat(path);
     } catch {
       left = false;
     }
