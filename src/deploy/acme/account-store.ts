@@ -164,11 +164,19 @@ export function forgetAcmeAccount(
   layout: Pick<LayoutPaths, "stateDir">,
   directoryUrl: string,
   contactEmail?: string,
+  /** Forget only this account: a file that already holds a newer one is kept. */
+  expectedAccountUrl?: string | null,
 ): Promise<void> {
   const path = acmeAccountPath(layout, directoryUrl, contactEmail);
   // The same lock as loading, so a registration in flight is never undone half
   // way.
   return withKeyedLock(lockKey(path), async () => {
+    if (expectedAccountUrl) {
+      const stored = await loadStored(path, directoryUrl);
+      if (stored?.accountUrl && stored.accountUrl !== expectedAccountUrl) {
+        return;
+      }
+    }
     try {
       await Deno.remove(path);
     } catch (err) {

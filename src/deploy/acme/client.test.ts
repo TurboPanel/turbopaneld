@@ -524,3 +524,38 @@ test("forgetting the account waits for a registration in flight", async () => {
     await Deno.remove(root, { recursive: true });
   }
 });
+
+test("forgetting a closed account keeps a newer one already registered in its place", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-forget-newer-" });
+  try {
+    const layout = layoutUnder(root);
+    const ca = await createFakeCa();
+    const options = { directoryUrl: FAKE_CA_DIRECTORY, fetch: ca.fetch };
+    const current = await acmeAccountClient(layout, options);
+    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY);
+    // A refusal that names an older account leaves the file alone.
+    await forgetAcmeAccount(
+      layout,
+      FAKE_CA_DIRECTORY,
+      undefined,
+      "https://ca.test/acct/older",
+    );
+    assert((await Deno.readTextFile(path)).includes(current.accountUrl!));
+    // The account that was refused is forgotten.
+    await forgetAcmeAccount(
+      layout,
+      FAKE_CA_DIRECTORY,
+      undefined,
+      current.accountUrl,
+    );
+    let left = true;
+    try {
+      await Deno.stat(path);
+    } catch {
+      left = false;
+    }
+    assertEquals(left, false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});

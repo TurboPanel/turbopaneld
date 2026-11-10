@@ -120,8 +120,8 @@ export function orderNames(
 
 /**
  * Giving up the authorizations of a failed order gets its own short budget,
- * after the order's: together they stay well inside the issuer unit's
- * `RuntimeMaxSec=600` even for a certificate with a hundred names.
+ * after the order's: together they stay well inside the 15 minutes the local
+ * proof routes live, even for a certificate with a hundred names.
  */
 export const ACME_DEACTIVATE_BUDGET_MS = 30_000;
 
