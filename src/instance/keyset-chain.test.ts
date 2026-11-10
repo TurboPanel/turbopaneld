@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { keysetVectors as vectors } from "../testing/keyset-vectors.ts";
 import {
   createKeysetChainGate,
@@ -128,6 +128,14 @@ test("the chain answer is parsed strictly and the gate allows one fetch a minute
     1,
   );
   assertEquals(parseKeysetStatements("nope"), []);
+  // The replaced key's signature reaches tp-host as served; a revoke has none.
+  const [signed, revoke] = parseKeysetStatements(
+    JSON.stringify({ statements: [vectors.chain[1], vectors.chain[2]] }),
+  );
+  assertEquals(signed, vectors.chain[1]);
+  assert(signed?.keySig);
+  assertEquals(revoke, vectors.chain[2]);
+  assertEquals(revoke?.keySig, undefined);
   assertEquals(statementHead({ statement: "!!", approvals: [] }), null);
   let now = 0;
   const gate = createKeysetChainGate(() => now);

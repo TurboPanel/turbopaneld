@@ -5624,9 +5624,14 @@ PY
 # Rules: prev = pinned current, keyset above the pinned one, iat at most 300 s
 # ahead; at least one pinned approval; a removal needs a pinned approval from
 # a passkey that stays; every added passkey (or, for an rp id move, every new
-# one) proves possession. Python writes one message, signature and key per
-# approval; openssl checks every signature (ES256 DER with dgst, EdDSA raw
-# with pkeyutl) and any failure refuses the whole statement. The control
+# one) proves possession. Passkey plus old key: `rotate` and `passkeys` also
+# need the envelope's `keySig` {pub, sig}, the replaced key's Ed25519
+# signature over "tp-keyset\n" + the statement bytes (pub hashes to the pinned
+# current key); a `revoke` has none and needs two pinned approvals with
+# different ids; a key change keeps the pinned passkeys and rp id. Python
+# writes one message, signature and key per approval (and `k.*` for keySig);
+# openssl checks every signature (ES256 DER with dgst, EdDSA raw with pkeyutl)
+# and any failure refuses the whole statement. The control
 # plane's twin is src/lib/panel-identity/keyset-statement.ts; both run the
 # shared vectors (src/testing/keyset-statement-vectors.json).
 tp_panel_statement_python() {
@@ -5692,7 +5697,10 @@ if not pinned or not pin_rp_id:
 try:
     envelope = json.loads(Path(env_path).read_bytes())
     stmt_b64, approvals = envelope["statement"], envelope["approvals"]
-except (ValueError, KeyError, TypeError):
+    key_sig = envelope.get("keySig")
+except (ValueError, KeyError, TypeError, AttributeError):
+    refuse("envelope is malformed")
+if key_sig is not None and (not isinstance(key_sig, dict) or list(key_sig) != ["pub", "sig"]):
     refuse("envelope is malformed")
 if not isinstance(approvals, list) or len(approvals) > 10:
     refuse("envelope is malformed")
@@ -5783,9 +5791,25 @@ for index, approval in enumerate(approvals):
     checks.append("%d %s" % (index, "es256" if key["alg"] == "ES256" else "eddsa"))
     (pinned_ok if role == "pinned" else possession_ok).add(pk_id)
 
+if kind != "revoke":
+    # The replaced key signs every change but a revoke (its key may be lost).
+    if key_sig is None:
+        refuse("the previous key did not sign")
+    k_pub, k_sig = b64d(key_sig["pub"]), b64d(key_sig["sig"])
+    if len(k_pub) != 32 or len(k_sig) != 64 or b64e(hashlib.sha256(k_pub).digest()) != prev:
+        refuse("the previous key did not sign")
+    (out / "k.pem").write_text(pem(ED25519, k_pub))
+    (out / "k.msg").write_bytes(b"tp-keyset\n" + raw)
+    (out / "k.sig").write_bytes(k_sig)
+    checks.append("k eddsa")
 if not pinned_ok:
     refuse("no pinned passkey approved")
-if rp_id != pin_rp_id:
+if kind != "passkeys":
+    if rp_id != pin_rp_id or len(new_set) != len(pinned) or not all(any(same(p, q) for q in pinned) for p in new_set):
+        refuse("a key change must keep the passkeys")
+    if kind == "revoke" and len(pinned_ok) < 2:
+        refuse("a revoke needs two pinned passkeys")
+elif rp_id != pin_rp_id:
     if not all(p["id"] in possession_ok for p in new_set):
         refuse("every passkey under the new rpId must prove possession")
 else:
@@ -5819,7 +5843,10 @@ tp_verb_panel_identity_statement() {
     "$(tp_pin_field_of "$_ps_file" rp_id)" "$(tp_pin_field_of "$_ps_file" passkeys)" ||
     tp_die "panel-identity-write: refusing the statement"
   while read -r _ps_i _ps_alg; do
-    if [ "$_ps_alg" = es256 ]; then
+    if [ "$_ps_i" = k ]; then
+      openssl pkeyutl -verify -pubin -inkey "$TP_STAGE/v/k.pem" -rawin -in "$TP_STAGE/v/k.msg" -sigfile "$TP_STAGE/v/k.sig" >/dev/null 2>&1 ||
+        tp_die "panel-identity-write: the previous key did not sign"
+    elif [ "$_ps_alg" = es256 ]; then
       openssl dgst -sha256 -verify "$TP_STAGE/v/$_ps_i.pem" -signature "$TP_STAGE/v/$_ps_i.sig" "$TP_STAGE/v/$_ps_i.msg" >/dev/null 2>&1 ||
         tp_die "panel-identity-write: an approval signature is invalid"
     else

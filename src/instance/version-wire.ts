@@ -123,6 +123,7 @@ export const DAEMON_WIRE_FEATURES = [
   "panel-bound-session-v1",
   "panel-keyset-statements-v1",
   "environment-stop-remove-volumes-v1",
+  "panel-keyset-key-signature-v1",
 ] as const;
 
 /**
@@ -280,6 +281,15 @@ export const SIGNED_REPORTS_FEATURE: DaemonWireFeature = "signed-reports-v1";
  */
 export const PANEL_KEYSET_STATEMENTS_FEATURE: DaemonWireFeature =
   "panel-keyset-statements-v1";
+
+/**
+ * Passkey plus old key: tp-host follows a `rotate` or `passkeys` statement
+ * only with the replaced key's `keySig`, and a revoke only with two different
+ * pinned passkeys. Announced so the control plane can tell; nothing switches
+ * on it, and no statement without the signature is ever followed.
+ */
+export const PANEL_KEYSET_KEY_SIGNATURE_FEATURE: DaemonWireFeature =
+  "panel-keyset-key-signature-v1";
 
 /**
  * This daemon holds an X25519 sealing key (registered with the control plane,
