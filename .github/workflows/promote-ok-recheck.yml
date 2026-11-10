@@ -56,11 +56,11 @@ jobs:
       || (github.event_name == 'workflow_run'
           && github.event.workflow_run.event != 'pull_request'
           && github.event.workflow_run.conclusion != 'skipped')
-    uses: TurboPanel/dev/.github/workflows/gh-promote-ok-recheck.yml@b33db829052e8bfeed7965041715e7ddb244c81a # dev#118
+    uses: TurboPanel/dev/.github/workflows/gh-promote-ok-recheck.yml@ea6e8f0dd5b5ca9280292e9ad2019fb565083644 # dev#118
     with:
       repo-kind: daemon
       ci-workflow: publish-daemon-trunk.yml
-      dev-ref: b33db829052e8bfeed7965041715e7ddb244c81a # dev#118
+      dev-ref: ea6e8f0dd5b5ca9280292e9ad2019fb565083644 # dev#118
       dry-run: ${{ github.event_name == 'workflow_dispatch' && !inputs.rerun }}
     # gh-promote-ok-recheck.yml finds the open PRs (pull-requests), judges
     # their heads like promote-ok.yml (contents, actions) and writes the
@@ -73,11 +73,11 @@ jobs:
 
   dry-run:
     if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
-    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@b33db829052e8bfeed7965041715e7ddb244c81a # dev#118
+    uses: TurboPanel/dev/.github/workflows/gh-promote-ok.yml@ea6e8f0dd5b5ca9280292e9ad2019fb565083644 # dev#118
     with:
       repo-kind: daemon
       ci-workflow: publish-daemon-trunk.yml
-      dev-ref: b33db829052e8bfeed7965041715e7ddb244c81a # dev#118
+      dev-ref: ea6e8f0dd5b5ca9280292e9ad2019fb565083644 # dev#118
       pr-number: ${{ inputs.pr }}
     # A dry run writes no check, but the called workflow declares checks: write.
     permissions:
