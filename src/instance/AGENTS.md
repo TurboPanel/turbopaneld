@@ -809,8 +809,11 @@ call can't be caught mid-race and misreported as a failure. Whether the
 restart actually worked is never this call's job to decide — that's what the
 guard/attach flow below is for.
 
-**Self-healing guard:** daemon self-update arms `<runDir>/update-guard.json`
-(target commit + deadline) and starts `turbopaneld-update-guard.timer` (~10
+**Self-healing guard:** daemon self-update arms root's
+`<install>/lib/update-guard-armed` (the only record the guard decides from; see
+`src/update/AGENTS.md`, Root build floor), its daemon-readable copy
+`<runDir>/update-guard.json` (target commit + deadline), and starts
+`turbopaneld-update-guard.timer` (~10
 minutes, one-shot per attempt). `turbopaneld.service` uses `OnFailure=` that
 unit plus a start limit so a crash-looping build can trigger
 `orchestration/scripts/tp-update-guard` (root, no sudoers entry). The guard

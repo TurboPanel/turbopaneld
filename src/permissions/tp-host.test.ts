@@ -1530,6 +1530,7 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
         ["systemctl", "is-enabled", "wg-quick@tp0"],
         ["systemctl", "is-active", "wg-quick@tp0"],
         ["systemctl", "disable", "--now", "wg-quick@tp0"],
+        ["systemctl", "is-active", "turbopaneld-update-guard.timer"],
       ]
     ) {
       const unit = await host.run(args);
@@ -1540,6 +1541,11 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
         ["systemctl", "link", host.path("tmp/evil.service")],
         ["systemctl", "edit", "turbopanel-app-x.service"],
         ["systemctl", "start", "evil.service"],
+        // Root arms and starts the update guard; the daemon may not.
+        ["systemctl", "start", "turbopaneld-update-guard.service"],
+        ["systemctl", "restart", "turbopaneld-update-guard.timer"],
+        ["systemctl", "stop", "turbopaneld-update-guard.timer"],
+        ["systemctl", "start", "turbopaneld-update-guard-retry-1"],
         ["systemctl", "set-environment", "LD_PRELOAD=/tmp/x.so"],
         [
           "journalctl",

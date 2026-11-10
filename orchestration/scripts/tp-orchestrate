@@ -26,6 +26,9 @@
 #       license (base64url id:token) is read as one line from stdin and
 #       handed to run.sh in TURBOPANEL_LICENSE, never on a command line
 #       (sudo logs argv and any local user can read it from /proc).
+#       run.sh refuses a daemon release older than root's own record of the
+#       installed build; this helper runs only an installer that has that
+#       check and never passes its operator override.
 #
 #   kernel-features list|status [ID]|apply ID [--reboot] [--countdown N]|undo ID
 #       Named kernel/boot features (orchestration/scripts/tp-kernel-features),
@@ -45,6 +48,12 @@ tp_die() {
 }
 
 [ "$(id -u)" = "0" ] || tp_die "must run as root (sudo -n tp-orchestrate …)"
+
+# The daemon build floor's break-glass belongs to an operator running run.sh
+# by hand. Nothing the daemon account starts through this helper may carry
+# it, whatever sudo's environment policy is; --allow-downgrade is refused by
+# every verb's flag list.
+unset TURBOPANEL_ALLOW_DOWNGRADE
 
 ORCH_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
 INSTALL_ROOT="$(cd "$ORCH_DIR/../.." && pwd -P)"
@@ -772,6 +781,17 @@ tp_fetch_pinned_run_script() {
   [ -s "$_script" ] || { rm -f "$_script"; tp_die "empty run.sh from $_script_url"; }
 }
 
+# A daemon package install is run only by an installer that enforces the root
+# build floor (scripts/run.sh tp_check_daemon_build_floor). The installer comes
+# from the channel the caller names, and one from before the floor would
+# install an older signed release without comparing it.
+tp_require_build_floor_installer() {
+  if ! grep -q -e 'tp_check_daemon_build_floor "\$DAEMON_BUILD_FLOOR"' "$_script"; then
+    rm -f "$_script"
+    tp_die "refusing an installer that does not check the installed daemon build (older than this host's helper)"
+  fi
+}
+
 tp_verb_update() {
   tp_require_root_scratch
   tp_read_update_origin_pin
@@ -864,8 +884,9 @@ tp_verb_update() {
   [ -n "$_dl_base" ] || _dl_base="$_pin_dl_base"
   [ -n "$_ca" ] || _ca="$_pin_ca"
   # An overlay host installs with --dev-allow-unsigned; a --manifest-url pin
-  # (an upgrade or a rollback to one exact release) must always verify against
-  # the release key, so the two never travel together (run.sh agrees).
+  # (one exact release, never older than the installed build) must always
+  # verify against the release key, so the two never travel together (run.sh
+  # agrees).
   if [ -n "$_manifest_url" ] && [ -n "$_dl_base" ]; then
     tp_die "refusing --manifest-url on an overlay host: a pinned manifest must be signed by the release key"
   fi
@@ -876,6 +897,7 @@ tp_verb_update() {
   # After the checks above, absent flags have been filled from the pin, so
   # the host / overlay / CA the installer records are the pinned ones.
   tp_fetch_pinned_run_script
+  tp_require_build_floor_installer
 
   set --
   [ -n "$_host" ] && set -- "$@" --host "$_host"
@@ -1027,6 +1049,7 @@ tp_verb_update_colocated() {
   [ "$_no_start" = true ] || tp_die "update-colocated requires --no-start (the daemon restarts itself)"
   tp_read_control_plane_pin
   tp_fetch_pinned_run_script
+  tp_require_build_floor_installer
 
   set -- --daemon-only --channel "$_channel"
   [ -n "$_manifest_url" ] && set -- "$@" --manifest-url "$_manifest_url"

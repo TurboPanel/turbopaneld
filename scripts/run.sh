@@ -1121,6 +1121,8 @@ tp_resolve_channel_manifest() {
   _manifest_host="$(tp_manifest_field "$_compact" "defaultControlPlaneUrl")"
   _manifest_commit="$(tp_manifest_field "$_compact" "commit")"
   _manifest_build_id="$(tp_manifest_field "$_compact" "buildId")"
+  _manifest_version="$(tp_manifest_field "$_compact" "version")"
+  _manifest_built_at="$(tp_manifest_field "$_compact" "builtAt")"
   _linux_arch="$(tp_resolve_linux_arch)" || return 1
   _binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
   _binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "$TP_MANIFEST_SHA_FIELD")"
@@ -1134,6 +1136,196 @@ tp_resolve_channel_manifest() {
   if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
     || [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
     || [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# --- Daemon build floor (no rollback through root) ------------------------
+# The daemon refuses a signed manifest older than the build it runs
+# (src/update/freshness.ts), but the daemon account can also ask root for an
+# update directly (tp-orchestrate update --manifest-url), and an older signed
+# release would put back root helpers that later releases fixed. So root keeps
+# its own floor: <install>/lib/installed-build (root-owned, in a root-owned
+# folder the daemon cannot write), the daemon build this script last
+# installed. A manifest older than it is refused before anything is
+# downloaded. The comparison mirrors isRollback: the same commit is never
+# older, base versions (major.minor.patch, labels ignored) order releases,
+# and the same base compares builtAt. The only override is the operator's
+# own: --allow-downgrade or TURBOPANEL_ALLOW_DOWNGRADE=1 in root's
+# environment when running this script by hand. tp-orchestrate clears the
+# variable and refuses the flag, and daemon.env is never read for it.
+
+# Print "<major> <minor> <patch>" for a semver (optional leading v), or nothing.
+tp_semver_base() {
+  _svb_in="$1"
+  _svb="$(printf '%s' "$_svb_in" | tr -d '[:space:]')"
+  _svb="${_svb#v}"
+  printf '%s' "$_svb" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || return 0
+  _svb="${_svb%%+*}"
+  _svb="${_svb%%-*}"
+  printf '%s' "$_svb" | tr '.' ' '
+}
+
+# Compare two unsigned decimal strings of any length: prints -1, 0 or 1.
+tp_decimal_cmp() {
+  _dc_left="$1"
+  _dc_right="$2"
+  _dca="$(printf '%s' "$_dc_left" | sed 's/^0*//')"
+  _dcb="$(printf '%s' "$_dc_right" | sed 's/^0*//')"
+  if [ "${#_dca}" -lt "${#_dcb}" ]; then
+    printf '%s' "-1"
+  elif [ "${#_dca}" -gt "${#_dcb}" ]; then
+    printf '%s' "1"
+  elif [ "$_dca" = "$_dcb" ]; then
+    printf '%s' "0"
+  elif [ "$(printf '%s\n%s\n' "$_dca" "$_dcb" | LC_ALL=C sort | head -1)" = "$_dca" ]; then
+    printf '%s' "-1"
+  else
+    printf '%s' "1"
+  fi
+}
+
+# Milliseconds since the epoch for an ISO 8601 time, or nothing.
+tp_epoch_ms() {
+  _ems_in="$1"
+  case "$_ems_in" in
+    "" | *[!0-9TZ:.+-]*) return 0 ;;
+    *) ;;
+  esac
+  _ems="$(date -u -d "$_ems_in" '+%s%3N' 2>/dev/null)" || return 0
+  case "$_ems" in
+    "" | *[!0-9-]*) return 0 ;;
+    *) ;;
+  esac
+  printf '%s' "$_ems"
+}
+
+# Usage: tp_daemon_build_older <have commit> <have version> <have builtAt>
+#                              <want commit> <want version> <want builtAt>
+# Exit 0: want is older than have. 1: it is not. 2: no evidence either way.
+tp_daemon_build_older() {
+  _dbo_have_commit="$1"
+  _dbo_have_version="$2"
+  _dbo_have_built="$3"
+  _dbo_want_commit="$4"
+  _dbo_want_version="$5"
+  _dbo_want_built="$6"
+  if [ -n "$_dbo_have_commit" ] && [ "$_dbo_have_commit" = "$_dbo_want_commit" ]; then
+    return 1
+  fi
+  _dbo_have="$(tp_semver_base "$_dbo_have_version")"
+  _dbo_want="$(tp_semver_base "$_dbo_want_version")"
+  if [ -n "$_dbo_have" ] && [ -n "$_dbo_want" ]; then
+    for _dbo_i in 1 2 3; do
+      _dbo_c="$(tp_decimal_cmp "$(printf '%s' "$_dbo_want" | cut -d' ' -f"$_dbo_i")" \
+        "$(printf '%s' "$_dbo_have" | cut -d' ' -f"$_dbo_i")")"
+      [ "$_dbo_c" = "-1" ] && return 0
+      [ "$_dbo_c" = "1" ] && return 1
+    done
+  fi
+  _dbo_have_at="$(tp_epoch_ms "$_dbo_have_built")"
+  _dbo_want_at="$(tp_epoch_ms "$_dbo_want_built")"
+  if [ -z "$_dbo_have_at" ] || [ -z "$_dbo_want_at" ]; then
+    return 2
+  fi
+  [ "$_dbo_want_at" -lt "$_dbo_have_at" ] && return 0
+  return 1
+}
+
+# One record field, as written by tp_write_daemon_build_floor.
+# Usage: tp_floor_field <record> <key>
+tp_floor_field() {
+  _ff_file="$1"
+  _ff_key="$2"
+  sed -n "s/^$_ff_key=//p" "$_ff_file" | head -1
+}
+
+# Print "commit version builtAt" (tab-separated) for the floor: the record
+# when it exists, else the installed native binary's --version line (a host
+# installed before the record existed), else nothing.
+tp_read_daemon_build_floor() {
+  _rdf_file="$1"
+  _rdf_bin="$2"
+  if [ -f "$_rdf_file" ] && [ ! -L "$_rdf_file" ]; then
+    printf '%s\t%s\t%s' "$(tp_floor_field "$_rdf_file" commit)" \
+      "$(tp_floor_field "$_rdf_file" version)" \
+      "$(tp_floor_field "$_rdf_file" builtAt)"
+    return 0
+  fi
+  if [ ! -x "$_rdf_bin" ] || [ -L "$_rdf_bin" ]; then
+    return 0
+  fi
+  _rdf_line="$(timeout 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
+  # turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
+  printf '%s' "$_rdf_line" | sed -n 's/^turbopaneld v\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}(.*,[[:space:]]*\([^,)[:space:]]\{1,\}\))[[:space:]]*$/\2\t\1\t\3/p' | head -1
+}
+
+# Refuse a target older than the floor. Usage:
+#   tp_check_daemon_build_floor <record> <installed binary> <commit> <version> <builtAt>
+tp_check_daemon_build_floor() {
+  _cdf_record="$1"
+  _cdf_bin="$2"
+  _cdf_want_commit="$3"
+  _cdf_want_version="$4"
+  _cdf_want_built="$5"
+  if [ "${ALLOW_DOWNGRADE:-false}" = true ]; then
+    tp_print_styled_line "1;33" "*** --allow-downgrade: the daemon build floor is not enforced for this run ***" >&2
+    return 0
+  fi
+  _cdf_floor="$(tp_read_daemon_build_floor "$_cdf_record" "$_cdf_bin")"
+  [ -n "$_cdf_floor" ] || return 0
+  _cdf_tab="$(printf '\t')"
+  _cdf_have_commit="${_cdf_floor%%"$_cdf_tab"*}"
+  _cdf_rest="${_cdf_floor#*"$_cdf_tab"}"
+  _cdf_have_version="${_cdf_rest%%"$_cdf_tab"*}"
+  _cdf_have_built="${_cdf_rest#*"$_cdf_tab"}"
+  _cdf_rc=0
+  tp_daemon_build_older "$_cdf_have_commit" "$_cdf_have_version" "$_cdf_have_built" \
+    "$_cdf_want_commit" "$_cdf_want_version" "$_cdf_want_built" || _cdf_rc=$?
+  case "$_cdf_rc" in
+    1) return 0 ;;
+    2)
+      # A signed release manifest always carries builtAt; one without it is
+      # not something to install over a known build.
+      if [ -n "$(tp_epoch_ms "$_cdf_have_built")" ] && [ -z "$(tp_epoch_ms "$_cdf_want_built")" ]; then
+        echo "run.sh: refusing a daemon release without a build time over the installed build ${_cdf_have_version:-$_cdf_have_commit}" >&2
+        return 1
+      fi
+      return 0
+      ;;
+    *) ;;
+  esac
+  echo "run.sh: refusing to install daemon ${_cdf_want_version:-$_cdf_want_commit} (built ${_cdf_want_built:-unknown}): it is older than the installed build ${_cdf_have_version:-$_cdf_have_commit} (built ${_cdf_have_built:-unknown}). To roll back on purpose, run this installer as root with --allow-downgrade." >&2
+  return 1
+}
+
+# Record the daemon build this run installed. Root-owned, in the root-owned
+# lib folder; values are limited to the characters a build identity uses.
+# Usage: tp_write_daemon_build_floor <record> <commit> <version> <builtAt>
+tp_write_daemon_build_floor() {
+  _wdf_record="$1"
+  _wdf_commit="$2"
+  _wdf_version="$3"
+  _wdf_built="$4"
+  case "$_wdf_commit" in
+    "" | *[!0-9A-Za-z._-]*) return 0 ;;
+    *) ;;
+  esac
+  case "$_wdf_version" in
+    *[!0-9A-Za-z.+-]*) _wdf_version="" ;;
+    *) ;;
+  esac
+  case "$_wdf_built" in
+    *[!0-9TZ:.+-]*) _wdf_built="" ;;
+    *) ;;
+  esac
+  _wdf_dir="$(dirname "$_wdf_record")"
+  mkdir -p "$_wdf_dir" || return 1
+  _wdf_tmp="$(mktemp "$_wdf_dir/.installed-build.XXXXXX")" || return 1
+  if ! printf 'commit=%s\nversion=%s\nbuiltAt=%s\n' "$_wdf_commit" "$_wdf_version" "$_wdf_built" > "$_wdf_tmp" \
+    || ! chmod 0644 "$_wdf_tmp" || ! mv -f "$_wdf_tmp" "$_wdf_record"; then
+    rm -f "$_wdf_tmp"
     return 1
   fi
   return 0
@@ -1271,11 +1463,12 @@ tp_install_verified_binary_and_orchestration() {
 
   mkdir -p "$_home/bin" "$_home/share/orchestration"
   # Keep exactly one previous generation beside the new one (update-rollback,
-  # Road to 0.1.x): bin/turbopaneld.prev and share/orchestration.prev. A
-  # rollback is a re-run of this script pinned to the previous release's
-  # manifest (--manifest-url, or TURBOPANEL_MANIFEST_URL in daemon.env); the
-  # .prev copies are the offline emergency — swap them back by hand when the
-  # rail itself is unreachable.
+  # Road to 0.1.x): bin/turbopaneld.prev and share/orchestration.prev. The
+  # update guard moves them back after a failed update (root's armed record
+  # only). Any other rollback is an operator running this script as root with
+  # --manifest-url <older release> --allow-downgrade (the build floor refuses
+  # it otherwise), or swapping the .prev copies back by hand when the rail
+  # itself is unreachable.
   tp_emit_update_stage installing
   if [ -f "$_home/bin/$_binary_name" ]; then
     rm -f "$_home/bin/$_binary_name.prev"
@@ -1599,6 +1792,33 @@ tp_arm_update_guard() {
   fi
   if [ -z "$_previous_commit" ] && [ -x "$_js_prev" ]; then
     _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_js_prev" --version 2>/dev/null || true)")"
+  fi
+  # The record the guard acts on is root's: <install>/lib is root-owned and the
+  # daemon cannot write it, so the daemon cannot arm a rollback, keep an old
+  # record for later or change which build it restores. The guard consumes it
+  # on rollback or disarm, and ignores it after a reboot (boot id) or long
+  # after the deadline. update-guard.json below is the daemon's read-only copy.
+  _root_record="$(tp_prod_home)/lib/update-guard-armed"
+  _boot_id="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  case "$_boot_id" in
+    *[!0-9a-f-]*) _boot_id="" ;;
+    *) ;;
+  esac
+  case "$_previous_commit" in
+    *[!0-9A-Za-z._-]*) _previous_commit="" ;;
+    *) ;;
+  esac
+  mkdir -p "$(dirname "$_root_record")"
+  if ! _root_tmp="$(mktemp "$(dirname "$_root_record")/.update-guard-armed.XXXXXX")"; then
+    tp_print_error "Failed to write update guard record $_root_record"
+    return 1
+  fi
+  if ! printf 'targetCommit=%s\npreviousCommit=%s\ndeadlineAt=%s\narmedAt=%s\nbootId=%s\nrestartAttempts=0\n' \
+    "$_manifest_commit" "$_previous_commit" "$_deadline" "$_armed_at" "$_boot_id" > "$_root_tmp" \
+    || ! chmod 0640 "$_root_tmp" || ! mv -f "$_root_tmp" "$_root_record"; then
+    rm -f "$_root_tmp"
+    tp_print_error "Failed to write update guard record $_root_record"
+    return 1
   fi
   mkdir -p "$RUN_DIR"
   # Root-owned, daemon-group readable (production: root:tp 0640). /run/turbopanel
@@ -2914,6 +3134,11 @@ PANEL_KEYSET=""
 PANEL_RP_ID=""
 PANEL_PASSKEYS=""
 UNSAFE_NO_PANEL_KEY=false
+# Break-glass for the daemon build floor: root's own environment or the flag
+# below, never daemon.env (tp-orchestrate clears the variable and refuses the
+# flag, so the daemon account cannot ask for it).
+ALLOW_DOWNGRADE=false
+[ "${TURBOPANEL_ALLOW_DOWNGRADE:-}" = "1" ] && ALLOW_DOWNGRADE=true
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -2937,6 +3162,8 @@ while [ $# -gt 0 ]; do
       TUNNEL_TOKEN="$2"; shift 2 ;;
     --dev-allow-unsigned)
       export TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1; shift ;;
+    --allow-downgrade)
+      ALLOW_DOWNGRADE=true; shift ;;
     --insecure-tls)
       INSECURE_TLS=true; shift ;;
     --unsafe-no-panel-key)
@@ -3248,6 +3475,8 @@ if ! tp_is_root; then
   # Not secrets; they must survive sudo's environment reset.
   [ -n "$PANEL_FINGERPRINT" ] && set -- "$@" --panel-key "$PANEL_FINGERPRINT"
   [ "$UNSAFE_NO_PANEL_KEY" = true ] && set -- "$@" --unsafe-no-panel-key
+  # sudo resets the environment, so the break-glass travels as the flag.
+  [ "$ALLOW_DOWNGRADE" = true ] && set -- "$@" --allow-downgrade
   [ "$NO_START" = true ] && set -- "$@" --no-start
   [ "$SKIP_DAEMON_PACKAGE" = true ] && set -- "$@" --skip-daemon-package
   [ "$PROGRESS_MARKERS" = true ] && set -- "$@" --progress-markers
@@ -3271,6 +3500,7 @@ tp_print_header
 
 INSTALL_ROOT="/opt/turbopanel"
 BIN_DIR="$INSTALL_ROOT/bin"
+DAEMON_BUILD_FLOOR="$INSTALL_ROOT/lib/installed-build"
 ORCHESTRATION_DIR="$INSTALL_ROOT/share/orchestration"
 RUNTIMES_DIR="$INSTALL_ROOT/vendor"
 CONFIG_DIR="/etc/turbopanel"
@@ -3541,6 +3771,11 @@ if ! tp_fetch_channel_manifest; then
   tp_print_error "Failed to fetch release manifest"
   exit 1
 fi
+if ! tp_check_daemon_build_floor "$DAEMON_BUILD_FLOOR" "$(tp_daemon_binary_path)" \
+  "${_manifest_commit:-}" "${_manifest_version:-}" "${_manifest_built_at:-}"; then
+  tp_print_error "Refusing an older daemon release"
+  exit 1
+fi
 _colocated_daemon_refresh=false
 if [ "$DAEMON_ONLY" = true ] && tp_colocated_control_plane_host; then
   _colocated_daemon_refresh=true
@@ -3744,6 +3979,11 @@ tp_stop_running_daemon_for_release_swap
 
 if ! tp_install_verified_binary_and_orchestration; then
   tp_print_error "Failed to install daemon release artifacts"
+  exit 1
+fi
+if ! tp_write_daemon_build_floor "$DAEMON_BUILD_FLOOR" \
+  "${_manifest_commit:-}" "${_manifest_version:-}" "${_manifest_built_at:-}"; then
+  tp_print_error "Failed to record the installed daemon build in $DAEMON_BUILD_FLOOR"
   exit 1
 fi
 

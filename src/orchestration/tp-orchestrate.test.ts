@@ -331,6 +331,8 @@ async function runUpdateVerb(
     panelIdentity?: string;
     /** A run.sh from before the panel key pin: it has no --panel-key flag. */
     olderRunSh?: boolean;
+    /** A run.sh from before the root daemon build floor. */
+    withoutBuildFloor?: boolean;
   } = {},
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(helperPath);
@@ -358,6 +360,9 @@ async function runUpdateVerb(
       "  cat > \"$_out\" <<'FAKE'",
       "#!/bin/sh",
       options.olderRunSh ? "# no pin support" : "# supports --panel-key",
+      options.withoutBuildFloor
+        ? "# no build floor"
+        : '# tp_check_daemon_build_floor "$DAEMON_BUILD_FLOOR"',
       // An older installer rewrites the update origin without panel_key.
       options.olderRunSh
         ? `printf 'host=h\\n' > "${root}/lib/update-origin"`
@@ -391,6 +396,7 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_release_manifest_url_ok"),
       extractShellFunction(source, "tp_installer_host_for_channel"),
       extractShellFunction(source, "tp_fetch_pinned_run_script"),
+      extractShellFunction(source, "tp_require_build_floor_installer"),
       extractShellFunction(source, "tp_verb_update"),
       extractShellFunction(source, "tp_verb_update_instance"),
       extractShellFunction(source, "tp_verb_update_colocated"),
@@ -1250,4 +1256,56 @@ test("tp-orchestrate update (remote enrolment) refuses a control-plane pin", asy
   );
   assertEquals(result.status, 1);
   assertStringIncludes(result.stderr, "update-colocated");
+});
+
+// --- daemon build floor ------------------------------------------------------
+
+test("tp-orchestrate update and update-colocated refuse an installer without the root build floor", async () => {
+  const update = await runUpdateVerb(
+    ["--license-stdin", "--channel", "release", "--no-start"],
+    PUBLIC_PIN,
+    "tp_verb_update",
+    { withoutBuildFloor: true },
+  );
+  assertEquals(update.status, 1);
+  assertStringIncludes(update.stderr, "does not check the installed daemon");
+  assertEquals(update.stdout.includes("RUNSH"), false);
+
+  const colocated = await runUpdateVerb(
+    ["--channel", "release", "--no-start"],
+    COLOCATED_PIN,
+    "tp_verb_update_colocated",
+    { controlPlaneHost: true, withoutBuildFloor: true },
+  );
+  assertEquals(colocated.status, 1);
+  assertStringIncludes(colocated.stderr, "does not check the installed daemon");
+  assertEquals(colocated.stdout.includes("RUNSH"), false);
+});
+
+test("tp-orchestrate never carries the downgrade break-glass", async () => {
+  const source = await Deno.readTextFile(helperPath);
+  // Cleared before any verb runs, whatever sudo's environment policy is.
+  const unset = source.indexOf("unset TURBOPANEL_ALLOW_DOWNGRADE");
+  assertEquals(unset >= 0, true);
+  assertEquals(unset < source.indexOf("tp_verb_update() {"), true);
+  for (
+    const verb of [
+      "tp_verb_update",
+      "tp_verb_update_colocated",
+      "tp_verb_update_instance",
+    ] as const
+  ) {
+    const args = verb === "tp_verb_update"
+      ? ["--license-stdin", "--allow-downgrade", "--no-start"]
+      : ["--channel", "canary", "--allow-downgrade", "--no-start"];
+    const result = await runUpdateVerb(
+      args,
+      verb === "tp_verb_update" ? PUBLIC_PIN : COLOCATED_PIN,
+      verb,
+      { controlPlaneHost: verb !== "tp_verb_update" },
+    );
+    assertEquals(result.status, 1, verb);
+    assertStringIncludes(result.stderr, "--allow-downgrade", verb);
+    assertEquals(result.stdout.includes("RUNSH"), false, verb);
+  }
 });
