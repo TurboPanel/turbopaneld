@@ -665,19 +665,41 @@ export async function grantInstanceAcmeSocket(
   }
 }
 
-export async function withPreflightServer(
+export function withPreflightServer(
   socketPath: string,
   nonce: string,
   run: InstanceAcmeCommand,
   body: () => Promise<void>,
 ): Promise<void> {
+  return withProofAnswerServer(
+    socketPath,
+    (path) => preflightHttpResponse(path, nonce),
+    run,
+    body,
+  );
+}
+
+/** How the proof socket answers one request path. */
+export type ProofAnswer = (path: string) => { status: number; body: string };
+
+/**
+ * Serve `answer` on the proof socket (opened to the hosting web server) while
+ * `body` runs, then close and remove the socket. The preflight nonce and the
+ * daemon's own HTTP-01 answers (`acme/http01.ts`) both use it.
+ */
+export async function withProofAnswerServer<T>(
+  socketPath: string,
+  answer: ProofAnswer,
+  run: InstanceAcmeCommand,
+  body: () => Promise<T>,
+): Promise<T> {
   await removeSite(socketPath);
   const listener = Deno.listen({ transport: "unix", path: socketPath });
   await Deno.chmod(socketPath, 0o660).catch(() => undefined);
-  const serving = acceptPreflight(listener, nonce);
+  const serving = acceptProofRequests(listener, answer);
   try {
     await grantInstanceAcmeSocket(socketPath, run);
-    await body();
+    return await body();
   } finally {
     listener.close();
     await serving.catch(() => undefined);
@@ -685,9 +707,9 @@ export async function withPreflightServer(
   }
 }
 
-async function acceptPreflight(
+async function acceptProofRequests(
   listener: Deno.Listener,
-  nonce: string,
+  answer: ProofAnswer,
 ): Promise<void> {
   let conn: Deno.Conn;
   try {
@@ -696,20 +718,26 @@ async function acceptPreflight(
     return;
   }
   try {
-    await answerPreflight(conn, nonce);
+    await answerProofRequest(conn, answer);
+  } catch {
+    // A peer that went away mid-request costs nothing but its own answer.
   } finally {
     conn.close();
   }
-  return acceptPreflight(listener, nonce);
+  return acceptProofRequests(listener, answer);
 }
 
-async function answerPreflight(conn: Deno.Conn, nonce: string): Promise<void> {
+async function answerProofRequest(
+  conn: Deno.Conn,
+  answer: ProofAnswer,
+): Promise<void> {
   const path = await readRequestPath(conn);
-  const response = preflightHttpResponse(path, nonce);
+  const response = answer(path);
   const reason = response.status === 200 ? "OK" : "Not Found";
-  const payload =
-    `HTTP/1.1 ${response.status} ${reason}\r\nContent-Type: text/plain\r\nContent-Length: ${response.body.length}\r\nConnection: close\r\n\r\n${response.body}`;
-  await conn.write(new TextEncoder().encode(payload));
+  const bytes = new TextEncoder().encode(response.body);
+  const head =
+    `HTTP/1.1 ${response.status} ${reason}\r\nContent-Type: text/plain\r\nContent-Length: ${bytes.length}\r\nConnection: close\r\n\r\n`;
+  await conn.write(new TextEncoder().encode(head + response.body));
 }
 
 async function readRequestPath(conn: Deno.Conn): Promise<string> {

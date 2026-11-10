@@ -1,5 +1,7 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { acmeAccountDir } from "../src/deploy/acme/account-store.ts";
+import { PROD_STATE_DIR_DEFAULT } from "../src/paths/layout.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -1341,13 +1343,17 @@ test("the issuer's storage, requests, sockets and proof handlers sit in trees pu
     .replace(/^[A-Z_]+="/, "")
     .replace(/"$/, "")
     .split(" ");
-  // <state>/tenant-acme (account, requests, logs), <config>/hosting/proof and
+  // <state>/tenant-acme (accounts, requests, logs), <config>/hosting/proof and
   // the reserved proof sites, and <run>/tenant-acme-<id>.sock.
   for (
     const tree of ["/etc/turbopanel", "/var/lib/turbopanel", "/run/turbopanel"]
   ) {
     assert(trees.includes(tree), tree);
   }
+  // The daemon's own ACME account folder sits inside the state tree purge removes.
+  const accounts = acmeAccountDir({ stateDir: PROD_STATE_DIR_DEFAULT });
+  assertEquals(accounts, "/var/lib/turbopanel/tenant-acme/account");
+  assert(trees.some((tree) => accounts.startsWith(`${tree}/`)), accounts);
 });
 
 test("the connector program and the token copies are inside trees purge removes whole", async () => {
