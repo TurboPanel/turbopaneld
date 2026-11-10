@@ -404,6 +404,30 @@ async function removeUnitFile(
   return await io.run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", path]));
 }
 
+/**
+ * Rebuild the account walls (`tp-host php-loopback-sync`, `lib/tp-php-loopback`):
+ * each account may reach its own native apps' loopback ports, read from the
+ * unit files on disk, and no one else's. Run once the units are on disk and
+ * before any is started (an app that calls its own port at start must find it
+ * open), and again once a unit is gone, so a port the ledger hands to another
+ * account no longer opens for the old one. A failure only warns: the rules
+ * then stay as they were, which never opens a port to the wrong account
+ * unless one was just removed; the next sync (every PHP start, every deploy,
+ * every daemon start) repairs it.
+ */
+async function syncAccountWalls(io: NativeAppIo): Promise<void> {
+  const result = await io.run(
+    "sudo",
+    hostSudoArgs(["-n", "php-loopback-sync"]),
+  );
+  if (!result.success) {
+    logWarn(
+      "deploy",
+      `account loopback rules not reloaded: ${result.stderr}`,
+    );
+  }
+}
+
 /** True when the unit is currently active (a redeploy restarts, not enables). */
 async function unitIsActive(io: NativeAppIo, unit: string): Promise<boolean> {
   const result = await systemctl(io, ["is-active", "--quiet", unit]);
@@ -1207,6 +1231,8 @@ async function retireCheckCopy(
       `systemctl daemon-reload after removing ${unit} failed: ${reload.stderr}`,
     );
   }
+  // The copy's spare port goes back to the ledger.
+  await syncAccountWalls(io);
 }
 
 /** {@link retireCheckCopy} for a prepared app's own check copy. */
@@ -1671,6 +1697,9 @@ export async function applyNativeAppServices(
     if (!result.success) {
       throw new Error(result.stderr || "systemctl daemon-reload failed");
     }
+    // Each account's own app ports (check copies included) open before any
+    // app starts.
+    await syncAccountWalls(io);
   }
 
   // Phase 3 — start and health-probe each app (beside the release serving,
@@ -1863,6 +1892,8 @@ export async function removeNativeAppServices(
         `systemctl daemon-reload after native app removal failed: ${reload.stderr}`,
       );
     }
+    // The removed apps' ports go back to the ledger.
+    await syncAccountWalls(io);
   }
   return removed;
 }

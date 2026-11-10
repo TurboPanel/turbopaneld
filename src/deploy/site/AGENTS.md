@@ -188,52 +188,66 @@ Docker Compose. The daemon:
    carries `IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7`
    with `IPAddressAllow=127.0.0.1 127.0.0.53` (the database proxy and
    systemd-resolved's stub). systemd filters by address, not port, so the port
-   filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`): for
-   every site owner's Linux user with a PHP unit it refuses all loopback
-   destinations except 127.0.0.1:13306 (ProxySQL's MySQL port) and the stub
-   on port 53, so ProxySQL admin/metrics, other sites and Apache's backend
-   stay closed. The rules match the uid, so they also bind that user's ssh and
-   cron. Each unit runs it as root in `ExecStartPre=+` (the one root hook
-   tp-host pins; if it fails the unit does not start: fail closed) and the
-   daemon runs `tp-host php-loopback-sync` after installing (before starting)
-   or removing a runtime and at boot reconcile; the set is rebuilt from the
-   unit files on disk, so start and sweep cannot disagree. Replies of the owner's own local servers (a native app on 127.0.0.1) pass
-   through `ct state established,related accept` first. The `nft` and `flock`
-   programs are installed by `turbopanel-user/root-helpers.yml`; if still
-   missing the helper exits non-zero naming the program (units do not start,
-   boot reconcile logs the error). OpenLiteSpeed's detached lsphp (`lsd`) runs
-   the same unit, so it carries the same filter, limits and guard. Not closed: an
-   `nft flush ruleset` while PHP runs leaves loopback open until the next
-   start, deploy or daemon boot. The ProxySQL MySQL port is fixed at 13306
-   in the script; a changed `listenerPorts` needs the script's `DB_PORT`
-   changed too. **Container wall:** the same chain refuses, for every uid in
-   the principal band (15001-60000, tp-host's `PRINCIPAL_ID_MIN`/`MAX`, so
-   every Hosting Account's PHP, cron, ssh, sftp and `sudo -u` processes,
-   whether or not it has a PHP unit), new connections that leave through a
-   Docker bridge (`oifname` docker0 or `br-*`, so a network created after the
-   sync is covered; a `br-` interface that is not Docker's `br-<12 hex>`,
-   such as a LAN bridge, is left out by name as found at the sync), to the addresses on those bridges now (their gateways,
-   which route over lo; from `ip -o addr`), and to Docker's configured ranges
-   (`default-address-pools` bases and `bip` in `/etc/docker/daemon.json`,
-   which also covers container networks on other servers). One account can
-   therefore not reach another account's containers by bridge address, in
-   either direction. Docker's built-in pools are not assumed when none is
-   configured (they overlap common private networks; Docker only hands out
-   ranges that miss the host's routes, so the live bridges are exact). The
-   rest of RFC 1918 stays open (scope addresses, VPC services), and the
-   database proxy keeps working: the hook runs before Docker's NAT, so
-   127.0.0.1:13306 and 15432 are judged as loopback, not as the proxy's
-   bridge address. Malformed or wider-than-/8 ranges are dropped, never handed
-   to nft, so a stray `daemon.json` value cannot keep PHP down. Limits: a
-   network with its own bridge name (`com.docker.network.bridge.name`,
-   host-level approval only) outside the configured pools is not covered; an
-   account with no PHP unit is covered from the daemon's boot reconcile (every
-   daemon start runs the sync, also when it skips the PHP sweep over an
-   unreadable vhost), not from its own unit start; the script needs `ip`
-   (iproute2, installed beside nftables by `root-helpers.yml`); the loopback port
-   filter itself still binds only accounts with a PHP unit. A project's own
-   helper containers will be opened as a per-account loopback port in the
-   loopback rules (the marked slot in the script), never through this wall.
+   filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`, the
+   **account walls**). Every rule binds the principal band (uids 15001-60000,
+   tp-host's `PRINCIPAL_ID_MIN`/`MAX`): every Hosting Account's PHP, cron,
+   ssh, sftp, `sudo -u` and native app processes, with or without a PHP site.
+   Replies come first (`ct state established,related accept`), so a native
+   app's answers to the hosting proxy and every reply on a connection the
+   account was allowed to open pass. **Loopback:** every new connection to
+   127.0.0.0/8 or ::1 is refused except 127.0.0.1:13306 and 15432 (the
+   database proxy), port 53 on 127.0.0.53 and on any loopback nameserver
+   `/etc/resolv.conf` names, and the account's **own ports**: `uid . port`
+   pairs (set `own_ports`) from `User=` and `Environment=PORT=` of every
+   `turbopanel-app-*.service` on disk, check copies included. So ProxySQL
+   admin/metrics, other accounts' apps and loopback publishes, other sites and
+   Apache's backend are closed, and a server an account starts by hand on
+   loopback is refused to it too (nothing says which account a listener
+   belongs to). The `own_ports` set is the per-account opening the later
+   helper-container work extends. **Container networks:** new connections
+   are refused that leave through a Docker bridge (`oifname` docker0 or
+   `br-*`, so a network created after the sync is covered; a `br-` interface
+   that is not Docker's `br-<12 hex>`, such as a LAN bridge, is left out by
+   name as found at the sync), to the addresses on those bridges now (their
+   gateways, which route over lo; from `ip -o addr`), and to Docker's
+   configured ranges (`default-address-pools` bases and `bip` in
+   `/etc/docker/daemon.json`) less every range the host routes somewhere
+   other than a Docker bridge (`ip route`: the host's own networks, the
+   private fabric on tp0, a LAN bridge), so even a 10.0.0.0/8 pool does not
+   close the private network. One account can therefore not reach another
+   account's containers by bridge address, in either direction. Docker's
+   built-in pools are not assumed when none is configured (they overlap
+   common private networks; Docker only hands out ranges that miss the host's
+   routes, so the live bridges are exact). The rest of RFC 1918 stays open
+   (scope addresses, VPC services), and the database proxy keeps working: the
+   hook runs before Docker's NAT, so 127.0.0.1:13306 and 15432 are judged as
+   loopback, not as the proxy's bridge address. Malformed or wider-than-/8
+   pools are dropped, never handed to nft, so a stray `daemon.json` value
+   cannot keep PHP down; a native app unit that does not fit is skipped.
+   **Who loads it:** `turbopanel-loopback-php.service` at boot, before the
+   network, logins and cron (fails open; it sees no routes yet, so a pool is
+   whole until the daemon's own sync); every PHP unit in `ExecStartPre=+`
+   (the one root hook tp-host pins; if it fails the unit does not start:
+   fail closed); and the daemon through `tp-host php-loopback-sync` at its
+   boot reconcile (after the private fabric is restored, also when it skips
+   the PHP sweep over an unreadable vhost), after installing (before
+   starting) or removing a PHP runtime, and after native app units are
+   installed (before any starts), a check copy is retired or apps are
+   removed, so a port the ledger hands on leaves its old account. Everything
+   is rebuilt from disk and the kernel each time. The `nft`, `flock` and `ip`
+   programs are installed by `turbopanel-user/root-helpers.yml`; if missing,
+   or if an `ip` listing fails, the helper exits non-zero naming it (PHP units
+   do not start, boot reconcile logs the error). OpenLiteSpeed's detached
+   lsphp (`lsd`) runs the same unit, so it carries the same filter, limits
+   and guard. The ProxySQL MySQL port is fixed at 13306 in the script; a
+   changed `listenerPorts` needs the script's `DB_PORT` changed too. Limits:
+   an `nft flush ruleset` leaves everything open until the next start, deploy
+   or daemon boot; a network with its own bridge name
+   (`com.docker.network.bridge.name`, host-level approval only) outside the
+   configured pools is not covered; another server's container network this
+   host routes over tp0 stays open (the far server's forwarding rules decide
+   it); a route added after the last sync stays closed inside a pool until
+   the next sync.
    Every installed PHP series may be run by every site owner's Linux user, so
    a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
