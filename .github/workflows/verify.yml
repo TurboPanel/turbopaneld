@@ -406,11 +406,69 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
+      # Wire twins merge control plane first, then daemon, so between the two
+      # merges one trunk holds the twin and the other does not. On trunk (a
+      # push, a manual run, or the Release Candidate PR: head trunk of this
+      # repository, base staging)
+      # a failure here is looked at again below; every other pull request
+      # stays strict.
       - name: Check contract drift against turbopanel
+        id: drift
         working-directory: turbopaneld
+        continue-on-error: ${{ github.event_name != 'pull_request' || (github.head_ref == 'trunk' && github.base_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository) }}
         env:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
+
+      # Passes only when a twin is merged on one side (inside the checked
+      # tree) and still open, or merged later, on the other; it prints where
+      # to check the lagging side out. No such twin, or an API error, fails
+      # the job (scripts/half-merged-twin.ts).
+      - name: Look for a wire twin merged on one side only
+        id: twin
+        if: steps.drift.outcome == 'failure'
+        working-directory: turbopaneld
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELF_REPO: ${{ github.repository }}
+          SIBLING_REPO: TurboPanel/turbopanel
+          SELF_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          SIBLING_SHA="$(git -C ../turbopanel rev-parse HEAD)"
+          export SIBLING_SHA
+          deno run --no-prompt --no-lock \
+            --allow-env=GH_TOKEN,SELF_REPO,SIBLING_REPO,SELF_SHA,SIBLING_SHA \
+            --allow-net=api.github.com \
+            scripts/half-merged-twin.ts >> "$GITHUB_OUTPUT"
+
+      - name: Check out the daemon half of the twin
+        if: steps.twin.outputs.self-ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.twin.outputs.self-ref }}
+          path: turbopaneld
+          persist-credentials: false
+
+      - name: Check out the control plane half of the twin
+        if: steps.twin.outputs.sibling-ref != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/turbopanel
+          ref: ${{ steps.twin.outputs.sibling-ref }}
+          path: turbopanel
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check contract drift with both halves of the twin
+        if: steps.drift.outcome == 'failure'
+        working-directory: turbopaneld
+        env:
+          TURBOPANEL_REQUIRE_SIBLING: "1"
+          TWIN_NOTE: ${{ steps.twin.outputs.note }}
+        run: |
+          deno task check:contract-drift
+          echo "::warning title=Contract drift::${TWIN_NOTE}"
+          printf '%s\n' "$TWIN_NOTE" >> "$GITHUB_STEP_SUMMARY"
 
   # The one context the trunk ruleset will require: green only when every
   # PR-time job above succeeded. Every need runs unconditionally, so a

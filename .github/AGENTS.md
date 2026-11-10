@@ -93,7 +93,27 @@ to the repo root.
   the job. The job summary names the ref used and, for a twin, says to merge the
   turbopanel pull request before the turbopaneld one. The control plane
   repository keeps a twin of the resolver; change both together. Tests:
-  `scripts/resolve-sibling-ref.test.ts`. `scripts/scan-secrets.sh`,
+  `scripts/resolve-sibling-ref.test.ts`. **Half-merged twins on trunk.** Between
+  the control plane merge and the daemon merge of a wire twin, one trunk holds
+  the twin and the other does not, so the strict check fails on trunk although
+  nothing is wrong. On a trunk push, a manual run or the Release Candidate PR
+  (head `trunk` of this repository, base `staging`) only, a failed strict check
+  runs `scripts/half-merged-twin.ts`: it passes only when a same-named pull
+  request is merged on one side (inside the checked tree) and open, or merged
+  later, on the other, then the job checks the lagging side out at that pull
+  request's `refs/pull/<n>/merge` (or its later merge commit) and runs the same
+  strict check again. That second check must pass; the job then ends green with
+  a warning naming the twin. No such twin, an API error, or a drift the twin
+  does not explain stays red. An open twin's `refs/pull/<n>/merge` is GitHub's
+  last computed merge with trunk, so it holds the checked commit only once
+  GitHub has recomputed it after that commit landed. Every other pull request
+  stays strict. The trade-off: a trunk head in that window now gets its canary
+  and a green Release Candidate `ci-ok` instead of waiting for the second merge;
+  wire changes are expand-only, so the half that shipped first works alone. One
+  twin is taken per run (the newest); two half-merged twins on the same side at
+  once stay red until one is merged on both sides. The control plane keeps a
+  twin (`scripts/half-merged-twin.mjs`); change both together. Tests:
+  `scripts/half-merged-twin.test.ts`. `scripts/scan-secrets.sh`,
   `scripts/scan-secrets.patterns` and `scripts/scan-secrets.selftest.sh` are
   byte-identical in turbopanel, turbopaneld, ui, website and dev: change all
   five together (each repo keeps a copy because the pre-commit hook runs it
