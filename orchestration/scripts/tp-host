@@ -385,6 +385,86 @@ tp_refuse_root_entry() {
   tp_die "refusing $1: a root-owned entry at the top of ${1%/*}"
 }
 
+# Engine config folders under the config root. The daemon writes their files
+# root:<engine> through this script; the engines read them as their own
+# accounts, never as root.
+TP_ENGINE_CONFIG_DIRS="nginx apache openlitespeed site-caddy"
+
+# Where below the config root a generic verb may write, rename, remove, re-own
+# or change the mode of something. Root runs or loads much of this tree (the
+# system stack's scripts and backup job, each php-fpm master's series folder
+# and conf.d, the control plane's own config), so this is an allow-list of
+# what the daemon really writes, not a list of what it may not: the daemon's
+# leaves and loose files, the engine config folders, the shared php-fpm
+# masters' pool files (each checked by tp_phppool_ok), the control plane's
+# runtime.env and the two issuer files beside its Caddy config. Anything else,
+# including the config root itself, is refused. Paths outside the config root
+# are left to the other checks.
+tp_config_write_ok() {
+  tp_under "$1" "$R_CONFIG" || return 0
+  [ "$1" != "$R_CONFIG" ] || return 1
+  _cw_rel="${1#"$R_CONFIG"/}"
+  _cw_top="${_cw_rel%%/*}"
+  tp_daemon_leaf_name "$R_CONFIG/$_cw_top" && return 0
+  if [ "$_cw_rel" = "$_cw_top" ]; then
+    tp_daemon_loose_file_name "$1"
+    return
+  fi
+  for _cw_engine in $TP_ENGINE_CONFIG_DIRS; do
+    [ "$_cw_top" = "$_cw_engine" ] && return 0
+  done
+  case "$_cw_rel" in
+    instance/runtime.env|caddy/instance-acme.json|caddy/instance-acme-settings.json) return 0 ;;
+    # The control plane's env file is staged beside itself and renamed in.
+    instance/runtime.env.tmp-*) case "$_cw_rel" in */*/*) return 1 ;; esac; return 0 ;;
+  esac
+  tp_php_pool_file "$1"
+}
+
+# True for a file directly in a shared php-fpm master's pools folder,
+# <config>/php/<series>/pools/<name>.
+tp_php_pool_file() {
+  case "$1" in
+    "$R_CONFIG"/php/*/pools/?*) ;;
+    *) return 1 ;;
+  esac
+  _pf_series="${1#"$R_CONFIG"/php/}"
+  _pf_series="${_pf_series%%/*}"
+  tp_php_series_ok "$_pf_series" || return 1
+  _pf_name="${1#"$R_CONFIG"/php/"$_pf_series"/pools/}"
+  case "$_pf_name" in
+    */*|.|..) return 1 ;;
+  esac
+  return 0
+}
+
+# A pools folder itself, <config>/php/<series>/pools.
+tp_php_pools_dir() {
+  case "$1" in
+    "$R_CONFIG"/php/*/pools) ;;
+    *) return 1 ;;
+  esac
+  _pd_series="${1#"$R_CONFIG"/php/}"
+  tp_php_series_ok "${_pd_series%/pools}"
+}
+
+# For a generic verb on a `tree` path: die unless tp_config_write_ok allows it.
+tp_require_config_write() {
+  [ "$1" = "tree" ] || return 0
+  tp_config_write_ok "$2" ||
+    tp_die "refusing $2: root's part of ${R_CONFIG}, not a place the daemon writes"
+}
+
+# A pool file is root's: the root master reads it, so the daemon account (or
+# anyone but root) owning it could rewrite it without the pool check.
+tp_require_root_pool_owner() {
+  tp_php_pool_file "$1" || return 0
+  case "$2" in
+    ''|root) ;;
+    *) tp_die "refusing owner $2 for $1: a php-fpm pool file is root's" ;;
+  esac
+}
+
 # cd into DIR; its real path must be exactly DIR (no symlink anywhere in it).
 tp_pin_dir() {
   CDPATH='' cd -P -- "$1" 2>/dev/null || return 1
@@ -1096,12 +1176,17 @@ tp_sysctl_dropin_ok() {
 
 # A pool file of the shared php-fpm master (root; it reads every pool at start).
 # Only the directives the daemon renders, a pool never named `global` (that
-# section sets the master's own log, includes and prefix), no worker account
-# of root.
+# section sets the master's own log, includes and prefix), and only the
+# accounts phpFpmPoolConfig (src/deploy/site.ts) writes: each pool names
+# `user`, `group`, `listen.owner` and `listen.group` exactly once; its workers
+# run as a site owner with that owner's own group, or as one web server account
+# with the group of the same name; its socket belongs to one web server account
+# (owner and group the same). Never root, the daemon account, another
+# principal's group or a system group such as disk, shadow or docker.
 tp_phppool_ok() {
   tp_content_plain "$1" || return 1
-  LC_ALL=C awk '
-    function fail(msg) { print "tp-host: php-fpm pool: " msg > "/dev/stderr"; exit 1 }
+  _pp_accounts="$(LC_ALL=C awk '
+    function fail(msg) { print "tp-host: php-fpm pool: " msg > "/dev/stderr"; bad = 1; exit 1 }
     function acct(v) { return v != "root" && length(v) <= 32 && v ~ /^[a-z_][a-z0-9_-]*$/ }
     function word(v) { return v ~ /^[A-Za-z0-9._-]+$/ }
     function valueok(k, v) {
@@ -1115,9 +1200,17 @@ tp_phppool_ok() {
       if (k ~ /^php_admin_value\[[A-Za-z0-9._]+\]$/) return tolower(k) !~ /extension/ && v !~ /^[ \t]/
       return -1
     }
+    function endpool() {
+      if (!inpool) return
+      if (!("user" in a) || !("group" in a) || !("listen.owner" in a) || !("listen.group" in a))
+        fail("a pool without user, group, listen.owner and listen.group")
+      print a["user"], a["group"], a["listen.owner"], a["listen.group"]
+      delete a
+    }
     /^[ \t]*$/ || /^;/ { next }
     /^\[[A-Za-z0-9._-]+\]$/ {
       if (tolower($0) == "[global]") fail("a [global] section")
+      endpool()
       inpool = 1
       next
     }
@@ -1125,11 +1218,46 @@ tp_phppool_ok() {
       if (!inpool) fail("directive outside a pool")
       if (!match($0, /^[A-Za-z0-9._]+(\[[A-Za-z0-9._]+\])? = /)) fail("line without a key: " $0)
       k = $0; sub(/ = .*$/, "", k)
-      r = valueok(k, substr($0, RLENGTH + 1))
+      v = substr($0, RLENGTH + 1)
+      r = valueok(k, v)
       if (r < 0) fail("directive " k)
       if (!r) fail("value of " k)
+      if (k == "user" || k == "group" || k == "listen.owner" || k == "listen.group") {
+        if (k in a) fail("a second " k)
+        a[k] = v
+      }
     }
-  ' "$1"
+    END { if (bad) exit 1; endpool() }
+  ' "$1")" || return 1
+  [ -n "$_pp_accounts" ] || { echo "tp-host: php-fpm pool: no pool" >&2; return 1; }
+  printf '%s\n' "$_pp_accounts" | {
+    while read -r _pp_user _pp_group _pp_lowner _pp_lgroup; do
+      tp_phppool_accounts_ok "$_pp_user" "$_pp_group" "$_pp_lowner" "$_pp_lgroup" || exit 1
+    done
+  }
+}
+
+# The accounts of one shared-master pool (see tp_phppool_ok): USER GROUP
+# LISTEN_OWNER LISTEN_GROUP.
+tp_phppool_accounts_ok() {
+  if [ "$3" != "$4" ]; then
+    echo "tp-host: php-fpm pool: listen.owner $3 and listen.group $4 differ" >&2
+    return 1
+  fi
+  case " $ENGINE_USERS " in
+    *" $3 "*) ;;
+    *) echo "tp-host: php-fpm pool: socket owner $3 is not a web server account" >&2; return 1 ;;
+  esac
+  if [ "$1" != "$2" ]; then
+    echo "tp-host: php-fpm pool: user $1 runs with group $2, not its own" >&2
+    return 1
+  fi
+  case " $ENGINE_USERS " in
+    *" $1 "*) return 0 ;;
+  esac
+  tp_principal_own_group "$1" && return 0
+  echo "tp-host: php-fpm pool: worker account $1 is neither a site owner with its own group nor a web server account" >&2
+  return 1
 }
 
 # Run the check that belongs to what root loads unseen: CLASS, the staged file,
@@ -2288,6 +2416,18 @@ tp_verb_install() {
     _in_path="$1"
     tp_require_class "$_in_path" tree principal sshddir wireguard storage
     ! tp_release_path "$_in_path" || tp_die "refusing $_in_path: a release is created only by publish"
+    if tp_php_pools_dir "$_in_path"; then
+      # A shared master's pools folder: only the shape the daemon asks for,
+      # root-owned and grouped to the account the master runs as.
+      [ "$_in_mode" = "0750" ] && [ "$_in_owner" = "root" ] &&
+        case "$_in_group" in tpapache|tpols) true ;; *) false ;; esac ||
+        tp_die "refusing $_in_path: a php-fpm pools folder is only install -d -m 0750 -o root -g tpapache|tpols"
+    elif [ "$_in_path" = "$R_CONFIG/instance" ] && [ -z "$_in_owner$_in_group" ]; then
+      # The control plane's config folder may be made (root's), never re-owned.
+      :
+    else
+      tp_require_config_write "$(tp_path_class "$_in_path")" "$_in_path"
+    fi
     tp_is_root_path "$_in_path" && [ -n "$_in_owner$_in_group" ] &&
       [ "$_in_path" != "$R_PRINCIPALS" ] && tp_die "refusing to re-own $_in_path"
     # A depth-1 entry that is not the daemon's may be created (root-owned, as
@@ -2322,6 +2462,8 @@ tp_verb_install() {
     tree|principal|unit|sshd|wireguard|sysctl) ;;
     *) tp_die "refusing path $_in_dest ($_in_class)" ;;
   esac
+  tp_require_config_write "$_in_class" "$_in_dest"
+  tp_require_root_pool_owner "$_in_dest" "$_in_owner"
   tp_mode_ok "$_in_mode" "$_in_dest" || tp_die "refusing mode $_in_mode for $_in_dest"
   tp_owner_ok "$_in_dest" "$_in_owner" "$_in_group" ||
     tp_die "refusing owner $_in_owner:$_in_group for $_in_dest"
@@ -2347,6 +2489,8 @@ tp_verb_mkdir() {
   _md_path="$1"
   tp_require_class "$_md_path" tree principal wireguard
   ! tp_release_path "$_md_path" || tp_die "refusing $_md_path: a release is created only by publish"
+  ! tp_php_pools_dir "$_md_path" || tp_die "refusing $_md_path: a php-fpm pools folder is made only by install -d"
+  tp_require_config_write "$(tp_path_class "$_md_path")" "$_md_path"
   tp_mkdir_pinned "$_md_path" 0755
 }
 
@@ -2365,6 +2509,7 @@ tp_verb_cp() {
         phpconf) [ "$_cp_dest" = "$_cp_src.tpprev" ] || tp_die "refusing path $_cp_dest" ;;
         *) tp_die "refusing path $_cp_dest" ;;
       esac
+      tp_require_config_write "$_cp_class" "$_cp_dest"
       tp_path_class "$_cp_src" >/dev/null || tp_die "refusing path $_cp_src"
       tp_open_verified "$_cp_src" || tp_die "no such file $_cp_src"
       _cp_meta="$(stat -L -c '%a %U %G' /proc/self/fd/3)"
@@ -2410,7 +2555,9 @@ tp_verb_mv() {
   # reach the root php-fpm master without the pool check they get on install.
   [ "${2%/*}" != "$R_CONFIG/php" ] || tp_die "refusing path $2"
   case "$2" in "$R_CONFIG"/php/*/pools) tp_die "refusing path $2" ;; esac
-  tp_path_class "$1" >/dev/null || tp_die "refusing path $1"
+  _mv_src_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
+  tp_require_config_write "$_mv_src_class" "$1"
+  tp_require_config_write "$_mv_class" "$2"
   tp_refuse_root_entry "$1"
   tp_refuse_root_entry "$2"
   ! tp_home_scaffold "$1" && ! tp_home_scaffold "$2" ||
@@ -2442,6 +2589,7 @@ tp_verb_rm() {
   esac
   tp_is_root_path "$1" && tp_die "refusing to remove $1"
   tp_refuse_root_entry "$1"
+  tp_require_config_write "$_rm_class" "$1"
   # A principal home itself is removed by the uninstaller, never by the daemon.
   [ "${1%/*}" = "$R_PRINCIPALS" ] && tp_die "refusing to remove a principal home"
   ! tp_home_scaffold "$1" ||
@@ -2626,6 +2774,8 @@ tp_verb_chown() {
   esac
   tp_is_root_path "$_co_path" && tp_die "refusing to re-own $_co_path"
   tp_refuse_root_entry "$_co_path"
+  tp_require_config_write "$_co_class" "$_co_path"
+  tp_require_root_pool_owner "$_co_path" "$_co_owner"
   [ -z "$_co_rec" ] || tp_home_recursion_ok "$_co_path" ||
     tp_die "chown -R: refusing to walk $_co_path"
   tp_owner_ok "$_co_path" "$_co_owner" "$_co_group" ||
@@ -2646,6 +2796,7 @@ tp_verb_chmod() {
   _ch_path="$2"
   _ch_class="$(tp_path_class "$_ch_path")" || tp_die "refusing path $_ch_path"
   case "$_ch_class" in tree|principal|wireguard|sysctl) ;; *) tp_die "refusing path $_ch_path" ;; esac
+  tp_require_config_write "$_ch_class" "$_ch_path"
   case "$_ch_mode" in
     u=rwX,g=rX,o=)
       [ "$_ch_class" = "principal" ] && ! tp_home_structural "$_ch_path" &&
@@ -2764,6 +2915,7 @@ tp_verb_tee() {
   [ $# -eq 1 ] || tp_die "tee: only tee PATH"
   _te_class="$(tp_path_class "$1")" || tp_die "refusing path $1"
   case "$_te_class" in tree|sysctl) ;; *) tp_die "refusing path $1" ;; esac
+  tp_require_config_write "$_te_class" "$1"
   tp_stage_dir
   _te_tmp="$TP_STAGE/stdin"
   cat > "$_te_tmp"
