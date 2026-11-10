@@ -3,7 +3,8 @@
  * deleted the service or volume they belong to.
  *
  * This is the only way a volume folder leaves the host. Stopping an
- * environment keeps its volumes, and a service that leaves the compose file
+ * environment keeps its volume folders (a Destroy may remove registered Docker
+ * volumes only when asked, see `stop-environment-volumes.ts`), and a service that leaves the compose file
  * keeps its folder; both leave the files for the owner. A deleted asset is the
  * one case where the files go, and the panel says so by naming the folder here.
  *
