@@ -1,6 +1,7 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 import {
+  constantDrift,
   ContractDriftError,
   type ContractFieldPin,
   extractFieldSpecs,
@@ -8,6 +9,7 @@ import {
   floorWithinVersionDrift,
   main,
   mapDriftFromDaemon,
+  markedWidening,
   missingFromDaemon,
   objectLiteralEntries,
   runContractDriftCheck,
@@ -373,5 +375,39 @@ test("snapshot: this daemon may pin more types and optional fields, never fewer 
   assertStringIncludes(
     snapshotSubsetDrift(pin([a]), pin([{ ...a, type: "number" }])) ?? "",
     "$.T.fields.a.type differs",
+  );
+});
+
+test("named constants: a shared value must agree, a name only this daemon has is fine", () => {
+  assertEquals(
+    constantDrift("tp-hello-v1", "tp-hello-v1", "HELLO_PREFIX"),
+    null,
+  );
+  assertEquals(constantDrift(null, "tp-new-v1", "REQUEST_PREFIX"), null);
+  assertStringIncludes(
+    constantDrift("tp-hello-v1", "tp-hello-v2", "HELLO_PREFIX") ?? "",
+    "must hold the same value",
+  );
+  assertStringIncludes(
+    constantDrift("x", null, "HELLO_PREFIX") ?? "",
+    "missing on the daemon",
+  );
+});
+
+test("snapshot: a daemon pin that widens on purpose still covers the control plane's", () => {
+  const pin = { name: "v", required: true, type: "4 | 6" };
+  const wide = { ...pin, type: "4 | 6 | 8", expansion: true };
+  assertEquals(markedWidening(pin, wide), true);
+  assertEquals(markedWidening(pin, { ...wide, expansion: undefined }), false);
+  assertEquals(markedWidening(pin, { ...wide, required: false }), false);
+  assertEquals(markedWidening(pin, { ...wide, type: "4" }), false);
+  const snap = (field: object) =>
+    JSON.stringify({
+      T: { instance: "i.ts", daemon: "d.ts", fields: [field] },
+    });
+  assertEquals(snapshotSubsetDrift(snap(pin), snap(wide)), null);
+  assertStringIncludes(
+    snapshotSubsetDrift(snap(pin), snap({ ...pin, type: "4 | 6 | 8" })) ?? "",
+    "differs",
   );
 });

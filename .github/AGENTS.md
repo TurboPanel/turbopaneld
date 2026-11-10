@@ -87,12 +87,19 @@ to the repo root.
   extra snapshot types, extra optional snapshot fields), and it is red only when
   the control plane relies on something this daemon lacks or pins a shared entry
   differently. Old control planes ignore daemon features they do not know, which
-  is what makes a daemon that is ahead safe. Byte mirrors (metrics contract
-  body, hostname rules, machine-key namespace, signed-session bytes, key-set and
-  folder name vectors, slot mapping, `INSTANCE_VERSION_HEADER`) only print a
-  notice here when they differ; the control plane's `contract-twin` job is red
-  when its own pull request changes its copy to something other than daemon
-  trunk's. Tests: `scripts/check-contract-drift.test.ts`.
+  is what makes a daemon that is ahead safe. Named constants both sides use
+  (signed-session prefixes, proof tags, `HOSTNAME_RE`, `HOSTNAME_MAX_LENGTH`,
+  `MAX_NIC_SLOTS`, the machine-key namespace, `INSTANCE_VERSION_HEADER`) must
+  hold the same value on both sides, since a peer that disagrees rejects the
+  other's bytes; a name only this daemon has yet is a notice. Whole-file mirrors
+  (metrics contract body, key-set and folder name vectors) and
+  `FILESYSTEM_ROLE_PRIORITY` only print a notice here when they differ; the
+  control plane's `contract-twin` job is red when its own pull request changes
+  its copy (per file) to something other than daemon trunk's. Removing goes the
+  other way: this check is red if the daemon drops a feature, floor or pin the
+  control plane still has. A snapshot pin this daemon widens on purpose
+  (`expansion: true`, same requiredness, wider type) still covers the control
+  plane's. Tests: `scripts/check-contract-drift.test.ts`.
   `scripts/scan-secrets.sh`, `scripts/scan-secrets.patterns` and
   `scripts/scan-secrets.selftest.sh` are byte-identical in turbopanel,
   turbopaneld, ui, website and dev: change all five together (each repo keeps a

@@ -21,13 +21,16 @@
  *     in the daemon's, unchanged. The daemon may have more (a daemon-only
  *     snapshot field must be optional); old control planes ignore daemon
  *     features they do not know.
- *   - byte mirrors (the metrics contract body, hostname rules, machine-key
- *     namespace, signed-session bytes, key-set and folder name vectors, slot
- *     mapping, INSTANCE_VERSION_HEADER): there is no "ahead" for bytes, so on
- *     the daemon side a mismatch (or a control plane copy that does not exist
- *     yet) is only a notice that the control plane has not caught up. The
- *     control plane's twin goes red when its own pull request changes its
- *     copy to something other than daemon trunk's.
+ *   - named constants both sides use (signed-session prefixes, proof tags,
+ *     HOSTNAME_RE, HOSTNAME_MAX_LENGTH, MAX_NIC_SLOTS, the machine-key
+ *     namespace, INSTANCE_VERSION_HEADER): a value the control plane has must
+ *     equal this daemon's (a peer that disagrees rejects the other's bytes);
+ *     a name only this daemon has yet is a notice.
+ *   - whole-file mirrors (the metrics contract body, the key-set and folder
+ *     name vectors) and FILESYSTEM_ROLE_PRIORITY: there is no "ahead" for
+ *     bytes, so a mismatch (or a control plane copy that does not exist yet)
+ *     is only a notice here. The control plane's twin goes red when its own
+ *     pull request changes its copy to something other than daemon trunk's.
  *
  * Run: `deno task check:contract-drift`.
  */
@@ -317,6 +320,35 @@ export function versionFloorsDrift(
   );
 }
 
+/**
+ * A named constant both sides use (a signing prefix, a proof tag, a hostname
+ * rule): the control plane's value must equal this daemon's. A name only this
+ * daemon has yet is fine (a notice); a different value is red, because a peer
+ * that disagrees rejects the other's bytes.
+ */
+export function constantDrift(
+  left: string | null,
+  right: string | null,
+  message: string,
+): string | null {
+  if (right == null) return `${message}: missing on the daemon`;
+  if (left == null) return null;
+  if (left !== right) {
+    return `${message}: the control plane and this daemon must hold the same value`;
+  }
+  return null;
+}
+
+function constantEqual(
+  left: string | null,
+  right: string | null,
+  message: string,
+): void {
+  const drift = constantDrift(left, right, message);
+  if (drift) fail(drift);
+  if (left == null) mirrorNotice(`${message} is not on the control plane yet`);
+}
+
 function mirrorJoinedEqual(
   left: string[] | null,
   right: string[] | null,
@@ -363,12 +395,12 @@ async function checkHostname(tp: string, td: string): Promise<void> {
     "hostname sources missing on the daemon",
   );
   if (hostnameLeft == null) return;
-  mirrorEqual(
+  constantEqual(
     extractConst(hostnameLeft, "HOSTNAME_RE"),
     extractConst(hostnameRight, "HOSTNAME_RE"),
     "HOSTNAME_RE drifted",
   );
-  mirrorEqual(
+  constantEqual(
     extractConst(hostnameLeft, "HOSTNAME_MAX_LENGTH"),
     extractConst(hostnameRight, "HOSTNAME_MAX_LENGTH"),
     "HOSTNAME_MAX_LENGTH drifted",
@@ -394,7 +426,7 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
       "SIG_SUFFIX_MARKER",
     ]
   ) {
-    mirrorEqual(
+    constantEqual(
       envelopeLeft == null ? null : extractConst(envelopeLeft, name),
       extractConst(envelopeRight, name),
       `${name} drifted`,
@@ -406,7 +438,7 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
     "keys.ts missing on the daemon",
   );
   for (const name of ["ENROLL_PROOF_V2_TAG", "AUTH_PROOF_V2_TAG"]) {
-    mirrorEqual(
+    constantEqual(
       proofLeft == null ? null : extractConst(proofLeft, name),
       extractConst(proofRight, name),
       `${name} drifted`,
@@ -426,7 +458,7 @@ async function checkPanelIdentityBytes(tp: string, td: string): Promise<void> {
   for (const [index, [, name]] of pairs.entries()) {
     const left = sources[index];
     if (left == null) continue;
-    mirrorEqual(
+    constantEqual(
       extractConst(left, name),
       extractConst(proofRight, name),
       `${name} drifted`,
@@ -458,7 +490,7 @@ async function checkMachineKey(tp: string, td: string): Promise<void> {
     "machine-key.ts missing on one side of the pair",
   );
   if (mkLeft == null) return;
-  mirrorEqual(
+  constantEqual(
     extractConst(mkLeft, "TURBOPANEL_MACHINE_ID_NAMESPACE"),
     extractConst(mkRight, "TURBOPANEL_MACHINE_ID_NAMESPACE"),
     "TURBOPANEL_MACHINE_ID_NAMESPACE drifted",
@@ -520,7 +552,7 @@ async function checkSlotMapping(tp: string, td: string): Promise<void> {
     await readRel(td, "src/contracts/topology-slot-mapping.ts"),
     "topology slot-mapping sources missing on one side of the pair",
   );
-  mirrorEqual(
+  constantEqual(
     slotLeftTypes == null ? null : extractConst(slotLeftTypes, "MAX_NIC_SLOTS"),
     extractConst(slotRightTypes, "MAX_NIC_SLOTS"),
     "MAX_NIC_SLOTS drifted",
@@ -1182,6 +1214,18 @@ type SnapshotPin = {
   fields?: { name: string; required?: boolean }[];
 };
 
+/**
+ * A daemon pin that widens the control plane's on purpose (same requiredness,
+ * a wider type, `expansion: true`) still covers it.
+ */
+export function markedWidening(
+  pin: { required?: boolean; type?: string },
+  theirs: { required?: boolean; type?: string; expansion?: boolean },
+): boolean {
+  return theirs.expansion === true && theirs.required === pin.required &&
+    relateFieldTypes(theirs.type ?? "", pin.type ?? "") === "wider";
+}
+
 /** Why the daemon's pin of one type does not cover the control plane's, or null. */
 function typePinDrift(
   typeName: string,
@@ -1204,7 +1248,9 @@ function typePinDrift(
       found,
       `$.${typeName}.fields.${field.name}`,
     );
-    if (differs) return `${differs} differs between the snapshots`;
+    if (differs && !markedWidening(field, found)) {
+      return `${differs} differs between the snapshots`;
+    }
     daemonFields.delete(field.name);
   }
   const required = [...daemonFields.values()].find((extra) => extra.required);
@@ -1384,7 +1430,7 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
     await readRel(td, "src/instance/version-wire.ts"),
     "daemon version-wire.ts missing",
   );
-  mirrorEqual(
+  constantEqual(
     extractConst(instanceWire, "INSTANCE_VERSION_HEADER"),
     extractConst(daemonWire, "INSTANCE_VERSION_HEADER"),
     "INSTANCE_VERSION_HEADER drifted",
