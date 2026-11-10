@@ -24,10 +24,9 @@ import { foldHostname } from "./hostname-fold.ts";
 import { tunnelTrustedRanges } from "./tunnel-caddy.ts";
 
 const LOCK_LINE_RE =
-  /^ {2}@tp_outside not remote_ip 127\.0\.0\.0\/8 ::1(?: [^\s]+)*$/;
-const TRUSTED_LINE_RE =
-  /^(\s+)trusted_proxies 127\.0\.0\.0\/8 ::1(?: [^\s]+)*$/;
-const BIND_LINE_RE = /^ {2}bind ((?:[^\s]+)(?: [^\s]+)*)$/;
+  /^ {2}@tp_outside not remote_ip 127\.0\.0\.0\/8 ::1( \S+)*$/;
+const TRUSTED_LINE_RE = /^( +)trusted_proxies 127\.0\.0\.0\/8 ::1( \S+)*$/;
+const BIND_LINE_RE = /^ {2}bind (\S+( \S+)*)$/;
 
 /** Peers per folded name. A name listed twice keeps the first entry (the parser refuses that anyway). */
 export function inboundPeers(
@@ -96,6 +95,8 @@ export function relockSiteText(
   listen: readonly string[] = [],
 ): string {
   if (peers.size === 0) return contents;
+  // Same exact-address check as the peers: nothing else reaches a `bind` line.
+  tunnelTrustedRanges(listen);
   const parsed = parseSnippet(contents);
   let changed = false;
   const lines = parsed.items.flatMap((item) => {

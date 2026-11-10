@@ -120,15 +120,15 @@ test("a site with no lock never gets one, only its trusted peers follow", () => 
 });
 
 test("a bound site gains this server's own addresses once it has peers, and never loses any", () => {
-  const before = locked(["127.0.0.1"], "203.0.113.4");
-  assertEquals(before.includes("  bind 203.0.113.4 127.0.0.1\n"), true);
+  const before = locked(["127.0.0.1"], "10.0.0.8");
+  assertEquals(before.includes("  bind 10.0.0.8 127.0.0.1\n"), true);
   const after = relockSiteText(
     before,
     peersOf("app.example.com", ["10.0.0.5"]),
     ["10.0.0.7", "fd00::7"],
   );
   assertEquals(
-    after.includes("  bind 203.0.113.4 127.0.0.1 10.0.0.7 [fd00::7]\n"),
+    after.includes("  bind 10.0.0.8 127.0.0.1 10.0.0.7 [fd00::7]\n"),
     true,
   );
   const narrowed = relockSiteText(
@@ -137,7 +137,7 @@ test("a bound site gains this server's own addresses once it has peers, and neve
     ["10.0.0.7"],
   );
   assertEquals(
-    narrowed.includes("  bind 203.0.113.4 127.0.0.1 10.0.0.7 [fd00::7]\n"),
+    narrowed.includes("  bind 10.0.0.8 127.0.0.1 10.0.0.7 [fd00::7]\n"),
     true,
   );
 });
