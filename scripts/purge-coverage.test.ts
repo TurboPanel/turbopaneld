@@ -974,6 +974,7 @@ test("every nft table the install or the daemon loads is deleted by purge.sh", a
       "turbopanel_ingress_guard",
       "turbopanel_build",
       "turbopanel_php",
+      "turbopanel_tunnel",
     ]
   ) {
     assert(named.has(expected), `the scan no longer sees ${expected}`);

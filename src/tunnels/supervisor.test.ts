@@ -222,6 +222,12 @@ test("the update run moves an older tunnel to the pinned version", async () => {
       [UUID, "updated"],
     ]);
     assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
+    // The metrics port lock is reloaded first, once per round.
+    assert(calls[0].endsWith(" tunnel-loopback-sync"), calls.join("\n"));
+    assertEquals(
+      calls.filter((c) => c.endsWith(" tunnel-loopback-sync")).length,
+      1,
+    );
   });
 });
 
@@ -230,7 +236,9 @@ test("a paused server keeps the connector versions it runs", async () => {
     await writeOldRecord(dir);
     await Deno.writeTextFile(join(dir, CONNECTOR_UPDATES_PAUSED_FILE), "");
     assertEquals(await runConnectorUpdates(io), null);
-    assertEquals(calls, []);
+    // Only the metrics port lock is reloaded; no connector is touched.
+    assertEquals(calls.length, 1, calls.join("\n"));
+    assert(calls[0].endsWith(" tunnel-loopback-sync"), calls[0]);
   });
 });
 

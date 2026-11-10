@@ -1212,6 +1212,8 @@ const TUNNEL_UNITS = [
   "turbopanel-tunnel-instance.service",
   // The second unit a connector update starts beside the first.
   "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d-b.service",
+  // The boot unit that loads the metrics port lock (tp-tunnel-loopback).
+  "turbopanel-loopback-tunnel.service",
 ];
 
 test("every tunnel connector service is stopped, disabled and its unit file removed", async () => {
@@ -2948,6 +2950,7 @@ test("purge deletes TurboPanel's nft tables by name and leaves every other table
     "inet turbopanel_ingress_guard",
     "inet turbopanel_build",
     "inet turbopanel_php",
+    "inet turbopanel_tunnel",
     "inet filter",
     "ip nat",
     "inet turbopanel_operator_own",
@@ -2960,6 +2963,7 @@ test("purge deletes TurboPanel's nft tables by name and leaves every other table
     "nft delete table inet turbopanel_ingress_guard",
     "nft delete table inet turbopanel_build",
     "nft delete table inet turbopanel_php",
+    "nft delete table inet turbopanel_tunnel",
   ]);
   assertEquals(
     (await Deno.readTextFile(join(bin, "nft.tables"))).trim().split("\n"),
