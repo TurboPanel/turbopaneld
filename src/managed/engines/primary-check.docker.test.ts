@@ -280,13 +280,13 @@ async function startPostgresShutdown(server: string): Promise<void> {
 }
 
 /** Assert one capture: `exit`, and for PostgreSQL the fixed start of its message. */
-function expect(capture: Capture, exit: number, text?: string): void {
+function assertAnswer(capture: Capture, exit: number, text?: string): void {
   assertEquals(capture.exit, exit, JSON.stringify(capture));
   if (text) assert(capture.firstLine.includes(text), JSON.stringify(capture));
 }
 
 /** A deadline case: answered by the client's own 3 s timeout, never past the 4 s kill. */
-function expectDeadline(capture: Capture): void {
+function assertWithinDeadline(capture: Capture): void {
   assert(capture.elapsedMs >= 2_500, JSON.stringify(capture));
   assert(capture.elapsedMs < 8_000, JSON.stringify(capture));
 }
@@ -364,7 +364,7 @@ for (const engine of ENGINES) {
           "healthy, right password",
           await probe(prober, engine, at),
         );
-        expect(healthy, 0);
+        assertAnswer(healthy, 0);
 
         const wrong = record(
           engine.image,
@@ -372,16 +372,16 @@ for (const engine of ENGINES) {
           await probe(prober, engine, { ...at, password: "not-the-password" }),
         );
         // The server answered: alive. The MySQL tools exit 0 on access denied.
-        if (pg) expect(wrong, 2, "FATAL:");
-        else expect(wrong, 0);
+        if (pg) assertAnswer(wrong, 2, "FATAL:");
+        else assertAnswer(wrong, 0);
 
         const refused = record(
           engine.image,
           "nothing listening on the port",
           await probe(prober, engine, { ...at, port: engine.port + 1 }),
         );
-        if (pg) expect(refused, 2, "Connection refused");
-        else expect(refused, 1);
+        if (pg) assertAnswer(refused, 2, "Connection refused");
+        else assertAnswer(refused, 1);
 
         const badCa = record(
           engine.image,
@@ -400,9 +400,9 @@ for (const engine of ENGINES) {
           await probe(prober, engine, { host: UNROUTABLE, port: engine.port }),
         );
         // The same exit as a hung primary: only a TCP connect step tells them apart.
-        if (pg) expect(silent, 2, "timeout expired");
-        else expect(silent, 1);
-        expectDeadline(silent);
+        if (pg) assertAnswer(silent, 2, "timeout expired");
+        else assertAnswer(silent, 1);
+        assertWithinDeadline(silent);
 
         const paused = await docker(["pause", server]);
         if (!paused.success) throw new Error(paused.stderr);
@@ -412,9 +412,9 @@ for (const engine of ENGINES) {
           await probe(prober, engine, at),
         );
         await docker(["unpause", server]);
-        if (pg) expect(hung, 2, "timeout expired");
-        else expect(hung, 1);
-        expectDeadline(hung);
+        if (pg) assertAnswer(hung, 2, "timeout expired");
+        else assertAnswer(hung, 1);
+        assertWithinDeadline(hung);
 
         if (pg) {
           await startPostgresShutdown(server);
@@ -423,7 +423,7 @@ for (const engine of ENGINES) {
             "primary shutting down (57P03)",
             await probe(prober, engine, at),
           );
-          expect(stopping, 2, "FATAL:");
+          assertAnswer(stopping, 2, "FATAL:");
           assert(
             stopping.firstLine.includes("shutting down"),
             JSON.stringify(stopping),
