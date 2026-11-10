@@ -2805,6 +2805,12 @@ tp_verb_systemctl() {
           -*) tp_die "systemctl: refusing option $_sc_a" ;;
           *)
             tp_unit_name_ok "$_sc_a" || tp_die "systemctl: refusing unit $_sc_a"
+            # The update guard is root's: run.sh arms its timer and the
+            # daemon's OnFailure= starts it. The daemon may only ask about it.
+            case "$_sc_verb:$_sc_a" in
+              is-active:turbopaneld-update-guard*|is-enabled:turbopaneld-update-guard*|is-failed:turbopaneld-update-guard*) ;;
+              *:turbopaneld-update-guard*) tp_die "systemctl: refusing $_sc_verb of $_sc_a" ;;
+            esac
             _sc_units=$((_sc_units + 1))
             ;;
         esac

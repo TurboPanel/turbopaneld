@@ -71,8 +71,54 @@ unparsable evidence (dev checkout `unstamped`, the trunk drop's absent
 `version`) is never refused. There is deliberately **no** expiry or sequence
 field: a host offline for weeks must still update and old manifests lack it.
 Break-glass is host-side only: `TURBOPANEL_ALLOW_DOWNGRADE=1` in the daemon
-environment, or running `run.sh --manifest-url <older tag>` by hand (run.sh
-itself does not compare versions). Nothing in a WebSocket message can lift it.
+environment for the daemon's own check, and an operator running run.sh as root
+with `--allow-downgrade` (or `TURBOPANEL_ALLOW_DOWNGRADE=1` in root's
+environment) for root's check below. Nothing in a WebSocket message can lift
+either.
+
+## Root build floor (no rollback through root)
+
+The daemon's check runs in the daemon, and the daemon account can also ask
+root for an update directly (`sudo tp-orchestrate update --manifest-url`
+naming any tag on the rail). An older signed release would put back root
+helpers (`tp-host`, `tp-orchestrate`) that later releases fixed, so root keeps
+its own floor:
+
+- `run.sh` refuses a daemon manifest older than `<install>/lib/installed-build`
+  (root-owned `0644` in the root-owned `lib/`; `commit=`, `version=`,
+  `builtAt=`) right after verifying its signature and before stopping the
+  daemon or downloading anything (`tp_check_daemon_build_floor`). It writes
+  the record after every successful package swap
+  (`tp_write_daemon_build_floor`). A host without the record takes its floor
+  from `bin/turbopaneld --version`; a host whose native binary cannot run (the
+  JS runtime) gets its first record on the first update through a fixed
+  installer. The comparison (`tp_daemon_build_older`) mirrors `isRollback`
+  (same commit, base version, then `builtAt`); one difference: a manifest with
+  no parsable `builtAt` is refused over a known floor, since every release
+  manifest carries one. `src/update/run-sh-build-floor.test.ts` runs a corpus
+  through both.
+- The only override is the operator's: `run.sh --allow-downgrade` or
+  `TURBOPANEL_ALLOW_DOWNGRADE=1` in root's own environment (forwarded across
+  the sudo re-exec as the flag). daemon.env is never read for it;
+  `tp-orchestrate` unsets the variable and refuses the flag on every verb.
+- `tp-orchestrate update` and `update-colocated` refuse to run a fetched
+  installer that lacks the floor check (`tp_require_build_floor_installer`):
+  the installer comes from the channel the caller names, and one from before
+  the floor would not compare.
+- `--manifest-url` stays accepted (the control plane names exact builds on a
+  signed session); the floor is what keeps an exact pin from going backwards.
+- Automatic rollback (`tp-update-guard`) acts only on root's own record,
+  `<install>/lib/update-guard-armed`, which `tp_arm_update_guard` writes next to
+  the daemon's `update-guard.json` copy: target and previous commit, deadline,
+  boot id, restart count. The guard moves back only the previous build root
+  recorded (it checks `bin/turbopaneld.prev --version`), consumes the record
+  on rollback, disarm or the attention threshold, and drops it after a reboot
+  or an hour past the deadline. A daemon-written `update-guard.json` alone
+  moves nothing. tp-host refuses every `systemctl` verb but `is-*` on
+  `turbopaneld-update-guard*`. The guard never lowers the floor, so after a
+  rollback the next update may only be the failed build again or newer.
+- Not covered: the control plane and web interface packages
+  (`update-instance`) have no root floor yet.
 
 ## Update channel pin
 

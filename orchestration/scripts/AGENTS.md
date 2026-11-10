@@ -312,7 +312,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   tree cannot remove the only executable the timer can run. Its records live
   in `tp`-owned `RUN_DIR`/`STATE_DIR`, so every root write goes through
   `tp_write_file` (a verified root-only 0700 subdirectory, then `mv -T`) and
-  never through a symlink `tp` planted (`update-guard.test.ts`).
+  never through a symlink `tp` planted (`update-guard.test.ts`). The rollback
+  decision is taken only from root's `lib/update-guard-armed` (written by
+  run.sh when it arms, consumed once), never from those `tp`-owned files, and
+  tp-host refuses `start`/`stop`/`restart` of `turbopaneld-update-guard*`.
+  `update` and `update-colocated` run only an installer that enforces the
+  root daemon build floor and never carry `TURBOPANEL_ALLOW_DOWNGRADE`
+  (`src/update/AGENTS.md`, Root build floor).
   The control plane is a separate verb, `sudo -n tp-orchestrate update-instance
   --channel canary|rc|release [--manifest-url …] --no-start`
   (`rootHelperInstanceUpdateInvocation`). It takes no license, host, overlay,
