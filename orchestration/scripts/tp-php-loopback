@@ -31,18 +31,54 @@
 # accept` comes first so those replies are never refused; PHP's own new
 # connections are `new` and still hit the port filter.
 #
-# Needs the `nft` and `flock` programs (Ansible installs the nftables and
-# util-linux packages in turbopanel-user/root-helpers.yml). When either is
-# missing the script exits non-zero with a message naming it, so a PHP unit
+# Needs the `nft`, `flock` and `ip` programs (Ansible installs the nftables,
+# util-linux and iproute2 packages in turbopanel-user/root-helpers.yml). When
+# one is missing the script exits non-zero with a message naming it, so a PHP unit
 # does not start with open loopback and the daemon's reconcile reports why.
+#
+# Container wall: the same chain also keeps every Hosting Account off the
+# host's container networks. For every uid in the principal band (15001-60000,
+# tp-host's PRINCIPAL_ID_MIN/MAX: site PHP, cron, ssh and sftp sessions, and
+# anything else run as the account, PHP unit or not) it refuses new
+# connections
+#
+#   - that leave through a container bridge (docker0, br-<id>), matched on the
+#     packet's output interface, so a network created after this sync is
+#     covered too (a br-<name> that is not Docker's, such as a LAN bridge,
+#     is left out by name as found at the sync);
+#   - to an address on one of those bridges now (the networks' gateways, which
+#     are the host's own addresses and route over lo), read from `ip -o addr`;
+#   - to Docker's configured address pools and default bridge range
+#     (`default-address-pools` bases and `bip` in /etc/docker/daemon.json),
+#     which also covers container networks on other servers reached over
+#     the private network.
+#
+# Everything else stays open: the host's scope addresses and the private
+# network's services (a datacenter database, a VPC service), and the database
+# proxy on 127.0.0.1, whose published port the hook sees before Docker's NAT
+# rewrites it to the proxy's bridge address. Docker's built-in pools are not
+# assumed when none is configured: they overlap common private networks
+# (172.31.0.0/16, 192.168.0.0/16), and Docker only hands out ranges that do not
+# collide with the host's routes, so the live bridges and the interface match
+# are exact. Not covered: a network given its own bridge name
+# (`com.docker.network.bridge.name`, host-level approval only) whose range is
+# outside the configured pools.
+#
+# A project's own helper containers are not opened here: the later design
+# publishes them on a loopback port and opens that port for the one account
+# in the loopback rules above (see the marked slot), so this wall stays whole.
 #
 # Not closed: someone running `nft flush ruleset` / `nft delete table inet
 # turbopanel_php` while PHP runs. The next unit start, the next deploy or the
-# daemon's boot reconcile restores it; until then loopback is open to PHP.
+# daemon's boot reconcile restores it; until then loopback and the container
+# networks are open to PHP. An account with no PHP unit is covered from the
+# daemon's boot reconcile (every daemon start runs this sync) and every later
+# sync.
 set -eu
 umask 077
 
 PRINCIPAL_ID_MIN=15001
+PRINCIPAL_ID_MAX=60000
 DB_PORT=13306
 PG_PORT=15432
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -97,11 +133,124 @@ owner_uids() {
   printf '%s' "$_acc" | sort -un
 }
 
+# Keep only well-formed CIDRs of one family (4 or 6) from stdin, one per line,
+# so a stray value never makes nft refuse the ruleset (which would keep every
+# PHP unit down). Prefixes shorter than /8 are dropped with a warning: no
+# container network is that wide, and such a value would cut off the internet.
+valid_cidrs() {
+  awk -v fam="$1" '
+    function v4(a,   n, o, i) {
+      n = split(a, o, ".")
+      if (n != 4) return 0
+      for (i = 1; i <= 4; i++)
+        if (o[i] !~ /^[0-9]+$/ || length(o[i]) > 3 || o[i] + 0 > 255) return 0
+      return 1
+    }
+    function v6(a,   n, g, i, t) {
+      if (a !~ /^[0-9a-f:]+$/ || a !~ /:/ || a ~ /:::/) return 0
+      t = a
+      if (gsub(/::/, "", t) > 1) return 0
+      n = split(a, g, ":")
+      if (n > 8) return 0
+      for (i = 1; i <= n; i++) if (length(g[i]) > 4) return 0
+      return 1
+    }
+    {
+      c = tolower($0)
+      if (split(c, p, "/") != 2 || p[2] !~ /^[0-9]+$/ || length(p[2]) > 3) next
+      max = (fam == 4) ? 32 : 128
+      if (fam == 4 && !v4(p[1])) next
+      if (fam == 6 && !v6(p[1])) next
+      if (p[2] + 0 > max) next
+      if (p[2] + 0 < 8) {
+        printf "tp-php-loopback: ignoring %s (wider than /8)\n", c > "/dev/stderr"
+        next
+      }
+      print p[1] "/" (p[2] + 0)
+    }
+  ' | sort -u
+}
+
+# Docker's configured ranges: every `default-address-pools` base and `bip`.
+docker_config_ranges() {
+  _dj="$P/etc/docker/daemon.json"
+  [ -f "$_dj" ] && [ ! -L "$_dj" ] || return 0
+  grep -oE '"(base|bip)"[[:space:]]*:[[:space:]]*"[^"]*"' "$_dj" |
+    sed 's/.*:[[:space:]]*"\([^"]*\)"$/\1/' || :
+}
+
+# `ip -o addr show` (a fixture file in test mode).
+ip_addrs() {
+  if [ -n "$TP_TEST" ]; then
+    [ ! -f "$P/ip-addr" ] || cat "$P/ip-addr"
+  else
+    ip -o addr show
+  fi
+}
+
+# `ip -o link show` (a fixture file in test mode).
+ip_links() {
+  if [ -n "$TP_TEST" ]; then
+    [ ! -f "$P/ip-link" ] || cat "$P/ip-link"
+  else
+    ip -o link show
+  fi
+}
+
+# Interfaces named br-<something> that are not Docker's (br-<12 hex>), such as
+# an operator's LAN bridge: the br-* interface match must not catch them.
+foreign_br_links() {
+  ip_links | awk '{
+    n = $2; sub(/:$/, "", n); sub(/@.*/, "", n)
+    if (n !~ /^br-/ || length(n) > 15 || n !~ /^[A-Za-z0-9_.-]+$/) next
+    if (n ~ /^br-[0-9a-f]+$/ && length(n) == 15) next
+    print n
+  }' | sort -u
+}
+
+# The addresses on Docker's bridges right now (docker0 and br-<12 hex>), with
+# their prefixes; link-local ones are left to the unit's own filter.
+bridge_ranges() {
+  ip_addrs | awk '
+    ($2 == "docker0" || ($2 ~ /^br-[0-9a-f]+$/ && length($2) == 15)) &&
+      ($3 == "inet" || $3 == "inet6") && $0 !~ / scope link / { print $4 }
+  '
+}
+
+# A set of one family, or nothing when it would be empty.
+range_set() {
+  [ -n "$3" ] || return 0
+  _e=""
+  for _r in $3; do _e="${_e:+$_e, }$_r"; done
+  cat <<SET
+  set $1 {
+    type $2
+    flags interval
+    auto-merge
+    elements = { $_e }
+  }
+SET
+}
+
 ruleset() {
   _elems=""
   for _id in $1; do _elems="${_elems:+$_elems, }$_id"; done
   _line=""
   [ -z "$_elems" ] || _line="    elements = { $_elems }"
+  _band="$PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX"
+  _not=""
+  for _n in $4; do _not="${_not:+$_not, }\"$_n\""; done
+  [ -z "$_not" ] || _not=" oifname != { $_not }"
+  _bridge_rules=""
+  if [ -n "$2" ]; then
+    _bridge_rules="    meta skuid $_band ip daddr @bridge4 meta l4proto tcp reject with tcp reset
+    meta skuid $_band ip daddr @bridge4 reject"
+  fi
+  if [ -n "$3" ]; then
+    _bridge_rules="${_bridge_rules:+$_bridge_rules
+}    meta skuid $_band ip6 daddr @bridge6 meta l4proto tcp reject with tcp reset
+    meta skuid $_band ip6 daddr @bridge6 reject"
+  fi
   cat <<RULES
 add table inet turbopanel_php
 delete table inet turbopanel_php
@@ -110,6 +259,8 @@ table inet turbopanel_php {
     type uid
 $_line
   }
+$(range_set bridge4 ipv4_addr "$2")
+$(range_set bridge6 ipv6_addr "$3")
   chain output {
     type filter hook output priority -150; policy accept;
     meta skuid @owners ct state established,related accept
@@ -117,17 +268,30 @@ $_line
     meta skuid @owners ip daddr 127.0.0.1 tcp dport $PG_PORT accept
     meta skuid @owners ip daddr 127.0.0.53 udp dport 53 accept
     meta skuid @owners ip daddr 127.0.0.53 tcp dport 53 accept
+    # Per-account loopback openings (a project's own helper containers) go here.
     meta skuid @owners ip daddr 127.0.0.0/8 meta l4proto tcp reject with tcp reset
     meta skuid @owners ip daddr 127.0.0.0/8 reject
     meta skuid @owners ip6 daddr ::1 meta l4proto tcp reject with tcp reset
     meta skuid @owners ip6 daddr ::1 reject
+    meta skuid $_band ct state established,related accept
+    meta skuid $_band oifname "docker0" meta l4proto tcp reject with tcp reset
+    meta skuid $_band oifname "docker0" reject
+    meta skuid $_band oifname "br-*"$_not meta l4proto tcp reject with tcp reset
+    meta skuid $_band oifname "br-*"$_not reject
+$_bridge_rules
   }
 }
 RULES
 }
 
 _ids="$(owner_uids)"
-_rules="$(ruleset "$_ids")"
+if [ -z "$TP_TEST" ]; then
+  command -v ip >/dev/null 2>&1 || tp_die "ip is not installed (apt install iproute2); site PHP cannot start without its container rules"
+fi
+_ranges="$({ docker_config_ranges; bridge_ranges; })"
+_v4="$(printf '%s\n' "$_ranges" | valid_cidrs 4)"
+_v6="$(printf '%s\n' "$_ranges" | valid_cidrs 6)"
+_rules="$(ruleset "$_ids" "$_v4" "$_v6" "$(foreign_br_links)")"
 
 if [ -n "$TP_TEST" ]; then
   printf '%s\n' "$_rules"
@@ -145,3 +309,5 @@ for _id in $_ids; do
   printf '%s\n' "$_live" | grep -Eq "(^|[ ,{])$_id([ ,}]|\$)" ||
     tp_die "uid $_id missing from the loaded set"
 done
+printf '%s\n' "$_live" | grep -q "meta skuid $PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX oifname \"docker0\"" ||
+  tp_die "container rules not loaded"

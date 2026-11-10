@@ -402,13 +402,16 @@ function phpFpmExec(spec: SitePhpRuntimeSpec): string {
  * - `127.0.0.53`, allowed: systemd-resolved's stub, the resolver
  *   `/etc/resolv.conf` names on Ubuntu; without it a site resolves nothing.
  *
- * Not closed: RFC 1918 and CGNAT. A `datacenter`/`fabric` scope database
- * (tp0 is in 10/8) and a VPC's own services live there, and Docker's bridge
- * pools are operator-configured, so the host's private addresses and other
- * containers' bridge IPs stay reachable. The systemd filter covers these
- * units only and, without cgroup BPF, systemd only warns and does not filter;
- * the nftables rules match the owner's uid, so they also bind that Linux
- * user's ssh, cron and CLI processes on loopback.
+ * Not closed here: RFC 1918 and CGNAT. A `datacenter`/`fabric` scope database
+ * (tp0 is in 10/8) and a VPC's own services live there, so the host's private
+ * addresses stay reachable. Container networks are closed by the same
+ * `tp-php-loopback` table instead, for every Hosting Account uid (PHP unit or
+ * not): it refuses traffic leaving through a Docker bridge and to the
+ * bridges' and Docker's configured pools' ranges, which it reads on the host
+ * at each sync, so this static list does not have to name them. The systemd
+ * filter covers these units only and, without cgroup BPF, systemd only warns
+ * and does not filter; the nftables rules match the uid, so they also bind
+ * that Linux user's ssh, cron and CLI processes.
  *
  * tp-host pins both strings (`tp_php_service_pinned_ok`).
  */

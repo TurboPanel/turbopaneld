@@ -206,9 +206,34 @@ Docker Compose. The daemon:
    `nft flush ruleset` while PHP runs leaves loopback open until the next
    start, deploy or daemon boot. The ProxySQL MySQL port is fixed at 13306
    in the script; a changed `listenerPorts` needs the script's `DB_PORT`
-   changed too. RFC 1918 stays open
-   (scope addresses, VPC services, operator-set Docker pools), so the host's
-   private addresses and other containers' bridge IPs are not closed by it.
+   changed too. **Container wall:** the same chain refuses, for every uid in
+   the principal band (15001-60000, tp-host's `PRINCIPAL_ID_MIN`/`MAX`, so
+   every Hosting Account's PHP, cron, ssh, sftp and `sudo -u` processes,
+   whether or not it has a PHP unit), new connections that leave through a
+   Docker bridge (`oifname` docker0 or `br-*`, so a network created after the
+   sync is covered; a `br-` interface that is not Docker's `br-<12 hex>`,
+   such as a LAN bridge, is left out by name as found at the sync), to the addresses on those bridges now (their gateways,
+   which route over lo; from `ip -o addr`), and to Docker's configured ranges
+   (`default-address-pools` bases and `bip` in `/etc/docker/daemon.json`,
+   which also covers container networks on other servers). One account can
+   therefore not reach another account's containers by bridge address, in
+   either direction. Docker's built-in pools are not assumed when none is
+   configured (they overlap common private networks; Docker only hands out
+   ranges that miss the host's routes, so the live bridges are exact). The
+   rest of RFC 1918 stays open (scope addresses, VPC services), and the
+   database proxy keeps working: the hook runs before Docker's NAT, so
+   127.0.0.1:13306 and 15432 are judged as loopback, not as the proxy's
+   bridge address. Malformed or wider-than-/8 ranges are dropped, never handed
+   to nft, so a stray `daemon.json` value cannot keep PHP down. Limits: a
+   network with its own bridge name (`com.docker.network.bridge.name`,
+   host-level approval only) outside the configured pools is not covered; an
+   account with no PHP unit is covered from the daemon's boot reconcile (every
+   daemon start runs the sync, also when it skips the PHP sweep over an
+   unreadable vhost), not from its own unit start; the script needs `ip`
+   (iproute2, installed beside nftables by `root-helpers.yml`); the loopback port
+   filter itself still binds only accounts with a PHP unit. A project's own
+   helper containers will be opened as a per-account loopback port in the
+   loopback rules (the marked slot in the script), never through this wall.
    Every installed PHP series may be run by every site owner's Linux user, so
    a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
