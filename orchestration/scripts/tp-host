@@ -421,6 +421,14 @@ tp_config_write_ok() {
   tp_php_pool_file "$1"
 }
 
+# The loose files below the config root the daemon writes (never folders).
+tp_config_file_only() {
+  case "${1#"$R_CONFIG"/}" in
+    instance/runtime.env|instance/runtime.env.tmp-*|caddy/instance-acme.json|caddy/instance-acme-settings.json) return 0 ;;
+  esac
+  tp_at_platform_root "$1" && tp_daemon_loose_file_name "$1"
+}
+
 # True for a file directly in a shared php-fpm master's pools folder,
 # <config>/php/<series>/pools/<name>.
 tp_php_pool_file() {
@@ -760,6 +768,8 @@ TP_RESERVED_SCOPES=" common home tmp services volumes data sites backup backups 
 tp_owner_shape_ok() {
   case "$1" in
     ''|[!a-z_]*|*[!a-z0-9_-]*|*-|*--*|*-grp|tp*|systemd-*) return 1 ;;
+    # Words an INI reader (php-fpm, php.ini) turns into 1 or an empty value.
+    yes|no|on|off|true|false|none|null) return 1 ;;
   esac
   [ "${#1}" -le 28 ]
 }
@@ -1182,17 +1192,26 @@ tp_sysctl_dropin_ok() {
 # run as a site owner with that owner's own group, or as one web server account
 # with the group of the same name; its socket belongs to one web server account
 # (owner and group the same). Never root, the daemon account, another
-# principal's group or a system group such as disk, shadow or docker.
+# principal's group or a system group such as disk, shadow or docker. The
+# socket is exactly <run>/php/<series>/<pool>.sock, the series that of the
+# pool file's own folder, mode 0660: the root master removes whatever is at
+# that path, binds there and re-owns it, so no other path may be named.
+# FILE is the staged copy, DEST the pool file it will become.
 tp_phppool_ok() {
   tp_content_plain "$1" || return 1
-  _pp_accounts="$(LC_ALL=C awk '
+  _pp_series="${2#"$R_CONFIG"/php/}"
+  _pp_series="${_pp_series%%/*}"
+  tp_php_series_ok "$_pp_series" || { echo "tp-host: php-fpm pool: not in a series pools folder" >&2; return 1; }
+  _pp_accounts="$(LC_ALL=C awk -v sockdir="${R_RUN#"$P"}/php/$_pp_series" '
     function fail(msg) { print "tp-host: php-fpm pool: " msg > "/dev/stderr"; bad = 1; exit 1 }
-    function acct(v) { return v != "root" && length(v) <= 32 && v ~ /^[a-z_][a-z0-9_-]*$/ }
+    # php-fpm reads values as INI, where these words become 1 or nothing.
+    function iniword(v) { return v ~ /^(yes|no|on|off|true|false|none|null)$/ }
+    function acct(v) { return v != "root" && !iniword(v) && length(v) <= 32 && v ~ /^[a-z_][a-z0-9_-]*$/ }
     function word(v) { return v ~ /^[A-Za-z0-9._-]+$/ }
     function valueok(k, v) {
       if (k == "user" || k == "group" || k == "listen.owner" || k == "listen.group") return acct(v)
-      if (k == "listen") return v ~ /^\/[A-Za-z0-9._\/-]+$/
-      if (k == "listen.mode") return v ~ /^0[0-7][0-7][0-7]$/
+      if (k == "listen") return v == sockdir "/" pool ".sock"
+      if (k == "listen.mode") return v == "0660"
       if (k == "pm") return v == "static" || v == "dynamic" || v == "ondemand"
       if (k ~ /^pm\.(max_children|start_servers|min_spare_servers|max_spare_servers|max_requests|process_idle_timeout)$/ || k == "request_terminate_timeout") return word(v)
       if (k == "chdir") return v ~ /^\/[A-Za-z0-9._\/@+:-]*$/
@@ -1202,8 +1221,8 @@ tp_phppool_ok() {
     }
     function endpool() {
       if (!inpool) return
-      if (!("user" in a) || !("group" in a) || !("listen.owner" in a) || !("listen.group" in a))
-        fail("a pool without user, group, listen.owner and listen.group")
+      if (!("user" in a) || !("group" in a) || !("listen.owner" in a) || !("listen.group" in a) || !("listen" in a))
+        fail("a pool without user, group, listen, listen.owner and listen.group")
       print a["user"], a["group"], a["listen.owner"], a["listen.group"]
       delete a
     }
@@ -1212,6 +1231,8 @@ tp_phppool_ok() {
       if (tolower($0) == "[global]") fail("a [global] section")
       endpool()
       inpool = 1
+      pool = substr($0, 2, length($0) - 2)
+      if (pool == "." || pool == "..") fail("pool name " pool)
       next
     }
     {
@@ -1222,7 +1243,7 @@ tp_phppool_ok() {
       r = valueok(k, v)
       if (r < 0) fail("directive " k)
       if (!r) fail("value of " k)
-      if (k == "user" || k == "group" || k == "listen.owner" || k == "listen.group") {
+      if (k == "user" || k == "group" || k == "listen" || k == "listen.mode" || k == "listen.owner" || k == "listen.group") {
         if (k in a) fail("a second " k)
         a[k] = v
       }
@@ -1269,7 +1290,7 @@ tp_content_ok() {
     sysctl) tp_sysctl_dropin_ok "$2" ;;
     tree)
       case "$3" in
-        "$R_CONFIG"/php/*/pools/*) tp_phppool_ok "$2" ;;
+        "$R_CONFIG"/php/*/pools/*) tp_phppool_ok "$2" "$3" ;;
         *) return 0 ;;
       esac
       ;;
@@ -2428,6 +2449,7 @@ tp_verb_install() {
       :
     else
       ! tp_php_pool_file "$_in_path" || tp_die "refusing $_in_path: a php-fpm pools folder holds files only"
+      ! tp_config_file_only "$_in_path" || tp_die "refusing $_in_path: a file's place, not a folder's"
       tp_require_config_write "$(tp_path_class "$_in_path")" "$_in_path"
     fi
     tp_is_root_path "$_in_path" && [ -n "$_in_owner$_in_group" ] &&
@@ -2493,6 +2515,7 @@ tp_verb_mkdir() {
   ! tp_release_path "$_md_path" || tp_die "refusing $_md_path: a release is created only by publish"
   ! tp_php_pools_dir "$_md_path" || tp_die "refusing $_md_path: a php-fpm pools folder is made only by install -d"
   ! tp_php_pool_file "$_md_path" || tp_die "refusing $_md_path: a php-fpm pools folder holds files only"
+  ! tp_config_file_only "$_md_path" || tp_die "refusing $_md_path: a file's place, not a folder's"
   tp_require_config_write "$(tp_path_class "$_md_path")" "$_md_path"
   tp_mkdir_pinned "$_md_path" 0755
 }
@@ -3745,7 +3768,7 @@ systemd-journal tss uuidd vboxusers wireshark"
 # already exist, which must keep working under the names they were given.
 TP_RESERVED_NEW_NAMES="ftp sftp git www httpd apache nginx ubuntu debian pi vagrant ec2-user ssm-user
 opc postfix dovecot vmail clamav opendkim mongodb mariadb memcache
-elasticsearch openldap unbound chrony ntp lightdm gdm pulse rtkit colord
+elasticsearch openldap unbound chrony ntp yes no on off true false none null lightdm gdm pulse rtkit colord
 geoclue saned dnsmasq landscape lxc"
 
 tp_reserved_new_name() {

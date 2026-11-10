@@ -27,6 +27,7 @@ import {
 import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { phpFpmPoolConfig } from "../deploy/site.ts";
+import { isReservedPrincipalUsername } from "../deploy/reserved-principal-names.ts";
 import { allAccessGroups } from "../runtime/registry.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
@@ -5051,7 +5052,7 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
           },
         },
         "/var/lib/turbopanel/sites/env1/phpapp/public",
-        "/run/turbopanel/php/tp-env1-phpapp.sock",
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
         {
           openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
           releaseSymlinkSwap: true,
@@ -5245,6 +5246,18 @@ test("below the config root only the daemon's own places are writable: root-run 
       staged,
       join(config, "nginx/../system/postgres-backup.sh"),
     ]);
+    // The files the daemon keeps there are never made folders.
+    for (
+      const path of [
+        join(config, "instance/runtime.env"),
+        join(config, "caddy/instance-acme.json"),
+        join(config, "firewall.v4"),
+      ]
+    ) {
+      await Deno.remove(path).catch(() => undefined);
+      await refused(host, ["install", "-d", "-m", "0750", path]);
+      await refused(host, ["mkdir", "-p", path]);
+    }
     // The control plane's folder is made only root's, 0750.
     await refused(host, [
       "install",
@@ -5420,8 +5433,29 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
       `${engine}user = alice\n`,
       `${owned}group = disk\n`,
       engine.replace("user = tpnginx\n", ""),
+      // The socket is the pool's own, in its series folder, mode 0660.
+      ...[
+        "/etc/turbopanel/system/postgres-backup.sh",
+        "/run/turbopanel/php/8.3/tp-env1-phpapp.sock",
+        "/run/turbopanel/php/8.4/tp-env1-other.sock",
+        "/run/turbopanel/php/8.4/../tp-env1-phpapp.sock",
+        "/run/turbopanel/tp-env1-phpapp.sock",
+        "127.0.0.1:9000",
+      ].map((path) => owned.replace(`listen = ${socket}`, `listen = ${path}`)),
+      owned.replace(`listen = ${socket}\n`, ""),
+      `${owned}listen = ${socket}\n`,
+      ...["0666", "0777", "0600", "0661"].map((mode) =>
+        owned.replace("listen.mode = 0660", `listen.mode = ${mode}`)
+      ),
+      // INI words php-fpm turns into uid or gid 1 or an empty value.
+      ...["yes", "on", "true", "no", "off", "none", "false", "null"].flatMap((
+        word,
+      ) => [
+        owned.replace("group = alice", `group = ${word}`),
+        owned.replace("listen.owner = tpnginx", `listen.owner = ${word}`),
+      ]),
       // A good pool followed by a bad one.
-      `${owned}[second]\nuser = alice\ngroup = disk\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
+      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel/php/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
       engine.replace("listen.group = tpnginx\n", ""),
     ];
     for (const content of hostile) {
@@ -5438,6 +5472,35 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
         dest,
       ]);
       await refused(host, ["tee", dest], content);
+    }
+  });
+});
+
+test("a site owner name is never a word an INI reader turns into 1 or nothing", async () => {
+  await withHost(async (host) => {
+    // The same shape with an ordinary name goes through.
+    const control = await host.run(["groupadd", "-g", "15020", "bob"]);
+    assertEquals(control.code, 0, control.stderr);
+    for (
+      const word of ["yes", "no", "on", "off", "true", "false", "none", "null"]
+    ) {
+      assertEquals(isReservedPrincipalUsername(word), true, word);
+      await refused(host, ["groupadd", "-g", "15021", word]);
+      await refused(host, [
+        "useradd",
+        "-K",
+        "UID_MIN=15001",
+        "-K",
+        "UID_MAX=60000",
+        "-g",
+        word,
+        "-d",
+        host.path(`srv/users/${word}/home`),
+        "-M",
+        "-s",
+        "/bin/bash",
+        word,
+      ]);
     }
   });
 });
