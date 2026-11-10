@@ -180,6 +180,13 @@ export class ManagedEngineExitGuard {
    * of started (see the file comment).
    */
   readonly #vouched = new Set<string>();
+  /**
+   * Clusters whose hold failed part way. The held stop marker may already be
+   * on disk without `boot-hold.json`: the marker alone keeps the engine
+   * stopped but is never reported, so the hold is finished before anything
+   * else looks at the cluster.
+   */
+  readonly #pendingHolds = new Set<string>();
 
   constructor(deps: ManagedEngineExitGuardDeps) {
     this.#layout = deps.layout;
@@ -286,19 +293,70 @@ export class ManagedEngineExitGuard {
     if (this.#vouched.has(managedId) || !isHoldablePrimary(member)) {
       return false;
     }
+    await this.#tryHold(member);
+    return true;
+  }
+
+  /**
+   * Take (or finish) the hold. On failure the cluster stays pending: the next
+   * tick finishes the hold before the marker checks, which would otherwise
+   * read a half-written hold (marker without hold file) as settled.
+   */
+  async #tryHold(member: ManagedHaMemberRecord): Promise<void> {
+    const { managedId } = member;
     try {
       await this.#holdPrimary(member);
+      this.#pendingHolds.delete(managedId);
       this.#vouched.add(managedId);
     } catch (err) {
-      // Not vouched: the next tick tries the hold again. The engine stays
-      // stopped meanwhile.
+      this.#pendingHolds.add(managedId);
       logWarn(
         "managed",
         `engine exit guard: could not hold unconfirmed primary managedId=${managedId}:`,
         sanitizeForLog(err),
       );
     }
-    return true;
+  }
+
+  /**
+   * Finish a hold that failed part way. Not when the engine runs again (a
+   * command started it: nothing to hold) or a command has replaced the held
+   * stop marker since (the cluster is looked at as usual next tick).
+   */
+  async #finishPendingHold(member: ManagedHaMemberRecord): Promise<void> {
+    const { managedId } = member;
+    const containers = await this.#readContainers(managedId);
+    if (containers === undefined) return;
+    if (!engineContainersDown(containers)) {
+      this.#pendingHolds.delete(managedId);
+      this.#noteRunning(managedId);
+      return;
+    }
+    const lookup = await lookupManagedIntent(this.#layout.stateDir, managedId);
+    const replaced = lookup.status === "found" &&
+      !(isHeldIntent(lookup) && lookup.intent.kind === "stop");
+    if (replaced) {
+      this.#pendingHolds.delete(managedId);
+      return;
+    }
+    await this.#tryHold(member);
+  }
+
+  #readContainers(
+    managedId: string,
+  ): Promise<EnvironmentDeployContainer[] | undefined> {
+    return collectManagedContainers(
+      managedComposeProject(managedId),
+      (text) => sanitizeForLog(text),
+      this.#run,
+    );
+  }
+
+  /** The engine runs: it is vouched for and its start bookkeeping resets. */
+  #noteRunning(managedId: string): void {
+    this.#vouched.add(managedId);
+    this.#loggedSkip.delete(managedId);
+    this.#attempts.delete(managedId);
   }
 
   /** The wait is still running, or the guard has given up on this engine. */
@@ -356,21 +414,19 @@ export class ManagedEngineExitGuard {
   async #maybeStart(member: ManagedHaMemberRecord): Promise<void> {
     const { managedId } = member;
     if (!(await pathExists(managedDir(this.#layout, managedId)))) return;
+    if (this.#pendingHolds.has(managedId)) {
+      await this.#finishPendingHold(member);
+      return;
+    }
 
     const now = this.#nowMs();
     if (await this.#meantToStayStopped(member, now)) return;
 
     const project = managedComposeProject(managedId);
-    const containers = await collectManagedContainers(
-      project,
-      (text) => sanitizeForLog(text),
-      this.#run,
-    );
+    const containers = await this.#readContainers(managedId);
     if (containers === undefined) return;
     if (!engineContainersDown(containers)) {
-      this.#vouched.add(managedId);
-      this.#loggedSkip.delete(managedId);
-      this.#attempts.delete(managedId);
+      this.#noteRunning(managedId);
       return;
     }
     if (await this.#holdsUnconfirmedPrimary(member)) return;

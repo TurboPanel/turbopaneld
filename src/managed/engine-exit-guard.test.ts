@@ -9,6 +9,7 @@ import {
 } from "./engine-exit-guard.ts";
 import {
   applyBootHold,
+  bootHoldPath,
   listActiveBootHolds,
   resetUnsettledBootHoldsForTests,
 } from "./boot-hold.ts";
@@ -1111,3 +1112,71 @@ for (const engine of ["postgres", "mysql", "mariadb"] as const) {
     });
   });
 }
+
+test("a hold whose marker was written but whose hold file failed is finished and reported", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    // A directory where the hold file goes: the marker write succeeds, the
+    // hold file write (rename over it) fails.
+    const holdFile = bootHoldPath(layout, MANAGED_ID);
+    await Deno.mkdir(`${holdFile}/blocker`, { recursive: true });
+    const fake = docker();
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+    });
+    await guard.tick();
+    const lookup = await lookupManagedIntent(layout.stateDir, MANAGED_ID);
+    assertEquals(isHeldIntent(lookup), true);
+    assertEquals(await listActiveBootHolds(layout), []);
+    assertEquals(startCount(fake.calls), 0);
+
+    // The held marker alone must not read as settled: the next tick finishes
+    // the hold so the reporter can see it.
+    await Deno.remove(holdFile, { recursive: true });
+    await guard.tick();
+    const holds = await listActiveBootHolds(layout);
+    assertEquals(holds.map((h) => h.managedId), [MANAGED_ID]);
+    assertEquals(startCount(fake.calls), 0);
+  });
+});
+
+test("a half-written hold is dropped, not finished, once a command has the engine running", async () => {
+  await withTempLayout(async ({ env }) => {
+    resetManagedIntentsForTests();
+    resetUnsettledBootHoldsForTests();
+    const layout = resolveLayout(env);
+    await seedMember(layout);
+    const holdFile = bootHoldPath(layout, MANAGED_ID);
+    await Deno.mkdir(`${holdFile}/blocker`, { recursive: true });
+    const fake = switchableDocker(EXITED_PS);
+    const guard = new ManagedEngineExitGuard({
+      layout,
+      run: fake.run,
+      listMembers: () => Promise.resolve([memberRecord(1)]),
+    });
+    await guard.tick();
+    await Deno.remove(holdFile, { recursive: true });
+    // An operator start from the control plane released the marker and the
+    // engine runs again before the next tick.
+    await clearManagedIntent(layout.stateDir, MANAGED_ID, "operator start");
+    fake.state.ps = RUNNING_PS;
+    const stopsBefore = fake.calls.filter((args) =>
+      args.at(-1) === "stop"
+    ).length;
+    await guard.tick();
+    assertEquals(
+      fake.calls.filter((args) => args.at(-1) === "stop").length,
+      stopsBefore,
+    );
+    assertEquals(await listActiveBootHolds(layout), []);
+    // It was seen running: a later exit is started as before.
+    fake.state.ps = EXITED_PS;
+    await guard.tick();
+    assertEquals(startCount(fake.calls), 1);
+  });
+});
