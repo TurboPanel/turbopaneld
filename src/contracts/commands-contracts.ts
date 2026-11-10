@@ -1849,6 +1849,30 @@ export type EnvironmentStopPayload = {
    * delete sets it; without it the daemon removes only its own compose files.
    */
   removeDeploymentDir?: true;
+  /**
+   * Also remove these registered Docker volumes after the stack is down (the
+   * Destroy dialog's "Also Delete the Data Volumes"). Each is named by its
+   * storage id, which is the Docker volume's exact name; nothing else is ever
+   * removed. A volume a container still uses is kept and reported. Only a
+   * control plane that saw `environment-stop-remove-volumes-v1` sends it.
+   */
+  removeVolumes?: StopVolumeRemoval[];
+};
+
+/** One registered Docker volume a stop is asked to remove, by its storage id (its exact name). */
+export type StopVolumeRemoval = { storageId: string };
+
+/** What happened to one volume a stop was asked to remove. */
+export type EnvironmentStopVolumeState = {
+  storageId: string;
+  /**
+   * `removed`: gone now. `absent`: there was no such volume on this server.
+   * `kept`: left in place on purpose (a container still uses it, or Docker is
+   * not installed). `failed`: Docker refused to remove it.
+   */
+  state: "removed" | "absent" | "kept" | "failed";
+  /** Why the volume stayed, in plain words. Present for `kept` and `failed`. */
+  reason?: string;
 };
 
 export type EnvironmentStopResult = {
@@ -1862,6 +1886,8 @@ export type EnvironmentStopResult = {
    * is true once the folder is gone from the host (or was never there).
    */
   folders?: EnvironmentStopFolderState[];
+  /** One entry per volume in `removeVolumes`; present only when it was sent. */
+  volumes?: EnvironmentStopVolumeState[];
 };
 
 /** One reclaimed (or not) service folder, by its components. */
@@ -7449,6 +7475,36 @@ function parseRetirePrincipalEntry(value: unknown): { username: string } {
   return { username: value.username };
 }
 
+/** A storage id: the exact name of the Docker volume the control plane registered for it. */
+const STOP_VOLUME_STORAGE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The most volumes one stop may name. */
+const MAX_STOP_REMOVE_VOLUMES = 200;
+
+function parseStopVolumeRemovals(
+  value: unknown,
+): StopVolumeRemoval[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_STOP_REMOVE_VOLUMES) {
+    throw new TypeError("Invalid environment.stop removeVolumes");
+  }
+  const seen = new Set<string>();
+  const out: StopVolumeRemoval[] = [];
+  for (const entry of value) {
+    if (
+      !isRecord(entry) || typeof entry.storageId !== "string" ||
+      !STOP_VOLUME_STORAGE_ID_RE.test(entry.storageId)
+    ) {
+      throw new TypeError("Invalid environment.stop removeVolumes entry");
+    }
+    if (seen.has(entry.storageId)) continue;
+    seen.add(entry.storageId);
+    out.push({ storageId: entry.storageId });
+  }
+  return out;
+}
+
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value)) {
@@ -7495,6 +7551,7 @@ export function parseEnvironmentStopPayload(
     "retirePrincipals",
     parseRetirePrincipalEntry,
   );
+  const removeVolumes = parseStopVolumeRemovals(value.removeVolumes);
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -7507,6 +7564,7 @@ export function parseEnvironmentStopPayload(
     ...(value.removeDeploymentDir === true
       ? { removeDeploymentDir: true as const }
       : {}),
+    ...(removeVolumes === undefined ? {} : { removeVolumes }),
   };
 }
 
