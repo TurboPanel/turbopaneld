@@ -13,6 +13,8 @@ const ORIGIN_PATH = "opt/turbopanel/lib/update-origin";
 type Panel = {
   kid: string;
   pub: string;
+  /** Ed25519 signature by this key, base64url. */
+  sign: (bytes: Uint8Array) => Promise<string>;
   document: (options?: DocOptions) => Promise<string>;
 };
 type DocOptions = {
@@ -38,6 +40,16 @@ async function makePanel(): Promise<Panel> {
   return {
     kid,
     pub: encodeBase64Url(raw),
+    sign: async (bytes) =>
+      encodeBase64Url(
+        new Uint8Array(
+          await crypto.subtle.sign(
+            "Ed25519",
+            pair.privateKey,
+            bytes as BufferSource,
+          ),
+        ),
+      ),
     document: async (options = {}) => {
       const keys: unknown[] = [
         { kid, alg: "Ed25519", pub: encodeBase64Url(raw), role: "current" },
@@ -345,6 +357,8 @@ const REFUSAL_REASONS: Record<string, string> = {
   // A 64-byte signature under an id pinned as ES256 is not DER at all.
   "approval under a pinned id signed by another key":
     "signature is not strict DER",
+  "approval under a pinned id signed by another key of the same kind":
+    "an approval signature is invalid",
   "assertion replayed onto another statement": "an approval does not verify",
   "applied statement replayed": "prev is not the pinned key",
   "keyset not above the pinned one": "keyset is not above the pinned one",
@@ -362,6 +376,22 @@ const REFUSAL_REASONS: Record<string, string> = {
     "an added passkey must prove possession",
   "passkeys kind that changes the key":
     "kind does not match whether the key changes",
+  // Passkey plus old key (owner decision 2026-11-10).
+  "rotation approved by a passkey without the old key signature":
+    "the previous key did not sign",
+  "passkey change without the old key signature":
+    "the previous key did not sign",
+  "old key signature by another key": "the previous key did not sign",
+  "old key signature under the pinned key with another key":
+    "the previous key did not sign",
+  "old key signature over another statement": "the previous key did not sign",
+  "old key signature without a passkey approval": "no pinned passkey approved",
+  "revoke approved by one passkey": "a revoke needs two pinned passkeys",
+  "revoke approved by one passkey with an old key signature":
+    "a revoke needs two pinned passkeys",
+  "revoke approved twice by the same passkey": "an approval is repeated",
+  "revoke that adds a passkey": "a key change must keep the passkeys",
+  "rotation that removes a passkey": "a key change must keep the passkeys",
 };
 
 // Fixed iat values in the shared vectors are in the past here, so the
@@ -494,6 +524,12 @@ async function freshRotation(iat: number) {
         clientDataJSON: encodeBase64Url(clientData),
         signature: encodeBase64Url(signature),
       }],
+      keySig: {
+        pub: panel.pub,
+        sig: await panel.sign(
+          encoder.encode(`tp-keyset\n${statement}`),
+        ),
+      },
     },
     next: next.kid,
   };
@@ -520,6 +556,32 @@ test("a statement more than five minutes ahead is refused; one from now applies"
       await Deno.readTextFile(host.path(PIN_PATH)),
       `current=${fresh.next}\n`,
     );
+  });
+});
+
+test("a rotation needs the passkey and the old key; neither alone moves the pin", async () => {
+  await withHost(async (host) => {
+    const now = Math.floor(Date.now() / 1000);
+    const both = await freshRotation(now);
+    await writeRotationPin(host, both.pin);
+    const before = await Deno.readTextFile(host.path(PIN_PATH));
+    const { keySig: _dropped, ...passkeyOnly } = both.envelope;
+    const keyOnly = { ...both.envelope, approvals: [] };
+    for (
+      const [name, envelope, reason] of [
+        ["passkey only", passkeyOnly, "the previous key did not sign"],
+        ["old key only", keyOnly, "no pinned passkey approved"],
+      ] as const
+    ) {
+      const result = await applyStatement(host, envelope);
+      assert(result.code !== 0, name);
+      assertStringIncludes(result.stderr, reason, name);
+      assertEquals(await Deno.readTextFile(host.path(PIN_PATH)), before, name);
+    }
+    const result = await applyStatement(host, both.envelope);
+    assertEquals(result.code, 0, result.stderr);
+    const replay = await applyStatement(host, both.envelope);
+    assertStringIncludes(replay.stderr, "prev is not the pinned key");
   });
 });
 
