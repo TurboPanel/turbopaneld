@@ -734,6 +734,10 @@ export async function reconcileSitePhpRuntimes(
       "deploy",
       "PHP runtime reconcile skipped: a vhost could not be read",
     );
+    // The rules still go back into the kernel: they are derived from the
+    // units on disk alone, and every Hosting Account (PHP or not) relies on
+    // this boot sync for its container wall.
+    await sudoQuietly(io, ["php-loopback-sync"], "PHP loopback rules");
     return { started: [], removed: [] };
   }
   await removeSitePhpRuntimes(io, configDir, orphans, listing);

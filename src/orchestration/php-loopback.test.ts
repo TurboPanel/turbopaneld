@@ -90,6 +90,15 @@ const IP_ADDR = [
   "9: br-lan    inet 192.168.7.1/24 scope global br-lan\\       valid_lft forever preferred_lft forever",
 ].join("\n") + "\n";
 
+/** `ip -o link show`: Docker's bridges plus an operator's LAN bridge, br-lan. */
+const IP_LINK = [
+  "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000\\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00",
+  "3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN mode DEFAULT group default \\    link/ether 02:42:00:00:00:01 brd ff:ff:ff:ff:ff:ff",
+  "7: br-0123456789ab: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default \\    link/ether 02:42:00:00:00:02 brd ff:ff:ff:ff:ff:ff",
+  "9: br-lan: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000\\    link/ether 52:54:00:00:00:03 brd ff:ff:ff:ff:ff:ff",
+  "12: veth1a2b3c4@if11: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue master br-0123456789ab state UP mode DEFAULT group default \\    link/ether 6a:00:00:00:00:04 brd ff:ff:ff:ff:ff:ff link-netnsid 0",
+].join("\n") + "\n";
+
 const DAEMON_JSON = JSON.stringify(
   {
     bip: "172.17.0.1/16",
@@ -105,7 +114,11 @@ const DAEMON_JSON = JSON.stringify(
 
 const TWO_ACCOUNTS = {
   units: { "turbopanel-php-a-fcgi84.service": "alice" },
-  files: { "ip-addr": IP_ADDR, "etc/docker/daemon.json": DAEMON_JSON },
+  files: {
+    "ip-addr": IP_ADDR,
+    "ip-link": IP_LINK,
+    "etc/docker/daemon.json": DAEMON_JSON,
+  },
 };
 
 /** The elements of one named set in the rendered ruleset. */
@@ -425,8 +438,10 @@ test("the container wall binds every Hosting Account, with or without a PHP unit
         l.startsWith(`meta skuid ${BAND} `) && l.includes(" reject")
       );
       assertEquals(wall, [
-        `meta skuid ${BAND} oifname { "docker0", "br-*" } meta l4proto tcp reject with tcp reset`,
-        `meta skuid ${BAND} oifname { "docker0", "br-*" } reject`,
+        `meta skuid ${BAND} oifname "docker0" meta l4proto tcp reject with tcp reset`,
+        `meta skuid ${BAND} oifname "docker0" reject`,
+        `meta skuid ${BAND} oifname "br-*" oifname != { "br-lan" } meta l4proto tcp reject with tcp reset`,
+        `meta skuid ${BAND} oifname "br-*" oifname != { "br-lan" } reject`,
         `meta skuid ${BAND} ip daddr @bridge4 meta l4proto tcp reject with tcp reset`,
         `meta skuid ${BAND} ip daddr @bridge4 reject`,
         `meta skuid ${BAND} ip6 daddr @bridge6 meta l4proto tcp reject with tcp reset`,
@@ -478,7 +493,6 @@ test("the blocked ranges are the live Docker bridges and Docker's configured poo
       for (const open of ["10.", "192.168.", "fe80:", "127."]) {
         assert(!blocked.some((r) => r.startsWith(open)), open);
       }
-      assert(!out.stdout.includes("br-lan"));
       // No assumed default ranges: only what this host is configured with.
       assert(!out.stdout.includes("172.16.0.0/12"));
     },
@@ -522,7 +536,11 @@ test("with no Docker config and no bridges the interface wall still stands", asy
     assert(!out.stdout.includes("@bridge"));
     assertStringIncludes(
       out.stdout,
-      `meta skuid ${BAND} oifname { "docker0", "br-*" } reject`,
+      `meta skuid ${BAND} oifname "docker0" reject`,
+    );
+    assertStringIncludes(
+      out.stdout,
+      `meta skuid ${BAND} oifname "br-*" reject`,
     );
   });
 });
@@ -572,4 +590,25 @@ test("the live ruleset is checked for the container wall after loading", async (
   assertStringIncludes(script, "container rules not loaded");
   assertStringIncludes(script, "ip is not installed");
   assert(script.indexOf("ip is not installed") < script.indexOf("nft -f -"));
+});
+
+test("a br- bridge that is not Docker's (a LAN bridge) is left out of the interface wall by name", async () => {
+  await withTree(
+    TWO_ACCOUNTS.units,
+    async (run) => {
+      const out = await run("sync");
+      assertEquals(out.code, 0, out.stderr);
+      const exempt = rules(out.stdout).filter((l) => l.includes("oifname !="));
+      assertEquals(exempt.length, 2);
+      for (const l of exempt) {
+        // Only the foreign name: Docker's own bridge and veth peers are not exempt.
+        assertStringIncludes(l, 'oifname != { "br-lan" }');
+        assert(!l.includes("br-0123456789ab") && !l.includes("veth"), l);
+      }
+      // Its addresses are not in any blocked set either.
+      assert(!setElements(out.stdout, "bridge4").includes("192.168.7.1/24"));
+    },
+    PASSWD,
+    TWO_ACCOUNTS.files,
+  );
 });

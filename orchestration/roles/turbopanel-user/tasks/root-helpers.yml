@@ -40,10 +40,11 @@
 # tp-php-loopback keeps site PHP off every loopback port but the database
 # proxy's. Every per-site PHP unit runs it as root (`ExecStartPre=+`) before
 # PHP starts, and `tp-host php-loopback-sync` runs it after units change.
-- name: Install nft and flock for tp-php-loopback
+- name: Install nft, flock and ip for tp-php-loopback
   ansible.builtin.apt:
     lock_timeout: 300
     name:
+      - iproute2
       - nftables
       - util-linux
     state: present

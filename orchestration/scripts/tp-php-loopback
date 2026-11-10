@@ -31,9 +31,9 @@
 # accept` comes first so those replies are never refused; PHP's own new
 # connections are `new` and still hit the port filter.
 #
-# Needs the `nft` and `flock` programs (Ansible installs the nftables and
-# util-linux packages in turbopanel-user/root-helpers.yml). When either is
-# missing the script exits non-zero with a message naming it, so a PHP unit
+# Needs the `nft`, `flock` and `ip` programs (Ansible installs the nftables,
+# util-linux and iproute2 packages in turbopanel-user/root-helpers.yml). When
+# one is missing the script exits non-zero with a message naming it, so a PHP unit
 # does not start with open loopback and the daemon's reconcile reports why.
 #
 # Container wall: the same chain also keeps every Hosting Account off the
@@ -44,7 +44,8 @@
 #
 #   - that leave through a container bridge (docker0, br-<id>), matched on the
 #     packet's output interface, so a network created after this sync is
-#     covered too;
+#     covered too (a br-<name> that is not Docker's, such as a LAN bridge,
+#     is left out by name as found at the sync);
 #   - to an address on one of those bridges now (the networks' gateways, which
 #     are the host's own addresses and route over lo), read from `ip -o addr`;
 #   - to Docker's configured address pools and default bridge range
@@ -187,6 +188,26 @@ ip_addrs() {
   fi
 }
 
+# `ip -o link show` (a fixture file in test mode).
+ip_links() {
+  if [ -n "$TP_TEST" ]; then
+    [ ! -f "$P/ip-link" ] || cat "$P/ip-link"
+  else
+    ip -o link show
+  fi
+}
+
+# Interfaces named br-<something> that are not Docker's (br-<12 hex>), such as
+# an operator's LAN bridge: the br-* interface match must not catch them.
+foreign_br_links() {
+  ip_links | awk '{
+    n = $2; sub(/:$/, "", n); sub(/@.*/, "", n)
+    if (n !~ /^br-/ || length(n) > 15 || n !~ /^[A-Za-z0-9_.-]+$/) next
+    if (n ~ /^br-[0-9a-f]+$/ && length(n) == 15) next
+    print n
+  }' | sort -u
+}
+
 # The addresses on Docker's bridges right now (docker0 and br-<12 hex>), with
 # their prefixes; link-local ones are left to the unit's own filter.
 bridge_ranges() {
@@ -217,6 +238,9 @@ ruleset() {
   _line=""
   [ -z "$_elems" ] || _line="    elements = { $_elems }"
   _band="$PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX"
+  _not=""
+  for _n in $4; do _not="${_not:+$_not, }\"$_n\""; done
+  [ -z "$_not" ] || _not=" oifname != { $_not }"
   _bridge_rules=""
   if [ -n "$2" ]; then
     _bridge_rules="    meta skuid $_band ip daddr @bridge4 meta l4proto tcp reject with tcp reset
@@ -250,8 +274,10 @@ $(range_set bridge6 ipv6_addr "$3")
     meta skuid @owners ip6 daddr ::1 meta l4proto tcp reject with tcp reset
     meta skuid @owners ip6 daddr ::1 reject
     meta skuid $_band ct state established,related accept
-    meta skuid $_band oifname { "docker0", "br-*" } meta l4proto tcp reject with tcp reset
-    meta skuid $_band oifname { "docker0", "br-*" } reject
+    meta skuid $_band oifname "docker0" meta l4proto tcp reject with tcp reset
+    meta skuid $_band oifname "docker0" reject
+    meta skuid $_band oifname "br-*"$_not meta l4proto tcp reject with tcp reset
+    meta skuid $_band oifname "br-*"$_not reject
 $_bridge_rules
   }
 }
@@ -265,7 +291,7 @@ fi
 _ranges="$({ docker_config_ranges; bridge_ranges; })"
 _v4="$(printf '%s\n' "$_ranges" | valid_cidrs 4)"
 _v6="$(printf '%s\n' "$_ranges" | valid_cidrs 6)"
-_rules="$(ruleset "$_ids" "$_v4" "$_v6")"
+_rules="$(ruleset "$_ids" "$_v4" "$_v6" "$(foreign_br_links)")"
 
 if [ -n "$TP_TEST" ]; then
   printf '%s\n' "$_rules"
@@ -283,5 +309,5 @@ for _id in $_ids; do
   printf '%s\n' "$_live" | grep -Eq "(^|[ ,{])$_id([ ,}]|\$)" ||
     tp_die "uid $_id missing from the loaded set"
 done
-printf '%s\n' "$_live" | grep -q "meta skuid $PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX oifname" ||
+printf '%s\n' "$_live" | grep -q "meta skuid $PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX oifname \"docker0\"" ||
   tp_die "container rules not loaded"

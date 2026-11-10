@@ -665,6 +665,9 @@ test("boot reconcile does nothing when a vhost cannot be read", async () => {
     io.calls.some((c) => c.startsWith("systemctl") || c.startsWith("rm")),
     false,
   );
+  // The rules still go back into the kernel: accounts with no PHP unit rely
+  // on this boot sync for their container wall.
+  assert(io.calls.includes("php-loopback-sync"));
 });
 
 test("boot reconcile keeps what an OpenLiteSpeed vhconf names and sweeps lsd orphans", async () => {
