@@ -5205,8 +5205,24 @@ test("below the config root only the daemon's own places are writable: root-run 
 
     // What the daemon really writes there still works.
     for (
+      const sub of [
+        "apache/sites",
+        "openlitespeed/sites",
+        "openlitespeed/vhosts/svc1",
+        "site-caddy/sites",
+      ]
+    ) {
+      await Deno.mkdir(join(config, sub), { recursive: true });
+    }
+    for (
       const path of [
         join(config, "nginx/sites/svc1.conf"),
+        join(config, "apache/sites/svc1.conf"),
+        join(config, "openlitespeed/sites/svc1.conf"),
+        join(config, "openlitespeed/vhosts/svc1/vhconf.conf"),
+        join(config, "openlitespeed/httpd_config.conf"),
+        join(config, "site-caddy/sites/svc1.caddy"),
+        join(config, "site-caddy/Caddyfile"),
         join(config, "instance/runtime.env"),
         join(config, "caddy/instance-acme.json"),
         join(config, "caddy/instance-acme-settings.json"),
@@ -5221,6 +5237,21 @@ test("below the config root only the daemon's own places are writable: root-run 
       "0640",
       staged,
       join(config, "caddy/Caddyfile"),
+    ]);
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "nginx/../system/postgres-backup.sh"),
+    ]);
+    // The control plane's folder is made only root's, 0750.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0755",
+      join(config, "instance"),
     ]);
   });
 });
@@ -5267,6 +5298,17 @@ test("a php-fpm series folder and its pools folder stay root's: no verb re-owns,
       ]);
       assertEquals(ok.code, 0, ok.stderr);
     }
+    // Nothing but files inside pools/.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "tp",
+      `${php}/8.4/pools/x`,
+    ]);
+    await refused(host, ["mkdir", "-p", `${php}/8.4/pools/x`]);
     // A pool file is root's: never handed to the daemon or anyone else.
     await refused(host, ["chown", "tp", pool]);
     await refused(host, ["chown", "tpnginx:tpnginx", pool]);
@@ -5378,6 +5420,8 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
       `${engine}user = alice\n`,
       `${owned}group = disk\n`,
       engine.replace("user = tpnginx\n", ""),
+      // A good pool followed by a bad one.
+      `${owned}[second]\nuser = alice\ngroup = disk\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
       engine.replace("listen.group = tpnginx\n", ""),
     ];
     for (const content of hostile) {

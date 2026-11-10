@@ -57,9 +57,9 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     Everything else is root's (the system stack's scripts and the backup job
     root runs on a timer under `system/`, the control plane's other config, a
     php-fpm series folder and its `conf.d`), and so is the config root itself.
-    `install -d` of `instance` itself is allowed only without an owner. A
+    `install -d -m 0750` of `instance` itself is allowed only without an owner. A
     `pools` folder is made only as `install -d -m 0750 -o root -g
-    tpapache|tpols`, never re-owned, removed or chmodded, and a pool file is
+    tpapache|tpols`, never re-owned, removed or chmodded, holds no folder, and a pool file is
     always root-owned. A new folder the daemon needs under the config root
     goes on that list in the same change, with its reader named;
   - checks a shared php-fpm master's pool file (`tp_phppool_ok`): only the

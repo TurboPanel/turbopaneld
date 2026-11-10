@@ -30,7 +30,7 @@ controls below do not close:
 3. **php-fpm's config test runs as root** — `php-fpm<x.y> --fpm-config
    /etc/turbopanel/php/<x.y>/php-fpm.conf --test` (`TP_ENGINE_VALIDATE`,
    pinned to exactly that file). On a sealed host the series folder,
-   `php-fpm.conf` and `conf.d` are root's and no tp-host verb reaches them
+   `php-fpm.conf` and `conf.d` are root's and no tp-host write verb reaches them
    (only `pools/<file>` does, each pool checked; see the config root
    allow-list in `orchestration/scripts/AGENTS.md`), but on a host whose
    `/etc/turbopanel` is still `tp`-owned `tp` can replace them, and php-fpm

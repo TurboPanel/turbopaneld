@@ -1232,7 +1232,7 @@ tp_phppool_ok() {
   [ -n "$_pp_accounts" ] || { echo "tp-host: php-fpm pool: no pool" >&2; return 1; }
   printf '%s\n' "$_pp_accounts" | {
     while read -r _pp_user _pp_group _pp_lowner _pp_lgroup; do
-      tp_phppool_accounts_ok "$_pp_user" "$_pp_group" "$_pp_lowner" "$_pp_lgroup" || exit 1
+      tp_phppool_accounts_ok "$_pp_user" "$_pp_group" "$_pp_lowner" "$_pp_lgroup" </dev/null || exit 1
     done
   }
 }
@@ -2422,10 +2422,12 @@ tp_verb_install() {
       [ "$_in_mode" = "0750" ] && [ "$_in_owner" = "root" ] &&
         case "$_in_group" in tpapache|tpols) true ;; *) false ;; esac ||
         tp_die "refusing $_in_path: a php-fpm pools folder is only install -d -m 0750 -o root -g tpapache|tpols"
-    elif [ "$_in_path" = "$R_CONFIG/instance" ] && [ -z "$_in_owner$_in_group" ]; then
+    elif [ "$_in_path" = "$R_CONFIG/instance" ] && [ -z "$_in_owner$_in_group" ] &&
+      [ "$_in_mode" = "0750" ]; then
       # The control plane's config folder may be made (root's), never re-owned.
       :
     else
+      ! tp_php_pool_file "$_in_path" || tp_die "refusing $_in_path: a php-fpm pools folder holds files only"
       tp_require_config_write "$(tp_path_class "$_in_path")" "$_in_path"
     fi
     tp_is_root_path "$_in_path" && [ -n "$_in_owner$_in_group" ] &&
@@ -2490,6 +2492,7 @@ tp_verb_mkdir() {
   tp_require_class "$_md_path" tree principal wireguard
   ! tp_release_path "$_md_path" || tp_die "refusing $_md_path: a release is created only by publish"
   ! tp_php_pools_dir "$_md_path" || tp_die "refusing $_md_path: a php-fpm pools folder is made only by install -d"
+  ! tp_php_pool_file "$_md_path" || tp_die "refusing $_md_path: a php-fpm pools folder holds files only"
   tp_require_config_write "$(tp_path_class "$_md_path")" "$_md_path"
   tp_mkdir_pinned "$_md_path" 0755
 }
