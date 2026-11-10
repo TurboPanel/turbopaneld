@@ -9,8 +9,9 @@
  * not hearing back is not a failed proof.
  *
  * Once the hello verified, `command-outcome`, `fabric-peers-report` and
- * `managed-ha-event` are signed with the daemon key when {@link SignedSessionOptions.reportSigning}
- * allows it (`report-signing.ts`). Signing is async, so while one is being
+ * `managed-ha-event` are signed with the daemon key when
+ * {@link SignedSessionOptions.reportSigning} allows it for that type
+ * (`report-signing.ts`). Signing is async, so while one is being
  * signed every later send waits behind it and the frames keep their order.
  * A report sent before the attach frame says what the control plane supports
  * is held, not sent unsigned: a control plane that has seen this server sign
