@@ -322,7 +322,9 @@ before the daemon starts, so an older answer never counts). `connected`
 passes, and so do enrolment files saved during this run
 (`tp_enrol_files_fresh`: `server.id`, `server-key-id` and the key file all
 newer than `/run/turbopanel-install-start`, the same test as
-`tp-kernel-features`), which every daemon release writes. A park of kind `permanent` (an install command already used, or a
+`tp-kernel-features`), which every daemon release writes. The daemon saves
+those files before it signs in, so a later step can still refuse: the files
+count as accepted only after the status file had 10 more seconds to say so. A park of kind `permanent` (an install command already used, or a
 revoked re-enroll token), `tls-trust` or `panel-identity` exits 1 with the
 reason in plain words, before the Raspberry Pi kernel step; the parked
 install stays, and a fresh command re-run unparks it. `awaiting-seat` and the
@@ -333,7 +335,7 @@ re-enroll there may only get the note).
 The installer script can be newer than the daemon it installs (the script
 host serves the branch tip while the binary comes from the channel's last
 build), so the wait only runs when the installed release lists
-`enroll-status` in `orchestration/daemon-features`, which ships in the same
+`enroll-status` in `orchestration/daemon-features` (see `orchestration/AGENTS.md`), which ships in the same
 release and under the same manifest as the binary (`tp_daemon_has_feature`;
 a missing file is a release from before it). Never ask the binary itself: an
 older build has no such flag and starts a daemon instead. Add a name to that

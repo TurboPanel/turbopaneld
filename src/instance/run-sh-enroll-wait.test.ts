@@ -371,18 +371,50 @@ test("a linked daemon-features file is ignored", async () => {
   assertEquals(res.stdout.includes("STEP"), false);
 });
 
-test("enrolment files saved during this run end the wait at once", async () => {
+test("enrolment files saved during this run count as accepted after 10 s", async () => {
   const res = await runWait({ enrol: "fresh" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
   assertStringIncludes(res.stdout, "OK The control plane accepted this server");
-  assertEquals(res.sleepCalls, []);
+  // Five 2 s pauses give the status file the time to report a later step.
+  assertEquals(res.sleepCalls, ["2", "2", "2", "2", "2"]);
 });
 
 test("enrolment files saved while the installer waits end the wait", async () => {
   const res = await runWait({ enrol: "later" });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
   assertStringIncludes(res.stdout, "OK The control plane accepted this server");
+  assertEquals(res.sleepCalls.length, 6);
+});
+
+test("a refusal after the enrolment was saved still fails the install", async () => {
+  // The daemon saves its enrolment first; the panel key check comes after.
+  const res = await runWait({
+    enrol: "fresh",
+    later: formatEnrollStatus({
+      state: "parked",
+      kind: "panel-identity",
+      reason: "signature mismatch",
+    }),
+  });
+  assertStringIncludes(res.stdout, "rc=1", res.stderr);
+  assertStringIncludes(res.stderr, "did not prove it holds the panel key");
+});
+
+test("a session reported after the enrolment ends the wait at once", async () => {
+  const res = await runWait({
+    enrol: "fresh",
+    later: formatEnrollStatus({ state: "connected" }),
+  });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
   assertEquals(res.sleepCalls, ["2"]);
+});
+
+test("a saved enrolment is not cut short by a short wait setting", async () => {
+  // The 10 s grace is counted from the first sight of the files; with a
+  // shorter total wait the note is printed instead of a false "accepted".
+  const res = await runWait({ enrol: "fresh", waitSeconds: "4" });
+  assertStringIncludes(res.stdout, "rc=0", res.stderr);
+  assertStringIncludes(res.stdout, "NOTE No answer from the control plane yet");
 });
 
 test("enrolment files from an earlier enrolment do not count", async () => {

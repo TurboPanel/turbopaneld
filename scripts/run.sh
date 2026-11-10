@@ -1682,11 +1682,12 @@ tp_enroll_status_field() {
 # such flag and would start a daemon instead. A missing file means a release
 # from before the file, which has none of the listed features.
 tp_daemon_has_feature() {
+  _dhf_name="$1"
   _dhf_file="$ORCHESTRATION_DIR/daemon-features"
   if [ ! -f "$_dhf_file" ] || [ -L "$_dhf_file" ]; then
     return 1
   fi
-  grep -qx "$1" "$_dhf_file" 2>/dev/null
+  grep -qx "$_dhf_name" "$_dhf_file" 2>/dev/null
 }
 
 # True once the daemon saved an enrolment during this run: server.id, the key
@@ -1710,7 +1711,8 @@ tp_enrol_files_fresh() {
 # install with the reason; the parked install stays, and re-running a fresh
 # command restages the license and lets the daemon try again. A wait for a
 # purchased size, a license or an administrator is not a refusal. Enrolment
-# files saved during this run (tp_enrol_files_fresh) also count as accepted.
+# files saved during this run (tp_enrol_files_fresh) count as accepted once
+# the status file has had 10 more seconds to report a later refusal.
 # No answer within TURBOPANEL_ENROLL_WAIT_SECONDS (default 120, the same
 # ceiling as tp-kernel-features' enrolment wait) only prints a note: the panel
 # may be slow or unreachable for now, or an already enrolled server converges
@@ -1733,6 +1735,7 @@ tp_wait_for_enrollment() {
     *) ;;
   esac
   _we_waited=0
+  _we_enrolled_at=""
   tp_print_step "▸" "Waiting for the control plane to accept this server…"
   while :; do
     case "$(tp_enroll_status_field "$_we_file" state)" in
@@ -1771,12 +1774,17 @@ tp_wait_for_enrollment() {
         esac
         ;;
       *)
-        # No answer yet (or one this script does not know): a saved
-        # enrolment from this run already proves the control plane let this
-        # server in.
+        # No answer yet (or one this script does not know). The daemon saves
+        # its enrolment before it signs in, so a saved enrolment from this run
+        # proves the control plane took the license, but a later step can
+        # still refuse (certificate, panel key, purchased size): give the
+        # status file 10 more seconds, then count the enrolment as accepted.
         if tp_enrol_files_fresh; then
-          tp_print_ok "The control plane accepted this server"
-          return 0
+          [ -n "$_we_enrolled_at" ] || _we_enrolled_at="$_we_waited"
+          if [ $((_we_waited - _we_enrolled_at)) -ge 10 ]; then
+            tp_print_ok "The control plane accepted this server"
+            return 0
+          fi
         fi
         ;;
     esac
