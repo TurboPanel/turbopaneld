@@ -30,12 +30,15 @@ import {
   tunnelPeerPaths,
 } from "./tunnel-caddy.ts";
 import {
+  clearTunnelGeneration,
+  isStaleTunnelGeneration,
   type OwnSiteFile,
   peerMaterialId,
   plannedRelocks,
   readTunnelState,
   removeTunnelState,
   renderStoredTunnelFile,
+  tryRecordTunnelGeneration,
   type TunnelState,
   writeTunnelState,
 } from "./tunnel-state.ts";
@@ -141,13 +144,17 @@ async function unchangedResult(
   prior: TunnelState | undefined,
   live: string | undefined,
 ): Promise<TunnelRoutesResult | undefined> {
-  if (prior?.hash !== payload.hash) return undefined;
+  // A different generation is a full apply, so the stored table keeps it too.
+  if (
+    prior?.hash !== payload.hash || prior.generation !== payload.generation
+  ) return undefined;
   const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
   const filesOk = prior.peerId === undefined ||
     await peerFilesPresent(hostingDir, prior.peerId);
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
   // A site deployed since (or written by an older daemon) may hold other peers.
   if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
+  await settleGeneration(hostingDir, payload.generation);
   return {
     hash: payload.hash,
     applied: false,
@@ -226,6 +233,16 @@ async function swapTunnelFile(
   }
 }
 
+/** After a table is in place: keep its generation, or forget the record when it has none. */
+function settleGeneration(
+  hostingDir: string,
+  generation: number | undefined,
+): Promise<void> {
+  return generation === undefined
+    ? clearTunnelGeneration(hostingDir)
+    : tryRecordTunnelGeneration(hostingDir, generation);
+}
+
 function tunnelStateFor(
   payload: TunnelRoutesPayload,
   peerId: string | undefined,
@@ -239,6 +256,9 @@ function tunnelStateFor(
       : {}),
     ...(peerId === undefined ? {} : { peerId }),
     ...(payload.inbound ? { inbound: payload.inbound } : {}),
+    ...(payload.generation === undefined
+      ? {}
+      : { generation: payload.generation }),
   };
 }
 
@@ -257,6 +277,24 @@ async function applyTunnelRoutesLocked(
     payload.peerAddresses.length === 0 && (payload.inbound?.length ?? 0) === 0;
   const live = await readTextIfPresent(livePath);
   const prior = await readTunnelState(hostingDir);
+
+  // A table older than one already applied (or than a deploy's newer peers)
+  // must not bring back carriers the newer one removed.
+  if (await isStaleTunnelGeneration(hostingDir, payload.generation, prior)) {
+    logInfo(
+      "tunnels",
+      `tunnel table generation ${payload.generation} is older than the one in place; left as it is`,
+    );
+    return {
+      hash: payload.hash,
+      applied: false,
+      routeCount: prior?.routes.filter((route) => !route.local).length ?? 0,
+      dropped: [],
+      warnings: [
+        "ignored: a newer forwarding table is already in place",
+      ],
+    };
+  }
 
   // An unchanged table with the file in place changes nothing.
   const unchanged = await unchangedResult(
@@ -295,6 +333,7 @@ async function applyTunnelRoutesLocked(
     await (empty
       ? removeTunnelState(hostingDir)
       : writeTunnelState(hostingDir, state));
+    await settleGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
     logInfo(
       "tunnels",

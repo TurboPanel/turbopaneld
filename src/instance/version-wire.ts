@@ -130,6 +130,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-connector-token-change-v1",
   "deploy-config-files-v1",
   "site-php-lifecycle-v1",
+  "tunnel-table-generation-v1",
 ] as const;
 
 /**
@@ -787,3 +788,16 @@ export const DEPLOY_CONFIG_FILES_FEATURE: DaemonWireFeature =
  */
 export const SITE_PHP_LIFECYCLE_FEATURE: DaemonWireFeature =
   "site-php-lifecycle-v1";
+
+/**
+ * `tunnel-table-generation-v1`: `server.tunnel.routes` and the tunnel field of
+ * an environment deploy may carry a `generation` (a non-negative safe integer,
+ * monotonic per organization tunnel table). The daemon keeps the highest it
+ * applied and ignores a table or deploy tunnel field below it, so a deploy and
+ * a table update that cross never bring back an older carrier list. The
+ * control plane sends `max(previous + 1, current Unix time in milliseconds)`, so
+ * the counter survives a restore or reset; a table with no `generation` clears
+ * the daemon's record (the way back from a reset counter).
+ */
+export const TUNNEL_TABLE_GENERATION_FEATURE: DaemonWireFeature =
+  "tunnel-table-generation-v1";

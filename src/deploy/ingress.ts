@@ -16,9 +16,12 @@ import {
   proofImportPattern,
 } from "./acme-proof-forward.ts";
 import {
+  deployTunnelGeneration,
   plannedTunnelContents,
+  readTunnelGeneration,
   readTunnelState,
   relockWithStoredPeers,
+  tryRecordTunnelGeneration,
 } from "./tunnel-state.ts";
 import {
   type PeerUpstream,
@@ -3539,9 +3542,18 @@ async function plannedTunnelFile(
 async function relockForDeploy(
   hostingDir: string,
   contents: string,
+  generation: number | undefined,
 ): Promise<string> {
   try {
-    return relockWithStoredPeers(await readTunnelState(hostingDir), contents);
+    const state = await readTunnelState(hostingDir);
+    // A deploy prepared from a newer table than the stored one keeps its peers.
+    if (generation !== undefined) {
+      const known = state
+        ? state.generation
+        : await readTunnelGeneration(hostingDir);
+      if (generation > (known ?? -1)) return contents;
+    }
+    return relockWithStoredPeers(state, contents);
   } catch (err) {
     logWarn("deploy", `tunnel name lock kept as sent: ${errorText(err)}`);
     return contents;
@@ -3606,7 +3618,12 @@ async function rewriteHostingCaddySitesLocked(
     .join("\n");
   // The lock on tunnel names follows the last forwarding table, which may be
   // newer than the peers this deploy was prepared with.
-  const siteContent = await relockForDeploy(hostingDir, renderedSites);
+  const tunnelGeneration = deployTunnelGeneration(payload.hostings);
+  const siteContent = await relockForDeploy(
+    hostingDir,
+    renderedSites,
+    tunnelGeneration,
+  );
   const siteFile = `${payload.environmentId}.caddy`;
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
@@ -3663,6 +3680,8 @@ async function rewriteHostingCaddySitesLocked(
       ? []
       : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),
   ]);
+
+  await tryRecordTunnelGeneration(hostingDir, tunnelGeneration);
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry

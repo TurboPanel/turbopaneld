@@ -65,10 +65,12 @@ written. Details: `src/tunnels/AGENTS.md`.
 
 **Site commands and workers (`site-php-lifecycle-v1`).** This daemon runs
 `sites[].postDeploy` (commands in each newly built release, before it takes
-traffic or right after the switch) and keeps `sites[].workers` running. It is the
-last entry of `DAEMON_WIRE_FEATURES`; the control plane refuses a deploy that
+traffic or right after the switch) and keeps `sites[].workers` running. The
+control plane refuses a deploy that
 carries either for a daemon without it, because an older daemon would drop both
 fields. Detail: `src/deploy/site/AGENTS.md`.
+
+**Tunnel table generation (`tunnel-table-generation-v1`, the last entry of `DAEMON_WIRE_FEATURES`).** `server.tunnel.routes` and `hostings[].tunnel` may carry a `generation`; the daemon ignores a table below the highest generation it applied. Detail: `src/deploy/AGENTS.md`.
 
 **Topology generation off the wire (`topology-generation-optional-v1`).** A
 control plane that lists it no longer needs the topology generation numbers.

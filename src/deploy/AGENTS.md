@@ -1286,6 +1286,36 @@ a deploy is checked against the site files, not only the forward file. Site
 files written by an older daemon have the same lines, so they follow the first
 table that carries `inbound` with no deploy.
 
+**Newest table wins (feature `tunnel-table-generation-v1`).** A table and a
+deploy can cross, so a deploy could apply older stored peers and let a removed
+carrier back in until the next table. The control plane may send a `generation`
+(a non-negative safe integer, one counter for the organization's whole table,
+not per tunnel) on `server.tunnel.routes` and in each `hostings[].tunnel` of a
+deploy. The contract: it sends `max(previous + 1, current Unix time in
+milliseconds)`, so the counter survives a restore from backup or a wipe.
+Two records exist. The applied table's own generation is stored inside the
+stored table (`TunnelState.generation`, written with it). The high-water file
+`hosting/tunnel-generation.json` (`tunnel-state.ts`) holds the highest generation
+seen, from a table or a deploy, and outlives an emptied table. A table lower than
+the higher of the two is not applied (answer: not applied, with a warning); equal
+or higher applies. A deploy whose highest generation is above the stored table's
+own keeps its own peers, however many deploys at that generation come before
+the table does, and raises the high-water file; otherwise it takes the stored
+peers. With no stored table the high-water file is the comparison. Without a
+generation nothing changes (older control plane), and a table with no generation
+clears the high-water file: only a downgraded or reset control plane sends one.
+Manual recovery if a counter ever drops under the record: delete
+`hosting/tunnel-generation.json` and resend the table (purge removes it). A
+failure to write the high-water file is logged and never fails a table or deploy.
+A deploy at or below the record with no stored `inbound` cannot be corrected
+here; the next table does it.
+A stored table without a generation reads as -1, so any deploy with a generation
+keeps its own peers (the old behaviour). A deploy below the record but above the
+stored table's own generation (for example at 6 after a deploy at 7, with the
+table at 5) also keeps its own peers until the next table. A table resent with
+the same content but a different generation is applied in full, so the stored
+table's generation always follows the table last accepted.
+
 ## Deploy Hooks
 
 - **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
