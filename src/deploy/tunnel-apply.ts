@@ -15,7 +15,7 @@ import type {
   TunnelRoutesResult,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { logInfo } from "../util/logger.ts";
+import { errorText, logInfo } from "../util/logger.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import { grantHostingCaddyRead } from "./ensure-hosting-caddy.ts";
 import {
@@ -158,6 +158,43 @@ async function unchangedResult(
 }
 
 /**
+ * Judge the new tunnel file together with the relocked site files. When the
+ * set is refused and the tunnel file alone would load, the refusal is about the
+ * site files, and the error names them, not the tunnel file.
+ */
+async function judgeTunnelSet(
+  layout: LayoutPaths,
+  paths: { hostingDir: string; sitesDir: string },
+  contents: string,
+  relocks: readonly OwnSiteFile[],
+  grantRead: (hostingDir: string) => Promise<void>,
+): Promise<void> {
+  const judge = (sites: readonly OwnSiteFile[]) =>
+    validateHostingCaddyCandidate(
+      layout,
+      paths.hostingDir,
+      paths.sitesDir,
+      TUNNEL_SITE_FILE,
+      contents,
+      grantRead,
+      { sites },
+    );
+  try {
+    await judge(relocks);
+  } catch (err) {
+    if (relocks.length === 0) throw err;
+    // Only on a refusal: is the tunnel file fine without the site changes?
+    const tunnelAlone = await judge([]).then(() => true, () => false);
+    if (!tunnelAlone) throw err;
+    throw new Error(
+      `hosting Caddy refused the new tunnel peers for ${
+        relocks.map((site) => site.file).join(", ")
+      }: ${errorText(err)}`,
+    );
+  }
+}
+
+/**
  * Judge, swap in and reload the new tunnel file together with the site files
  * whose tunnel lock changed, with one reload; nothing happens when neither
  * changed.
@@ -174,15 +211,7 @@ async function swapTunnelFile(
   const tunnelSame = contents === (live ?? "") ||
     (contents === "" && live === undefined);
   if (tunnelSame && relocks.length === 0) return;
-  await validateHostingCaddyCandidate(
-    layout,
-    paths.hostingDir,
-    paths.sitesDir,
-    TUNNEL_SITE_FILE,
-    contents,
-    grantRead,
-    { sites: relocks },
-  );
+  await judgeTunnelSet(layout, paths, contents, relocks, grantRead);
   if (contents !== "") await enableHostingCaddy();
   await activateHostingSites([
     ...(tunnelSame ? [] : [{ live: paths.livePath, contents }]),
