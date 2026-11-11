@@ -254,7 +254,13 @@ for (const variant of VARIANTS) {
         only(unit, "Unit", "OnFailure"),
         "turbopaneld-update-guard.service",
       );
-      assertEquals(only(unit, "Unit", "StartLimitBurst"), "5");
+      // Never give up restarting, with a growing delay between attempts.
+      assertEquals(only(unit, "Unit", "StartLimitIntervalSec"), "0");
+      assertEquals(unit.get("Unit")?.get("StartLimitBurst"), undefined);
+      assertEquals(only(unit, "Service", "Restart"), "on-failure");
+      assertEquals(only(unit, "Service", "RestartSec"), "5");
+      assertEquals(only(unit, "Service", "RestartSteps"), "10");
+      assertEquals(only(unit, "Service", "RestartMaxDelaySec"), "120");
       assert(
         only(unit, "Service", "ExecStart").startsWith(
           "/usr/bin/flock -n /run/turbopanel/daemon.lock ",

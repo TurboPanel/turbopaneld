@@ -28,7 +28,7 @@
 import { join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
-import { writeTextFileAtomic } from "../atomic-write.ts";
+import { writeTextFileAtomicOrSkipWhenFull } from "../atomic-write.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import type {
   SlotMapping,
@@ -241,7 +241,7 @@ async function writePersistedState(
   path: string,
   state: TopologyGenerationState,
 ): Promise<void> {
-  await writeTextFileAtomic(path, JSON.stringify(state));
+  await writeTextFileAtomicOrSkipWhenFull(path, JSON.stringify(state));
 }
 
 export type ResolveTopologyGenerationDeps = {
