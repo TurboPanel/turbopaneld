@@ -367,9 +367,12 @@ test("cache units and helper lines that do not fit are skipped, and an app's por
     assertEquals(setElements(out.stdout, "guarded"), ["18400"]);
     assert(setElements(out.stdout, "own_ports").includes("15001 . 18400"));
     // App ports sit in the band's neighbours or outside it; none is guarded.
-    assert(!setElements(out.stdout, "guarded").includes("3000"));
+    assert(setElements(out.stdout, "own_ports").includes("15003 . 18090"));
+    assert(!setElements(out.stdout, "guarded").includes("18090"));
   }, {
     ...UNITS,
+    // An app on an in-band port stays unguarded.
+    "turbopanel-app-c9.service": appUnit("carol", "18090"),
     // Outside the band, a root unit, a port out of range, a leading zero.
     "turbopanel-cache-c1.service": cacheUnit("alice", "13306"),
     "turbopanel-cache-c2.service": cacheUnit("root", "18100"),

@@ -74,6 +74,8 @@ test("reach-ports-install refuses every line the daemon never writes", async () 
       "alice 18100\r\n",
       "alice 18100\nalice 18100\n",
       "root 18100\n",
+      "alice 18100",
+      "alice 18100\nroot 18101",
       "tp 18100\n",
       "nobody 18100\n",
       "carol 18100\n",

@@ -6,7 +6,7 @@
 #
 # One nftables table, `inet turbopanel_php`, with an output hook at priority
 # -150 (before Docker's NAT, so a published 127.0.0.1:<port> is still seen as
-# 127.0.0.1). Every rule binds only the principal band (uids 15001-60000,
+# 127.0.0.1). Every rule, except the guard rule of guarded ports below, binds only the principal band (uids 15001-60000,
 # tp-host's PRINCIPAL_ID_MIN/MAX): site PHP, cron, ssh and sftp sessions,
 # `sudo -u`, native apps and anything else run as a Hosting Account, whether
 # or not it has a PHP site. The daemon, root, the web servers and builds

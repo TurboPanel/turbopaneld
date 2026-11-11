@@ -263,7 +263,7 @@ Docker Compose. The daemon:
    with `IPAddressAllow=127.0.0.1 127.0.0.53` (the database proxy and
    systemd-resolved's stub). systemd filters by address, not port, so the port
    filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`, the
-   **account walls**). Every rule binds the principal band (uids 15001-60000,
+   **account walls**). Every rule but the guard rule below binds the principal band (uids 15001-60000,
    tp-host's `PRINCIPAL_ID_MIN`/`MAX`): every Hosting Account's PHP, cron,
    ssh, sftp, `sudo -u` and native app processes, with or without a PHP site.
    Replies come first (`ct state established,related accept`), so a native

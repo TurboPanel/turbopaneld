@@ -689,6 +689,12 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
     madeBy:
       "tp-host reach-ports-install, root:root 0700; lib/tp-php-loopback reads it",
   },
+  {
+    root: "config",
+    name: "cache",
+    madeBy:
+      "tp-host cache-prepare and cache-config-install (a folder per cache, root:<account> 0750); the cache unit reads it",
+  },
   { root: "config", name: "instance", madeBy: "instance-launch role" },
   { root: "config", name: "caddy", madeBy: "instance-launch role" },
   { root: "config", name: "site-caddy", madeBy: "site-caddy role" },

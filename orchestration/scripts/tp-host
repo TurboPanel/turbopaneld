@@ -5951,6 +5951,8 @@ tp_verb_tunnel_env_remove() {
 
 tp_reach_content_ok() {
   tp_content_plain "$1" || return 1
+  # Every line ends in a newline: `read` skips an unterminated last line.
+  [ -z "$(tail -c 1 "$1")" ] || return 1
   LC_ALL=C awk -v min="$TP_LISTEN_PORT_MIN" -v max="$TP_LISTEN_PORT_MAX" -v lines="$TP_REACH_MAX_LINES" '
     function fail(msg) {
       print "tp-host: reach list: " msg > "/dev/stderr"

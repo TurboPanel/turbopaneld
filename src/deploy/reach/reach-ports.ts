@@ -82,7 +82,9 @@ export function renderReachList(entries: readonly ReachPort[]): string {
       `helper ports: more than ${REACH_LIST_MAX_LINES} ports in one environment`,
     );
   }
-  return [...lines].sort().map((line) => `${line}\n`).join("");
+  return [...lines].sort((a, b) => a.localeCompare(b)).map((line) =>
+    `${line}\n`
+  ).join("");
 }
 
 /** `tp-host php-loopback-sync`; a failure throws (the guard must be in force). */
