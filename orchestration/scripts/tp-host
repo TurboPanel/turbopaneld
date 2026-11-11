@@ -5996,8 +5996,6 @@ tp_verb_reach_ports_remove() {
   tp_pin_dir "$R_REACH" || return 0
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
     tp_die "refusing $R_REACH: not a root-owned 0700 directory"
-  tp_dir_sealed_at .. || tp_config_root_self_sealed .. ||
-    tp_die "refusing $R_REACH: its parent is not sealed (root-owned, not group- or world-writable)"
   rm -f -- "./$1.list"
 }
 
