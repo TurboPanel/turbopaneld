@@ -42,8 +42,11 @@ restarts by itself (owner decision 2026-11-01). The role installs
 no mail) and copies one file, `/etc/apt/apt.conf.d/52turbopanel-security-updates`
 (`root:root` `0644`). It sorts after the package's `50unattended-upgrades`, so
 its `#clear Unattended-Upgrade::Origins-Pattern` drops the package default
-(which also takes stable point releases) and leaves only the
-`${distro_codename}-security` origin; it also turns on the two
+(which also takes stable point releases) and leaves the
+`${distro_codename}-security` origin and the PHP package archive
+(`origin=deb.sury.org`, owner decision 2026-11-10: PHP patches arrive daily
+and automatically; the daemon then restarts each site's PHP runtime in order,
+`src/deploy/site/AGENTS.md`); it also turns on the two
 `APT::Periodic` switches and sets `Automatic-Reboot "false"`. The package's own
 conffiles are never edited. The apt timers (`apt-daily`, `apt-daily-upgrade`)
 are enabled. A kernel update leaves `/var/run/reboot-required` (the package's

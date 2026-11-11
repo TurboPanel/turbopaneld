@@ -73,7 +73,7 @@ import {
 import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
-import { removeRecordedSiteEnvFiles } from "../deploy/site/site-env-owners.ts";
+import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
 import {
   siteCronWritableDirs,
   siteRunContext,
@@ -166,6 +166,7 @@ import {
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   removeNamedSites,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
   siteWritableDirs,
@@ -3506,14 +3507,7 @@ async function deployEnvironmentHolding(
   // serving, so a deploy that failed earlier never leaves an old vhost gone.
   // A failure from here on is only the report being built, and the vhosts of a
   // site that has left the compose file are not needed by the new version.
-  const leftSites = await removeLeftSites(layout, parsedPayload);
-  // The units that loaded a left site's variables went with the sweeps above.
-  await removeRecordedSiteEnvFiles(
-    runtime.runPrivileged,
-    layout,
-    parsedPayload.environmentId,
-    leftSites,
-  );
+  await removeLeftSites(layout, parsedPayload);
 
   logInfo(
     "commands",
@@ -3522,6 +3516,11 @@ async function deployEnvironmentHolding(
 
   if (parsedPayload.desiredHash !== undefined) {
     await writeAppliedDeployHash(earlyDeploymentDir, parsedPayload.desiredHash);
+  }
+  // A PHP site was applied: look for a PHP build older than the installed one,
+  // in the background (it waits behind this deploy's environment lock).
+  if (sites.some((site) => resolveSitePhpSeries(site) !== undefined)) {
+    requestPhpPatchPassAfterDeploy();
   }
 
   return shapeEnvironmentDeployResult({

@@ -16,6 +16,7 @@ import {
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
+import { armPhpPatchRestarts } from "../deploy/site/php-patch-restart.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
@@ -135,6 +136,8 @@ export type DaemonRunIo = {
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
   reconcileSitePhpRuntimes?: () => Promise<void>;
+  /** Start the PHP patch restarts (the boot pass and the watch). */
+  armPhpPatchRestarts?: () => void;
   /** Start containers a restore stopped before the daemon died. */
   recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
@@ -476,6 +479,9 @@ async function afterOrchestration(
     restoreFabricFromPersistedState)();
   await reinstallForwardingJumps();
   await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
+  // After the runtimes are back: restart what still runs a PHP build older
+  // than the installed one, in the background, and keep watching.
+  (io.armPhpPatchRestarts ?? (() => armPhpPatchRestarts(resolveLayout())))();
   (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
     .catch((err) => {
       (io.logWarn ?? logWarn)(

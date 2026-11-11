@@ -3071,6 +3071,7 @@ async function removeReplacedPhpRuntimes(
     layout.configDir,
     replaced,
     phpUnits,
+    layout.stateDir,
   );
 }
 
@@ -3459,7 +3460,11 @@ async function applySitePhpBackend(
         series,
         siteKey,
       ),
-      { existing: paths.phpUnits ?? new Map(), probe: siteProbeTarget(site) },
+      {
+        existing: paths.phpUnits ?? new Map(),
+        probe: siteProbeTarget(site),
+        record: { stateDir: layout.stateDir, environmentId },
+      },
     );
     return {
       socket: sitePhpSocketPath(phpRuntime.files.spec.id),
@@ -5086,6 +5091,7 @@ export async function removeNamedSites(
           layout.configDir,
           ids,
           listing,
+          layout.stateDir,
         );
       }
     }
@@ -5135,5 +5141,11 @@ async function removeEnvironmentPhpRuntimes(
     );
   }
   const ids = [...new Set([...named, ...(orphans ?? [])])];
-  await removeSitePhpRuntimes(sitePhpIo(), layout.configDir, ids, listing);
+  await removeSitePhpRuntimes(
+    sitePhpIo(),
+    layout.configDir,
+    ids,
+    listing,
+    layout.stateDir,
+  );
 }

@@ -15,10 +15,28 @@
  */
 
 import { readEnv, resolveRuntimesDir } from "../paths/layout.ts";
+import {
+  type PhpPatchRestartError,
+  type PhpPatchSite,
+  type PhpPatchSnapshot,
+  phpPatchSnapshot,
+} from "./php-patch-cache.ts";
 
 export type HostRuntimeMetadata = {
   /** php-fpm series installed from sury, e.g. `["8.3", "8.4"]`. */
-  php?: { series: string[]; extensions?: Record<string, string[]> };
+  php?: {
+    series: string[];
+    extensions?: Record<string, string[]>;
+    /**
+     * Installed patch version by series, from the package database (re-read
+     * only when a binary's change time moved). Present only when known.
+     */
+    versions?: Record<string, string>;
+    /** Per-site runtimes and the version each runs; at most 256, sorted. */
+    sites?: PhpPatchSite[];
+    /** Why the last restart pass stopped, while a site is still held back. */
+    restartError?: PhpPatchRestartError;
+  };
   /** Vendored tenant Node series (`vendor/node-app/<series>/current`). */
   node?: { series: string[] };
   /** Vendored tenant Deno series (`vendor/deno-app/<series>/current`). */
@@ -32,6 +50,7 @@ const SERIES_RE = /^\d{1,3}(\.\d{1,3})?$/;
 const EXTENSION_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 const MAX_SERIES = 16;
 const MAX_EXTENSIONS = 128;
+const MAX_PATCH_SITES = 256;
 
 function readDirNames(path: string): string[] {
   try {
@@ -108,6 +127,33 @@ function vendoredSeries(root: string): string[] {
   );
 }
 
+/**
+ * The patch fields of the PHP entry: only what the cache holds, versions only
+ * for series installed now, sites capped. Exported for fixture tests.
+ */
+export function phpPatchFields(
+  phpSeries: readonly string[],
+  patches: PhpPatchSnapshot,
+): Pick<
+  NonNullable<HostRuntimeMetadata["php"]>,
+  "versions" | "sites" | "restartError"
+> {
+  const versions = Object.fromEntries(
+    Object.entries(patches.versions).filter(([series]) =>
+      phpSeries.includes(series)
+    ),
+  );
+  return {
+    ...(Object.keys(versions).length > 0 ? { versions } : {}),
+    ...(patches.sites.length > 0
+      ? { sites: patches.sites.slice(0, MAX_PATCH_SITES) }
+      : {}),
+    ...(patches.restartError === undefined
+      ? {}
+      : { restartError: patches.restartError }),
+  };
+}
+
 export function readHostRuntimes(
   vendorDir?: string,
 ): HostRuntimeMetadata | undefined {
@@ -128,6 +174,8 @@ export function readHostRuntimes(
     meta.php = {
       series: phpSeries,
       ...(Object.keys(extensions).length > 0 ? { extensions } : {}),
+      // From the cache the patch pass fills: no file is read here.
+      ...phpPatchFields(phpSeries, phpPatchSnapshot()),
     };
   }
 
