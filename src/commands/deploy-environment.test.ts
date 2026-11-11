@@ -1200,7 +1200,7 @@ services:
       assertEquals(envText.includes("web__PORT=3000"), true);
       assertEquals(composeText.includes(secretPath), true);
       assertEquals(await Deno.readTextFile(secretPath), secretValue);
-      assertEquals((await Deno.stat(secretPath)).mode! & 0o777, 0o600);
+      assertEquals((await Deno.stat(secretPath)).mode! & 0o777, 0o444);
       const manifest = JSON.parse(
         await Deno.readTextFile(
           join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
