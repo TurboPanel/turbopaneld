@@ -14,11 +14,14 @@ import {
 } from "./apply-source-releases.ts";
 import type { SandboxedBuildParams } from "./build-sandbox.ts";
 import {
+  PHP_DEPENDENCY_INSTALL_COMMAND,
   prepareNativeAppBuildOutput,
   runReleaseBuild,
   sandboxBuildEnvironment,
 } from "./build.ts";
 import { stageRelease, type StageReleaseParams } from "./promote.ts";
+import { readReleaseManifest } from "./deployment-json.ts";
+import { resolveDaemonReleasePaths } from "./release-layout.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test} — Sonar typescript:S2187 only
@@ -527,6 +530,101 @@ test("a development checkout prepares image builds as the developer, without the
         },
       );
       assertEquals(sandboxed, false);
+    });
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a PHP site's sandboxed build derives the PHP dependency install on the site's series", async () => {
+  const fixture = await createTempLayout();
+  try {
+    await withSandboxRoot(async (_root, deps, seen) => {
+      const base = payload();
+      const site = {
+        composeServiceName: "web",
+        engine: "apache" as const,
+        root: "public",
+        listenPort: 18080,
+        php: { version: "8.3" },
+      };
+      const siteDeps: ApplySourceReleasesDeps = {
+        ...deps,
+        checkoutReleaseFn: async (params) => {
+          const workingDir = params.checkoutDir ??
+            join(params.scratchDir, "source");
+          await Deno.mkdir(workingDir);
+          await Deno.mkdir(join(workingDir, "public"));
+          await Deno.mkdir(join(workingDir, "bootstrap"));
+          for (
+            const file of [
+              "artisan",
+              "bootstrap/app.php",
+              "public/index.php",
+            ]
+          ) {
+            await Deno.writeTextFile(join(workingDir, file), "<?php\n");
+          }
+          await Deno.writeTextFile(join(workingDir, "composer.json"), "{}");
+          return { workingDir, commitSha: "abc123" };
+        },
+        runReleaseBuildFn: (params) =>
+          runReleaseBuild({
+            ...params,
+            phpCliExists: () => Promise.resolve(true),
+            ...(params.sandbox
+              ? {
+                sandbox: {
+                  ...params.sandbox,
+                  run: (run) => {
+                    seen.sandboxRuns.push(run);
+                    return Promise.resolve();
+                  },
+                },
+              }
+              : {}),
+          }),
+      };
+      const phpLayout = resolveLayout(fixture.env);
+      const applied = await applySourceReleases(
+        phpLayout,
+        {
+          ...base,
+          nativeAppServices: [],
+          sites: [site],
+          sourceMaterial: (base.sourceMaterial ?? []).map((entry) => ({
+            ...entry,
+            build: { kind: "native", buildCommand: "true" },
+          })),
+        } as EnvironmentDeployPayload,
+        siteDeps,
+      );
+      const run = seen.sandboxRuns[0];
+      if (!run) throw new TypeError("expected a sandboxed run");
+      const fields = specLines(run.spec);
+      assertEquals(
+        (fields.get("run") ?? []).map(decode),
+        [PHP_DEPENDENCY_INSTALL_COMMAND, "true"],
+      );
+      const env = Object.fromEntries(
+        (fields.get("env") ?? []).map((line) => {
+          const [name = "", value = ""] = line.split(" ");
+          return [name, decode(value)];
+        }),
+      );
+      assertEquals(env.TURBOPANEL_PHP, "8.3");
+      assert(env.PATH?.includes("/composer/current/bin"));
+      // The built tree is a Laravel app: the result and the daemon's own record
+      // of the release carry it, so the vhost serves storage/ and a rollback
+      // puts the shared folders back.
+      assertEquals(applied[0]?.frameworkLayout, "laravel");
+      const record = await readReleaseManifest(
+        resolveDaemonReleasePaths(phpLayout, {
+          serviceId: applied[0]?.serviceId ?? "",
+          releaseId: applied[0]?.releaseId ?? "",
+        }).releaseDir,
+      );
+      assertEquals(record?.frameworkLayout, "laravel");
     });
   } finally {
     await fixture.cleanup();

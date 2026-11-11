@@ -390,7 +390,10 @@ the major (`2`). The playbook and its `deno_app_versions` extra-var are on
 ### php-fpm (`php-fpm`)
 
 Moved to `roles/php-fpm/AGENTS.md` — co-installed sury series, per-series
-`turbopanel-php-fpm@<series>` instances, statoverrides, masked sury units.
+`turbopanel-php-fpm@<series>` instances, masked sury units, the PHP shell
+dispatcher and the vendored PHP package manager (`vendor/composer/<version>/`,
+pinned with its digest, `other:x` ACL like the other runtime trees; site builds
+put its `bin` on `PATH`).
 
 ### OpenLiteSpeed (`openlitespeed`)
 

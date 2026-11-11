@@ -45,5 +45,15 @@ and in the daemon's own contract parser.
 
 `Persistent=false` and a `RandomizedDelaySec` spread: a host down for a week must
 not stampede every missed run on boot, and a hundred sites scheduled every five
-minutes must not all fire on the same tick.
+minutes must not all fire on the same tick. The spread follows the schedule
+(`cronRandomizedDelaySec`): a per-minute job (`* * * * *`, which a framework
+scheduler needs) has none and fires on the minute; `*/N` minutes spread by up to
+`N * 15` seconds; hourly and daily jobs keep 120 seconds.
+
+**A site's jobs load the site's environment file** (`EnvironmentFile=<config>/
+site-env/<user>/<site id>.env`, `deploy/site/site-env-file.ts`) and a PHP site's
+jobs run with `TURBOPANEL_PHP=<series>`, so a bare `php` is the site's own
+series. A release-backed site's jobs run in the release root (`current`), so
+`php artisan schedule:run` works as typed; a managed-directory site's run in
+its document root. A native app's jobs load no file yet.
 

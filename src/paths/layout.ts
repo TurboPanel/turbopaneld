@@ -672,6 +672,12 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
   },
   {
     root: "config",
+    name: "site-env",
+    madeBy:
+      "tp-host site-env-install, root:root 0700 (a 0700 folder per Linux user); units read it",
+  },
+  {
+    root: "config",
     name: "tunnel-env",
     madeBy: "tp-host tunnel-env-install, root:root 0700; the unit reads it",
   },

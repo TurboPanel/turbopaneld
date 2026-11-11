@@ -44,6 +44,9 @@ export type CronApplySpec = {
   workingDirectory: string;
   /** The site's tenant-writable dirs; see `CronUnitOpts.siteWritableDirs`. */
   siteWritableDirs?: readonly string[];
+  /** See `CronUnitOpts.environmentFile` and `phpSeries`. */
+  environmentFile?: string;
+  phpSeries?: string;
   jobs: readonly EnvironmentDeployCronJob[];
 };
 
@@ -90,6 +93,10 @@ function cronMembers(
       username: spec.username,
       workingDirectory: spec.workingDirectory,
       siteWritableDirs: spec.siteWritableDirs ?? [],
+      ...(spec.environmentFile === undefined
+        ? {}
+        : { environmentFile: spec.environmentFile }),
+      ...(spec.phpSeries === undefined ? {} : { phpSeries: spec.phpSeries }),
     };
     members.push({
       unit: cronUnitName(identity),

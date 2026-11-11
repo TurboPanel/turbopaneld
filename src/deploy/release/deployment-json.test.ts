@@ -288,3 +288,26 @@ test("writeReleaseManifest replaces atomically and leaves no temp file", async (
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+test("a framework layout round-trips, and a manifest naming another one is not read", async () => {
+  await withReleaseDir(async (releaseDir) => {
+    for (const frameworkLayout of ["laravel", "wordpress"] as const) {
+      await writeReleaseManifest(releaseDir, { ...BASE, frameworkLayout });
+      assertEquals(
+        (await readReleaseManifest(releaseDir))?.frameworkLayout,
+        frameworkLayout,
+      );
+    }
+    await writeReleaseManifest(releaseDir, BASE);
+    assertEquals(
+      (await readReleaseManifest(releaseDir))?.frameworkLayout,
+      undefined,
+    );
+    // A layout the daemon does not know would excuse links it should not.
+    await writeReleaseManifest(releaseDir, {
+      ...BASE,
+      frameworkLayout: "rails" as unknown as "laravel",
+    });
+    assertEquals(await readReleaseManifest(releaseDir), null);
+  });
+});

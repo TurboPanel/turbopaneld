@@ -81,6 +81,16 @@ test("principal-remove retires a principal on the root-owned layout", async () =
     // A tenant link out of its home: removal must unlink it, never follow it.
     await Deno.symlink(host.path("outside/secret"), `${root}/home/escape`);
     await Deno.symlink(host.path("outside"), `${root}/data/out`);
+    // Its copies of its sites' variables go with it; another account's stay.
+    for (const user of ["dave", "alice"]) {
+      await Deno.mkdir(host.path(`etc/turbopanel/site-env/${user}`), {
+        recursive: true,
+      });
+      await Deno.writeTextFile(
+        host.path(`etc/turbopanel/site-env/${user}/web-0123456789ab.env`),
+        "A='1'\n",
+      );
+    }
 
     const result = await host.run(["principal-remove", "dave"]);
     assertEquals(result.code, 0, result.stderr);
@@ -103,6 +113,15 @@ test("principal-remove retires a principal on the root-owned layout", async () =
     ) {
       assertEquals(await exists(host.path(gone)), false, gone);
     }
+    assertEquals(
+      await exists(host.path("etc/turbopanel/site-env/dave")),
+      false,
+    );
+    assert(
+      await exists(
+        host.path("etc/turbopanel/site-env/alice/web-0123456789ab.env"),
+      ),
+    );
     // What the links pointed at, and every other principal, is untouched.
     assertEquals(
       await Deno.readTextFile(host.path("outside/secret")),

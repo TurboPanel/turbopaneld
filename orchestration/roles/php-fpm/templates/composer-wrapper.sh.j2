@@ -1,0 +1,6 @@
+#!/bin/sh
+# Managed by TurboPanel. Edits are overwritten on the next converge.
+#
+# Runs the pinned PHP package manager on the PHP series the caller asked for
+# (TURBOPANEL_PHP) through the PHP shell dispatcher.
+exec /usr/local/bin/php "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/composer.phar" "$@"

@@ -50,6 +50,12 @@ import { ensureAssetFolder } from "../asset-folders.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import type { DeployCancelToken } from "../deploy-cancel.ts";
 import { join } from "@std/path";
+import { resolveSitePhpSeries } from "../site.ts";
+import {
+  detectFrameworkLayout,
+  type FrameworkLayout,
+  frameworkLayoutLine,
+} from "./framework-layout.ts";
 import {
   assertCheckoutCredentialsRemoved,
   checkoutRelease,
@@ -197,6 +203,11 @@ export type AppliedRelease = {
    * (`deno`), or on a rollback the one its record kept. Absent means Node.
    */
   runtime?: "node" | "deno";
+  /**
+   * The framework layout of a site's release (built, or on a rollback read back
+   * from its record): the site apply serves the layout's shared folders by URL.
+   */
+  frameworkLayout?: FrameworkLayout;
 };
 
 export { resolveReleaseServiceId } from "./release-service-id.ts";
@@ -415,6 +426,9 @@ async function rollbackOneRelease(
       releaseId: params.releaseId,
       ...(deps.runFn === undefined ? {} : { runFn: deps.runFn }),
       ...(keepCurrent ? { keepCurrent } : {}),
+      ...(recordedManifest.frameworkLayout === undefined
+        ? {}
+        : { frameworkLayout: recordedManifest.frameworkLayout }),
     });
   logSink.onLine(
     "stdout",
@@ -451,6 +465,9 @@ async function rollbackOneRelease(
     // A record without a runtime ran on Node; say so explicitly so a rollback
     // across a switch never keeps the newer payload's `deno`.
     runtime: recordedManifest.runtime ?? "node",
+    ...(recordedManifest.frameworkLayout === undefined
+      ? {}
+      : { frameworkLayout: recordedManifest.frameworkLayout }),
   };
 }
 
@@ -936,6 +953,15 @@ async function buildNativeRelease(
     // A site that would have no document root fails here, while `current` still
     // points at the last good release and nothing of this one is on disk.
     await assertSiteRootBuilt(payload, entry, nativeOutput, checkout);
+    const frameworkLayout = await detectSiteFrameworkLayout(
+      payload,
+      entry,
+      nativeOutput,
+      checkout,
+    );
+    if (frameworkLayout !== undefined) {
+      logSink.onLine("stdout", frameworkLayoutLine(frameworkLayout));
+    }
     const htaccessWarnings = await htaccessWarningsForSite(
       payload,
       entry,
@@ -970,6 +996,9 @@ async function buildNativeRelease(
       startCommand: entry.build.startCommand?.trim() || undefined,
       startupFile: nativeAppForService(payload, entry.composeServiceName)
         ?.startupFile?.trim() || undefined,
+      // A Laravel or WordPress site's layout, so tp-host links the shared
+      // folders in and a rollback puts them back (`ReleaseManifestV1`).
+      frameworkLayout,
     });
     await recordNativeRelease(layout, manifest, deps);
     const keepCurrent = await holdsCurrent(
@@ -1038,6 +1067,7 @@ async function buildNativeRelease(
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
       runtime: builtRuntime(payload, entry.composeServiceName),
+      frameworkLayout,
     });
   } finally {
     if (work) await removeBuildWork(work, onOutput);
@@ -1100,6 +1130,25 @@ async function htaccessWarningsForSite(
   } catch {
     return [];
   }
+}
+
+/**
+ * For a site, which framework the built tree is (`./framework-layout.ts`),
+ * read from the folder that becomes the release root. Not a site, or a tree the
+ * daemon cannot read, is no layout: the site is served as it is.
+ */
+async function detectSiteFrameworkLayout(
+  payload: EnvironmentDeployPayload,
+  entry: EnvironmentDeploySource,
+  nativeOutput: NativeAppBuildOutput,
+  checkout: CheckoutResult,
+): Promise<FrameworkLayout | undefined> {
+  if (!siteForSource(payload, entry.composeServiceName)) return undefined;
+  const outputDirectory = entry.build.outputDirectory ??
+    nativeOutput.outputDirectory;
+  return await detectFrameworkLayout(
+    join(checkout.workingDir, entry.subdirectory ?? "", outputDirectory ?? ""),
+  );
 }
 
 /**
@@ -1195,6 +1244,7 @@ async function buildNativeTree(
     nativeRuntime: nativeApp
       ? nativeBuildRuntime(layout, nativeApp)
       : siteBuildRuntime(layout, payload, entry),
+    serviceName: entry.composeServiceName,
     sandbox: work
       ? definedFields({
         work,
@@ -1259,8 +1309,20 @@ function siteBuildRuntime(
   payload: EnvironmentDeployPayload,
   entry: EnvironmentDeploySource,
 ): NativeBuildRuntime | undefined {
-  if (!siteForSource(payload, entry.composeServiceName)) return undefined;
-  return nativeBuildRuntime(layout, { runtime: "node" });
+  const site = siteForSource(payload, entry.composeServiceName);
+  if (!site) return undefined;
+  const base = nativeBuildRuntime(layout, { runtime: "node" });
+  // A PHP site's build also gets its series' command-line PHP and the vendored
+  // PHP package manager; the series is installed before any release is built.
+  const series = resolveSitePhpSeries(site);
+  if (series === undefined) return base;
+  return {
+    ...base,
+    php: {
+      series,
+      composerBinDir: join(layout.runtimesDir, "composer", "current", "bin"),
+    },
+  };
 }
 
 /** The author said how the app starts: a start command or a startup file. */

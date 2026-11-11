@@ -22,7 +22,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   managed install, `-u` re-execs, tp-orchestrate and engine tests alone. The
   verbs are split in two: `HOST_PROGRAM_VERBS` (real programs: `install`,
   `systemctl`, `iptables`, `useradd`, …) run directly in development, and
-  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `instance-cert-install`, `panel-identity-write`, `publish`,
+  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `site-env-install`, `release-layout-folders`, `instance-cert-install`, `panel-identity-write`, `publish`,
   `cert-dates`, …, which no host program provides) run in development through
   the checkout's own `<checkout>/orchestration/scripts/tp-host` with sudo and
   every check it applies on a managed host. `tp_dir_sealed_at` stays
@@ -95,7 +95,15 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     equal to `<config>/node-app-env/<id>.env` (its own variables copy; systemd
     reads it as root, so no other path, no `-` prefix, no second line;
     `tp_app_envfile_ok`) and no other unit may carry one except the backup unit
-    below. That folder is root's alone: only `app-env-install <id>` fills it
+    below, and a `turbopanel-cron-*.service` may carry exactly one
+    `EnvironmentFile=`, equal to `<config>/site-env/<the unit's own
+    User=>/<site id>.env` (`tp_site_envfile_ok`: a unit can never load another
+    account's variables; no `-` prefix, no second line). `site-env-install
+    USER ID` / `site-env-remove USER ID` fill and empty those per-account
+    folders the way `app-env-install` does (staged file
+    `<state>/sites/.env-stage/<id>.env`, the same content checker, `0600 root:root`
+    in a `root:root 0700` folder per account); `principal-remove` removes the
+    account's folder. That folder is root's alone: only `app-env-install <id>` fills it
     (it reads the daemon's staged `<config>/node-apps/envs/<id>.env` as the
     daemon account on an open descriptor, refuses a symlink, a non-regular
     file, another owner, a second hard link or more than 1 MiB, checks the
@@ -408,3 +416,23 @@ must be plain whole numbers (`v` exactly `1`, never `true` or `1.0`; nothing abo
 the control plane reads them. The shared vectors (`src/testing/keyset-statement-vectors.json`) are
 byte-identical to the control plane's and pinned by `check:contract-drift`. Root can hand-apply
 a downloaded statement: `sudo tp-host panel-identity-write statement < key-set-N.json`.
+
+## Release publish with a framework layout
+
+`publish` and `publish-keep` take an optional seventh word after the six-word
+form: `layout=laravel` or `layout=wordpress` (anything else is refused, and
+`publish-open` takes none). In the sealed leaf, before the link check
+(`tp_publish_layout`), the one recipe path (`tp_layout_recipe`: Laravel
+`storage` -> `shared/storage`, WordPress `wp-content/uploads` ->
+`../shared/uploads`) is replaced by its link, refusing a parent that is a link;
+for Laravel the real `bootstrap/cache` folder (when it is not a link) is made the
+site account's (`0750`, files `0640`), the only entry of the release that is not
+root's. `tp_publish_links` skips exactly that path with exactly that text
+(`find ... ! ( -path -lname )`), so a user link that goes through the recipe link
+still resolves under `shared/` and is refused. After the release is placed,
+`tp_layout_folders` makes the layout's folders in the service's `shared/` **as
+the owner** (`tp_as`, never as root) with `0750`. `release-layout-folders OWNER
+SCOPE SLUG SERVICE-ID RELEASE-ID layout=NAME` does the same for a release that
+exists (the daemon runs it before a rollback swap). The recipe is the daemon's
+`platformLayoutLinks` (`src/deploy/release/framework-layout.ts`); a test keeps
+them equal.

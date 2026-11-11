@@ -33,6 +33,11 @@
 import { dirname, join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import {
+  type FrameworkLayout,
+  isRecipeLink,
+  recipeLinkTargets,
+} from "./framework-layout.ts";
 import type { ReleasePaths } from "./release-layout.ts";
 
 /** How many offending targets an error names before it summarizes. */
@@ -189,12 +194,22 @@ export async function assertReleaseLinksStayHome(
 export async function assertStagedLinksStayInRelease(
   releaseDir: string,
   runFn: RunFn,
+  /**
+   * The framework layout whose recipe links were already put in the staged
+   * tree (a daemon-owned release applies them before this check, the way
+   * tp-host does). Each recipe link's own resolution, `<release>/shared/<folder>`,
+   * is excused once; a link that goes through it resolves deeper and is refused.
+   */
+  layout?: FrameworkLayout,
 ): Promise<void> {
   const targets = await releaseLinkTargets(releaseDir, runFn);
-  const leaving = linkTargetsLeavingRelease(
-    targets,
-    await physicalPath(releaseDir),
-  );
+  const physical = await physicalPath(releaseDir);
+  let rest = [...targets];
+  for (const expected of recipeLinkTargets(layout, physical)) {
+    const at = rest.indexOf(expected);
+    if (at !== -1) rest = rest.toSpliced(at, 1);
+  }
+  const leaving = linkTargetsLeavingRelease(rest, physical);
   if (leaving.length === 0) return;
   throw new Error(
     `release ${releaseDir} has symlinks that leave the release or reach into ` +
@@ -366,6 +381,13 @@ function stepFrame(walk: Walk, frame: Frame, root: PathNode): void {
 export function linksLeavingReleaseLexically(
   links: readonly ReleaseLink[],
   stepBudget = LINK_WALK_STEP_BUDGET,
+  /**
+   * The framework layout the release's own record names. Its recipe links
+   * (exact path and exact text) are the platform's, not the build's, and are
+   * not reported; a link that goes **through** one still resolves into
+   * `shared/` and is. A release with no layout excuses nothing.
+   */
+  layout?: FrameworkLayout,
 ): string[] {
   const root: PathNode = { parent: null, children: new Map() };
   const nodes = links.map((link) => {
@@ -377,7 +399,9 @@ export function linksLeavingReleaseLexically(
   const budget = { steps: stepBudget };
   const leaving: string[] = [];
   for (const [index, link] of links.entries()) {
-    if (link.path === RELEASE_SHARED_NAME) continue;
+    if (link.path === RELEASE_SHARED_NAME || isRecipeLink(layout, link)) {
+      continue;
+    }
     const node = nodes[index];
     const result = node.result ?? resolveLink(node, root, budget);
     if (result === OVER_BUDGET) {
@@ -494,16 +518,22 @@ function resolvedTargetsLeavingSealedRelease(
   targets: readonly string[],
   links: readonly ReleaseLink[],
   physicalReleaseDir: string,
+  layout?: FrameworkLayout,
 ): string[] {
   const layoutLink = links.some((link) =>
     link.path === RELEASE_SHARED_NAME && link.text === "../../shared"
   );
-  const layoutTarget = join(
-    dirname(dirname(physicalReleaseDir)),
-    RELEASE_SHARED_NAME,
-  );
+  const siteDir = dirname(dirname(physicalReleaseDir));
+  const layoutTarget = join(siteDir, RELEASE_SHARED_NAME);
   const index = layoutLink ? targets.indexOf(layoutTarget) : -1;
-  const rest = index === -1 ? targets : targets.toSpliced(index, 1);
+  let rest = index === -1 ? targets : targets.toSpliced(index, 1);
+  // Each recipe link present resolves to its folder in `shared/`; one
+  // occurrence each is excused. A recipe folder the owner has repointed
+  // resolves elsewhere and is reported.
+  for (const expected of recipeLinkTargets(layout, siteDir)) {
+    const at = rest.indexOf(expected);
+    if (at !== -1) rest = rest.toSpliced(at, 1);
+  }
   return linkTargetsLeavingRelease(rest, physicalReleaseDir);
 }
 
@@ -520,15 +550,22 @@ export async function assertSealedLinksStayInRelease(
   releaseDir: string,
   runFn: RunFn,
   asRoot = false,
+  /** The layout the release's own record names (see {@link linksLeavingReleaseLexically}). */
+  layout?: FrameworkLayout,
 ): Promise<void> {
   const links = await listReleaseLinks(releaseDir, runFn, asRoot);
-  const lexical = linksLeavingReleaseLexically(links);
+  const lexical = linksLeavingReleaseLexically(
+    links,
+    LINK_WALK_STEP_BUDGET,
+    layout,
+  );
   const resolved = lexical.length > 0
     ? []
     : resolvedTargetsLeavingSealedRelease(
       await releaseLinkTargets(releaseDir, runFn),
       links,
       await physicalPath(releaseDir),
+      layout,
     );
   const leaving = [...lexical, ...resolved];
   if (leaving.length === 0) return;

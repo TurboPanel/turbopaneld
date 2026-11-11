@@ -73,6 +73,11 @@ import {
 import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import {
+  materializeSiteEnvFiles,
+  siteEnvFileId,
+  siteEnvRootPath,
+} from "../deploy/site/site-env-file.ts";
+import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
   createNoopCommandOutputSink,
@@ -146,10 +151,12 @@ import {
 import {
   applySites,
   ensureSiteEngines,
+  planSiteFrameworkAliases,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   removeNamedSites,
   resolveSiteDocumentRoot,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
   siteWritableDirs,
@@ -192,6 +199,7 @@ import {
 } from "../deploy/native/apply-native-apps.ts";
 import {
   siteBuildRuntimes,
+  sitesWithFrameworkLayouts,
   sitesWithReleaseRoots,
 } from "../deploy/release/site-release.ts";
 import {
@@ -1399,6 +1407,54 @@ function nativeRef(
   };
 }
 
+/**
+ * One site's scheduled jobs, with the account, folder and variables they run
+ * with, or `undefined` when it has none. A release-backed site's jobs run in
+ * the release root (`current`), so a framework's `php artisan` works as typed;
+ * a managed-directory site's in its document root. Both load the site's
+ * environment file (installed by `materializeSiteEnvFiles` earlier in the
+ * deploy) and, for a PHP site, a bare `php` is the site's own series.
+ */
+export function siteCronSpec(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: EnvironmentDeploySite,
+  release: SiteRelease | undefined,
+  managed: SiteManagedDirectory | undefined,
+): CronApplySpec | undefined {
+  const principal = site.principal;
+  // The wire contract already refuses jobs without a principal; this keeps the
+  // type honest rather than re-reporting it.
+  if (!site.cron || site.cron.length === 0 || !principal) return undefined;
+  const owner = release ?? managed;
+  const phpSeries = resolveSitePhpSeries(site);
+  return {
+    composeServiceName: site.composeServiceName,
+    username: principal.username,
+    workingDirectory: release
+      ? serviceTree(layout, release).currentLink
+      : resolveSiteDocumentRoot(
+        layout,
+        environmentId,
+        site,
+        release,
+        managed,
+      ),
+    siteWritableDirs: siteCronWritableDirs(layout, release, managed),
+    ...(owner
+      ? {
+        environmentFile: siteEnvRootPath(
+          layout,
+          owner.username,
+          siteEnvFileId(environmentId, site.composeServiceName),
+        ),
+      }
+      : {}),
+    ...(phpSeries === undefined ? {} : { phpSeries }),
+    jobs: site.cron,
+  };
+}
+
 async function applyDeployCronJobs(
   layout: LayoutPaths,
   parsedPayload: EnvironmentDeployPayload,
@@ -1410,27 +1466,14 @@ async function applyDeployCronJobs(
 ): Promise<void> {
   const specs: CronApplySpec[] = [];
   for (const site of sites) {
-    const principal = site.principal;
-    // The wire contract already refuses jobs without a principal; this keeps
-    // the type honest rather than re-reporting it.
-    if (!site.cron || site.cron.length === 0 || !principal) continue;
-    specs.push({
-      composeServiceName: site.composeServiceName,
-      username: principal.username,
-      workingDirectory: resolveSiteDocumentRoot(
-        layout,
-        parsedPayload.environmentId,
-        site,
-        releaseBindings.get(site.composeServiceName),
-        managedBindings.get(site.composeServiceName),
-      ),
-      siteWritableDirs: siteCronWritableDirs(
-        layout,
-        releaseBindings.get(site.composeServiceName),
-        managedBindings.get(site.composeServiceName),
-      ),
-      jobs: site.cron,
-    });
+    const spec = siteCronSpec(
+      layout,
+      parsedPayload.environmentId,
+      site,
+      releaseBindings.get(site.composeServiceName),
+      managedBindings.get(site.composeServiceName),
+    );
+    if (spec) specs.push(spec);
   }
   for (const app of nativeAppServices) {
     if (!app.cron || app.cron.length === 0) continue;
@@ -3172,7 +3215,10 @@ async function deployEnvironmentHolding(
   // static export is served as files, not supervised as a process.
   const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
   // A site that publishes an output folder serves that folder, not `public`.
-  lanes.sites = sitesWithReleaseRoots(parsedPayload, lanes.sites);
+  lanes.sites = sitesWithFrameworkLayouts(
+    sitesWithReleaseRoots(parsedPayload, lanes.sites),
+    appliedReleases,
+  );
   const { nativeAppServices } = lanes;
   // Everything from here on (release trees reclaimed, sites and native apps
   // applied, cron timers swept) changes what is serving. A deploy with none of
@@ -3213,7 +3259,10 @@ async function deployEnvironmentHolding(
   // Before anything is written: a variable a site's web server cannot carry is
   // named in the command log and the result, a required database setting stops
   // the deploy here.
-  const siteWarnings = sites.flatMap(planSiteWebEnv);
+  const siteWarnings = sites.flatMap((site) => [
+    ...planSiteWebEnv(site),
+    ...planSiteFrameworkAliases(site),
+  ]);
   for (const warning of siteWarnings) {
     runtime.logSink.onLine("stderr", warning);
   }
@@ -3223,6 +3272,17 @@ async function deployEnvironmentHolding(
     parsedPayload,
     siteReleaseBindings,
   );
+  // Each site's environment file (cron jobs load it), before anything runs a
+  // command or applies a site.
+  const siteEnvLines = await materializeSiteEnvFiles(
+    layout,
+    parsedPayload.environmentId,
+    sites,
+    siteReleaseBindings,
+    siteManagedBindings,
+    runtime.runPrivileged,
+  );
+  for (const line of siteEnvLines) runtime.logSink.onLine("stderr", line);
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
     appliedReleases,

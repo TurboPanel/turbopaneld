@@ -115,7 +115,44 @@ WordPress `wp-content/uploads -> ../shared/uploads` (or any other link into
 `shared/`) fails the promote with "reach into shared/" (serve shared files
 through the app, not a link), and on nginx every link under the document root,
 even one that stays in the release (`public/build -> ../dist`, Laravel
-`public/storage`), answers 403 (`../site/AGENTS.md`).
+`public/storage`), answers 403 (`../site/AGENTS.md`). The one exception is
+the **platform's own layout links**, below.
+
+**Framework layouts** (`framework-layout.ts`). After the build, a site's release
+root is detected as Laravel or WordPress (regular files only) and the layout is
+recorded in the release manifest (`frameworkLayout`, daemon-only). tp-host
+`publish` / `publish-keep` take it as an optional seventh word,
+`layout=laravel|wordpress`, and in the sealed leaf, before the link check,
+replace one path with a link into `shared/`: Laravel `storage` ->
+`shared/storage`, WordPress `wp-content/uploads` -> `../shared/uploads`. Only
+that; Laravel's `bootstrap/cache` stays in the release (filled while it is
+built, by the PHP dependency install's package discovery) and, as the one folder
+of the sealed release the site account owns (`0750`, files `0640`), is what a
+post-deploy command may write the config and route caches into; WordPress's
+`wp-content/cache` stays in the release, read-only. A `bootstrap/cache` the
+build shipped as a link stays root's and read-only. After the release is placed,
+tp-host makes the layout's folders in `shared/` **as the owner**
+(`release-layout-folders` does the same for an existing release, which the
+daemon runs before a rollback swap). The link check exempts exactly the recipe
+path **with exactly its text** (tp-host `find ... ! ( -path -lname )`; the daemon's
+`isRecipeLink`), at publish, on rollback and in the boot scan, and only for a
+release whose own daemon record names the layout; every other link, including
+one that goes **through** a recipe link (`public/x -> ../storage/app`), is still
+refused. On rollback the recipe link's resolution is excused once, and only
+when it lands in the layout's folder in `shared/`. A daemon-owned (development)
+tree applies the same links in place (`applyFrameworkLayoutInPlace`).
+
+**PHP dependency install.** A PHP site build (`NativeBuildRuntime.php`) puts the
+vendored PHP package manager after the tenant Node on `PATH`, pins
+`TURBOPANEL_PHP` to the site's series and gives it a cache per account and
+project (`<build cache>/composer`) and a home outside the checkout. With a
+`composer.json` (a regular file) and no author command naming it, `composer
+install --no-dev --optimize-autoloader --no-interaction --no-progress
+--prefer-dist` runs first (never `--no-scripts`: package discovery writes the
+framework's caches into the release while it is writable). `COMPOSER_AUTH`,
+`COMPOSER_HOME`, `COMPOSER_CACHE_DIR` and `TURBOPANEL_PHP` are reserved build
+variables: a build variable is an `env(1)` argument and not secret, so private
+packages are not supported yet.
 
 **A rollback re-checks the target's links, lexically and resolved**
 (`assertSealedLinksStayInRelease`). A release sealed before the publish-time

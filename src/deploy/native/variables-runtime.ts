@@ -123,16 +123,18 @@ export function normalizeNativeAppEnvValue(
   composeServiceName: string,
   name: string,
   value: string,
+  /** What the service is, for the error: a native app, or a site. */
+  subject = "native app",
 ): string {
   const normalized = value.replaceAll("\r\n", "\n");
   if (normalized.includes("\r")) {
     throw new Error(
-      `native app ${composeServiceName}: variable ${name} holds a carriage return that is not part of a Windows line ending (CR LF); remove it and deploy again`,
+      `${subject} ${composeServiceName}: variable ${name} holds a carriage return that is not part of a Windows line ending (CR LF); remove it and deploy again`,
     );
   }
   if (normalized.includes("\0")) {
     throw new Error(
-      `native app ${composeServiceName}: variable ${name} holds a NUL character, which an environment variable cannot carry`,
+      `${subject} ${composeServiceName}: variable ${name} holds a NUL character, which an environment variable cannot carry`,
     );
   }
   return normalized;
