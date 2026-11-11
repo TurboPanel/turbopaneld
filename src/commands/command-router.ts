@@ -329,18 +329,27 @@ const LATE_COMMAND_HANDLERS: Record<
     ),
 };
 
-/** The result of a late command, or `undefined` for a type this table does not hold. */
-async function dispatchLateCommand(
+/** How a late command ended, in the fields the dispatch outcome carries. */
+type LateOutcome = {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  respondedAt?: string;
+};
+
+/** Run a late command, or answer "unknown" for a type this table does not hold. */
+async function runLateCommand(
   message: CommandDispatchMessage,
   daemonReceivedAt: string,
-): Promise<unknown> {
+): Promise<LateOutcome> {
   if (!Object.hasOwn(LATE_COMMAND_HANDLERS, message.commandType)) {
-    return undefined;
+    return { ok: false, error: `Unknown command type: ${message.commandType}` };
   }
-  return await LATE_COMMAND_HANDLERS[message.commandType](
+  const result = await LATE_COMMAND_HANDLERS[message.commandType](
     message,
     daemonReceivedAt,
   );
+  return { ok: true, result, respondedAt: new Date().toISOString() };
 }
 
 /**
@@ -762,15 +771,11 @@ export async function handleCommandDispatch(
         break;
       }
       default: {
-        const late = await dispatchLateCommand(message, daemonReceivedAt);
-        if (late === undefined) {
-          ok = false;
-          error = `Unknown command type: ${message.commandType}`;
-        } else {
-          result = late;
-          ok = true;
-          daemonRespondedAt = new Date().toISOString();
-        }
+        const late = await runLateCommand(message, daemonReceivedAt);
+        ok = late.ok;
+        result = late.result;
+        error = late.error;
+        daemonRespondedAt = late.respondedAt ?? daemonRespondedAt;
         break;
       }
     }
