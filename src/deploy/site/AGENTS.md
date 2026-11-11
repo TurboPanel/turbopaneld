@@ -743,8 +743,15 @@ bundle, certificate blocks only (checked at parse). It lands as
 `<siteRoot>/.turbopanel-hosting/managed-ca.pem` through the same `sudo -n
 install` call as `hosting.env` (owner's Linux user, `0400`, directory
 `root:root` `0711`), and every name in `dbCa.variables` is set to that path, so
-a multi-line certificate never enters the web server's environment. A site with
-`dbCa` and no owning Linux user is refused. Native apps are unchanged: their
+a multi-line certificate never enters the web server's environment. With
+feature `site-db-url-ca-v1`, `dbCa.urlVariables` (up to 16 names, like
+`variables`) lists variables holding a PostgreSQL URL: `withDbCaVariables`
+passes each one present in the site's environment through
+`withPostgresRootCert` (`db-url-ca.ts`), which appends `sslrootcert=<CA file>`
+(path percent-encoded outside `[A-Za-z0-9/._-]`) only for a `postgres://` or
+`postgresql://` URL whose `sslmode` is `verify-ca` or `verify-full` and that has
+no `sslrootcert`. Only listed names are touched, and the value is never logged.
+A site with `dbCa` and no owning Linux user is refused. Native apps are unchanged: their
 environment file carries a multi-line value as is.
 
 Future seams (not MVP): multi-version PHP side-by-side, swarm-style replicas,

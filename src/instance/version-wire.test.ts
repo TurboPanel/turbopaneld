@@ -45,6 +45,7 @@ import {
   SERVER_NETWORK_CHECK_FEATURE,
   SIGNIN_V2_FEATURE,
   SITE_DB_BINDINGS_FEATURE,
+  SITE_DB_URL_CA_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   SITE_PHP_LIFECYCLE_FEATURE,
   TLS_CAPTURE_FEATURE,
@@ -564,11 +565,19 @@ test("site-php-lifecycle-v1 is advertised", () => {
   assert(DAEMON_WIRE_FEATURES.includes(SITE_PHP_LIFECYCLE_FEATURE));
 });
 
-test("tunnel-table-generation-v1 is advertised, and is the last entry", () => {
+test("tunnel-table-generation-v1 is advertised, right after site-php-lifecycle-v1", () => {
   assertEquals(TUNNEL_TABLE_GENERATION_FEATURE, "tunnel-table-generation-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_TABLE_GENERATION_FEATURE);
-  assert(
-    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_TABLE_GENERATION_FEATURE) ===
-      DAEMON_WIRE_FEATURES.indexOf(SITE_PHP_LIFECYCLE_FEATURE) + 1,
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_TABLE_GENERATION_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(SITE_PHP_LIFECYCLE_FEATURE) + 1,
+  );
+});
+
+test("site-db-url-ca-v1 is advertised, and is the last entry", () => {
+  assertEquals(SITE_DB_URL_CA_FEATURE, "site-db-url-ca-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SITE_DB_URL_CA_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(SITE_DB_URL_CA_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_TABLE_GENERATION_FEATURE) + 1,
   );
 });

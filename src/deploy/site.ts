@@ -181,6 +181,7 @@ import {
 } from "./site/php-runtime-apply.ts";
 import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
 import { removeRecordedSiteEnvFiles } from "./site/site-env-owners.ts";
+import { withPostgresRootCert } from "./site/db-url-ca.ts";
 import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
 import {
   type FrameworkAlias,
@@ -2013,7 +2014,9 @@ export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
  * Point every `dbCa.variables` name at the CA file the owner's folder will
  * hold, so the site's engine renders a path instead of a multi-line value. The
  * file lives with the other hosting files and is written by the same call, so
- * only a site with a Linux user owning its tree can take one.
+ * only a site with a Linux user owning its tree can take one. A PostgreSQL URL
+ * named in `dbCa.urlVariables` also gets `sslrootcert=<path>` in the verify
+ * modes (`withPostgresRootCert`); the URL's value is never logged.
  */
 export function withDbCaVariables(
   layout: LayoutPaths,
@@ -2032,6 +2035,10 @@ export function withDbCaVariables(
   );
   const webEnv = { ...site.webEnv };
   for (const variable of site.dbCa.variables) webEnv[variable] = path;
+  for (const variable of site.dbCa.urlVariables ?? []) {
+    const url = webEnv[variable];
+    if (url !== undefined) webEnv[variable] = withPostgresRootCert(url, path);
+  }
   return { ...site, webEnv };
 }
 
