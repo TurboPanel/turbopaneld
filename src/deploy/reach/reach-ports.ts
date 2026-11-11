@@ -91,7 +91,7 @@ export function renderReachList(entries: readonly ReachPort[]): string {
 }
 
 /** `tp-host php-loopback-sync`; a failure throws (the guard must be in force). */
-async function syncWalls(run: RunFn): Promise<void> {
+export async function syncAccountWalls(run: RunFn): Promise<void> {
   const result = await run("sudo", hostSudoArgs(["-n", "php-loopback-sync"]));
   if (!result.success) {
     throw new Error(
@@ -149,7 +149,7 @@ export async function installReachPorts(
     return;
   }
   await installList(layout, run, environmentId, renderReachList(entries));
-  await syncWalls(run);
+  await syncAccountWalls(run);
 }
 
 /** Close the helper ports of one environment: delete its list, rebuild the walls. */
@@ -169,5 +169,5 @@ export async function removeReachPorts(
       }`,
     );
   }
-  await syncWalls(run);
+  await syncAccountWalls(run);
 }

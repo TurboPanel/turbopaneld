@@ -132,6 +132,7 @@ export const DAEMON_WIRE_FEATURES = [
   "site-php-lifecycle-v1",
   "tunnel-table-generation-v1",
   "site-db-url-ca-v1",
+  "project-cache-v1",
 ] as const;
 
 /**
@@ -812,3 +813,15 @@ export const TUNNEL_TABLE_GENERATION_FEATURE: DaemonWireFeature =
  * daemon that lists this feature; an older daemon would drop it silently.
  */
 export const SITE_DB_URL_CA_FEATURE: DaemonWireFeature = "site-db-url-ca-v1";
+
+/**
+ * `project-cache-v1`: `environment.deploy` may carry `caches` (the complete set
+ * of project caches this environment has on the host) and `helperReach` (the
+ * helper container ports to open to a Hosting Account), and the command
+ * `cache.apply` brings a host's caches for one environment in line between
+ * deploys. Each field has three states: absent leaves the host alone, empty
+ * clears it, a list sets it. The control plane sends them only to a daemon that
+ * lists this feature; an older daemon would drop them silently. Appended last
+ * on purpose: wire features are expand-only and a later feature goes after it.
+ */
+export const PROJECT_CACHE_FEATURE: DaemonWireFeature = "project-cache-v1";

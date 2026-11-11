@@ -589,6 +589,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "ansible", mode: "0750" },
   // Staged helper port lists, in `.stage`, that `tp-host reach-ports-install` copies (deploy/reach).
   { name: "reach", mode: "0700" },
+  // The host index of each environment's project caches and their staged configs, in `.stage` (deploy/cache).
+  { name: "caches", mode: "0700" },
 ];
 
 /** `<backupDir>/<kind>`: the top folder of one kind of backup. */

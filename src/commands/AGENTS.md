@@ -18,6 +18,12 @@ Root context: `../../AGENTS.md`. Transport: `../instance/AGENTS.md`.
 
 ## Handlers
 
+`cache.apply` (`cache-apply.ts`, feature `project-cache-v1`) brings a host's
+project caches for one environment in line between deploys: the complete set in
+`caches`, removals in `removed` (`deleteData` per entry), under the environment
+lock. A cache whose Hosting Account is not on the host yet is answered `pending`.
+It never prunes a cache that is merely not listed. Detail: `../deploy/cache/AGENTS.md`.
+
 - `server.timezone.set` / `server.ntp.set` (`timezone.ts`, `ntp.ts`) apply via
   `runTimeSyncApply` → `time-sync-apply.yml` and return observed host state
   from `readTimeSync()`.

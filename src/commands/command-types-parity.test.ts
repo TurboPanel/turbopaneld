@@ -79,6 +79,7 @@ const INSTANCE_COMMAND_TYPES = [
   "storage.backup",
   "storage.restore",
   "system.reconcile",
+  "cache.apply",
 ] as const;
 
 test("COMMAND_TYPES matches instance canonical order", () => {

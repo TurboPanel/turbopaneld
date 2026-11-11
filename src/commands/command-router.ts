@@ -18,6 +18,7 @@ import type {
 import {
   parseBackupsReconcilePayload,
   parseBackupTargetTestPayload,
+  parseCacheApplyPayload,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -68,6 +69,7 @@ import { handleManagedDestroy } from "../managed/destroy.ts";
 import { handleManagedLifecycle } from "../managed/lifecycle.ts";
 import { handleManagedPromote } from "../managed/promote.ts";
 import { handleManagedHaFailover } from "./managed-ha-failover.ts";
+import { handleCacheApply } from "./cache-apply.ts";
 import { handleManagedHaReconcile } from "./managed-ha-reconcile.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
@@ -154,6 +156,7 @@ export type CommandRouterHandlerOverrides = {
   handleStorageBackup?: typeof handleStorageBackup;
   handleStorageRestore?: typeof handleStorageRestore;
   handleSystemReconcile?: typeof handleSystemReconcile;
+  handleCacheApply?: typeof handleCacheApply;
 };
 
 let commandRouterHandlerOverrides: CommandRouterHandlerOverrides | null = null;
@@ -306,6 +309,47 @@ function sanitizeError(
   const text = sanitizeForLog(value);
   if (text.length <= maxLen) return text;
   return `${TRUNCATED_MARKER}${text.slice(text.length - maxLen)}`;
+}
+
+/**
+ * Commands added after the main switch reached its size limit, looked up by
+ * type. Each takes the dispatch message and returns the command's result.
+ */
+const LATE_COMMAND_HANDLERS: Record<
+  string,
+  (
+    message: CommandDispatchMessage,
+    daemonReceivedAt: string,
+  ) => Promise<unknown>
+> = {
+  "cache.apply": (message, daemonReceivedAt) =>
+    pickCommandRouterHandler("handleCacheApply", handleCacheApply)(
+      parseCacheApplyPayload(message.payload),
+      daemonReceivedAt,
+    ),
+};
+
+/** How a late command ended, in the fields the dispatch outcome carries. */
+type LateOutcome = {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+  respondedAt?: string;
+};
+
+/** Run a late command, or answer "unknown" for a type this table does not hold. */
+async function runLateCommand(
+  message: CommandDispatchMessage,
+  daemonReceivedAt: string,
+): Promise<LateOutcome> {
+  if (!Object.hasOwn(LATE_COMMAND_HANDLERS, message.commandType)) {
+    return { ok: false, error: `Unknown command type: ${message.commandType}` };
+  }
+  const result = await LATE_COMMAND_HANDLERS[message.commandType](
+    message,
+    daemonReceivedAt,
+  );
+  return { ok: true, result, respondedAt: new Date().toISOString() };
 }
 
 /**
@@ -726,10 +770,14 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
-      default:
-        ok = false;
-        error = `Unknown command type: ${message.commandType}`;
+      default: {
+        const late = await runLateCommand(message, daemonReceivedAt);
+        ok = late.ok;
+        result = late.result;
+        error = late.error;
+        daemonRespondedAt = late.respondedAt ?? daemonRespondedAt;
         break;
+      }
     }
 
     const sized = sizedOutcomeFields(

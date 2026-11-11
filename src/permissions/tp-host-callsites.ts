@@ -42,6 +42,7 @@ import {
   tunnelUnitName,
 } from "../tunnels/connector-unit.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
+import { renderCacheConfig } from "../deploy/cache/config.ts";
 import { accessGroup } from "../runtime/registry.ts";
 import {
   sitePhpFpmConf,
@@ -155,6 +156,21 @@ const MGD_MATCH = [
   "5432",
 ];
 const APP_UNIT = "turbopanel-app-svc1.service";
+/** A project cache: its folders, staged config and unit under the test prefix. */
+const CACHE_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+const CACHE_UNIT = `turbopanel-cache-${CACHE_ID}.service`;
+const CACHE_LAYOUT = {
+  runtimesDir: `${P}${VENDOR}`,
+  configDir: `${P}/etc/turbopanel`,
+  principalHomeRoot: `${P}/srv/users`,
+};
+const CACHE_CONF_TEXT = renderCacheConfig(CACHE_LAYOUT, {
+  id: CACHE_ID,
+  username: "alice",
+  maxMemoryMb: 64,
+  passwordSha256: "ab".repeat(32),
+});
+
 /** A tunnel connector: its unit, run token and the unit text the daemon renders. */
 const TUNNEL_ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const TUNNEL_UNIT = tunnelUnitName(TUNNEL_ID);
@@ -1381,6 +1397,65 @@ const SITES: CallSite[] = [
   ),
   tpHost('src/deploy/reach/reach-ports.ts|["-n","php-loopback-sync"]', {
     argv: ["php-loopback-sync"],
+  }),
+
+  // --- project caches --------------------------------------------------------
+  tpHost(
+    'src/deploy/cache/apply.ts|hostSudo(io,["cache-prepare",username,id],"preparingthefolders")',
+    { argv: ["cache-prepare", "alice", CACHE_ID] },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|hostSudo(io,["cache-config-install",username,id],"installingtheconfig")',
+    {
+      argv: ["cache-config-install", "alice", CACHE_ID],
+      setup: {
+        dirs: [`${CONF}/cache/${CACHE_ID}`],
+        files: {
+          [`${STATE}/caches/.stage/${CACHE_ID}.conf`]: CACHE_CONF_TEXT,
+        },
+      },
+    },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|hostSudo(io,["cache-remove",entry.username,entry.id,...(deleteData?["--data"]:[])],"removingthecache")',
+    { argv: ["cache-remove", "alice", CACHE_ID] },
+    { argv: ["cache-remove", "alice", CACHE_ID, "--data"] },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|hostSudo(io,["rm","-f","--",join(io.unitDir??SYSTEMD_UNIT_DIR,cacheUnitName(id))],"removingtheunit")',
+    { argv: ["rm", "-f", "--", `${UNITS}/${CACHE_UNIT}`] },
+  ),
+  tpHost('src/deploy/cache/apply.ts|["-n",...args]', {
+    argv: ["cache-prepare", "alice", CACHE_ID],
+  }),
+  tpHost('src/deploy/cache/apply.ts|["-n","systemctl",...args]', {
+    argv: ["systemctl", "enable", "--now", CACHE_UNIT],
+  }),
+  tpHost("src/deploy/cache/apply.ts|systemctl(io,args)", {
+    argv: ["systemctl", "daemon-reload"],
+  }),
+  tpHost(
+    'src/deploy/cache/apply.ts|mustSystemctl(io,["daemon-reload"],"reloadingsystemd")',
+    { argv: ["systemctl", "daemon-reload"] },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|mustSystemctl(io,["enable","--now",unit],"startingthecache")',
+    { argv: ["systemctl", "enable", "--now", CACHE_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|mustSystemctl(io,["restart",unit],"restartingthecache")',
+    { argv: ["systemctl", "restart", CACHE_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|systemctl(io,["disable","--now",unit])',
+    { argv: ["systemctl", "disable", "--now", CACHE_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/cache/apply.ts|systemctl(io,["is-active","--quiet",unit])',
+    { argv: ["systemctl", "is-active", "--quiet", CACHE_UNIT] },
+  ),
+  tpHost('src/deploy/cache/apply.ts|systemctl(io,["reset-failed",unit])', {
+    argv: ["systemctl", "reset-failed", CACHE_UNIT],
   }),
 
   // --- control-plane hostname certificates ---------------------------------

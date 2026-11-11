@@ -133,7 +133,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `TP_LISTEN_PORT_MIN`/`MAX`, kept equal to `lib/tp-php-loopback` and the
     compose policy by tests; `reach-ports-remove <id>`; the daemon runs
     `php-loopback-sync` after either, and no generic verb names
-    `<config>/reach-ports` or `<config>/cache`); a control-plane hostname's uploaded certificate pair goes the
+    `<config>/reach-ports` or `<config>/cache`); a project cache is made by
+    `cache-prepare <user> <id>`, `cache-config-install <user> <id>` (the staged
+    `<state>/caches/.stage/<id>.conf`, rebuilt from its few variable values and
+    compared whole, `tp_cache_conf_text`) and `cache-remove <user> <id>
+    [--data]`, and its unit `turbopanel-cache-<id>.service` is likewise rebuilt
+    and compared whole (`tp_cache_unit_text`); see `src/permissions/AGENTS.md`);
+    a control-plane hostname's uploaded certificate pair goes the
     same way into the instance-certs role's `<state>/tls/certs`
     (`instance-cert-install <id>` reads the daemon's staged
     `<state>/system/instance-certs/<id>.{crt,key}`, checks one PEM chain and

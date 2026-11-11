@@ -1042,3 +1042,38 @@ test("the helper port lists and their staging folder sit inside trees purge.sh r
   assert(tpHost.includes('R_REACH="$R_CONFIG/reach-ports"'));
   assert(tpHost.includes('R_REACH_STAGE="$R_STATE/reach/.stage"'));
 });
+
+test("project cache units, links, configs, data, the runtime and the memory setting are all inside what purge.sh removes", async () => {
+  const code = await purgeCode();
+  const trees = shellList(code, "TP_OWNED_TREES");
+  // <config>/cache/<id>/valkey.conf, <state>/caches (index and staged config),
+  // <home>/cache/<id>/dump.rdb under the principal homes, and
+  // <install>/vendor/valkey/<version> with its LICENSE beside the binary.
+  for (
+    const root of [
+      "/etc/turbopanel",
+      "/var/lib/turbopanel",
+      "/srv/users",
+      "/opt/turbopanel",
+    ]
+  ) {
+    assert(trees.includes(root), `${root} is not purged`);
+  }
+  // turbopanel-cache-<id>.service and its multi-user.target.wants link match
+  // the `turbopanel*` name the unit sweep and the file sweep take.
+  assert(code.includes("'turbopanel*' 'turbopaneld*'"));
+  assert(code.includes("-name 'turbopanel*'"));
+  // The role's sysctl drop-in is one purge.sh's pattern matches.
+  const role = await Deno.readTextFile(
+    join(repo, "orchestration/roles/valkey-runtime/tasks/main.yml"),
+  );
+  const dropIn = /sysctl_file: (\/etc\/sysctl\.d\/[^\s]+)/.exec(role)?.[1] ??
+    "";
+  assertEquals(dropIn, "/etc/sysctl.d/99-turbopanel-cache.conf");
+  assert(code.includes("/etc/sysctl.d/99-turbopanel-*.conf"));
+  const tpHost = await Deno.readTextFile(
+    join(dirname(purgePath), "../orchestration/scripts/tp-host"),
+  );
+  assert(tpHost.includes('R_CACHE="$R_CONFIG/cache"'));
+  assert(tpHost.includes('R_CACHE_STAGE="$R_STATE/caches/.stage"'));
+});

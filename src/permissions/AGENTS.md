@@ -152,3 +152,21 @@ A guarded port that more than one account claims (lists, cache units, app
 units) stays guarded and opens to none, with a warning, and `tp-host` refuses
 a list that names one port under two users. `<config>/reach-ports` and
 `<config>/cache` are refused to every generic verb (`tp_path_class`).
+
+**Project cache verbs.** A project cache is a Valkey unit run as one Hosting
+Account; three `tp-host` verbs keep it tied to that account and its id (a
+lower-case UUID): `cache-prepare <user> <id>` makes `<home>/cache` (`root:root
+0755`), `<home>/cache/<id>` (`<user>:<user> 0700`) and `<config>/cache/<id>`
+(`root:<user> 0750`); `cache-config-install <user> <id>` copies the staged
+`<state>/caches/.stage/<id>.conf` to `<config>/cache/<id>/valkey.conf`
+(`root:<user> 0640`); `cache-remove <user> <id> [--data]` deletes the config
+folder and, with `--data`, empties the data folder **as the account** and removes
+it. Neither the unit nor the config is checked line by line: `tp-host` rebuilds
+each from the few values that vary (`tp_cache_unit_text`, `tp_cache_conf_text`)
+and refuses any difference, so no directive can ride along (no `save`,
+`appendonly`, `maxmemory-policy`, module, include, rename, replication or ACL
+change, and not `user default on`). The unit also needs a root-owned,
+non-link binary of that release, an installed config whose port equals the
+unit's `PORT=`, and an id that stays with the first account that used it.
+`journalctl` may read `turbopanel-cache-*`. The daemon side is
+`src/deploy/cache/`.

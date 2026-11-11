@@ -10,6 +10,10 @@ import {
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
+import {
+  applyDeployCachesAndReach,
+  type DeployCacheStepInput,
+} from "../deploy/cache/deploy-step.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
@@ -259,6 +263,7 @@ import {
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
 import {
+  type CacheApplyResult,
   type EnvironmentDeployComposeFile,
   type EnvironmentDeployContainer,
   type EnvironmentDeployFabricNetwork,
@@ -463,6 +468,8 @@ export type EnvironmentDeployDeps = {
    * or a real `ansible-playbook` run.
    */
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
+  /** Test seam — the machine-touching parts of the project cache apply (runtime install, account probe, sleep). */
+  cacheIo?: DeployCacheStepInput["io"];
   /** Test seam: how the host is asked whether a skipped deploy is still running. */
   hostProbe?: HostProbe;
   /** Test seam — the Ansible runner for the early site engine install. */
@@ -2262,6 +2269,7 @@ async function deployContainerServices(
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
       ].filter((n): n is string => typeof n === "string"),
+      helperReach: parsedPayload.helperReach,
     });
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
@@ -2635,6 +2643,8 @@ export function shapeEnvironmentDeployResult(input: {
   principals?: readonly PrincipalIdReport[];
   /** Service folders left in place because their service left the compose file. */
   keptFolders?: readonly KeptFolder[];
+  /** What happened to each cache the deploy was sent; omitted when none was. */
+  caches?: readonly CacheApplyResult[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2668,6 +2678,9 @@ export function shapeEnvironmentDeployResult(input: {
       : {}),
     ...(input.keptFolders && input.keptFolders.length > 0
       ? { keptFolders: [...input.keptFolders] }
+      : {}),
+    ...(input.caches && input.caches.length > 0
+      ? { caches: [...input.caches] }
       : {}),
   };
 }
@@ -3318,6 +3331,14 @@ async function deployEnvironmentHolding(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
   );
+  // Project caches and helper ports, right after the accounts they belong to
+  // exist (and before the sites that read their variables start).
+  const cacheStep = await applyDeployCachesAndReach({
+    layout,
+    payload: parsedPayload,
+    run: runtime.runPrivileged,
+    io: deps?.cacheIo,
+  });
 
   // Git-backed releases run before the compose / site apply steps,
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
@@ -3596,9 +3617,14 @@ async function deployEnvironmentHolding(
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
+  // A cache that is not running leaves the deploy unrecorded, so the next
+  // identical deploy runs in full and tries it again instead of being skipped.
+  const cachesRunning = (cacheStep.caches ?? []).every((c) =>
+    c.state === "ready"
+  );
   await recordAppliedDeploy(
     earlyDeploymentDir,
-    parsedPayload.desiredHash,
+    cachesRunning ? parsedPayload.desiredHash : undefined,
     sites,
   );
 
@@ -3615,8 +3641,10 @@ async function deployEnvironmentHolding(
       ...siteWarnings,
       ...workerWarnings,
       ...appliedReleases.flatMap((release) => release.htaccessWarnings ?? []),
+      ...cacheStep.warnings,
     ],
     principals: principalIdReports,
     keptFolders,
+    caches: cacheStep.caches,
   });
 }
