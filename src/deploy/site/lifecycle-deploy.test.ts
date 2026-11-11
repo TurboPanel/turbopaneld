@@ -149,6 +149,18 @@ test("a site is held only with before-traffic commands and a release already ser
       false,
     );
     assertEquals(await held([site()]), false);
+    // A rollback is never held, even for a site with commands and a serving release.
+    assertEquals(
+      await siteHeldForPostDeploy(
+        host.layout,
+        [site({ postDeploy: COMMANDS })],
+        bindings,
+        "web",
+        serving,
+        true,
+      ),
+      false,
+    );
     assertEquals(
       await held([site({ postDeploy: COMMANDS })], () => Promise.resolve(null)),
       false,

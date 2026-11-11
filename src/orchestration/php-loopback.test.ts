@@ -653,3 +653,32 @@ test("the rendered ruleset passes `nft -c -f`, overlapping pools and bridges inc
     }, UNITS);
   }
 });
+
+test("a user with only a worker template or only a command unit is walled like any other account", async () => {
+  const plain: Out[] = [];
+  await withTree(HOST_FILES, async (run) => {
+    plain.push(await run());
+  });
+  const withUnits: Out[] = [];
+  await withTree(HOST_FILES, async (run) => {
+    withUnits.push(await run());
+  }, {
+    // bob has only a worker template; carol only a post-deploy command unit;
+    // neither has a PHP unit.
+    "turbopanel-worker-env1-web-queue@.service": "[Service]\nUser=bob\n",
+    "turbopanel-deploycmd-env1-web.service": "[Service]\nUser=carol\n",
+  });
+  assertEquals(plain[0]?.code, 0, plain[0]?.stderr);
+  assertEquals(withUnits[0]?.code, 0, withUnits[0]?.stderr);
+  // The rules bind the whole band and read no unit of these two families, so
+  // the two accounts are covered without a PHP unit file and the unit files
+  // change nothing in the ruleset.
+  assertEquals(withUnits[0]?.stdout, plain[0]?.stdout);
+  for (const line of rules(withUnits[0]?.stdout ?? "")) {
+    assert(
+      line.startsWith(`meta skuid ${BAND} `) ||
+        line === "meta skuid . tcp dport @own_ports ip daddr 127.0.0.1 accept",
+      line,
+    );
+  }
+});

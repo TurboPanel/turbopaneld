@@ -10,8 +10,10 @@ import {
   type SystemdHostCall,
 } from "../../testing/systemd-host.ts";
 import {
+  armPhpPatchRestarts,
   armPhpPatchWatch,
   clearPhpPatchFailure,
+  disarmPhpPatchRestarts,
   isStale,
   parseUnitStart,
   PHP_PATCH_CHECK_INTERVAL_MS,
@@ -22,6 +24,7 @@ import {
   readPhpPackageVersions,
   readPhpRuntimeRecords,
   removePhpRuntimeRecords,
+  requestPhpPatchPassAfterDeploy,
   resetPhpPatchState,
   runPhpPatchPass,
   writePhpRuntimeRecord,
@@ -527,3 +530,33 @@ async function ticksRun(ticks: Array<() => void>) {
   for (const tick of ticks) tick();
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
+
+test("a deploy asks for a pass only once the daemon has armed the restarts, and arming happens once", async () => {
+  resetPhpPatchState();
+  disarmPhpPatchRestarts();
+  const f = await fixture([A]);
+  try {
+    oldRuntimes(f, A);
+    const { schedule, ticks } = fakeSchedule();
+    // Not armed: a deploy reaches nothing.
+    requestPhpPatchPassAfterDeploy(schedule);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assertEquals(f.events, []);
+    armPhpPatchRestarts(f.io.layout, f.io, schedule);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The boot pass ran and the watch is armed.
+    assert(f.events.includes(`restart turbopanel-php-${A.id}.service`));
+    assertEquals(ticks.length, 1);
+    // A second arming is ignored.
+    armPhpPatchRestarts(f.io.layout, f.io, schedule);
+    assertEquals(ticks.length, 1);
+    // Armed: a deploy asks for a pass (nothing is stale now, so it is quiet).
+    f.events.length = 0;
+    requestPhpPatchPassAfterDeploy(schedule);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assertEquals(f.events, []);
+  } finally {
+    disarmPhpPatchRestarts();
+    await f.cleanup();
+  }
+});

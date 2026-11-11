@@ -3246,6 +3246,11 @@ async function deployEnvironmentHolding(
         parsedPayload.sites ?? [],
         deployReleaseBindings(parsedPayload),
         service.composeServiceName,
+        undefined,
+        (parsedPayload.sourceMaterial ?? []).some((entry) =>
+          entry.composeServiceName === service.composeServiceName &&
+          entry.rollbackToReleaseId !== undefined
+        ),
       ),
     ensureBuildkitImageBuildFn: (releaseLayout) =>
       runInstallStep(

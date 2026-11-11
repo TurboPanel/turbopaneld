@@ -6080,35 +6080,28 @@ function parseSiteWorkers(
       name: raw.name,
       command: [...raw.command],
     };
-    if (raw.processes !== undefined) {
-      if (!integerInRange(raw.processes, 1, MAX_WORKER_PROCESSES)) {
+    const limits: Array<
+      [
+        "processes" | "stopTimeoutSeconds" | "memoryMaxBytes",
+        number,
+        number,
+      ]
+    > = [
+      ["processes", 1, MAX_WORKER_PROCESSES],
+      [
+        "stopTimeoutSeconds",
+        MIN_WORKER_STOP_TIMEOUT_SECONDS,
+        MAX_WORKER_STOP_TIMEOUT_SECONDS,
+      ],
+      ["memoryMaxBytes", MIN_WORKER_MEMORY_BYTES, MAX_WORKER_MEMORY_BYTES],
+    ];
+    for (const [key, min, max] of limits) {
+      const value = raw[key];
+      if (value === undefined) continue;
+      if (!integerInRange(value, min, max)) {
         throw new TypeError(`Invalid ${label} workers entry`);
       }
-      worker.processes = raw.processes;
-    }
-    if (raw.stopTimeoutSeconds !== undefined) {
-      if (
-        !integerInRange(
-          raw.stopTimeoutSeconds,
-          MIN_WORKER_STOP_TIMEOUT_SECONDS,
-          MAX_WORKER_STOP_TIMEOUT_SECONDS,
-        )
-      ) {
-        throw new TypeError(`Invalid ${label} workers entry`);
-      }
-      worker.stopTimeoutSeconds = raw.stopTimeoutSeconds;
-    }
-    if (raw.memoryMaxBytes !== undefined) {
-      if (
-        !integerInRange(
-          raw.memoryMaxBytes,
-          MIN_WORKER_MEMORY_BYTES,
-          MAX_WORKER_MEMORY_BYTES,
-        )
-      ) {
-        throw new TypeError(`Invalid ${label} workers entry`);
-      }
-      worker.memoryMaxBytes = raw.memoryMaxBytes;
+      worker[key] = value;
     }
     return worker;
   });

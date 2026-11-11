@@ -163,19 +163,15 @@ async function readRunOutput(
   io: PostDeployIo,
   unit: string,
   releaseId: string,
+  attempt = 1,
 ): Promise<string[]> {
-  const sleep = io.sleep ?? defaultSleep;
-  let lines: string[] = [];
-  for (let attempt = 0; attempt < POST_DEPLOY_JOURNAL_ATTEMPTS; attempt++) {
-    const text = await readUnitJournal(io.run, `${unit}.service`, 2000);
-    const read = lastRunOutput(text, releaseId);
-    lines = read.lines;
-    if (read.finished) break;
-    if (attempt < POST_DEPLOY_JOURNAL_ATTEMPTS - 1) {
-      await sleep(POST_DEPLOY_JOURNAL_WAIT_MS);
-    }
+  const text = await readUnitJournal(io.run, `${unit}.service`, 2000);
+  const read = lastRunOutput(text, releaseId);
+  if (read.finished || attempt >= POST_DEPLOY_JOURNAL_ATTEMPTS) {
+    return read.lines;
   }
-  return lines;
+  await (io.sleep ?? defaultSleep)(POST_DEPLOY_JOURNAL_WAIT_MS);
+  return await readRunOutput(io, unit, releaseId, attempt + 1);
 }
 
 /**
@@ -255,8 +251,8 @@ export type PostDeployFailedAfterSwitchDetails = {
 /**
  * The failure of an `after-switch` run: the new release is already live. Carries
  * the code and the two release ids in process; the command outcome does not
- * carry details today (see the plan's STOP note), so only the sentence leaves
- * the daemon.
+ * carry details today (a failed outcome sends no result), so only the sentence
+ * leaves the daemon.
  */
 export class PostDeployFailedAfterSwitchError extends StructuredCommandError {
   constructor(details: PostDeployFailedAfterSwitchDetails) {

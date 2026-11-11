@@ -114,7 +114,10 @@ export async function siteHeldForPostDeploy(
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   composeServiceName: string,
   readCurrent: typeof readCurrentReleaseId = readCurrentReleaseId,
+  /** A rollback publishes nothing and moves `current` itself: never held. */
+  rollsBack = false,
 ): Promise<boolean> {
+  if (rollsBack) return false;
   const site = sites.find((entry) =>
     entry.composeServiceName === composeServiceName
   );

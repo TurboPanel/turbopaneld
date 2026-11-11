@@ -264,24 +264,20 @@ type WatchedInstance = { unit: string; label: string };
 async function pollInstances(
   io: WorkerIo,
   instances: readonly WatchedInstance[],
+  states: Map<string, string> = new Map(),
+  attempt = 1,
 ): Promise<{ pending: WatchedInstance[]; states: Map<string, string> }> {
-  const sleep = io.sleep ?? defaultSleep;
-  const states = new Map<string, string>();
-  let pending = [...instances];
-  for (let attempt = 0; attempt < WORKER_POLL_ATTEMPTS; attempt++) {
-    const next: WatchedInstance[] = [];
-    await forEachSequential(pending, async (entry) => {
-      const state = await activeState(io, entry.unit);
-      states.set(entry.unit, state);
-      if (state !== "active") next.push(entry);
-    });
-    pending = next;
-    if (pending.length === 0) break;
-    if (attempt < WORKER_POLL_ATTEMPTS - 1) {
-      await sleep(WORKER_POLL_INTERVAL_MS);
-    }
+  const next: WatchedInstance[] = [];
+  await forEachSequential(instances, async (entry) => {
+    const state = await activeState(io, entry.unit);
+    states.set(entry.unit, state);
+    if (state !== "active") next.push(entry);
+  });
+  if (next.length === 0 || attempt >= WORKER_POLL_ATTEMPTS) {
+    return { pending: next, states };
   }
-  return { pending, states };
+  await (io.sleep ?? defaultSleep)(WORKER_POLL_INTERVAL_MS);
+  return await pollInstances(io, next, states, attempt + 1);
 }
 
 /** Print an instance's journal tail to the transcript. */
