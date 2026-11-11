@@ -1286,6 +1286,20 @@ a deploy is checked against the site files, not only the forward file. Site
 files written by an older daemon have the same lines, so they follow the first
 table that carries `inbound` with no deploy.
 
+**Newest table wins (feature `tunnel-table-generation-v1`).** A table and a
+deploy can cross, so a deploy could apply older stored peers and let a removed
+carrier back in until the next table. The control plane may send a `generation`
+(a non-negative safe integer, one counter for the organization's whole table,
+not per tunnel) on `server.tunnel.routes` and in each `hostings[].tunnel` of a
+deploy. The daemon keeps the highest it applied in
+`hosting/tunnel-generation.json` (`tunnel-state.ts`; it outlives an emptied
+table and a restart). A table lower than that is not applied (answer: not
+applied, with a warning). A deploy whose highest generation is above it keeps
+its own peers (the stored table is older) and raises the record; a deploy at or
+below it takes the stored peers as before. Without a generation nothing changes
+(older control plane). A deploy at or below the record with no stored `inbound`
+cannot be corrected here; the next table does it.
+
 ## Deploy Hooks
 
 - **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the

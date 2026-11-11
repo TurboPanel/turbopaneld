@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import {
   ACME_ISSUE_FEATURE,
   BACKUP_S3_COPY_FEATURE,
@@ -54,6 +54,7 @@ import {
   TUNNEL_LOCK_FOLLOW_FEATURE,
   TUNNEL_STATUS_FACTS_FEATURE,
   TUNNEL_STATUS_FEATURE,
+  TUNNEL_TABLE_GENERATION_FEATURE,
 } from "./version-wire.ts";
 
 /**
@@ -558,7 +559,16 @@ test("deploy-config-files-v1 is advertised", () => {
   );
 });
 
-test("site-php-lifecycle-v1 is advertised, and is the last entry", () => {
+test("site-php-lifecycle-v1 is advertised", () => {
   assertEquals(SITE_PHP_LIFECYCLE_FEATURE, "site-php-lifecycle-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SITE_PHP_LIFECYCLE_FEATURE);
+  assert(DAEMON_WIRE_FEATURES.includes(SITE_PHP_LIFECYCLE_FEATURE));
+});
+
+test("tunnel-table-generation-v1 is advertised, and is the last entry", () => {
+  assertEquals(TUNNEL_TABLE_GENERATION_FEATURE, "tunnel-table-generation-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_TABLE_GENERATION_FEATURE);
+  assert(
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_TABLE_GENERATION_FEATURE) ===
+      DAEMON_WIRE_FEATURES.indexOf(SITE_PHP_LIFECYCLE_FEATURE) + 1,
+  );
 });

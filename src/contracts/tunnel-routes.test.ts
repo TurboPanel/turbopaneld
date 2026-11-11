@@ -277,3 +277,31 @@ test("server.tunnel.routes: a carrier-only server may send no peer addresses", (
   const parsed = parseTunnelRoutesPayload({ ...GOOD, peerAddresses: [] });
   assertEquals(parsed.peerAddresses, []);
 });
+
+test("a tunnel generation is optional and must be a non-negative safe integer", () => {
+  assertEquals(
+    parseTunnelRoutesPayload({ ...GOOD, generation: 0 }).generation,
+    0,
+  );
+  assertEquals(parseTunnelRoutesPayload(GOOD).generation, undefined);
+  for (const generation of [-1, 1.5, "3", null, Number.MAX_SAFE_INTEGER + 1]) {
+    assertThrows(
+      () => parseTunnelRoutesPayload({ ...GOOD, generation }),
+      TypeError,
+    );
+  }
+  const tunnel = { hostnames: ["app.example.com"], peers: ["10.0.0.5"] };
+  assertEquals(
+    parseEnvironmentDeployPayload(
+      deploy({ tunnel: { ...tunnel, generation: 12 } }),
+    ).hostings[0]?.tunnel?.generation,
+    12,
+  );
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        deploy({ tunnel: { ...tunnel, generation: -2 } }),
+      ),
+    TypeError,
+  );
+});

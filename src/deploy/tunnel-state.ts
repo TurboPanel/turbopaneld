@@ -73,6 +73,59 @@ export async function writeTunnelState(
   await Deno.rename(next, path);
 }
 
+/** Where the highest applied table generation is kept (outlives an emptied table). */
+export const TUNNEL_GENERATION_FILE = "tunnel-generation.json";
+
+/** The highest table generation applied here, or `undefined` when none was ever recorded. */
+export async function readTunnelGeneration(
+  hostingDir: string,
+): Promise<number | undefined> {
+  const text = await readTextIfPresent(
+    join(hostingDir, TUNNEL_GENERATION_FILE),
+  );
+  if (text === undefined) return undefined;
+  try {
+    const value = (JSON.parse(text) as { generation?: unknown }).generation;
+    if (
+      typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ) {
+      return value;
+    }
+  } catch {
+    // A record that cannot be read counts as none: the next table rewrites it.
+  }
+  return undefined;
+}
+
+/** Keep `generation` when it is higher than the one on record; `undefined` changes nothing. */
+export async function recordTunnelGeneration(
+  hostingDir: string,
+  generation: number | undefined,
+): Promise<void> {
+  if (generation === undefined) return;
+  const last = await readTunnelGeneration(hostingDir);
+  if (last !== undefined && last >= generation) return;
+  const path = join(hostingDir, TUNNEL_GENERATION_FILE);
+  const next = `${path}.tpnew`;
+  await Deno.writeTextFile(next, JSON.stringify({ generation }), {
+    mode: 0o640,
+  });
+  await Deno.rename(next, path);
+}
+
+/**
+ * Whether a table or deploy tunnel field of `generation` is older than what was
+ * applied. Without a generation on either side nothing is older.
+ */
+export async function isStaleTunnelGeneration(
+  hostingDir: string,
+  generation: number | undefined,
+): Promise<boolean> {
+  if (generation === undefined) return false;
+  const last = await readTunnelGeneration(hostingDir);
+  return last !== undefined && generation < last;
+}
+
 export async function removeTunnelState(hostingDir: string): Promise<void> {
   await Deno.remove(join(hostingDir, TUNNEL_STATE_FILE)).catch(() => {});
 }
@@ -181,6 +234,17 @@ export async function peerMaterialId(
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", data));
   return Array.from(digest, (byte) => byte.toString(16).padStart(2, "0"))
     .join("").slice(0, 16);
+}
+
+/**
+ * The highest tunnel `generation` among a deploy's hostings, or `undefined`
+ * when none carries one (an older control plane).
+ */
+export function deployTunnelGeneration(
+  hostings: readonly { tunnel?: { generation?: number } }[],
+): number | undefined {
+  const found = hostings.flatMap((hosting) => hosting.tunnel?.generation ?? []);
+  return found.length === 0 ? undefined : Math.max(...found);
 }
 
 /** `contents` with the tunnel peers of the stored table; as it was when there is no table or no `inbound`. */

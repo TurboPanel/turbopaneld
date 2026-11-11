@@ -16,8 +16,11 @@ import {
   proofImportPattern,
 } from "./acme-proof-forward.ts";
 import {
+  deployTunnelGeneration,
   plannedTunnelContents,
+  readTunnelGeneration,
   readTunnelState,
+  recordTunnelGeneration,
   relockWithStoredPeers,
 } from "./tunnel-state.ts";
 import {
@@ -3539,12 +3542,33 @@ async function plannedTunnelFile(
 async function relockForDeploy(
   hostingDir: string,
   contents: string,
+  generation: number | undefined,
 ): Promise<string> {
   try {
+    // A deploy prepared from a newer table than the stored one keeps its peers.
+    if (generation !== undefined) {
+      const last = await readTunnelGeneration(hostingDir);
+      if (last === undefined || generation > last) return contents;
+    }
     return relockWithStoredPeers(await readTunnelState(hostingDir), contents);
   } catch (err) {
     logWarn("deploy", `tunnel name lock kept as sent: ${errorText(err)}`);
     return contents;
+  }
+}
+
+/** Remember the table generation a live deploy used; a failure only costs the ordering guard. */
+async function recordDeployTunnelGeneration(
+  hostingDir: string,
+  generation: number | undefined,
+): Promise<void> {
+  try {
+    await recordTunnelGeneration(hostingDir, generation);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `tunnel table generation not recorded: ${errorText(err)}`,
+    );
   }
 }
 
@@ -3606,7 +3630,12 @@ async function rewriteHostingCaddySitesLocked(
     .join("\n");
   // The lock on tunnel names follows the last forwarding table, which may be
   // newer than the peers this deploy was prepared with.
-  const siteContent = await relockForDeploy(hostingDir, renderedSites);
+  const tunnelGeneration = deployTunnelGeneration(payload.hostings);
+  const siteContent = await relockForDeploy(
+    hostingDir,
+    renderedSites,
+    tunnelGeneration,
+  );
   const siteFile = `${payload.environmentId}.caddy`;
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
@@ -3663,6 +3692,8 @@ async function rewriteHostingCaddySitesLocked(
       ? []
       : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),
   ]);
+
+  await recordDeployTunnelGeneration(hostingDir, tunnelGeneration);
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry

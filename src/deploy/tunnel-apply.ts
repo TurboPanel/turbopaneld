@@ -30,10 +30,12 @@ import {
   tunnelPeerPaths,
 } from "./tunnel-caddy.ts";
 import {
+  isStaleTunnelGeneration,
   type OwnSiteFile,
   peerMaterialId,
   plannedRelocks,
   readTunnelState,
+  recordTunnelGeneration,
   removeTunnelState,
   renderStoredTunnelFile,
   type TunnelState,
@@ -258,6 +260,24 @@ async function applyTunnelRoutesLocked(
   const live = await readTextIfPresent(livePath);
   const prior = await readTunnelState(hostingDir);
 
+  // A table older than one already applied (or than a deploy's newer peers)
+  // must not bring back carriers the newer one removed.
+  if (await isStaleTunnelGeneration(hostingDir, payload.generation)) {
+    logInfo(
+      "tunnels",
+      `tunnel table generation ${payload.generation} is older than the one in place; left as it is`,
+    );
+    return {
+      hash: payload.hash,
+      applied: false,
+      routeCount: prior?.routes.filter((route) => !route.local).length ?? 0,
+      dropped: [],
+      warnings: [
+        "ignored: a newer forwarding table is already in place",
+      ],
+    };
+  }
+
   // An unchanged table with the file in place changes nothing.
   const unchanged = await unchangedResult(
     hostingDir,
@@ -295,6 +315,7 @@ async function applyTunnelRoutesLocked(
     await (empty
       ? removeTunnelState(hostingDir)
       : writeTunnelState(hostingDir, state));
+    await recordTunnelGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
     logInfo(
       "tunnels",
