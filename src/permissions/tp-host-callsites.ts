@@ -30,6 +30,8 @@ import {
   backupTimerPath,
 } from "../backups/units.ts";
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
+import { postDeployUnitContent } from "../deploy/site/post-deploy.ts";
+import { workerUnitContent } from "../deploy/site/workers.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { nativeAppUnitContent } from "../deploy/native/unit.ts";
@@ -229,6 +231,40 @@ const BACKUP_TIMER_STAMP =
 const BACKUP_TIMER_UNIT = `turbopanel-backup-${BACKUP_POLICY}.timer`;
 const unitSetup = (text: string): CallSiteSetup => ({
   files: { [STAGED]: underPrefix(text) },
+});
+/** A site's post-deploy command unit and worker template, as the daemon renders them. */
+const LIFECYCLE_BASE = {
+  layout: LAYOUT,
+  username: "alice",
+  workingDirectory: "/srv/users/alice/sites/svc1/current",
+  environmentFile: "/etc/turbopanel/site-env/alice/web-0123456789ab.env",
+  phpSeries: "8.4",
+  siteWritableDirs: ["/srv/users/alice/sites/svc1/shared"],
+  environmentId: "env1",
+  composeServiceName: "web",
+};
+const DEPLOYCMD_UNIT = `${UNITS}/turbopanel-deploycmd-env1-web.service`;
+const WORKER_UNIT_FILE = `${UNITS}/turbopanel-worker-env1-web-queue@.service`;
+const DEPLOYCMD_TEXT = postDeployUnitContent({
+  ...LIFECYCLE_BASE,
+  releaseId: "rel1",
+  extraWritablePaths: [
+    "/srv/users/alice/sites/svc1/releases/rel1/bootstrap/cache",
+  ],
+  postDeploy: {
+    commands: [["/usr/local/bin/php", "artisan", "migrate", "--force"]],
+    timeoutSeconds: 300,
+  },
+});
+const WORKER_TEXT = workerUnitContent({
+  ...LIFECYCLE_BASE,
+  worker: {
+    name: "queue",
+    command: ["/usr/local/bin/php", "artisan", "queue:work", "--sleep=3"],
+    processes: 2,
+    stopTimeoutSeconds: 90,
+    memoryMaxBytes: 536870912,
+  },
 });
 
 // One per-site PHP runtime of alice's, as `php-runtime.ts` renders it.
@@ -629,6 +665,56 @@ const SITES: CallSite[] = [
     },
     { argv: ["systemctl", "enable", "--now", BACKUP_TIMER_UNIT] },
     { argv: ["systemctl", "disable", "--now", BACKUP_TIMER_UNIT] },
+    // A site's post-deploy commands and workers.
+    {
+      argv: [
+        "systemctl",
+        "reset-failed",
+        "turbopanel-deploycmd-env1-web.service",
+      ],
+    },
+    { argv: ["systemctl", "start", "turbopanel-deploycmd-env1-web.service"] },
+    {
+      argv: [
+        "systemctl",
+        "enable",
+        "turbopanel-worker-env1-web-queue@1.service",
+        "turbopanel-worker-env1-web-queue@2.service",
+      ],
+    },
+    {
+      argv: [
+        "systemctl",
+        "disable",
+        "--now",
+        "--no-block",
+        "turbopanel-worker-env1-web-queue@3.service",
+      ],
+    },
+    {
+      argv: [
+        "systemctl",
+        "restart",
+        "--no-block",
+        "turbopanel-worker-env1-web-queue@1.service",
+        "turbopanel-worker-env1-web-queue@2.service",
+      ],
+    },
+    {
+      argv: [
+        "systemctl",
+        "stop",
+        "--no-block",
+        "turbopanel-worker-env1-web-queue@1.service",
+      ],
+    },
+    {
+      argv: [
+        "systemctl",
+        "is-active",
+        "turbopanel-worker-env1-web-queue@1.service",
+      ],
+    },
   ),
   tpHost('src/deploy/systemd-unit-set.ts|["-n","cmp","-s","--",staged,path]', {
     argv: [
@@ -683,6 +769,34 @@ const SITES: CallSite[] = [
         BACKUP_TIMER,
       ],
       setup: unitSetup(backupTimerContent(BACKUP_POLICY, "*-*-* 03:00:00")),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        DEPLOYCMD_UNIT,
+      ],
+      setup: unitSetup(DEPLOYCMD_TEXT),
+    },
+    {
+      argv: [
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        STAGED,
+        WORKER_UNIT_FILE,
+      ],
+      setup: unitSetup(WORKER_TEXT),
     },
   ),
   tpHost('src/deploy/unchanged-deploy.ts|["-n","ls","-A","--",dir]', {
@@ -1210,6 +1324,43 @@ const SITES: CallSite[] = [
     'src/deploy/native/apply-native-apps.ts|["-n","rm","-f","--",path]',
     { argv: ["rm", "-f", "--", `${UNITS}/turbopanel-app-svc1.service`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${CHECK_UNIT}`] },
+  ),
+  tpHost(
+    'src/deploy/site/lifecycle-unit.ts|["-n","journalctl",`--unit=${unit}`,"-n",String(count),"--no-pager","--output=short-iso"]',
+    {
+      argv: [
+        "journalctl",
+        "--unit=turbopanel-deploycmd-env1-web.service",
+        "-n",
+        "2000",
+        "--no-pager",
+        "--output=short-iso",
+      ],
+    },
+    {
+      argv: [
+        "journalctl",
+        "--unit=turbopanel-worker-env1-web-queue@1.service",
+        "-n",
+        "30",
+        "--no-pager",
+        "--output=short-iso",
+      ],
+    },
+  ),
+  tpHost('src/deploy/site/post-deploy.ts|["-n","php-loopback-sync"]', {
+    argv: ["php-loopback-sync"],
+  }),
+  tpHost('src/deploy/site/workers.ts|["-n","php-loopback-sync"]', {
+    argv: ["php-loopback-sync"],
+  }),
+  tpHost(
+    'src/deploy/site/post-deploy.ts|["-n","rm","-f","--",join(unitDir,`${unit}.service`)]',
+    { argv: ["rm", "-f", "--", DEPLOYCMD_UNIT] },
+  ),
+  tpHost(
+    'src/deploy/site/workers.ts|["-n","rm","-f","--",join(unitDir,workerTemplateFile(base))]',
+    { argv: ["rm", "-f", "--", WORKER_UNIT_FILE] },
   ),
   tpHost('src/deploy/native/apply-native-apps.ts|["-n","php-loopback-sync"]', {
     argv: ["php-loopback-sync"],

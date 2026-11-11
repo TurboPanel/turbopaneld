@@ -33,6 +33,8 @@ import {
   removeHostingCaddySite,
 } from "../deploy/ingress.ts";
 import { removeCronJobs } from "../deploy/cron/apply.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
+import { removeEnvironmentSiteLifecycle } from "../deploy/site/lifecycle-deploy.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
 import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
@@ -94,6 +96,8 @@ export type EnvironmentStopHandlerDeps = {
   dockerInstalled?: () => Promise<boolean>;
   /** Test seam — the `sshd` drop-in re-render after principals are retired. */
   applySshAccess?: () => Promise<SshApplyResult>;
+  /** Test seam — removes the environment's worker and command units. */
+  removeSiteLifecycle?: (environmentId: string) => Promise<void>;
   /** Test seam — defaults to {@link removeCronJobs}. */
   removeCronJobs?: (environmentId: string) => Promise<number>;
 };
@@ -235,6 +239,26 @@ async function removeEnvironmentCronJobs(
       "commands",
       `environment.stop cron teardown failed env=${environmentId}: ${
         err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove this environment's worker and post-deploy command units. Best effort
+ * like the rest of the teardown.
+ */
+async function removeEnvironmentSiteUnits(
+  environmentId: string,
+  remove: (environmentId: string) => Promise<void>,
+): Promise<void> {
+  try {
+    await remove(environmentId);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.stop worker teardown failed env=${environmentId}: ${
+        err instanceof Error ? err.message : Deno.inspect(err)
       }`,
     );
   }
@@ -586,6 +610,17 @@ async function stopEnvironmentLocked(
   await removeEnvironmentCronJobs(
     parsedPayload.environmentId,
     deps?.removeCronJobs ?? removeCronJobs,
+  );
+  // Workers and post-deploy command units load the same variables copy, so
+  // they go before the copy and before the sites.
+  await removeEnvironmentSiteUnits(
+    parsedPayload.environmentId,
+    deps?.removeSiteLifecycle ??
+      ((environmentId) =>
+        removeEnvironmentSiteLifecycle(
+          { run: runHostCommand, onLine: () => undefined },
+          environmentId,
+        )),
   );
   await removeSites(layout, parsedPayload.environmentId);
   // Disable + remove the generated app units before the release trees they run

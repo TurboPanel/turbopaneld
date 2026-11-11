@@ -1,8 +1,9 @@
 ---
 # Automatic Debian security updates: unattended-upgrades limited to the Debian
-# security repository, never restarting the server. Debian only: Ubuntu keeps
-# its own defaults (which already take security updates), and our origin list
-# would replace them with one that matches nothing there.
+# security repository and the PHP package archive, never restarting the
+# server. Debian only: Ubuntu keeps its own defaults (which already take
+# security updates), and our origin list would replace them with one that
+# matches nothing there.
 #
 # Fast path: the package already present and the file unchanged means apt and
 # copy report ok and nothing else runs.
@@ -20,7 +21,7 @@
 # Sorts after the package's own 50unattended-upgrades, so the #clear lines
 # drop its origin list. The package's conffiles (50unattended-upgrades,
 # 20auto-upgrades) are left as shipped.
-- name: Limit automatic updates to the Debian security repository
+- name: Limit automatic updates to the Debian security repository and the PHP archive
   ansible.builtin.copy:
     src: 52turbopanel-security-updates
     dest: /etc/apt/apt.conf.d/52turbopanel-security-updates

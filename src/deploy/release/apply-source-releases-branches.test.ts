@@ -1208,3 +1208,67 @@ test("applySourceReleases cuts over to a re-sent release this host already publi
     }
   });
 });
+
+test("a re-sent release is put forward for the site commands, held when a release serves, and left alone once live with its commands passed", async () => {
+  await createTempLayout().then(async (fixture) => {
+    try {
+      const layout = layoutFromFixture(fixture);
+      const serviceId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f";
+      const releaseId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c000001";
+      const paths = resolveReleasePaths(layout, {
+        username: PRINCIPAL.username,
+        serviceId,
+        folder: folderOf(serviceId),
+        releaseId,
+      });
+      await mkdirReleaseTree(paths);
+      await seedRecord(layout, { serviceId, releaseId });
+      const payload = basePayload({
+        hostings: [{
+          hostingId: "host-resent2",
+          composeServiceName: "web",
+          serviceId,
+          hostnames: ["resent2.example.com"],
+        }],
+        sourceMaterial: [baseSource({
+          commitSha: "recorded-commit",
+          releaseServiceId: serviceId,
+          principal: PRINCIPAL,
+        })],
+      });
+      const deps = {
+        ...nativeDeps(fakeLogSink().sink),
+        promoteExistingReleaseFn: (
+          params: { paths: { releaseDir: string } },
+        ) => Promise.resolve(params.paths.releaseDir),
+      };
+      const run = (extra: Record<string, unknown> = {}) =>
+        applySourceReleases(layout, payload, { ...deps, ...extra });
+
+      const [plain] = await run();
+      assertEquals(plain?.built, true);
+      assertEquals(plain?.heldCurrent, undefined);
+
+      const [held] = await run({ holdCurrent: () => Promise.resolve(true) });
+      assertEquals(held?.built, true);
+      assertEquals(held?.heldCurrent, true);
+
+      // Already current: still put forward until its commands have passed.
+      await swapCurrentSymlink(paths);
+      const [live] = await run();
+      assertEquals(live?.built, true);
+      await Deno.writeTextFile(
+        join(
+          resolveDaemonReleasePaths(layout, { serviceId, releaseId })
+            .releaseDir,
+          "post-deploy-passed",
+        ),
+        "passed\n",
+      );
+      const [passed] = await run();
+      assertEquals(passed?.built, undefined);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+});

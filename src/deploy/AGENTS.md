@@ -1129,7 +1129,9 @@ failing at `execve`. Ordering uses `sort -V`, so 8.10 comes after 8.4.
 ## Scheduled jobs
 
 Moved to [`cron/AGENTS.md`](./cron/AGENTS.md) — per-service scheduled command
-units.
+units. A PHP site's post-deploy commands, background workers and PHP patch
+restarts are in [`site/AGENTS.md`](./site/AGENTS.md); they share the cron
+unit's sandbox (`principalHardeningLines`, `quoteExecArg`).
 
 ## SSH access
 

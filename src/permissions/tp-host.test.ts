@@ -20,6 +20,8 @@ import {
   resolveLayout,
 } from "../paths/layout.ts";
 import { cronServiceContent, cronTimerContent } from "../deploy/cron/unit.ts";
+import { postDeployUnitContent } from "../deploy/site/post-deploy.ts";
+import { workerUnitContent } from "../deploy/site/workers.ts";
 import {
   nativeAppUnitContent,
   principalSliceContent,
@@ -5950,5 +5952,137 @@ test("a site's cron unit may load only its own account's variables copy", async 
       "turbopanel-other-env1-web.service",
     );
     assertEquals(other.code === 0, false);
+  });
+});
+
+test("a site's command and worker units carry the PHP walls, each pinned", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const own = host.path(SITE_ENV_COPY);
+    const base = {
+      layout: { ...layout, libDir: host.path("opt/turbopanel/lib") },
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+      environmentFile: own,
+      phpSeries: "8.4",
+      siteWritableDirs: [host.path("srv/users/alice/sites/web/shared")],
+      environmentId: "env1",
+      composeServiceName: "web",
+    };
+    const command = postDeployUnitContent({
+      ...base,
+      releaseId: "rel1",
+      extraWritablePaths: [
+        host.path("srv/users/alice/sites/web/releases/rel1/bootstrap/cache"),
+      ],
+      postDeploy: {
+        commands: [["/usr/bin/php8.4", "artisan", "migrate", "--force"]],
+        timeoutSeconds: 300,
+      },
+    });
+    const worker = workerUnitContent({
+      ...base,
+      worker: {
+        name: "queue",
+        command: ["/usr/bin/php8.4", "artisan", "queue:work"],
+        processes: 2,
+        memoryMaxBytes: 536870912,
+      },
+    });
+    const commandName = "turbopanel-deploycmd-env1-web.service";
+    const workerName = "turbopanel-worker-env1-web-queue@.service";
+    for (
+      const [name, text] of [[commandName, command], [workerName, worker]]
+    ) {
+      const ok = await installUnit(host, name, text);
+      assertEquals(ok.code, 0, `${name}: ${ok.stderr}`);
+      const guard = `ExecStartPre=+${
+        host.path("opt/turbopanel/lib")
+      }/tp-php-loopback sync`;
+      assertStringIncludes(text, guard);
+      const bad = [
+        // Each wall removed.
+        text.replace(guard, ""),
+        text.replace(/^IPAddressDeny=.*$/m, ""),
+        text.replace(/^IPAddressAllow=.*$/m, ""),
+        text.replace(/^PrivateDevices=.*$/m, ""),
+        // Each wall changed.
+        text.replace(/^IPAddressDeny=.*$/m, "IPAddressDeny=localhost"),
+        text.replace(/^IPAddressAllow=.*$/m, "IPAddressAllow=any"),
+        text.replace("PrivateDevices=yes", "PrivateDevices=no"),
+        // Another root hook, or a second hook of any kind.
+        text.replace(guard, "ExecStartPre=+/bin/true"),
+        text.replace(guard, `${guard}\nExecStartPre=/bin/true`),
+        text.replace(guard, `${guard}\n${guard}`),
+        // Another account's variables copy, or none of its own pinned form.
+        text.replace(
+          `EnvironmentFile=${own}`,
+          `EnvironmentFile=${host.path("etc/turbopanel/site-env/bob/x.env")}`,
+        ),
+      ];
+      for (const content of bad) {
+        assertEquals(
+          (await installUnit(host, name, content)).code === 0,
+          false,
+        );
+      }
+    }
+    // A scheduled job may not carry a root hook: the guard line is refused there.
+    const cron = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: base.workingDirectory,
+      environmentFile: own,
+    });
+    const guardLine = command.split("\n").find((line) =>
+      line.startsWith("ExecStartPre=")
+    ) ?? "";
+    await refusedUnit(
+      host,
+      "turbopanel-cron-env1-web-nightly.service",
+      cron.replace("[Service]\n", `[Service]\n${guardLine}\n`),
+    );
+    // The same unit under a name outside the two families is refused.
+    await refusedUnit(host, "turbopanel-other-env1-web.service", command);
+  });
+});
+
+test("journalctl reads a site's command and worker units, nothing else", async () => {
+  await withHost(async (host) => {
+    const form = (unit: string) => [
+      "journalctl",
+      `--unit=${unit}`,
+      "-n",
+      "2000",
+      "--no-pager",
+      "--output=short-iso",
+    ];
+    for (
+      const unit of [
+        "turbopanel-deploycmd-env1-web.service",
+        "turbopanel-worker-env1-web-queue@1.service",
+      ]
+    ) {
+      // tp-host's test mode refuses to exec journald; reaching that point
+      // means the unit name passed the check.
+      const result = await host.run(form(unit));
+      assertEquals(result.stderr.includes("refusing unit"), false, unit);
+    }
+    for (const unit of ["turbopanel-php-x.service", "ssh.service", "sshd"]) {
+      await refused(host, form(unit));
+    }
   });
 });

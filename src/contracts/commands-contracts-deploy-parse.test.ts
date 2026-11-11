@@ -1828,6 +1828,131 @@ test("parseEnvironmentDeployPayload enforces configFiles per service and total l
   rejectDeploy({ configFiles: big }, "exceed the maximum total size");
 });
 
+const LIFECYCLE_SITE = {
+  composeServiceName: "web",
+  engine: "apache" as const,
+  root: "public",
+  listenPort: 18080,
+  principal: {
+    principalId: PRINCIPAL_ID,
+    username: "alice",
+    uid: 15001,
+    gid: 15001,
+  },
+};
+
+function parseLifecycleSite(extra: Record<string, unknown>) {
+  return parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sites: [{ ...LIFECYCLE_SITE, ...extra }],
+  }).sites?.[0];
+}
+
+test("a site's post-deploy commands and workers parse with their defaults left out", () => {
+  const site = parseLifecycleSite({
+    postDeploy: {
+      commands: [["/usr/local/bin/php", "artisan", "migrate", "--force"]],
+    },
+    workers: [{
+      name: "queue",
+      command: ["/usr/local/bin/php", "artisan", "queue:work"],
+    }],
+  });
+  assertEquals(site?.postDeploy, {
+    commands: [["/usr/local/bin/php", "artisan", "migrate", "--force"]],
+  });
+  assertEquals(site?.workers, [{
+    name: "queue",
+    command: ["/usr/local/bin/php", "artisan", "queue:work"],
+  }]);
+  const full = parseLifecycleSite({
+    postDeploy: {
+      commands: [["/bin/true"]],
+      timeoutSeconds: 30,
+      timing: "after-switch",
+    },
+    workers: [{
+      name: "horizon",
+      command: ["/bin/true"],
+      processes: 8,
+      stopTimeoutSeconds: 3600,
+      memoryMaxBytes: 64 * 1024 * 1024,
+    }],
+  });
+  assertEquals(full?.postDeploy?.timing, "after-switch");
+  assertEquals(full?.workers?.[0]?.processes, 8);
+});
+
+test("a site's post-deploy commands refuse what the limits and argv rules refuse", () => {
+  const refuse = (postDeploy: unknown) =>
+    assertThrows(() => parseLifecycleSite({ postDeploy }), TypeError);
+  refuse({ commands: [] });
+  refuse({ commands: Array.from({ length: 11 }, () => ["/bin/true"]) });
+  refuse({ commands: [["php", "artisan"]] });
+  refuse({ commands: [[]] });
+  refuse({ commands: [["/bin/true", ""]] });
+  refuse({ commands: [["/bin/true", "a\nb"]] });
+  refuse({ commands: [["/bin/true", "a".repeat(513)]] });
+  refuse({ commands: [["/bin/true"]], timeoutSeconds: 29 });
+  refuse({ commands: [["/bin/true"]], timeoutSeconds: 1801 });
+  refuse({ commands: [["/bin/true"]], timeoutSeconds: 60.5 });
+  refuse({ commands: [["/bin/true"]], timing: "later" });
+});
+
+test("a site's workers refuse bad names, duplicates, counts and limits", () => {
+  const worker = { name: "queue", command: ["/bin/true"] };
+  const refuse = (workers: unknown) =>
+    assertThrows(() => parseLifecycleSite({ workers }), TypeError);
+  refuse([{ ...worker, name: "Queue" }]);
+  refuse([{ ...worker, name: "-q" }]);
+  refuse([worker, worker]);
+  refuse(Array.from({ length: 11 }, (_, i) => ({ ...worker, name: `w${i}` })));
+  refuse([{ ...worker, command: ["queue:work"] }]);
+  refuse([{ ...worker, processes: 0 }]);
+  refuse([{ ...worker, processes: 9 }]);
+  refuse([{ ...worker, stopTimeoutSeconds: 9 }]);
+  refuse([{ ...worker, stopTimeoutSeconds: 3601 }]);
+  refuse([{ ...worker, memoryMaxBytes: 1024 }]);
+  refuse([{ ...worker, memoryMaxBytes: 65 * 1024 * 1024 * 1024 }]);
+});
+
+test("post-deploy commands and workers need a principal, and commands need a release", () => {
+  const { principal: _principal, ...unowned } = LIFECYCLE_SITE;
+  for (
+    const extra of [
+      { postDeploy: { commands: [["/bin/true"]] } },
+      { workers: [{ name: "queue", command: ["/bin/true"] }] },
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          sites: [{ ...unowned, ...extra }],
+        }),
+      TypeError,
+      "require a principal",
+    );
+  }
+  assertThrows(
+    () =>
+      parseLifecycleSite({
+        sourceKind: "managed-directory",
+        postDeploy: { commands: [["/bin/true"]] },
+      }),
+    TypeError,
+    "no release",
+  );
+  // A worker is fine in a managed directory.
+  assertEquals(
+    parseLifecycleSite({
+      sourceKind: "managed-directory",
+      workers: [{ name: "queue", command: ["/bin/true"] }],
+    })?.workers?.length,
+    1,
+  );
+});
+
 test("parseEnvironmentDeployPayload refuses config names ending in .tmp", () => {
   rejectDeploy(
     { configFiles: [configFile({ relativePath: "web--conf.tmp" })] },

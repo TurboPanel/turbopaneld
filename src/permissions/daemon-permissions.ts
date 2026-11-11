@@ -160,6 +160,11 @@ export const DAEMON_READ_PATHS: readonly string[] = [
   "/etc/systemd",
   "/etc/docker",
   "/etc/php",
+  // The installed PHP patch versions, and whether a package run is still
+  // under way (`updates/` holds files until dpkg finishes), for the restart
+  // pass after a PHP package update. Never anything else under /var/lib/dpkg.
+  "/var/lib/dpkg/status",
+  "/var/lib/dpkg/updates",
   "/etc/apache2",
   "/etc/nginx",
   "/etc/caddy",

@@ -55,5 +55,10 @@ site-env/<user>/<site id>.env`, `deploy/site/site-env-file.ts`) and a PHP site's
 jobs run with `TURBOPANEL_PHP=<series>`, so a bare `php` is the site's own
 series. A release-backed site's jobs run in the release root (`current`), so
 `php artisan schedule:run` works as typed; a managed-directory site's run in
-its document root. A native app's jobs load no file yet.
+its document root. A native app's jobs load no file yet. The unit's sandbox
+lines are `principalHardeningLines()` (`native/unit.ts`) and its argument
+quoting `quoteExecArg`; a site's post-deploy command and worker units
+(`src/deploy/site/AGENTS.md`) reuse both, so a change to either reaches all three.
+Cron units do not get `PrivateDevices`, the address filter or the loopback
+guard line in this bundle.
 

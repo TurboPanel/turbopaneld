@@ -111,6 +111,7 @@ import { PENDING_RECORD_MARKER } from "./release-health.ts";
 import type { NativeAppStart } from "../native/start-entry.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import { readCapped } from "../site/app-detect.ts";
+import { postDeployPassed } from "../site/post-deploy-marker.ts";
 import { checkHtaccess, htaccessWarnings } from "../site/htaccess-check.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
@@ -182,6 +183,13 @@ export type AppliedRelease = {
    * release serving or, when that one stopped since, before starting it.
    */
   heldCurrent?: boolean;
+  /**
+   * True when this deploy puts the release forward (built now, or re-sent
+   * after an earlier try published it), unset for a rollback to an older one
+   * and for a re-sent release that is already `current` with its commands
+   * passed. A site's post-deploy commands run for every such release.
+   */
+  built?: boolean;
   /** True when a Next standalone tree was published instead of the checkout. */
   standaloneOutput: boolean;
   /**
@@ -247,8 +255,9 @@ function nativeAppForService(
 
 /**
  * Whether to publish this service's release without moving `current`: only a
- * server build (never a static export) of a Node app that is serving now.
- * Asking the host is best-effort: a probe that fails moves `current` as before.
+ * server build (never a static export) of a Node app that is serving now, or a
+ * site with before-traffic commands. A probe that throws moves `current` as
+ * before (the site probe fails closed itself and answers true).
  */
 async function holdsCurrent(
   deps: Pick<ApplySourceReleasesDeps, "holdCurrent">,
@@ -383,6 +392,7 @@ function imageRollbackResult(
  * owner can rewrite.
  */
 async function rollbackOneRelease(
+  layout: LayoutPaths,
   entry: EnvironmentDeploySource,
   target: RollbackTarget,
   params: {
@@ -390,6 +400,8 @@ async function rollbackOneRelease(
     releaseId: string;
     logSink: CommandOutputSink;
     deps: ApplySourceReleasesDeps;
+    /** A re-sent deploy of a published release: reported as put forward, not as a rollback. */
+    resent?: boolean;
   },
 ): Promise<AppliedRelease> {
   const { logSink, deps } = params;
@@ -452,6 +464,7 @@ async function rollbackOneRelease(
     releaseDir,
     previousReleaseId,
     ...(keepCurrent ? { heldCurrent: true } : {}),
+    ...(await putForwardFlag(layout, params, previousReleaseId)),
     // The runtime lane a rollback restores is the one the original promote
     // established, so both come off that release's own manifest rather than
     // being re-derived (nothing was built here to derive them from). A
@@ -469,6 +482,24 @@ async function rollbackOneRelease(
       ? {}
       : { frameworkLayout: recordedManifest.frameworkLayout }),
   };
+}
+
+/**
+ * `{ built: true }` for a re-sent release a site's commands still have to run
+ * for: any re-sent release, except one already `current` whose commands passed.
+ */
+async function putForwardFlag(
+  layout: LayoutPaths,
+  params: { serviceId: string; releaseId: string; resent?: boolean },
+  previousReleaseId: string | null,
+): Promise<{ built?: true }> {
+  if (params.resent !== true) return {};
+  const alreadyLive = previousReleaseId === params.releaseId;
+  if (
+    alreadyLive &&
+    await postDeployPassed(layout, params.serviceId, params.releaseId)
+  ) return {};
+  return { built: true };
 }
 
 /**
@@ -1063,6 +1094,7 @@ async function buildNativeRelease(
         : undefined,
       previousReleaseId,
       heldCurrent: keepCurrent || undefined,
+      built: true,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,
@@ -1462,7 +1494,7 @@ async function applyOneRelease(
       );
       return null;
     }
-    return await rollbackOneRelease(entry, rollbackTarget, {
+    return await rollbackOneRelease(layout, entry, rollbackTarget, {
       serviceId,
       releaseId: entry.rollbackToReleaseId,
       logSink,
@@ -1488,11 +1520,12 @@ async function applyOneRelease(
       `release ${entry.releaseId} is already published on this host; ` +
         `cutting ${entry.composeServiceName} over to it without a rebuild`,
     );
-    return await rollbackOneRelease(entry, resent, {
+    return await rollbackOneRelease(layout, entry, resent, {
       serviceId,
       releaseId: entry.releaseId,
       logSink,
       deps,
+      resent: true,
     });
   }
 

@@ -51,7 +51,10 @@ import {
   serviceIngressProject,
 } from "../deploy/ingress.ts";
 import { applyNativeAppLifecycle } from "../deploy/native/apply-native-apps.ts";
-import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { workerLifecycle } from "../deploy/site/workers.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
+import type { RunFn } from "../deploy/ensure-principal.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
@@ -76,6 +79,8 @@ export type EnvironmentLifecycleHandlerDeps = {
   logSink?: CommandOutputSink;
   decryptSecrets?: DecryptSecretsFn;
   rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
+  /** Test seam: the host runner for worker units. */
+  runHost?: RunFn;
 };
 
 function assertSafeLifecycleIdentifiers(
@@ -215,6 +220,32 @@ export async function handleEnvironmentLifecycle(
   );
 }
 
+/** Start and restart put the deployment's secret and config files back first. */
+async function ensureLifecycleSecrets(
+  parsedPayload: EnvironmentLifecyclePayload,
+  layout: ReturnType<typeof resolveLayout>,
+  manifest: Awaited<ReturnType<typeof readDeploymentManifest>>,
+  decryptSecrets: ReturnType<typeof captureDecryptedSecrets>,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<void> {
+  if (parsedPayload.action !== "start" && parsedPayload.action !== "restart") {
+    return;
+  }
+  const plan = manifest?.secrets ?? [];
+  const configFiles = manifest?.configFiles ?? [];
+  if (plan.length === 0 && configFiles.length === 0) return;
+  await ensureDeploymentSecretFiles({
+    layout,
+    projectId: parsedPayload.projectId,
+    environmentId: parsedPayload.environmentId,
+    generation: manifest?.generation,
+    decryptSecrets,
+    rehydrate: deps?.rehydrateDeploymentSecrets,
+    plan,
+    configFiles,
+  });
+}
+
 async function lifecycleLocked(
   parsedPayload: EnvironmentLifecyclePayload,
   daemonReceivedAt: string,
@@ -245,22 +276,13 @@ async function lifecycleLocked(
   // skipped as unchanged.
   await clearAppliedDeployHash(deploymentDir);
   const manifest = await readDeploymentManifest(deploymentDir);
-  if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
-    const plan = manifest?.secrets ?? [];
-    const configFiles = manifest?.configFiles ?? [];
-    if (plan.length > 0 || configFiles.length > 0) {
-      await ensureDeploymentSecretFiles({
-        layout,
-        projectId: parsedPayload.projectId,
-        environmentId: parsedPayload.environmentId,
-        generation: manifest?.generation,
-        decryptSecrets,
-        rehydrate: deps?.rehydrateDeploymentSecrets,
-        plan,
-        configFiles,
-      });
-    }
-  }
+  await ensureLifecycleSecrets(
+    parsedPayload,
+    layout,
+    manifest,
+    decryptSecrets,
+    deps,
+  );
 
   // A stack still running under an earlier, project-wide name (the recorded
   // names do not include this command's). Compose acts on a whole project and
@@ -326,6 +348,33 @@ async function lifecycleLocked(
       "commands",
       `environment.lifecycle ${parsedPayload.action} native units=${
         nativeUnits.join(",")
+      }`,
+    );
+  }
+
+  // A site's background workers follow the action too, best effort.
+  try {
+    const workerUnits = await workerLifecycle(
+      {
+        run: deps?.runHost ?? runHostCommand,
+        onLine: (stream, line) => logSink.onLine(stream, line),
+      },
+      parsedPayload.environmentId,
+      parsedPayload.action,
+    );
+    if (workerUnits.length > 0) {
+      logInfo(
+        "commands",
+        `environment.lifecycle ${parsedPayload.action} worker units=${
+          workerUnits.join(",")
+        }`,
+      );
+    }
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.lifecycle worker ${parsedPayload.action} failed env=${parsedPayload.environmentId}: ${
+        err instanceof Error ? err.message : Deno.inspect(err)
       }`,
     );
   }

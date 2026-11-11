@@ -129,6 +129,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-lock-follow-v1",
   "tunnel-connector-token-change-v1",
   "deploy-config-files-v1",
+  "site-php-lifecycle-v1",
 ] as const;
 
 /**
@@ -775,3 +776,14 @@ export function resolveInstanceCapabilities(
  */
 export const DEPLOY_CONFIG_FILES_FEATURE: DaemonWireFeature =
   "deploy-config-files-v1";
+
+/**
+ * `site-php-lifecycle-v1`: this daemon runs `sites[].postDeploy` (commands in
+ * each newly built release, before it takes traffic or right after the switch)
+ * and keeps `sites[].workers` running, restarting them after every deploy. The
+ * control plane refuses a deploy that carries either for a daemon without it,
+ * because an older daemon would drop both fields and the owner would believe
+ * a migration had run.
+ */
+export const SITE_PHP_LIFECYCLE_FEATURE: DaemonWireFeature =
+  "site-php-lifecycle-v1";

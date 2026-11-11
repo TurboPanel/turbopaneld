@@ -1129,6 +1129,44 @@ export type EnvironmentDeployCronJob = {
   concurrencyPolicy?: "forbid";
 };
 
+/** When a site's post-deploy commands run; omitted means `before-traffic`. */
+export type EnvironmentDeploySitePostDeployTiming =
+  | "before-traffic"
+  | "after-switch";
+
+/**
+ * Commands run as the site's account in the new release with the site's
+ * variables: before the release takes traffic (the default; a failure leaves
+ * the release that was serving in place) or right after the switch (a failure
+ * fails the deploy and the control plane offers a rollback). Sent only to a
+ * daemon that lists `site-php-lifecycle-v1`.
+ */
+export type EnvironmentDeploySitePostDeploy = {
+  /** 1 to 10 argv lists; `command[0]` is an absolute path. */
+  commands: string[][];
+  /** 30 to 1800; omitted means 900. */
+  timeoutSeconds?: number;
+  timing?: EnvironmentDeploySitePostDeployTiming;
+};
+
+/**
+ * One long-running command (a queue worker) kept running as a managed unit
+ * under the site's account. Restarted gracefully after every deploy. Sent only
+ * to a daemon that lists `site-php-lifecycle-v1`.
+ */
+export type EnvironmentDeploySiteWorker = {
+  /** Unit-name segment, unique within the site. */
+  name: string;
+  /** argv; `command[0]` is an absolute path. */
+  command: string[];
+  /** 1 to 8; omitted means 1. */
+  processes?: number;
+  /** `TimeoutStopSec=`, 10 to 3600; omitted means 90. */
+  stopTimeoutSeconds?: number;
+  /** `MemoryMax=` in bytes, 64 MiB to 64 GiB. */
+  memoryMaxBytes?: number;
+};
+
 export type EnvironmentDeploySite = {
   composeServiceName: string;
   /**
@@ -1151,6 +1189,13 @@ export type EnvironmentDeploySite = {
    * Requires `principal`: a timer with no `User=` would run as root.
    */
   cron?: EnvironmentDeployCronJob[];
+  /**
+   * Commands to run in each newly built release, as the site's principal.
+   * Requires `principal` and a release-backed site.
+   */
+  postDeploy?: EnvironmentDeploySitePostDeploy;
+  /** Background workers, run as the site's principal. Requires `principal`. */
+  workers?: EnvironmentDeploySiteWorker[];
   webEnv?: Record<string, string>;
   /**
    * Secret runtime variables, name to `tpdaemon` envelope (the sealed twin of
@@ -5790,6 +5835,43 @@ function parseSiteRequiredEnv(
   );
 }
 
+function assertSitePrincipals(site: EnvironmentDeploySite): void {
+  // A managed directory is "a directory **and a principal**": without an owner
+  // there is no account to write into it and nobody the tree could belong to.
+  // Rejected rather than silently falling back to the daemon-owned tree, which
+  // would look like it worked and be unreachable over SFTP.
+  // A timer with no `User=` runs as root. Refused rather than defaulted: there
+  // is no safe account to guess, and running a tenant's job as root because a
+  // field was missing is not a failure mode to leave open.
+  if (site.cron && site.cron.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
+    );
+  }
+  if (site.sourceKind === "managed-directory" && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
+    );
+  }
+  // Commands and workers run as the site's account, never as root.
+  if (site.postDeploy && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: post-deploy commands require a principal to run as`,
+    );
+  }
+  if (site.workers && site.workers.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: workers require a principal to run as`,
+    );
+  }
+  // A managed directory has no release for a command to run in.
+  if (site.postDeploy && site.sourceKind === "managed-directory") {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site has no release to run post-deploy commands in`,
+    );
+  }
+}
+
 function parseSite(
   value: unknown,
 ): EnvironmentDeploySite {
@@ -5810,6 +5892,16 @@ function parseSite(
   if (sourceKind) site.sourceKind = sourceKind;
   const cron = parseCronJobs(value.cron, `sites.${site.composeServiceName}`);
   if (cron) site.cron = cron;
+  const postDeploy = parseSitePostDeploy(
+    value.postDeploy,
+    `sites.${site.composeServiceName}`,
+  );
+  if (postDeploy) site.postDeploy = postDeploy;
+  const workers = parseSiteWorkers(
+    value.workers,
+    `sites.${site.composeServiceName}`,
+  );
+  if (workers) site.workers = workers;
   const webEnv = parseStringRecord(value.webEnv);
   if (webEnv) site.webEnv = webEnv;
   const webSecretEnv = parseStringRecord(value.webSecretEnv);
@@ -5825,23 +5917,7 @@ function parseSite(
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);
   if (principal) site.principal = principal;
-  // A managed directory is "a directory **and a principal**": without an owner
-  // there is no account to write into it and nobody the tree could belong to.
-  // Rejected rather than silently falling back to the daemon-owned tree, which
-  // would look like it worked and be unreachable over SFTP.
-  // A timer with no `User=` runs as root. Refused rather than defaulted: there
-  // is no safe account to guess, and running a tenant's job as root because a
-  // field was missing is not a failure mode to leave open.
-  if (site.cron && site.cron.length > 0 && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
-    );
-  }
-  if (site.sourceKind === "managed-directory" && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
-    );
-  }
+  assertSitePrincipals(site);
   return site;
 }
 
@@ -5914,6 +5990,125 @@ function parseCronJobs(
         ? {}
         : { concurrencyPolicy: "forbid" as const }),
     };
+  });
+}
+
+/** A command argv as the cron rule: non-empty, bounded, no control characters, absolute first word. */
+function isCommandArgv(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((arg) =>
+      typeof arg === "string" && arg.length > 0 && arg.length <= 512 &&
+      !/[\0\n\r]/.test(arg)
+    ) &&
+    (value[0] as string).startsWith("/");
+}
+
+/** Mirrors panel limits for `postDeploy`. */
+const MAX_POST_DEPLOY_COMMANDS = 10;
+const MIN_POST_DEPLOY_TIMEOUT_SECONDS = 30;
+const MAX_POST_DEPLOY_TIMEOUT_SECONDS = 1800;
+
+function parseSitePostDeploy(
+  value: unknown,
+  label: string,
+): EnvironmentDeploySitePostDeploy | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) || !Array.isArray(value.commands) ||
+    value.commands.length < 1 ||
+    value.commands.length > MAX_POST_DEPLOY_COMMANDS ||
+    !value.commands.every(isCommandArgv)
+  ) {
+    throw new TypeError(`Invalid ${label} postDeploy`);
+  }
+  const out: EnvironmentDeploySitePostDeploy = {
+    commands: value.commands.map((argv) => [...argv]),
+  };
+  if (value.timeoutSeconds !== undefined) {
+    const seconds = value.timeoutSeconds;
+    if (
+      typeof seconds !== "number" || !Number.isInteger(seconds) ||
+      seconds < MIN_POST_DEPLOY_TIMEOUT_SECONDS ||
+      seconds > MAX_POST_DEPLOY_TIMEOUT_SECONDS
+    ) {
+      throw new TypeError(`Invalid ${label} postDeploy timeoutSeconds`);
+    }
+    out.timeoutSeconds = seconds;
+  }
+  if (value.timing !== undefined) {
+    if (value.timing !== "before-traffic" && value.timing !== "after-switch") {
+      throw new TypeError(`Invalid ${label} postDeploy timing`);
+    }
+    out.timing = value.timing;
+  }
+  return out;
+}
+
+/** Mirrors panel limits for `workers`. */
+const MAX_SITE_WORKERS = 10;
+const MAX_WORKER_PROCESSES = 8;
+const MIN_WORKER_STOP_TIMEOUT_SECONDS = 10;
+const MAX_WORKER_STOP_TIMEOUT_SECONDS = 3600;
+const MIN_WORKER_MEMORY_BYTES = 64 * 1024 * 1024;
+const MAX_WORKER_MEMORY_BYTES = 64 * 1024 * 1024 * 1024;
+
+function integerInRange(
+  value: unknown,
+  min: number,
+  max: number,
+): value is number {
+  return typeof value === "number" && Number.isInteger(value) &&
+    value >= min && value <= max;
+}
+
+function parseSiteWorkers(
+  value: unknown,
+  label: string,
+): EnvironmentDeploySiteWorker[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_SITE_WORKERS) {
+    throw new TypeError(`Invalid ${label} workers`);
+  }
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (
+      !isRecord(raw) || typeof raw.name !== "string" ||
+      !CRON_JOB_NAME_RE.test(raw.name) || !isCommandArgv(raw.command)
+    ) {
+      throw new TypeError(`Invalid ${label} workers entry`);
+    }
+    if (seen.has(raw.name)) {
+      throw new TypeError(`Duplicate ${label} worker: ${raw.name}`);
+    }
+    seen.add(raw.name);
+    const worker: EnvironmentDeploySiteWorker = {
+      name: raw.name,
+      command: [...raw.command],
+    };
+    const limits: Array<
+      [
+        "processes" | "stopTimeoutSeconds" | "memoryMaxBytes",
+        number,
+        number,
+      ]
+    > = [
+      ["processes", 1, MAX_WORKER_PROCESSES],
+      [
+        "stopTimeoutSeconds",
+        MIN_WORKER_STOP_TIMEOUT_SECONDS,
+        MAX_WORKER_STOP_TIMEOUT_SECONDS,
+      ],
+      ["memoryMaxBytes", MIN_WORKER_MEMORY_BYTES, MAX_WORKER_MEMORY_BYTES],
+    ];
+    for (const [key, min, max] of limits) {
+      const value = raw[key];
+      if (value === undefined) continue;
+      if (!integerInRange(value, min, max)) {
+        throw new TypeError(`Invalid ${label} workers entry`);
+      }
+      worker[key] = value;
+    }
+    return worker;
   });
 }
 

@@ -72,11 +72,19 @@ import {
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
+import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
+import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
+import { siteRunContext } from "../deploy/site/lifecycle-context.ts";
 import {
-  materializeSiteEnvFiles,
-  siteEnvFileId,
-  siteEnvRootPath,
-} from "../deploy/site/site-env-file.ts";
+  applyDeployWorkers,
+  assertSiteLifecyclePhp,
+  hasPostDeployWork,
+  runAfterSwitchPostDeploy,
+  runBeforeTrafficPostDeploy,
+  siteHeldForPostDeploy,
+  type SiteLifecycleDeploy,
+  type SiteLifecycleIo,
+} from "../deploy/site/lifecycle-deploy.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
@@ -155,7 +163,6 @@ import {
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   removeNamedSites,
-  resolveSiteDocumentRoot,
   resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
@@ -1388,21 +1395,7 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
-/**
- * What a site's cron job may write besides the principal's `home/` and `tmp/`:
- * `shared/` and `logs/` in the release lane, `public/` too in the managed lane
- * (`webroot/` and `shared/` in the older tree), nothing for a tree outside the
- * principal's home.
- */
-export function siteCronWritableDirs(
-  layout: Pick<LayoutPaths, "principalHomeRoot">,
-  release: SiteRelease | undefined,
-  managed: SiteManagedDirectory | undefined,
-): string[] {
-  if (release) return siteWritableDirs(layout, release, false);
-  if (managed) return siteWritableDirs(layout, managed, true);
-  return [];
-}
+export { siteCronWritableDirs } from "../deploy/site/lifecycle-context.ts";
 
 /** A native app's tree reference: its service id and owner, plus its folder. */
 function nativeRef(
@@ -1431,35 +1424,22 @@ export function siteCronSpec(
   release: SiteRelease | undefined,
   managed: SiteManagedDirectory | undefined,
 ): CronApplySpec | undefined {
-  const principal = site.principal;
   // The wire contract already refuses jobs without a principal; this keeps the
   // type honest rather than re-reporting it.
-  if (!site.cron || site.cron.length === 0 || !principal) return undefined;
-  const owner = release ?? managed;
-  const phpSeries = resolveSitePhpSeries(site);
+  if (!site.cron || site.cron.length === 0) return undefined;
+  const context = siteRunContext(layout, environmentId, site, release, managed);
+  if (!context) return undefined;
   return {
     composeServiceName: site.composeServiceName,
-    username: principal.username,
-    workingDirectory: release
-      ? serviceTree(layout, release).currentLink
-      : resolveSiteDocumentRoot(
-        layout,
-        environmentId,
-        site,
-        release,
-        managed,
-      ),
-    siteWritableDirs: siteCronWritableDirs(layout, release, managed),
-    ...(owner
-      ? {
-        environmentFile: siteEnvRootPath(
-          layout,
-          owner.username,
-          siteEnvFileId(environmentId, site.composeServiceName),
-        ),
-      }
-      : {}),
-    ...(phpSeries === undefined ? {} : { phpSeries }),
+    username: context.username,
+    workingDirectory: context.workingDirectory,
+    siteWritableDirs: context.siteWritableDirs,
+    ...(context.environmentFile === undefined
+      ? {}
+      : { environmentFile: context.environmentFile }),
+    ...(context.phpSeries === undefined
+      ? {}
+      : { phpSeries: context.phpSeries }),
     jobs: site.cron,
   };
 }
@@ -3135,6 +3115,75 @@ function currentLinksOf(
   );
 }
 
+/**
+ * Which services keep `current` until their new release has passed: a serving
+ * Node app, or a site with before-traffic commands.
+ */
+function holdCurrentFor(
+  layout: LayoutPaths,
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  deps?: EnvironmentDeployDeps,
+): (
+  service: { composeServiceName: string; serviceId: string },
+) => Promise<boolean> {
+  // A Node app that is serving keeps `current` until its new release has
+  // answered beside it, so a crash, a cancel or a failure anywhere before
+  // the switch leaves the serving release live (and the one a restart or a
+  // reboot starts).
+  // A site with before-traffic commands holds `current` the same way until
+  // its commands have passed.
+  return async (service) =>
+    await nativeAppIsServing(
+      parsedPayload.nativeAppServices ?? [],
+      service,
+      deps?.nativeAppIo,
+    ) ||
+    await siteHeldForPostDeploy(
+      layout,
+      parsedPayload.sites ?? [],
+      deployReleaseBindings(parsedPayload),
+      service.composeServiceName,
+      undefined,
+      (parsedPayload.sourceMaterial ?? []).some((entry) =>
+        entry.composeServiceName === service.composeServiceName &&
+        entry.rollbackToReleaseId !== undefined
+      ),
+    );
+}
+
+/** Runs one group of a site's post-deploy commands inside the release-promote phase. */
+async function runPostDeployPhase(
+  runtime: ReturnType<typeof resolveEnvironmentDeployRuntime>,
+  siteLifecycle: Parameters<typeof hasPostDeployWork>[0],
+  siteLifecycleIo: Parameters<typeof runBeforeTrafficPostDeploy>[1],
+  when: "before-traffic" | "after-switch",
+): Promise<void> {
+  if (!hasPostDeployWork(siteLifecycle, when)) return;
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+  if (when === "before-traffic") {
+    await runBeforeTrafficPostDeploy(siteLifecycle, siteLifecycleIo);
+  } else {
+    await runAfterSwitchPostDeploy(siteLifecycle, siteLifecycleIo);
+  }
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+}
+
+/** Marks the deploy applied and asks for a PHP patch pass when a PHP site went live. */
+async function recordAppliedDeploy(
+  deploymentDir: string,
+  desiredHash: string | undefined,
+  sites: Parameters<typeof sitesWithFrameworkLayouts>[0],
+): Promise<void> {
+  if (desiredHash !== undefined) {
+    await writeAppliedDeployHash(deploymentDir, desiredHash);
+  }
+  // A PHP site was applied: look for a PHP build older than the installed one,
+  // in the background (it waits behind this deploy's environment lock).
+  if (sites.some((site) => resolveSitePhpSeries(site) !== undefined)) {
+    requestPhpPatchPassAfterDeploy();
+  }
+}
+
 async function deployEnvironmentHolding(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -3182,6 +3231,11 @@ async function deployEnvironmentHolding(
     publicEdge: hostingsNeedPublicHttpEdge(parsedPayload.hostings),
   }, deps?.presenceProbes);
   cancel?.throwIfCancelled("before the deploy started");
+  // Commands and workers run with the site's PHP: refuse before anything builds.
+  assertSiteLifecyclePhp(
+    parsedPayload.sites ?? [],
+    parsedPayload.environmentId,
+  );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
     layout,
@@ -3253,16 +3307,7 @@ async function deployEnvironmentHolding(
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
-    // A Node app that is serving keeps `current` until its new release has
-    // answered beside it, so a crash, a cancel or a failure anywhere before
-    // the switch leaves the serving release live (and the one a restart or a
-    // reboot starts).
-    holdCurrent: (service) =>
-      nativeAppIsServing(
-        parsedPayload.nativeAppServices ?? [],
-        service,
-        deps?.nativeAppIo,
-      ),
+    holdCurrent: holdCurrentFor(layout, parsedPayload, deps),
     ensureBuildkitImageBuildFn: (releaseLayout) =>
       runInstallStep(
         runtime,
@@ -3352,6 +3397,26 @@ async function deployEnvironmentHolding(
     runtime.runPrivileged,
   );
   for (const line of siteEnvLines) runtime.logSink.onLine("stderr", line);
+  const siteLifecycle: SiteLifecycleDeploy = {
+    layout,
+    environmentId: parsedPayload.environmentId,
+    sites,
+    releaseBindings: siteReleaseBindings,
+    managedBindings: siteManagedBindings,
+    applied: appliedReleases,
+  };
+  const siteLifecycleIo: SiteLifecycleIo = {
+    run: runtime.runPrivileged,
+    onLine: (stream, line) => runtime.logSink.onLine(stream, line),
+  };
+  // Commands that must pass before the new release takes traffic: every
+  // site's run first, then the held sites switch; one failure switches none.
+  await runPostDeployPhase(
+    runtime,
+    siteLifecycle,
+    siteLifecycleIo,
+    "before-traffic",
+  );
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
     appliedReleases,
@@ -3371,6 +3436,14 @@ async function deployEnvironmentHolding(
     siteReleaseBindings,
     siteManagedBindings,
     parsedPayload.hideWebServerNames === true,
+  );
+  // Commands that run right after the switch: a failure stops the deploy here,
+  // so no worker restarts onto the release that just failed.
+  await runPostDeployPhase(
+    runtime,
+    siteLifecycle,
+    siteLifecycleIo,
+    "after-switch",
   );
 
   // Read-only: what each site's document root runs (WordPress today), reported
@@ -3424,6 +3497,12 @@ async function deployEnvironmentHolding(
     nativeAppServicesForHost,
     nativeAppBindingsFromPayload(parsedPayload),
   );
+  // Workers last of the site pieces: the new release is live and its variables
+  // are in place, so each restarts straight onto it.
+  const workerWarnings = sites.length > 0 ||
+      (parsedPayload.removedSites ?? []).length > 0
+    ? await applyDeployWorkers(siteLifecycle, siteLifecycleIo)
+    : [];
 
   // Before any container carries a routing label for a name another
   // environment already serves here.
@@ -3498,9 +3577,11 @@ async function deployEnvironmentHolding(
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
-  if (parsedPayload.desiredHash !== undefined) {
-    await writeAppliedDeployHash(earlyDeploymentDir, parsedPayload.desiredHash);
-  }
+  await recordAppliedDeploy(
+    earlyDeploymentDir,
+    parsedPayload.desiredHash,
+    sites,
+  );
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,
@@ -3513,6 +3594,7 @@ async function deployEnvironmentHolding(
     // The `.htaccess` ones were already written to the transcript at build.
     warnings: [
       ...siteWarnings,
+      ...workerWarnings,
       ...appliedReleases.flatMap((release) => release.htaccessWarnings ?? []),
     ],
     principals: principalIdReports,

@@ -144,7 +144,13 @@ change-detected heartbeats.
   and vendored tenant Node / lsphp series — each area omitted entirely when
   empty, the same discipline `docker` follows. A vendored series is only
   reported once its `current` symlink resolves, so a half-vendored tree is never
-  advertised as runnable. The control plane stores it in `server.metadata.runtimes`
+  advertised as runnable. The PHP entry also carries the installed patch version per
+  series (`versions`), each per-site runtime with the version it runs and
+  whether it is behind (`sites`, at most 256, sorted) and why the last restart
+  pass stopped (`restartError`), all read from a cache the pass fills
+  (`php-patch-cache.ts`, `deploy/site/php-patch-restart.ts`): the snapshot reads
+  no file and starts no process for them, and an older control plane drops the
+  unknown fields. The control plane stores it in `server.metadata.runtimes`
   and gates on it at prepare: an unsupported series is a hard error before
   queueing, a supported-but-absent one is a warning because the deploy installs
   it, and **no report at all means unknown, never absent**.

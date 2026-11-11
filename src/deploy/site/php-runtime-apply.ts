@@ -38,6 +38,13 @@ import {
   type SiteValidationTarget,
   validateSiteEndpoints,
 } from "./engine-driver.ts";
+import type { LayoutPaths } from "../../paths/layout.ts";
+import {
+  clearPhpPatchFailure,
+  readPhpRuntimeRecords,
+  removePhpRuntimeRecords,
+  writePhpRuntimeRecord,
+} from "./php-patch-restart.ts";
 import {
   isSitePhpRuntimeId,
   SITE_PHP_GUARD_FILE,
@@ -82,6 +89,14 @@ export type PreparedSitePhpRuntime = Readonly<{
   units: readonly UnitWrite[];
   /** The site's loopback endpoint, probed when no vhost reload covered it. */
   probe: SiteValidationTarget;
+  /**
+   * Where the runtime's restart record is kept once it is committed, and whose
+   * site it is. Absent when the caller keeps no record.
+   */
+  record?: Readonly<{
+    stateDir: LayoutPaths["stateDir"];
+    environmentId: string;
+  }>;
 }>;
 
 /** A unit-directory listing, by runtime id. */
@@ -361,7 +376,11 @@ async function syncLoopbackRules(io: SitePhpRuntimeIo): Promise<void> {
 export async function installSitePhpRuntime(
   io: SitePhpRuntimeIo,
   files: SitePhpRuntimeFiles,
-  opts: Readonly<{ existing: SitePhpUnitListing; probe: SiteValidationTarget }>,
+  opts: Readonly<{
+    existing: SitePhpUnitListing;
+    probe: SiteValidationTarget;
+    record?: PreparedSitePhpRuntime["record"];
+  }>,
 ): Promise<PreparedSitePhpRuntime> {
   const configs: ConfigWrite[] = [];
   const units: UnitWrite[] = [];
@@ -373,6 +392,7 @@ export async function installSitePhpRuntime(
     configs,
     units,
     probe: opts.probe,
+    ...(opts.record === undefined ? {} : { record: opts.record }),
   });
   try {
     await writeRuntimeFiles(io, files, configs, units);
@@ -397,11 +417,49 @@ export async function installSitePhpRuntime(
   return prepared();
 }
 
+/**
+ * Write the runtime's restart record (`php-patch-restart.ts`). A runtime this
+ * apply did not touch keeps the version it was last seen on; one it started
+ * runs the installed build, which the next pass fills in. Never throws: a
+ * missing record only means the runtime is not restarted after a PHP update
+ * until the next deploy.
+ */
+async function recordRuntime(prepared: PreparedSitePhpRuntime): Promise<void> {
+  const { record } = prepared;
+  if (record === undefined) return;
+  const { spec } = prepared.files;
+  try {
+    const previous = prepared.changed
+      ? undefined
+      : (await readPhpRuntimeRecords(
+        { stateDir: record.stateDir },
+      )).find((entry) => entry.id === spec.id);
+    await writePhpRuntimeRecord({ stateDir: record.stateDir }, {
+      id: spec.id,
+      series: spec.series,
+      mode: spec.mode,
+      environmentId: record.environmentId,
+      composeServiceName: prepared.probe.label,
+      probeUrl: prepared.probe.url,
+      ...(previous?.version === undefined ? {} : { version: previous.version }),
+    });
+    clearPhpPatchFailure(spec.id);
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `PHP runtime ${spec.id} record not written: ${
+        err instanceof Error ? err.message : Deno.inspect(err)
+      }`,
+    );
+  }
+}
+
 /** Keep what one apply installed: only the `.tpprev` snapshots go. */
 export async function commitSitePhpRuntime(
   io: SitePhpRuntimeIo,
   prepared: PreparedSitePhpRuntime,
 ): Promise<void> {
+  await recordRuntime(prepared);
   await forEachSequential(prepared.configs, async (config) => {
     if (!config.snapshotted) return;
     await sudoQuietly(
@@ -514,6 +572,8 @@ export async function removeSitePhpRuntimes(
   configDir: string,
   ids: readonly string[],
   listing: SitePhpUnitListing,
+  /** Where the runtimes' restart records are kept, when the caller has one. */
+  stateDir?: LayoutPaths["stateDir"],
 ): Promise<void> {
   if (ids.length === 0) return;
   await forEachSequential(ids, async (id) => {
@@ -543,6 +603,16 @@ export async function removeSitePhpRuntimes(
       `could not remove the PHP config of ${id}`,
     );
   });
+  if (stateDir !== undefined) {
+    await removePhpRuntimeRecords({ stateDir }, ids).catch((err) =>
+      logWarn(
+        "deploy",
+        `PHP runtime records not removed: ${
+          err instanceof Error ? err.message : Deno.inspect(err)
+        }`,
+      )
+    );
+  }
 }
 
 /**
@@ -732,6 +802,7 @@ async function startIfDown(
 export async function reconcileSitePhpRuntimes(
   io: SitePhpRuntimeIo,
   configDir: string,
+  stateDir?: LayoutPaths["stateDir"],
 ): Promise<{ started: string[]; removed: string[] }> {
   const listing = await listSitePhpUnits(io);
   const orphans = await orphanSitePhpRuntimes(io, configDir, listing);
@@ -746,7 +817,7 @@ export async function reconcileSitePhpRuntimes(
     await sudoQuietly(io, ["php-loopback-sync"], "PHP loopback rules");
     return { started: [], removed: [] };
   }
-  await removeSitePhpRuntimes(io, configDir, orphans, listing);
+  await removeSitePhpRuntimes(io, configDir, orphans, listing, stateDir);
   // The rules live in the kernel only: rebuild them after a reboot or flush,
   // before anything below is started (each start also runs the guard).
   const live = [...listing].filter(([id]) =>
@@ -768,9 +839,11 @@ export async function reconcileSitePhpRuntimes(
 /** {@link reconcileSitePhpRuntimes} on the host, at daemon start. Never throws. */
 export async function reconcileSitePhpRuntimesAtBoot(): Promise<void> {
   try {
+    const layout = resolveLayout();
     const { started, removed } = await reconcileSitePhpRuntimes(
       { run: runHostCommand, unitDir: SYSTEMD_UNIT_DIR },
-      resolveLayout().configDir,
+      layout.configDir,
+      layout.stateDir,
     );
     if (removed.length > 0) {
       logInfo("deploy", `orphaned PHP runtimes removed: ${removed.join(",")}`);

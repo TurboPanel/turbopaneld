@@ -1347,6 +1347,91 @@ test("a running certificate issuer is stopped and the template unit file is remo
   assertEquals(await exists(join(units, "unrelated.service")), true);
 });
 
+const SITE_WORKER_TEMPLATE = "turbopanel-worker-env1-web-queue@.service";
+const SITE_WORKER_INSTANCES = [
+  "turbopanel-worker-env1-web-queue@1.service",
+  "turbopanel-worker-env1-web-queue@2.service",
+];
+const SITE_COMMAND_UNIT = "turbopanel-deploycmd-env1-web.service";
+
+test("a site's worker template, its enabled instances, their wants links and its command unit all go", async () => {
+  const units = await Deno.makeTempDir({ prefix: "tp-purge-units-" });
+  const wants = join(units, "multi-user.target.wants");
+  await Deno.mkdir(wants);
+  await Deno.writeTextFile(join(units, SITE_WORKER_TEMPLATE), "[Service]\n");
+  await Deno.writeTextFile(join(units, SITE_COMMAND_UNIT), "[Service]\n");
+  await Deno.writeTextFile(join(units, "unrelated.service"), "[Service]\n");
+  // `systemctl enable` links each instance to the template file.
+  for (const name of SITE_WORKER_INSTANCES) {
+    await Deno.symlink(
+      join(units, SITE_WORKER_TEMPLATE),
+      join(wants, name),
+    );
+  }
+  const log = join(units, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [
+      `log=${log}`,
+      'case "$*" in',
+      "  *LoadState*) echo loaded ;;",
+      "  *FragmentPath*) echo ;;",
+      "  *ActiveState*) echo active ;;",
+      "  is-active*) echo active ;;",
+      "  is-enabled*) echo enabled ;;",
+      "  *list-unit-files*) cat <<'FILES'",
+      `${SITE_WORKER_TEMPLATE} disabled enabled`,
+      `${SITE_COMMAND_UNIT} static -`,
+      "FILES",
+      "  ;;",
+      "  *list-units*) cat <<'LIST'",
+      ...SITE_WORKER_INSTANCES.map((u) =>
+        `${u} loaded active running TurboPanel worker queue (web)`
+      ),
+      "LIST",
+      "  ;;",
+      '  stop*|disable*) echo "$*" >> "$log" ;;',
+      "esac",
+    ].join("\n"),
+  );
+  const result = await runPurgeSh(
+    [
+      "tp_unit_present",
+      "tp_list_has_word",
+      "tp_collect_unit_names",
+      "tp_stop_disable_unit",
+      "tp_stop_units_matching",
+      "tp_remove_unit_files",
+      "tp_prune_wants_symlinks",
+    ],
+    [
+      `TP_SYSTEMD_DIRS=${units}`,
+      "TP_LEGACY_UNITS=",
+      "TP_OTHER_UNITS=",
+      "tp_collect_unit_names",
+      'cat "$TP_TMP/work.unitnames"',
+      "tp_stop_units_matching service",
+      "tp_remove_unit_files",
+      "tp_prune_wants_symlinks",
+    ].join("\n"),
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  for (const name of [...SITE_WORKER_INSTANCES, SITE_COMMAND_UNIT]) {
+    assertStringIncludes(result.stdout, `${name}\n`, result.stderr);
+  }
+  const calls = (await Deno.readTextFile(log)).split("\n");
+  for (const name of SITE_WORKER_INSTANCES) {
+    assert(calls.includes(`stop ${name}`), `stop ${name}\n${calls.join("\n")}`);
+    assert(calls.includes(`disable ${name}`), `disable ${name}`);
+  }
+  assertEquals(await exists(join(units, SITE_WORKER_TEMPLATE)), false);
+  assertEquals(await exists(join(units, SITE_COMMAND_UNIT)), false);
+  for (const name of SITE_WORKER_INSTANCES) {
+    assertEquals(await exists(join(wants, name)), false, name);
+  }
+  assertEquals(await exists(join(units, "unrelated.service")), true);
+});
+
 test("the issuer's storage, requests, sockets and proof handlers sit in trees purge removes whole", async () => {
   const source = await Deno.readTextFile(purgePath);
   const trees = (extractConstant(source, "TP_OWNED_TREES") ?? "")
