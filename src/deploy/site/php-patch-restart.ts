@@ -435,13 +435,16 @@ async function restartRuntimes(
   return failure === undefined ? { restarted } : { restarted, ...failure };
 }
 
-function workerIoOf(io: PhpPatchIo) {
+/** Where worker output from a patch pass goes: the daemon log, journal text left out. */
+export function workerIoOf(io: PhpPatchIo) {
   return {
     run: io.run,
     onLine: (_stream: "stdout" | "stderr", line: string) =>
       logInfo("deploy", line),
     ...(io.sleep === undefined ? {} : { sleep: io.sleep }),
     systemdUnitDir: io.systemdUnitDir ?? SYSTEMD_UNIT_DIR,
+    // These lines go to the daemon log, which has no deny-set to redact with.
+    omitJournal: true,
   };
 }
 

@@ -1,7 +1,8 @@
 // Managed by TurboPanel (os-security-updates role); do not edit by hand.
 // Installs updates from the Debian security repository and from the PHP
-// package archive the PHP runtimes come from, and never restarts the server. A kernel or library update that needs a restart
-// leaves /var/run/reboot-required, and the server page shows Restart Needed.
+// package archive the PHP runtimes come from, and never restarts the server.
+// A kernel or library update that needs a restart leaves
+// /var/run/reboot-required, and the server page shows Restart Needed.
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 // Replace the package's default list (which also takes stable point

@@ -29,9 +29,9 @@ import {
   runPhpPatchPass,
   writePhpRuntimeRecord,
 } from "./php-patch-restart.ts";
-import { phpSeriesChangeTime } from "./php-patch-restart.ts";
+import { phpSeriesChangeTime, workerIoOf } from "./php-patch-restart.ts";
 import { holdPruneKeys } from "./prune-holds.ts";
-import { applySiteWorkers } from "./workers.ts";
+import { applySiteWorkers, watchWorkerInstances } from "./workers.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -470,6 +470,44 @@ test("a restart that itself fails stops the pass with the restart's message", as
   }
 });
 
+test("worker output on the patch path carries no journal text", async () => {
+  const f = await fixture([A]);
+  try {
+    const lines: string[] = [];
+    const host = await makeSystemdHost((call: SystemdHostCall) => {
+      if (call.tool === "systemctl" && call.args[0] === "is-active") {
+        return hostFail("", "failed");
+      }
+      if (call.tool === "journalctl") {
+        return hostOk(
+          "2026-11-10T12:00:00+0000 h unit[9]: secret-looking-text",
+        );
+      }
+      return undefined;
+    });
+    try {
+      const io = workerIoOf({
+        ...f.io,
+        run: host.run,
+        sleep: () => Promise.resolve(),
+      });
+      const warnings = await watchWorkerInstances(
+        { ...io, onLine: (_stream, line) => lines.push(line) },
+        [{
+          unit: "turbopanel-worker-env1-alpha-queue@1.service",
+          label: "alpha/queue",
+        }],
+      );
+      assertEquals(warnings, ["alpha/queue"]);
+      assert(lines.every((line) => !line.includes("secret-looking-text")));
+    } finally {
+      await host.cleanup();
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
 function fakeSchedule() {
   const ticks: Array<() => void> = [];
   let cleared = false;
@@ -508,17 +546,21 @@ test("the watch looks only at change times and starts a pass only when one moved
     const stop = armPhpPatchWatch(f.io, schedule);
     const callsBefore = shows();
     const eventsBefore = f.events.length;
-    await ticksRun(ticks);
+    const readsBefore = changeReads;
+    await ticksRun(ticks, () => changeReads > readsBefore);
+    // Let a pass that wrongly started show itself before the negative checks.
+    await new Promise((resolve) => setTimeout(resolve, 50));
     // Nothing moved: only the binaries were looked at, no unit was queried.
     assertEquals(f.events.length, eventsBefore);
     assertEquals(shows(), callsBefore);
-    assert(changeReads > 0);
     // A newer package: the next tick runs a pass and restarts onto it.
     change = CHANGE_MS + 3 * 3600_000;
     f.nowMs.value = change + PHP_PATCH_SETTLE_MS;
     f.started.set(`turbopanel-php-${A.id}.service`, OLD_START_S + 10 * 3600);
-    await ticksRun(ticks);
-    assert(f.events.includes(`restart turbopanel-php-${A.id}.service`));
+    await ticksRun(
+      ticks,
+      () => f.events.includes(`restart turbopanel-php-${A.id}.service`),
+    );
     stop();
     assert(cleared());
   } finally {
@@ -526,9 +568,20 @@ test("the watch looks only at change times and starts a pass only when one moved
   }
 });
 
-async function ticksRun(ticks: Array<() => void>) {
+/** Wait for a condition with a generous ceiling, polling often. */
+async function until(condition: () => boolean, ceilingMs = 5000) {
+  const deadline = Date.now() + ceilingMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** Run the ticks; wait for `until`, or briefly when nothing is expected. */
+async function ticksRun(ticks: Array<() => void>, until_?: () => boolean) {
   for (const tick of ticks) tick();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  if (until_) await until(until_);
+  else await new Promise((resolve) => setTimeout(resolve, 50));
 }
 
 test("a deploy asks for a pass only once the daemon has armed the restarts, and arming happens once", async () => {
@@ -543,7 +596,9 @@ test("a deploy asks for a pass only once the daemon has armed the restarts, and 
     await new Promise((resolve) => setTimeout(resolve, 20));
     assertEquals(f.events, []);
     armPhpPatchRestarts(f.io.layout, f.io, schedule);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await until(() =>
+      f.events.includes(`restart turbopanel-php-${A.id}.service`)
+    );
     // The boot pass ran and the watch is armed.
     assert(f.events.includes(`restart turbopanel-php-${A.id}.service`));
     assertEquals(ticks.length, 1);

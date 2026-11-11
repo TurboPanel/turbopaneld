@@ -554,12 +554,16 @@ root-owned `0550` by design:
   normally, runs right after the site apply and before the workers restart; a
   failure throws at that point (`PostDeployFailedAfterSwitchError`, code
   `post_deploy_failed_after_switch`, both release ids in `details`), so no worker
-  restarts onto the failed release. Neither timing runs for a rollback or a
-  release this deploy did not build (`AppliedRelease.built`). **The command
+  restarts onto the failed release. Neither timing runs for a rollback
+  (`AppliedRelease.built` is set for a release built now and for a re-sent one,
+  which is held and switched like a new one; a re-sent release already
+  `current` is skipped only when the `post-deploy-passed` marker in its daemon
+  record folder says its commands passed). A failed read of `current` holds the
+  site, and a site with no owner or no PHP is never held. **The command
   outcome carries only the sentence today** (a failed outcome sends no
   `result`), so the control plane cannot yet read the code and ids. Commands
   need a principal and a release-backed site; a site with no PHP is refused
-  before the build (`assertSiteLifecyclePhp`).
+  before the build (`assertSiteLifecyclePhp`, which also refuses two workers that would share a unit name, such as `web` with `a-b` and `web-a` with `b`). Worker output on the patch-update path carries no journal text: that log is not redacted.
 - **Background workers** (`sites[].workers`, `workers.ts`). One template
   `turbopanel-worker-<env>-<service>-<name>@.service` per worker, instances
   `@1…@<processes>` (at most 8), `Restart=always`, `RestartSec=5`,

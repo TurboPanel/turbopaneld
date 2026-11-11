@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+} from "@std/assert";
 import { join } from "@std/path";
 import {
   hostFail,
@@ -278,6 +283,33 @@ test("a worker that is finishing a job is a transcript line, one that failed is 
       lines.join("\n"),
     );
     assert(lines.includes("boom"), lines.join("\n"));
+    // A caller whose lines are not redacted asks for no journal text at all.
+    const quiet: string[] = [];
+    await applySiteWorkers(
+      { ...io(host, quiet), omitJournal: true },
+      "env1",
+      [spec(host, [queue(1), { ...queue(1), name: "mail" }])],
+    );
+    assert(!quiet.includes("boom"), quiet.join("\n"));
+    assert(quiet.some((line) => line.includes("did not stay running")));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("two workers that would share a unit name are refused before anything is installed", async () => {
+  const host = await makeSystemdHost();
+  try {
+    await assertRejects(
+      () =>
+        applySiteWorkers(io(host), "env1", [
+          spec(host, [{ ...queue(1), name: "a-b" }], "web"),
+          spec(host, [{ ...queue(1), name: "b" }], "web-a"),
+        ]),
+      Error,
+      "would share the unit name",
+    );
+    assertEquals(host.systemctl(), []);
   } finally {
     await host.cleanup();
   }

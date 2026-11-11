@@ -3232,7 +3232,10 @@ async function deployEnvironmentHolding(
   }, deps?.presenceProbes);
   cancel?.throwIfCancelled("before the deploy started");
   // Commands and workers run with the site's PHP: refuse before anything builds.
-  assertSiteLifecyclePhp(parsedPayload.sites ?? []);
+  assertSiteLifecyclePhp(
+    parsedPayload.sites ?? [],
+    parsedPayload.environmentId,
+  );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
     layout,

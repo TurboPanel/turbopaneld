@@ -15,8 +15,9 @@
  *    the workers restart. A failure throws at once, so no worker restarts.
  *  - `applyDeployWorkers`: after the switch and the site apply.
  *
- * Neither timing runs for a rollback or a release that was not built by this
- * deploy.
+ * Neither timing runs for a rollback. A re-sent release counts as put forward
+ * unless it is already `current` and its commands passed before (the marker in
+ * `post-deploy-marker.ts`).
  */
 
 import type {
@@ -26,6 +27,7 @@ import type {
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { serviceTree } from "../../paths/layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { markPostDeployPassed } from "./post-deploy-marker.ts";
 import {
   readCurrentReleaseId,
   swapCurrentSymlink,
@@ -49,6 +51,7 @@ import {
 } from "./post-deploy.ts";
 import {
   applySiteWorkers,
+  assertDistinctWorkerBases,
   removeEnvironmentWorkers,
   type WorkerApplySpec,
   type WorkerIo,
@@ -70,10 +73,12 @@ export type SiteLifecycleDeploy = {
   applied: readonly AppliedRelease[];
 };
 
-/** Refuse a site that carries commands or workers but runs no PHP. */
+/** Refuse a site that carries commands or workers but runs no PHP, and workers that would share a unit name. */
 export function assertSiteLifecyclePhp(
   sites: readonly EnvironmentDeploySite[],
+  environmentId: string,
 ): void {
+  assertDistinctWorkerBases(environmentId, sites);
   for (const site of sites) {
     const hasWork = site.postDeploy !== undefined ||
       (site.workers?.length ?? 0) > 0;
@@ -91,7 +96,7 @@ function timingOf(
   return postDeploy.timing ?? "before-traffic";
 }
 
-/** The release this deploy built for a site: commands never run for a rollback or a reused release. */
+/** The release this deploy puts forward for a site (built now or re-sent): commands never run for a rollback. */
 function builtRelease(
   applied: readonly AppliedRelease[],
   composeServiceName: string,
@@ -99,14 +104,14 @@ function builtRelease(
   const release = applied.find((entry) =>
     entry.composeServiceName === composeServiceName
   );
-  if (release?.built !== true) return undefined;
-  return release.releaseId === release.previousReleaseId ? undefined : release;
+  return release?.built === true ? release : undefined;
 }
 
 /**
  * True when a site's new release is published without moving `current`: it has
- * before-traffic commands and a release is serving now. Best effort: a read
- * that fails moves `current` as before.
+ * before-traffic commands that will run (the site has an owner and PHP) and a
+ * release is serving now. A read of `current` that fails holds the site, so
+ * `current` never moves before the commands have passed.
  */
 export async function siteHeldForPostDeploy(
   layout: LayoutPaths,
@@ -125,13 +130,16 @@ export async function siteHeldForPostDeploy(
   if (!site?.postDeploy || timingOf(site.postDeploy) !== "before-traffic") {
     return false;
   }
-  if (!binding) return false;
+  // No job would run for such a site, so nothing would ever switch it.
+  if (!binding || !site.principal || resolveSitePhpSeries(site) === undefined) {
+    return false;
+  }
   try {
     return await readCurrent(
       { currentLink: serviceTree(layout, binding).currentLink },
     ) !== null;
   } catch {
-    return false;
+    return true;
   }
 }
 
@@ -253,6 +261,16 @@ export async function runBeforeTrafficPostDeploy(
       );
     },
   );
+  await forEachSequential(jobs, (job) => markPassed(deploy, job));
+}
+
+/** Remember that a job's commands passed, so a re-send of that release does not skip or repeat them wrongly. */
+function markPassed(deploy: SiteLifecycleDeploy, job: PostDeployJob) {
+  return markPostDeployPassed(
+    deploy.layout,
+    job.release.serviceId,
+    job.release.releaseId,
+  );
 }
 
 /**
@@ -274,6 +292,7 @@ export async function runAfterSwitchPostDeploy(
           previousReleaseId: job.release.previousReleaseId,
         });
       }
+      await markPassed(deploy, job);
     },
   );
 }

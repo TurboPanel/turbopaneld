@@ -132,10 +132,46 @@ export type WorkerIo = {
   onLine: (stream: "stdout" | "stderr", line: string) => void;
   sleep?: (ms: number) => Promise<void>;
   systemdUnitDir?: string;
+  /** Leave journal tails out of the output (a path whose lines are not redacted). */
+  omitJournal?: boolean;
 };
 
 const defaultSleep = (ms: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Refuse two workers that would share one unit name: `web` with `a-b` and
+ * `web-a` with `b` both map to `<env>-web-a-b`, and one would overwrite the
+ * other's unit.
+ */
+export function assertDistinctWorkerBases(
+  environmentId: string,
+  specs: ReadonlyArray<
+    {
+      composeServiceName: string;
+      workers?: readonly EnvironmentDeploySiteWorker[] | undefined;
+    }
+  >,
+): void {
+  const owners = new Map<string, string>();
+  for (const spec of specs) {
+    for (const worker of spec.workers ?? []) {
+      const base = workerUnitBase(
+        environmentId,
+        spec.composeServiceName,
+        worker.name,
+      );
+      const label = `${spec.composeServiceName}/${worker.name}`;
+      const other = owners.get(base);
+      if (other !== undefined) {
+        throw new Error(
+          `Workers ${other} and ${label} would share the unit name ${base}; rename one of them.`,
+        );
+      }
+      owners.set(base, label);
+    }
+  }
+}
 
 /** Bases of this environment's installed worker templates. */
 async function installedWorkerBases(
@@ -285,6 +321,13 @@ async function printJournalTail(
   io: WorkerIo,
   entry: WatchedInstance,
 ): Promise<void> {
+  if (io.omitJournal === true) {
+    io.onLine(
+      "stderr",
+      `${entry.label} did not stay running; read its journal on the host`,
+    );
+    return;
+  }
   const journal = await readUnitJournal(
     io.run,
     entry.unit,
@@ -357,6 +400,7 @@ export async function applySiteWorkers(
       });
     }
   }
+  assertDistinctWorkerBases(environmentId, specs);
   let changed = false;
   await forEachSequential(desired, async (entry) => {
     const moved = await installUnit(

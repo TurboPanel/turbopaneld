@@ -8,6 +8,8 @@ import {
   type SystemdHost,
   type SystemdHostCall,
 } from "../../testing/systemd-host.ts";
+import { resolveDaemonReleasePaths } from "../release/release-layout.ts";
+import { postDeployPassed } from "./post-deploy-marker.ts";
 import type { AppliedRelease } from "../release/apply-source-releases.ts";
 import type { SiteRelease } from "../site.ts";
 import {
@@ -165,12 +167,21 @@ test("a site is held only with before-traffic commands and a release already ser
       await held([site({ postDeploy: COMMANDS })], () => Promise.resolve(null)),
       false,
     );
-    // A read that fails moves `current` as before.
+    // A read that fails holds the site: `current` never moves before the commands pass.
     assertEquals(
       await held(
         [site({ postDeploy: COMMANDS })],
         () => Promise.reject(new Error("no")),
       ),
+      true,
+    );
+    // A site that would get no job (no owner, no PHP) is never held.
+    assertEquals(
+      await held([site({ postDeploy: COMMANDS, principal: undefined })]),
+      false,
+    );
+    assertEquals(
+      await held([site({ postDeploy: COMMANDS, php: undefined })]),
       false,
     );
     assertEquals(
@@ -260,12 +271,111 @@ test("a site whose release was published at once (a first deploy) runs its comma
   }
 });
 
-test("neither timing runs for a rollback or a reused release, and each timing runs only its own sites", async () => {
+test("a re-sent release runs its commands and is then switched; a failure keeps the serving release", async () => {
+  const host = await makeSystemdHost(answers());
+  try {
+    const swapped: string[] = [];
+    const resent = release({ heldCurrent: true });
+    await runBeforeTrafficPostDeploy(
+      deploy(host, [site({ postDeploy: COMMANDS })], [resent]),
+      lifecycleIo(host),
+      (job) => {
+        swapped.push(job.release.releaseId);
+        return Promise.resolve();
+      },
+    );
+    assertEquals(started(host).length, 1);
+    assertEquals(swapped, ["rel2"]);
+  } finally {
+    await host.cleanup();
+  }
+  const failing = await makeSystemdHost(answers({ startOk: false }));
+  try {
+    let swaps = 0;
+    await assertRejects(() =>
+      runBeforeTrafficPostDeploy(
+        deploy(failing, [site({ postDeploy: COMMANDS })], [
+          release({ heldCurrent: true }),
+        ]),
+        lifecycleIo(failing),
+        () => {
+          swaps++;
+          return Promise.resolve();
+        },
+      )
+    );
+    assertEquals(swaps, 0);
+  } finally {
+    await failing.cleanup();
+  }
+});
+
+test("a first deploy retried while current already is that release runs its commands and reports a failure", async () => {
+  const retry = () => release({ previousReleaseId: "rel2" });
+  const host = await makeSystemdHost(answers());
+  try {
+    const plan = deploy(host, [site({ postDeploy: COMMANDS })], [retry()]);
+    assertEquals(hasPostDeployWork(plan, "before-traffic"), true);
+    await runBeforeTrafficPostDeploy(plan, lifecycleIo(host));
+    assertEquals(started(host).length, 1);
+  } finally {
+    await host.cleanup();
+  }
+  const failing = await makeSystemdHost(answers({ startOk: false }));
+  try {
+    await assertRejects(() =>
+      runBeforeTrafficPostDeploy(
+        deploy(failing, [site({ postDeploy: COMMANDS })], [retry()]),
+        lifecycleIo(failing),
+      )
+    );
+  } finally {
+    await failing.cleanup();
+  }
+});
+
+test("a passed run leaves a marker in the release's record folder, a failed one does not", async () => {
+  const host = await makeSystemdHost(answers());
+  try {
+    const dir = resolveDaemonReleasePaths(host.layout, {
+      serviceId: "svc1",
+      releaseId: "rel2",
+    }).releaseDir;
+    await Deno.mkdir(dir, { recursive: true });
+    assertEquals(await postDeployPassed(host.layout, "svc1", "rel2"), false);
+    const plan = deploy(host, [site({ postDeploy: COMMANDS })], [release()]);
+    await runBeforeTrafficPostDeploy(plan, lifecycleIo(host));
+    assertEquals(await postDeployPassed(host.layout, "svc1", "rel2"), true);
+  } finally {
+    await host.cleanup();
+  }
+  const failing = await makeSystemdHost(answers({ startOk: false }));
+  try {
+    const dir = resolveDaemonReleasePaths(failing.layout, {
+      serviceId: "svc1",
+      releaseId: "rel2",
+    }).releaseDir;
+    await Deno.mkdir(dir, { recursive: true });
+    await assertRejects(() =>
+      runBeforeTrafficPostDeploy(
+        deploy(failing, [site({ postDeploy: COMMANDS })], [release()]),
+        lifecycleIo(failing),
+      )
+    );
+    assertEquals(
+      await postDeployPassed(failing.layout, "svc1", "rel2"),
+      false,
+    );
+  } finally {
+    await failing.cleanup();
+  }
+});
+
+test("neither timing runs for a rollback, and each timing runs only its own sites", async () => {
   const host = await makeSystemdHost(answers());
   try {
     const rollback = release({ built: undefined });
-    const reused = release({ previousReleaseId: "rel2" });
-    for (const applied of [rollback, reused]) {
+    for (const applied of [rollback]) {
       const plan = deploy(host, [site({ postDeploy: COMMANDS })], [applied]);
       assertEquals(hasPostDeployWork(plan, "before-traffic"), false);
       await runBeforeTrafficPostDeploy(plan, lifecycleIo(host));
@@ -348,7 +458,7 @@ test("a Laravel release lets its commands write the release's own cache folder",
 test("commands and workers on a site with no PHP are refused with a plain sentence", () => {
   const noPhp = site({ php: undefined });
   assertThrows(
-    () => assertSiteLifecyclePhp([{ ...noPhp, postDeploy: COMMANDS }]),
+    () => assertSiteLifecyclePhp([{ ...noPhp, postDeploy: COMMANDS }], "env1"),
     Error,
     "Site web: post-deploy commands and workers run with the site's PHP, and this site has none.",
   );
@@ -356,11 +466,24 @@ test("commands and workers on a site with no PHP are refused with a plain senten
     () =>
       assertSiteLifecyclePhp([
         { ...noPhp, workers: [{ name: "q", command: ["/bin/true"] }] },
-      ]),
+      ], "env1"),
     Error,
     "this site has none",
   );
-  assertSiteLifecyclePhp([noPhp, site({ postDeploy: COMMANDS })]);
+  assertSiteLifecyclePhp([noPhp, site({ postDeploy: COMMANDS })], "env1");
+});
+
+test("workers whose service and worker names run together to one unit name are refused before the deploy builds", () => {
+  const worker = (name: string) => ({ name, command: ["/bin/true"] });
+  assertThrows(
+    () =>
+      assertSiteLifecyclePhp([
+        site({ composeServiceName: "web", workers: [worker("a-b")] }),
+        site({ composeServiceName: "web-a", workers: [worker("b")] }),
+      ], "env1"),
+    Error,
+    "would share the unit name",
+  );
 });
 
 test("workers run in the release lane's current folder with the site's variables", async () => {

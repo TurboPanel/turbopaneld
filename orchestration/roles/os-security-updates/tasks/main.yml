@@ -1,8 +1,9 @@
 ---
 # Automatic Debian security updates: unattended-upgrades limited to the Debian
-# security repository and the PHP package archive, never restarting the server. Debian only: Ubuntu keeps
-# its own defaults (which already take security updates), and our origin list
-# would replace them with one that matches nothing there.
+# security repository and the PHP package archive, never restarting the
+# server. Debian only: Ubuntu keeps its own defaults (which already take
+# security updates), and our origin list would replace them with one that
+# matches nothing there.
 #
 # Fast path: the package already present and the file unchanged means apt and
 # copy report ok and nothing else runs.

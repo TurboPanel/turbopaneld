@@ -1159,6 +1159,7 @@ test("applySourceReleases rolls back native releases without fetch or build", as
       const row = applied[0];
       if (!row) throw new TypeError("expected rollback row");
       assertEquals(row.releaseId, "019e0a1b-7c3d-7a52-9b4e-3f1a2c000007");
+      assertEquals(row.built, undefined);
       assertEquals(row.commitSha, "old-commit");
       assertEquals(row.staticExport, true);
       assertEquals(row.standaloneOutput, false);
