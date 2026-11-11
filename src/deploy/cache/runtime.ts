@@ -10,11 +10,11 @@
 import { join } from "node:path";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalHomePath } from "../../paths/layout.ts";
-import { CACHE_RUNTIMES, MAX_CACHES_PER_COMMAND } from "./limits.ts";
+import { CACHE_RUNTIMES } from "./limits.ts";
 
 export type CacheEngine = "valkey";
 
-export { CACHE_RUNTIMES, MAX_CACHES_PER_COMMAND };
+export { CACHE_RUNTIMES, MAX_CACHES_PER_COMMAND } from "./limits.ts";
 
 /** The patch release for a series, or undefined when none is vendored. */
 export function cachePatchVersion(

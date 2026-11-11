@@ -201,8 +201,8 @@ function isHelperPublish(
   const protocol = entry.protocol ?? "tcp";
   const range = publishedRange(entry.published);
   return entry.host_ip === "127.0.0.1" && protocol === "tcp" &&
-    range !== undefined && range[0] === helper.hostPort &&
-    range[1] === helper.hostPort && entry.target === helper.containerPort;
+    range?.[0] === helper.hostPort && range[1] === helper.hostPort &&
+    entry.target === helper.containerPort;
 }
 
 function reservedPortFindings(

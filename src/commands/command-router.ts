@@ -312,6 +312,38 @@ function sanitizeError(
 }
 
 /**
+ * Commands added after the main switch reached its size limit, looked up by
+ * type. Each takes the dispatch message and returns the command's result.
+ */
+const LATE_COMMAND_HANDLERS: Record<
+  string,
+  (
+    message: CommandDispatchMessage,
+    daemonReceivedAt: string,
+  ) => Promise<unknown>
+> = {
+  "cache.apply": (message, daemonReceivedAt) =>
+    pickCommandRouterHandler("handleCacheApply", handleCacheApply)(
+      parseCacheApplyPayload(message.payload),
+      daemonReceivedAt,
+    ),
+};
+
+/** The result of a late command, or `undefined` for a type this table does not hold. */
+async function dispatchLateCommand(
+  message: CommandDispatchMessage,
+  daemonReceivedAt: string,
+): Promise<unknown> {
+  if (!Object.hasOwn(LATE_COMMAND_HANDLERS, message.commandType)) {
+    return undefined;
+  }
+  return await LATE_COMMAND_HANDLERS[message.commandType](
+    message,
+    daemonReceivedAt,
+  );
+}
+
+/**
  * Last line of defence for `command-outcome.error`.
  *
  * A handler error message is very often raw process stderr, and the outcome is
@@ -729,20 +761,18 @@ export async function handleCommandDispatch(
         daemonRespondedAt = new Date().toISOString();
         break;
       }
-      case "cache.apply": {
-        const payload = parseCacheApplyPayload(message.payload);
-        result = await pickCommandRouterHandler(
-          "handleCacheApply",
-          handleCacheApply,
-        )(payload, daemonReceivedAt);
-        ok = true;
-        daemonRespondedAt = new Date().toISOString();
+      default: {
+        const late = await dispatchLateCommand(message, daemonReceivedAt);
+        if (late === undefined) {
+          ok = false;
+          error = `Unknown command type: ${message.commandType}`;
+        } else {
+          result = late;
+          ok = true;
+          daemonRespondedAt = new Date().toISOString();
+        }
         break;
       }
-      default:
-        ok = false;
-        error = `Unknown command type: ${message.commandType}`;
-        break;
     }
 
     const sized = sizedOutcomeFields(
