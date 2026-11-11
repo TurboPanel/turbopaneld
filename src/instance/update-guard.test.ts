@@ -58,6 +58,7 @@ async function writeRootRecord(
     deadline?: string;
     bootId?: string;
     attempts?: number;
+    restartsAtArm?: number;
   },
 ): Promise<string> {
   const lib = join(installRoot, "lib");
@@ -72,6 +73,7 @@ async function writeRootRecord(
       "armedAt=2026-01-01T00:00:00Z",
       `bootId=${fields.bootId ?? ""}`,
       `restartAttempts=${fields.attempts ?? 0}`,
+      `restartsAtArm=${fields.restartsAtArm ?? 0}`,
       "",
     ].join("\n"),
   );
@@ -702,4 +704,198 @@ test("the guard drops a record from another boot, a stale one, or one for anothe
   assertEquals(otherPrevious.code === 0, false);
   assertEquals(otherPrevious.rolledBack, false);
   assertStringIncludes(otherPrevious.stderr, "not rolling back");
+});
+
+/** Seconds from now, as the armed record's ISO deadline. */
+function deadlineIn(seconds: number): string {
+  return new Date(Date.now() + seconds * 1000).toISOString().replace(
+    /\.\d{3}Z$/,
+    "Z",
+  );
+}
+
+type EarlyCase = {
+  nRestarts: number;
+  restartsAtArm?: number;
+  activeState: string;
+  subState: string;
+  /** Age of the current run in seconds; 0 means it just started. */
+  runningForSec: number;
+  deadline: string;
+  disarm?: boolean;
+};
+
+/** Run the guard against a stubbed systemctl; return whether it rolled back. */
+async function runEarlyGuard(c: EarlyCase): Promise<boolean> {
+  const root = await Deno.makeTempDir({ prefix: "tp-update-guard-early-" });
+  const bin = join(root, "bin");
+  const runDir = join(root, "run");
+  const stateDir = join(root, "state");
+  for (const d of [bin, runDir, stateDir]) {
+    await Deno.mkdir(d, { recursive: true });
+  }
+  const installBin = join(root, "bin");
+  await Deno.writeTextFile(join(installBin, "turbopaneld.prev"), "prev\n");
+  await Deno.writeTextFile(join(installBin, "turbopaneld"), "new\n");
+  await Deno.writeTextFile(join(bin, "id"), "#!/bin/sh\necho 0\n");
+  const uptime = Number(
+    (await Deno.readTextFile("/proc/uptime")).split(".")[0],
+  );
+  const enterUs = Math.max(0, uptime - c.runningForSec) * 1_000_000;
+  await Deno.writeTextFile(
+    join(bin, "systemctl"),
+    `#!/bin/sh
+case "$1" in
+  is-failed) exit 1 ;;
+  reset-failed|restart|stop) exit 0 ;;
+  is-active) exit 0 ;;
+  show)
+    case "$4" in
+      NRestarts) echo ${c.nRestarts} ;;
+      ActiveState) echo ${c.activeState} ;;
+      SubState) echo ${c.subState} ;;
+      ActiveEnterTimestampMonotonic) echo ${enterUs} ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+`,
+  );
+  await Deno.chmod(join(bin, "id"), 0o755);
+  await Deno.chmod(join(bin, "systemctl"), 0o755);
+  const record = await writeRootRecord(root, {
+    target: "new",
+    previous: "",
+    deadline: c.deadline,
+    restartsAtArm: c.restartsAtArm,
+  });
+  if (c.disarm) {
+    await Deno.writeTextFile(
+      join(stateDir, "update-guard-disarm.json"),
+      '{"targetCommit":"new"}\n',
+    );
+  }
+  const result = await new Deno.Command("sh", {
+    args: [updateGuardSh],
+    env: {
+      PATH: `${bin}:/usr/bin:/bin`,
+      TURBOPANEL_RUN_DIR: runDir,
+      TURBOPANEL_STATE_DIR: stateDir,
+      TURBOPANEL_INSTALL_ROOT: root,
+    },
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  assertEquals(result.success, true);
+  const rolledBack = await exists(join(stateDir, "update-rollback.json"));
+  if (rolledBack) {
+    assertEquals(await exists(record), false);
+    assertEquals(
+      await Deno.readTextFile(join(installBin, "turbopaneld")),
+      "prev\n",
+    );
+  }
+  await Deno.remove(root, { recursive: true });
+  return rolledBack;
+}
+
+test("early rollback: a crash loop after arming rolls back before the deadline", async () => {
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 3,
+      activeState: "activating",
+      subState: "auto-restart",
+      runningForSec: 0,
+      deadline: deadlineIn(500),
+    }),
+    true,
+  );
+  // The update's own restart zeroes NRestarts: a count below the recorded
+  // one is read as counting from zero.
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 3,
+      restartsAtArm: 4,
+      activeState: "activating",
+      subState: "auto-restart",
+      runningForSec: 0,
+      deadline: deadlineIn(500),
+    }),
+    true,
+  );
+  // The restart count is compared with the count recorded at arm time.
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 7,
+      restartsAtArm: 4,
+      activeState: "active",
+      subState: "running",
+      runningForSec: 5,
+      deadline: deadlineIn(500),
+    }),
+    true,
+  );
+});
+
+test("early rollback: a slow but healthy start does not roll back", async () => {
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 0,
+      activeState: "activating",
+      subState: "start",
+      runningForSec: 0,
+      deadline: deadlineIn(500),
+    }),
+    false,
+  );
+  // Restarts from before the update do not count.
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 5,
+      restartsAtArm: 4,
+      activeState: "activating",
+      subState: "auto-restart",
+      runningForSec: 0,
+      deadline: deadlineIn(500),
+    }),
+    false,
+  );
+  // Restarted three times but now running steadily.
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 3,
+      activeState: "active",
+      subState: "running",
+      runningForSec: 120,
+      deadline: deadlineIn(500),
+    }),
+    false,
+  );
+});
+
+test("early rollback: a disarmed update is never rolled back", async () => {
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 9,
+      activeState: "activating",
+      subState: "auto-restart",
+      runningForSec: 0,
+      deadline: deadlineIn(500),
+      disarm: true,
+    }),
+    false,
+  );
+});
+
+test("early rollback: the deadline still rolls back a healthy-looking unit", async () => {
+  assertEquals(
+    await runEarlyGuard({
+      nRestarts: 0,
+      activeState: "active",
+      subState: "running",
+      runningForSec: 5,
+      deadline: recentDeadline(),
+    }),
+    true,
+  );
 });

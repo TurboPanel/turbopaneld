@@ -62,7 +62,7 @@ test("run.sh arms the update guard on the executed installer path", async () => 
   const timerLog = join(root, "systemctl.log");
   await Deno.writeTextFile(
     join(stubBin, "systemctl"),
-    `#!/bin/sh\nprintf '%s\\n' "$*" >> "${timerLog}"\nexit 0\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> "${timerLog}"\n[ "$1" = show ] && echo 2\nexit 0\n`,
   );
   await Deno.chmod(join(stubBin, "systemctl"), 0o755);
 
@@ -116,6 +116,8 @@ test("run.sh arms the update guard on the executed installer path", async () => 
     assertStringIncludes(rootRecord, "targetCommit=newcommit\n");
     assertStringIncludes(rootRecord, "previousCommit=oldcommit\n");
     assertStringIncludes(rootRecord, "restartAttempts=0\n");
+    // The daemon unit's restart count at arm time, for the early check.
+    assertStringIncludes(rootRecord, "restartsAtArm=2\n");
     const bootId = (await Deno.readTextFile("/proc/sys/kernel/random/boot_id"))
       .trim();
     assertStringIncludes(rootRecord, `bootId=${bootId}\n`);

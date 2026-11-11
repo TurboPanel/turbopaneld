@@ -1918,13 +1918,22 @@ tp_arm_update_guard() {
     *[!0-9A-Za-z._-]*) _previous_commit="" ;;
     *) ;;
   esac
+  # NRestarts at arm time: the guard rolls back early on a restart delta.
+  _restarts_at_arm=0
+  if command -v systemctl >/dev/null 2>&1; then
+    _restarts_at_arm="$(systemctl show turbopaneld.service -p NRestarts --value 2>/dev/null | head -1 || true)"
+  fi
+  case "$_restarts_at_arm" in
+    ''|*[!0-9]*) _restarts_at_arm=0 ;;
+    *) ;;
+  esac
   mkdir -p "$(dirname "$_root_record")"
   if ! _root_tmp="$(mktemp "$(dirname "$_root_record")/.update-guard-armed.XXXXXX")"; then
     tp_print_error "Failed to write update guard record $_root_record"
     return 1
   fi
-  if ! printf 'targetCommit=%s\npreviousCommit=%s\ndeadlineAt=%s\narmedAt=%s\nbootId=%s\nrestartAttempts=0\n' \
-    "$_manifest_commit" "$_previous_commit" "$_deadline" "$_armed_at" "$_boot_id" > "$_root_tmp" \
+  if ! printf 'targetCommit=%s\npreviousCommit=%s\ndeadlineAt=%s\narmedAt=%s\nbootId=%s\nrestartAttempts=0\nrestartsAtArm=%s\n' \
+    "$_manifest_commit" "$_previous_commit" "$_deadline" "$_armed_at" "$_boot_id" "$_restarts_at_arm" > "$_root_tmp" \
     || ! chmod 0640 "$_root_tmp" || ! mv -f "$_root_tmp" "$_root_record"; then
     rm -f "$_root_tmp"
     tp_print_error "Failed to write update guard record $_root_record"
