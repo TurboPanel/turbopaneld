@@ -182,6 +182,11 @@ export type AppliedRelease = {
    * release serving or, when that one stopped since, before starting it.
    */
   heldCurrent?: boolean;
+  /**
+   * True when this deploy built the release (not a rollback to an older one).
+   * A site's post-deploy commands run only for a release built here.
+   */
+  built?: boolean;
   /** True when a Next standalone tree was published instead of the checkout. */
   standaloneOutput: boolean;
   /**
@@ -1063,6 +1068,7 @@ async function buildNativeRelease(
         : undefined,
       previousReleaseId,
       heldCurrent: keepCurrent || undefined,
+      built: true,
       standaloneOutput: nativeOutput.standaloneOutput,
       staticExport: nativeOutput.staticExport,
       nativeStart: nativeOutput.start,

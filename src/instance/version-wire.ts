@@ -129,6 +129,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-lock-follow-v1",
   "tunnel-connector-token-change-v1",
   "deploy-config-files-v1",
+  "site-php-lifecycle-v1",
 ] as const;
 
 /**

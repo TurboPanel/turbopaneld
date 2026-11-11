@@ -259,6 +259,29 @@ export function principalUnitEnvironment(
 }
 
 /**
+ * The sandbox lines every tenant unit that runs as a principal shares (cron
+ * jobs, post-deploy commands, workers): no new privileges, no capabilities, a
+ * private `/tmp`, a read-only system and kernel. `ProtectHome` is deliberately
+ * absent: the working directory is inside the principal's home. One place, so a
+ * change to the walls reaches every unit family at once.
+ */
+export function principalHardeningLines(): string[] {
+  return [
+    "NoNewPrivileges=yes",
+    "PrivateTmp=yes",
+    "ProtectSystem=strict",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectControlGroups=yes",
+    "RestrictSUIDSGID=yes",
+    "RestrictRealtime=yes",
+    "LockPersonality=yes",
+    "CapabilityBoundingSet=",
+    "AmbientCapabilities=",
+  ];
+}
+
+/**
  * The one `ReadWritePaths=` line for a cron job: the site directories it may
  * write, then the principal's `home/` and `tmp/`. Never the home
  * root: under `ProtectSystem=strict` everything else stays read-only, whatever

@@ -153,6 +153,11 @@ HOSTING_CADDY_USER="tpedge"
 # accessGroups: sftp, shell, password, principal); a test keeps them in step.
 SSHD_MATCH_GROUPS="tpsftp tpshell tppasswd tpprincipal"
 HOSTING_CADDY_CAP="CAP_NET_BIND_SERVICE"
+# The address filter every site process carries (php-runtime.ts SITE_PHP_IP_DENY
+# and SITE_PHP_IP_ALLOW): the per-site PHP unit and a site's command and worker
+# units are pinned to exactly these strings.
+SITE_IP_DENY="localhost link-local multicast 0.0.0.0/8 fc00::/7"
+SITE_IP_ALLOW="127.0.0.1 127.0.0.53"
 HOSTING_CADDY_STATE="turbopanel/hosting-caddy"
 # Its admin API is a unix socket in /run/<this> (0700, tpedge), never loopback
 # TCP: a tenant process can dial loopback and load a config that reads every
@@ -1321,15 +1326,22 @@ tp_unit_ok() {
   _uk_hosting=""
   _uk_app=""
   _uk_site=""
+  _uk_life=""
   [ "$_uk_name" = "turbopanel-hosting-caddy.service" ] && _uk_hosting=1
   case "$_uk_name" in
     turbopanel-app-*.service)
       _uk_app="${_uk_name#turbopanel-app-}"
       _uk_app="${_uk_app%.service}"
       ;;
-    # A site's scheduled jobs load the site's variables copy (4A); the worker
-    # and command names join this list when those units exist.
+    # A site's scheduled jobs load the site's variables copy.
     turbopanel-cron-*.service) _uk_site=1 ;;
+    # So do its post-deploy commands and its workers, which also carry the PHP
+    # walls (the address filter, no private devices rule, the loopback guard):
+    # tp_site_lifecycle_ok pins those lines.
+    turbopanel-deploycmd-*.service|turbopanel-worker-*@.service)
+      _uk_site=1
+      _uk_life=1
+      ;;
     *) ;;
   esac
   case "$_uk_name" in
@@ -1350,7 +1362,7 @@ tp_unit_ok() {
       ;;
     *) ;;
   esac
-  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v site="${_uk_site:+1}" -v hostcap="$HOSTING_CADDY_CAP" '
+  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v site="${_uk_site:+1}" -v life="${_uk_life:+1}" -v guard="+$INSTALL_ROOT/lib/tp-php-loopback sync" -v hostcap="$HOSTING_CADDY_CAP" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -1375,6 +1387,14 @@ tp_unit_ok() {
       # A site unit may load its own variables copy;
       # tp_site_envfile_ok pins the one path.
       if (site == "1") ok["Service", "EnvironmentFile"] = 1
+      # A command or worker unit of a site also carries the PHP walls and the
+      # loopback guard; tp_site_lifecycle_ok pins each value.
+      if (life == "1") {
+        ok["Service", "ExecStartPre"] = 1
+        ok["Service", "PrivateDevices"] = 1
+        ok["Service", "IPAddressDeny"] = 1
+        ok["Service", "IPAddressAllow"] = 1
+      }
       # A native app check copy runs beside the release serving, under the
       # same account ceilings: it may ask the kernel to kill it first, never
       # to spare it (1 to 1000 only).
@@ -1408,6 +1428,9 @@ tp_unit_ok() {
       if (section == "") fail("directive outside a section: " key)
       if (key ~ /^X-TurboPanel-[A-Za-z]+$/ && section == "Unit") next
       if (!((section, key) in ok)) fail("directive " section "." key)
+      # The one root hook a site unit may have: the loopback guard, exactly.
+      # (tp_site_lifecycle_ok counts it; any other ExecStartPre fails below.)
+      if (life == "1" && key == "ExecStartPre" && val == guard) next
       # systemd unquotes and unescapes the first word before it reads the
       # prefix characters, so a quoted or escaped `+` would still lift the
       # privilege limits. Only an absolute path may follow (after optional
@@ -1471,7 +1494,42 @@ tp_unit_ok() {
   [ "$_uk_nnp" = "yes" ] || return 1
   [ -z "$_uk_app" ] || tp_app_envfile_ok "$_uk_file" "$_uk_app" || return 1
   [ -z "$_uk_site" ] || tp_site_envfile_ok "$_uk_file" "$_uk_user" || return 1
+  [ -z "$_uk_life" ] || tp_site_lifecycle_ok "$_uk_file" || return 1
   return 0
+}
+
+# A site's post-deploy command or worker unit, beyond the account checks: the
+# PHP unit's walls, with each value pinned. Exactly one ExecStartPre, the
+# loopback guard from this script's own lib/ (so the rules load before the
+# process starts and a failure stops it); the address filter strings; and
+# PrivateDevices=yes. All three are required: a unit without them would run
+# with the loopback open.
+tp_site_lifecycle_ok() {
+  _sl_file="$1"
+  _sl_pre=0 _sl_deny=0 _sl_allow=0 _sl_dev=0
+  while IFS= read -r _sl_line || [ -n "$_sl_line" ]; do
+    case "$_sl_line" in
+      ExecStartPre=*)
+        [ "${_sl_line#*=}" = "+$INSTALL_ROOT/lib/tp-php-loopback sync" ] || return 1
+        _sl_pre=$((_sl_pre + 1))
+        ;;
+      IPAddressDeny=*)
+        [ "${_sl_line#*=}" = "$SITE_IP_DENY" ] || return 1
+        _sl_deny=$((_sl_deny + 1))
+        ;;
+      IPAddressAllow=*)
+        [ "${_sl_line#*=}" = "$SITE_IP_ALLOW" ] || return 1
+        _sl_allow=$((_sl_allow + 1))
+        ;;
+      PrivateDevices=*)
+        [ "${_sl_line#*=}" = "yes" ] || return 1
+        _sl_dev=$((_sl_dev + 1))
+        ;;
+      *) ;;
+    esac
+  done < "$_sl_file"
+  [ "$_sl_pre" -eq 1 ] && [ "$_sl_deny" -eq 1 ] && [ "$_sl_allow" -eq 1 ] &&
+    [ "$_sl_dev" -eq 1 ]
 }
 
 # A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
@@ -1995,8 +2053,8 @@ tp_php_service_pinned_ok() {
     # SITE_PHP_IP_DENY); 127.0.0.1 (the database proxy) and systemd-resolved's
     # stub reopened. systemd cannot filter by port: tp-php-loopback does, per
     # site owner, and the unit only starts once it has loaded its rules.
-    Service.IPAddressDeny=*) [ "${1#*=}" = "localhost link-local multicast 0.0.0.0/8 fc00::/7" ] ;;
-    Service.IPAddressAllow=*) [ "${1#*=}" = "127.0.0.1 127.0.0.53" ] ;;
+    Service.IPAddressDeny=*) [ "${1#*=}" = "$SITE_IP_DENY" ] ;;
+    Service.IPAddressAllow=*) [ "${1#*=}" = "$SITE_IP_ALLOW" ] ;;
     # The only root hook (`+`): the loopback guard, from this script's own lib/.
     Service.ExecStartPre=*) [ "${1#*=}" = "+$INSTALL_ROOT/lib/tp-php-loopback sync" ] ;;
     Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
@@ -3101,7 +3159,7 @@ tp_verb_systemctl() {
 tp_verb_journalctl() {
   [ "$#" -eq 5 ] || tp_die "journalctl: unsupported form"
   case "$1" in
-    --unit=turbopanel-app-*) ;;
+    --unit=turbopanel-app-*|--unit=turbopanel-deploycmd-*|--unit=turbopanel-worker-*) ;;
     *) tp_die "journalctl: refusing unit $1" ;;
   esac
   tp_unit_name_ok "${1#--unit=}" || tp_die "journalctl: refusing unit $1"

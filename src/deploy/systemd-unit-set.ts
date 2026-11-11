@@ -69,12 +69,13 @@ export async function runHostCommand(
   };
 }
 
-function systemctl(runFn: RunFn, args: string[]): Promise<RunResult> {
+/** `sudo -n systemctl <args>` through tp-host. */
+export function systemctl(runFn: RunFn, args: string[]): Promise<RunResult> {
   return runFn("sudo", hostSudoArgs(["-n", "systemctl", ...args]));
 }
 
 /** Install one root-owned unit file; returns whether the bytes moved. */
-async function installUnit(
+export async function installUnit(
   runFn: RunFn,
   path: string,
   contents: string,
@@ -124,6 +125,19 @@ export async function installedTimerUnits(
   unitDir: string,
   prefix: string,
 ): Promise<string[]> {
+  return await installedUnitNames(runFn, unitDir, prefix, ".timer");
+}
+
+/**
+ * File names in `unitDir` that start with `prefix` and end with `suffix`, the
+ * suffix cut off. Listed off the filesystem for the same reason as above.
+ */
+export async function installedUnitNames(
+  runFn: RunFn,
+  unitDir: string,
+  prefix: string,
+  suffix: string,
+): Promise<string[]> {
   const listing = await runFn(
     "sudo",
     hostSudoArgs(["-n", "ls", "-1", "--", unitDir]),
@@ -132,8 +146,8 @@ export async function installedTimerUnits(
   return listing.stdout
     .split("\n")
     .map((line) => line.trim())
-    .filter((name) => name.startsWith(prefix) && name.endsWith(".timer"))
-    .map((name) => name.slice(0, -".timer".length));
+    .filter((name) => name.startsWith(prefix) && name.endsWith(suffix))
+    .map((name) => name.slice(0, -suffix.length));
 }
 
 async function removeUnit(

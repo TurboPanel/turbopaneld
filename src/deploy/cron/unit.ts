@@ -18,6 +18,7 @@ import { safeConfigToken } from "../../contracts/config-values.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
 import {
+  principalHardeningLines,
   principalReadWritePaths,
   principalSliceName,
   principalUnitEnvironment,
@@ -114,7 +115,7 @@ const SYSTEMD_QUOTE_ESCAPE = String.raw`\$&`;
  * passes them through literally instead of expanding a variable or a
  * specifier (`%h`, `%u`, ...) before the job sees its own argument.
  */
-function quoteExecArg(arg: string): string {
+export function quoteExecArg(arg: string): string {
   const escaped = arg
     .replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)
     .replaceAll("$", () => "$$")
@@ -204,17 +205,7 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     `TimeoutStartSec=${
       opts.job.timeoutSeconds ?? DEFAULT_CRON_TIMEOUT_SECONDS
     }`,
-    "NoNewPrivileges=yes",
-    "PrivateTmp=yes",
-    "ProtectSystem=strict",
-    "ProtectKernelTunables=yes",
-    "ProtectKernelModules=yes",
-    "ProtectControlGroups=yes",
-    "RestrictSUIDSGID=yes",
-    "RestrictRealtime=yes",
-    "LockPersonality=yes",
-    "CapabilityBoundingSet=",
-    "AmbientCapabilities=",
+    ...principalHardeningLines(),
     // `ProtectHome` is deliberately NOT set: the working directory is inside
     // the principal's home, and a job that cannot read the application it was
     // written for is not a job. It writes only the site's own writable dirs and

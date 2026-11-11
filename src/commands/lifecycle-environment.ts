@@ -51,7 +51,10 @@ import {
   serviceIngressProject,
 } from "../deploy/ingress.ts";
 import { applyNativeAppLifecycle } from "../deploy/native/apply-native-apps.ts";
-import { logInfo, sanitizeForLog } from "../util/logger.ts";
+import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { workerLifecycle } from "../deploy/site/workers.ts";
+import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
+import type { RunFn } from "../deploy/ensure-principal.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import {
@@ -76,6 +79,8 @@ export type EnvironmentLifecycleHandlerDeps = {
   logSink?: CommandOutputSink;
   decryptSecrets?: DecryptSecretsFn;
   rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
+  /** Test seam: the privileged runner for worker units. */
+  runPrivileged?: RunFn;
 };
 
 function assertSafeLifecycleIdentifiers(
@@ -326,6 +331,33 @@ async function lifecycleLocked(
       "commands",
       `environment.lifecycle ${parsedPayload.action} native units=${
         nativeUnits.join(",")
+      }`,
+    );
+  }
+
+  // A site's background workers follow the action too, best effort.
+  try {
+    const workerUnits = await workerLifecycle(
+      {
+        run: deps?.runPrivileged ?? defaultRunPrivileged,
+        onLine: (stream, line) => logSink.onLine(stream, line),
+      },
+      parsedPayload.environmentId,
+      parsedPayload.action,
+    );
+    if (workerUnits.length > 0) {
+      logInfo(
+        "commands",
+        `environment.lifecycle ${parsedPayload.action} worker units=${
+          workerUnits.join(",")
+        }`,
+      );
+    }
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.lifecycle worker ${parsedPayload.action} failed env=${parsedPayload.environmentId}: ${
+        err instanceof Error ? err.message : String(err)
       }`,
     );
   }

@@ -72,11 +72,22 @@ import {
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
+import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
+import { removeRecordedSiteEnvFiles } from "../deploy/site/site-env-owners.ts";
 import {
-  materializeSiteEnvFiles,
-  siteEnvFileId,
-  siteEnvRootPath,
-} from "../deploy/site/site-env-file.ts";
+  siteCronWritableDirs,
+  siteRunContext,
+} from "../deploy/site/lifecycle-context.ts";
+import {
+  applyDeployWorkers,
+  assertSiteLifecyclePhp,
+  hasPostDeployWork,
+  runAfterSwitchPostDeploy,
+  runBeforeTrafficPostDeploy,
+  siteHeldForPostDeploy,
+  type SiteLifecycleDeploy,
+  type SiteLifecycleIo,
+} from "../deploy/site/lifecycle-deploy.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
@@ -155,8 +166,6 @@ import {
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   removeNamedSites,
-  resolveSiteDocumentRoot,
-  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
   siteWritableDirs,
@@ -1387,21 +1396,7 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
-/**
- * What a site's cron job may write besides the principal's `home/` and `tmp/`:
- * `shared/` and `logs/` in the release lane, `public/` too in the managed lane
- * (`webroot/` and `shared/` in the older tree), nothing for a tree outside the
- * principal's home.
- */
-export function siteCronWritableDirs(
-  layout: Pick<LayoutPaths, "principalHomeRoot">,
-  release: SiteRelease | undefined,
-  managed: SiteManagedDirectory | undefined,
-): string[] {
-  if (release) return siteWritableDirs(layout, release, false);
-  if (managed) return siteWritableDirs(layout, managed, true);
-  return [];
-}
+export { siteCronWritableDirs };
 
 /** A native app's tree reference: its service id and owner, plus its folder. */
 function nativeRef(
@@ -1430,35 +1425,22 @@ export function siteCronSpec(
   release: SiteRelease | undefined,
   managed: SiteManagedDirectory | undefined,
 ): CronApplySpec | undefined {
-  const principal = site.principal;
   // The wire contract already refuses jobs without a principal; this keeps the
   // type honest rather than re-reporting it.
-  if (!site.cron || site.cron.length === 0 || !principal) return undefined;
-  const owner = release ?? managed;
-  const phpSeries = resolveSitePhpSeries(site);
+  if (!site.cron || site.cron.length === 0) return undefined;
+  const context = siteRunContext(layout, environmentId, site, release, managed);
+  if (!context) return undefined;
   return {
     composeServiceName: site.composeServiceName,
-    username: principal.username,
-    workingDirectory: release
-      ? serviceTree(layout, release).currentLink
-      : resolveSiteDocumentRoot(
-        layout,
-        environmentId,
-        site,
-        release,
-        managed,
-      ),
-    siteWritableDirs: siteCronWritableDirs(layout, release, managed),
-    ...(owner
-      ? {
-        environmentFile: siteEnvRootPath(
-          layout,
-          owner.username,
-          siteEnvFileId(environmentId, site.composeServiceName),
-        ),
-      }
-      : {}),
-    ...(phpSeries === undefined ? {} : { phpSeries }),
+    username: context.username,
+    workingDirectory: context.workingDirectory,
+    siteWritableDirs: context.siteWritableDirs,
+    ...(context.environmentFile === undefined
+      ? {}
+      : { environmentFile: context.environmentFile }),
+    ...(context.phpSeries === undefined
+      ? {}
+      : { phpSeries: context.phpSeries }),
     jobs: site.cron,
   };
 }
@@ -3173,6 +3155,8 @@ async function deployEnvironmentHolding(
     publicEdge: hostingsNeedPublicHttpEdge(parsedPayload.hostings),
   }, deps?.presenceProbes);
   cancel?.throwIfCancelled("before the deploy started");
+  // Commands and workers run with the site's PHP: refuse before anything builds.
+  assertSiteLifecyclePhp(parsedPayload.sites ?? []);
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
     layout,
@@ -3248,11 +3232,19 @@ async function deployEnvironmentHolding(
     // answered beside it, so a crash, a cancel or a failure anywhere before
     // the switch leaves the serving release live (and the one a restart or a
     // reboot starts).
-    holdCurrent: (service) =>
-      nativeAppIsServing(
+    // A site with before-traffic commands holds `current` the same way until
+    // its commands have passed.
+    holdCurrent: async (service) =>
+      await nativeAppIsServing(
         parsedPayload.nativeAppServices ?? [],
         service,
         deps?.nativeAppIo,
+      ) ||
+      await siteHeldForPostDeploy(
+        layout,
+        parsedPayload.sites ?? [],
+        deployReleaseBindings(parsedPayload),
+        service.composeServiceName,
       ),
     ensureBuildkitImageBuildFn: (releaseLayout) =>
       runInstallStep(
@@ -3343,6 +3335,25 @@ async function deployEnvironmentHolding(
     runtime.runPrivileged,
   );
   for (const line of siteEnvLines) runtime.logSink.onLine("stderr", line);
+  const siteLifecycle: SiteLifecycleDeploy = {
+    layout,
+    environmentId: parsedPayload.environmentId,
+    sites,
+    releaseBindings: siteReleaseBindings,
+    managedBindings: siteManagedBindings,
+    applied: appliedReleases,
+  };
+  const siteLifecycleIo: SiteLifecycleIo = {
+    run: runtime.runPrivileged,
+    onLine: (stream, line) => runtime.logSink.onLine(stream, line),
+  };
+  // Commands that must pass before the new release takes traffic: every
+  // site's run first, then the held sites switch; one failure switches none.
+  if (hasPostDeployWork(siteLifecycle, "before-traffic")) {
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+    await runBeforeTrafficPostDeploy(siteLifecycle, siteLifecycleIo);
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+  }
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
     appliedReleases,
@@ -3363,6 +3374,13 @@ async function deployEnvironmentHolding(
     siteManagedBindings,
     parsedPayload.hideWebServerNames === true,
   );
+  // Commands that run right after the switch: a failure stops the deploy here,
+  // so no worker restarts onto the release that just failed.
+  if (hasPostDeployWork(siteLifecycle, "after-switch")) {
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+    await runAfterSwitchPostDeploy(siteLifecycle, siteLifecycleIo);
+    runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+  }
 
   // Read-only: what each site's document root runs (WordPress today), reported
   // so the control plane can warn about an unusable database pairing.
@@ -3415,6 +3433,12 @@ async function deployEnvironmentHolding(
     nativeAppServicesForHost,
     nativeAppBindingsFromPayload(parsedPayload),
   );
+  // Workers last of the site pieces: the new release is live and its variables
+  // are in place, so each restarts straight onto it.
+  const workerWarnings = sites.length > 0 ||
+      (parsedPayload.removedSites ?? []).length > 0
+    ? await applyDeployWorkers(siteLifecycle, siteLifecycleIo)
+    : [];
 
   // Before any container carries a routing label for a name another
   // environment already serves here.
@@ -3482,7 +3506,14 @@ async function deployEnvironmentHolding(
   // serving, so a deploy that failed earlier never leaves an old vhost gone.
   // A failure from here on is only the report being built, and the vhosts of a
   // site that has left the compose file are not needed by the new version.
-  await removeLeftSites(layout, parsedPayload);
+  const leftSites = await removeLeftSites(layout, parsedPayload);
+  // The units that loaded a left site's variables went with the sweeps above.
+  await removeRecordedSiteEnvFiles(
+    runtime.runPrivileged,
+    layout,
+    parsedPayload.environmentId,
+    leftSites,
+  );
 
   logInfo(
     "commands",
@@ -3504,6 +3535,7 @@ async function deployEnvironmentHolding(
     // The `.htaccess` ones were already written to the transcript at build.
     warnings: [
       ...siteWarnings,
+      ...workerWarnings,
       ...appliedReleases.flatMap((release) => release.htaccessWarnings ?? []),
     ],
     principals: principalIdReports,

@@ -33,6 +33,8 @@ import {
   removeHostingCaddySite,
 } from "../deploy/ingress.ts";
 import { removeCronJobs } from "../deploy/cron/apply.ts";
+import { removeEnvironmentSiteLifecycle } from "../deploy/site/lifecycle-deploy.ts";
+import { removeRecordedSiteEnvFiles } from "../deploy/site/site-env-owners.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
 import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
@@ -234,6 +236,29 @@ async function removeEnvironmentCronJobs(
     logWarn(
       "commands",
       `environment.stop cron teardown failed env=${environmentId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove this environment's worker and post-deploy command units. Best effort
+ * like the rest of the teardown.
+ */
+async function removeEnvironmentSiteUnits(
+  environmentId: string,
+  run: RunFn,
+): Promise<void> {
+  try {
+    await removeEnvironmentSiteLifecycle(
+      { run, onLine: () => undefined },
+      environmentId,
+    );
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.stop worker teardown failed env=${environmentId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -587,7 +612,19 @@ async function stopEnvironmentLocked(
     parsedPayload.environmentId,
     deps?.removeCronJobs ?? removeCronJobs,
   );
+  // Workers and post-deploy command units load the same variables copy, so
+  // they go before the copy and before the sites.
+  await removeEnvironmentSiteUnits(
+    parsedPayload.environmentId,
+    deps?.runPrivileged ?? runPrivileged,
+  );
   await removeSites(layout, parsedPayload.environmentId);
+  // Every unit that loaded a site's variables is gone, so the copies can go.
+  await removeRecordedSiteEnvFiles(
+    deps?.runPrivileged ?? runPrivileged,
+    layout,
+    parsedPayload.environmentId,
+  );
   // Disable + remove the generated app units before the release trees they run
   // out of are reclaimed, so systemd never restarts a unit whose
   // `WorkingDirectory` has just been deleted. The per-principal slice is
