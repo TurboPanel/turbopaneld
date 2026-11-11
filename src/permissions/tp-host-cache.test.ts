@@ -606,3 +606,23 @@ test("the unit is compared and installed from the daemon's own staging folder", 
     assertEquals(after.code, 0, after.stderr);
   });
 });
+
+test("cache-config-install refuses a port that differs from the installed unit's", async () => {
+  await withHost(async (host) => {
+    await setUp(host, { port: 18100 });
+    assertEquals(
+      (await installUnit(host, unitName(), unitFor(host, { port: 18100 })))
+        .code,
+      0,
+    );
+    for (const v of [{}, { port: 18101 }] as Variant[]) {
+      await stage(host, configFor(host, v));
+      await refused(host, ["cache-config-install", "alice", ID]);
+    }
+    await stage(host, configFor(host, { port: 18100, mb: 128 }));
+    assertEquals(
+      (await host.run(["cache-config-install", "alice", ID])).code,
+      0,
+    );
+  });
+});

@@ -1422,7 +1422,7 @@ const SITES: CallSite[] = [
     { argv: ["cache-remove", "alice", CACHE_ID, "--data"] },
   ),
   tpHost(
-    'src/deploy/cache/apply.ts|hostSudo(io,["rm","-f","--",join(io.unitDir??SYSTEMD_UNIT_DIR,unit)],"removingtheunit")',
+    'src/deploy/cache/apply.ts|hostSudo(io,["rm","-f","--",join(io.unitDir??SYSTEMD_UNIT_DIR,cacheUnitName(id))],"removingtheunit")',
     { argv: ["rm", "-f", "--", `${UNITS}/${CACHE_UNIT}`] },
   ),
   tpHost('src/deploy/cache/apply.ts|["-n",...args]', {

@@ -84,8 +84,14 @@ export type CacheIo = {
 export type CacheIndexEntry = {
   id: string;
   username: string;
-  /** SHA-256 of the config last installed; decides whether the cache restarts. */
+  /**
+   * SHA-256 of the config last installed **and started**; decides whether the
+   * cache restarts. Left out for a cache whose last apply did not finish, so the
+   * next apply reloads and restarts it.
+   */
   configSha256?: string;
+  /** The loopback port the unit was installed with; `null` for a socket cache. */
+  port?: number | null;
 };
 
 export type CacheApplyOutcome = {
@@ -136,6 +142,9 @@ export async function readCacheIndex(
         username: entry.username,
         ...(typeof entry.configSha256 === "string"
           ? { configSha256: entry.configSha256 }
+          : {}),
+        ...(typeof entry.port === "number" || entry.port === null
+          ? { port: entry.port }
           : {}),
       }];
     });
@@ -262,6 +271,12 @@ async function installOne(
   if (patch === undefined) throw new Error("the cache engine is not vendored");
   const { id, username } = cache;
   await hostSudo(io, ["cache-prepare", username, id], "preparing the folders");
+  // tp-host refuses a config whose port differs from the installed unit's, so
+  // a cache that changes between socket and port loses its old unit file first
+  // (the running process keeps going until the reload and restart below).
+  if (previous?.port !== undefined && previous.port !== (cache.port ?? null)) {
+    await removeUnitFile(io, id);
+  }
 
   const config = renderCacheConfig(io.layout, {
     id,
@@ -333,16 +348,25 @@ async function startOne(io: CacheIo, item: Installed): Promise<void> {
   }
 }
 
+async function removeUnitFile(io: CacheIo, id: string): Promise<void> {
+  await hostSudo(
+    io,
+    [
+      "rm",
+      "-f",
+      "--",
+      join(io.unitDir ?? SYSTEMD_UNIT_DIR, cacheUnitName(id)),
+    ],
+    "removing the unit",
+  );
+}
+
 async function removeUnit(io: CacheIo, id: string): Promise<void> {
   const unit = cacheUnitName(id);
   // A unit that was never installed is already gone; the next step says so.
   await systemctl(io, ["disable", "--now", unit]);
   await systemctl(io, ["reset-failed", unit]);
-  await hostSudo(
-    io,
-    ["rm", "-f", "--", join(io.unitDir ?? SYSTEMD_UNIT_DIR, unit)],
-    "removing the unit",
-  );
+  await removeUnitFile(io, id);
 }
 
 /** Stop one cache and delete its unit and config; its data only with `deleteData`. */
@@ -471,7 +495,21 @@ function removalsFor(
   opts: { removed?: readonly CacheApplyRemoval[]; pruneUnlisted: boolean },
   warnings: string[],
 ): Removal[] {
-  const named: Removal[] = [...(opts.removed ?? [])];
+  const named: Removal[] = [];
+  // Only a cache this host's index lists for this environment, and only for the
+  // account the index says it belongs to: a removal never names another
+  // environment's cache or another account's unit.
+  for (const entry of opts.removed ?? []) {
+    const known = index.find((e) => e.id === entry.id);
+    if (known === undefined) continue;
+    if (known.username !== entry.username) {
+      warnings.push(
+        `cache ${entry.id} was not removed: it belongs to another account on this server`,
+      );
+      continue;
+    }
+    named.push({ ...entry });
+  }
   if (!opts.pruneUnlisted) return named;
   const keep = new Set([...caches, ...named].map((c) => c.id));
   for (const entry of index) {
@@ -510,8 +548,10 @@ async function applyListed(
     if (sliceChanged || installed.some((i) => i.changed)) {
       await mustSystemctl(io, ["daemon-reload"], "reloading systemd");
     }
-    // Guard a port before anything can listen on it.
-    if (installed.some((i) => i.cache.port !== undefined)) {
+    // Rebuild the walls from the units now on disk before anything starts: a
+    // port cache is guarded before it can listen, and a cache that changed from
+    // a port to a socket no longer leaves its old pair open.
+    if (installed.some((i) => i.changed)) {
       await syncAccountWalls(io.run);
     }
     await startAll(io, steps, installed);
@@ -545,11 +585,17 @@ export async function applyEnvironmentCaches(
   // A failed removal, or a listed cache that failed before its files were
   // written, keeps the entry it had, so the next apply starts from the truth.
   const done = new Set(installed.map((i) => i.cache.id));
+  const ready = new Set(
+    steps.filter((s) => s.result?.state === "ready").map((s) => s.cache.id),
+  );
   const entries: CacheIndexEntry[] = [
+    // The new config hash is remembered only for a cache that came up with it;
+    // any other keeps no hash, so the next apply reloads and restarts it.
     ...installed.map((i) => ({
       id: i.cache.id,
       username: i.cache.username,
-      configSha256: i.configSha256,
+      port: i.cache.port ?? null,
+      ...(ready.has(i.cache.id) ? { configSha256: i.configSha256 } : {}),
     })),
     ...index.filter((e) => !removedIds.has(e.id) && !done.has(e.id)),
   ];

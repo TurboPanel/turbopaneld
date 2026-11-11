@@ -6245,7 +6245,7 @@ tp_verb_cache_prepare() {
   tp_cache_owner_ok "$_cp_id" "$_cp_user" ||
     tp_die "cache-prepare: $_cp_id belongs to another account"
   tp_pin_dir "$R_PRINCIPALS/$_cp_user" || tp_die "cache-prepare: $_cp_user has no home"
-  tp_dir_sealed_at . || tp_die "cache-prepare: the home of $_cp_user is not root-owned"
+  tp_dir_sealed_at . || tp_die "cache-prepare: the home of $_cp_user is not root-owned (an older account-owned home layout); it must be re-sealed before a cache can be made"
   if [ ! -d ./cache ]; then
     [ ! -e ./cache ] && [ ! -L ./cache ] || tp_die "cache-prepare: $R_PRINCIPALS/$_cp_user/cache is not a folder"
     mkdir -m 0755 -- ./cache
@@ -6283,6 +6283,14 @@ tp_verb_cache_config_install() {
     "$TP_STAGE/cachesrc" "cache config"
   tp_cache_conf_ok "$TP_STAGE/cachesrc" "$_ci_id" "$_ci_user" ||
     tp_die "refusing the cache config for $_ci_id: content outside the allowed shape"
+  # The walls read the unit's PORT=, the process listens on the config's: an
+  # installed unit must name the same port (or none, for a socket cache).
+  if [ -f "$R_UNITS/turbopanel-cache-$_ci_id.service" ]; then
+    _ci_unitport="$(sed -n '/^Environment=PORT=/{s/^Environment=PORT=//p;q}' "$R_UNITS/turbopanel-cache-$_ci_id.service")"
+    _ci_confport="$(sed -n '/^port /{s/^port //p;q}' "$TP_STAGE/cachesrc")"
+    [ "$_ci_confport" = "${_ci_unitport:-0}" ] ||
+      tp_die "refusing the cache config for $_ci_id: its port differs from the installed unit's"
+  fi
   tp_pin_dir "$R_CACHE/$_ci_id" || tp_die "cache-config-install: run cache-prepare first"
   tp_put_file "$R_CACHE/$_ci_id/valkey.conf" 0640 root "$_ci_user" < "$TP_STAGE/cachesrc"
 }

@@ -26,4 +26,6 @@ needs a cache on a host; never part of a converge. It does not touch the
 - **`vm.overcommit_memory=1`** in `/etc/sysctl.d/99-turbopanel-cache.conf`, so the
   default snapshot fork does not fail under memory pressure. Host-wide, set only
   on a server that runs a cache (owner decision 2026-11-11). `purge.sh` removes
-  every `99-turbopanel-*.conf`.
+  every `99-turbopanel-*.conf`. The kernel keeps
+  `overcommit_memory=1` until the next reboot, because purge removes the file,
+  not the running value.

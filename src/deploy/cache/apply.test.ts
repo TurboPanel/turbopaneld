@@ -162,7 +162,9 @@ test("a first apply vendors the runtime, makes each cache, reloads once and star
     assertEquals(out.warnings, []);
     const order = verbs(fake.calls);
     assertEquals(
-      order.filter((v) => v !== "cmp" && v !== "install" && v !== "systemctl"),
+      order.filter((v) =>
+        !["cmp", "install", "systemctl", "php-loopback-sync"].includes(v)
+      ),
       ["cache-prepare", "cache-config-install"],
     );
     const reload = fake.calls.indexOf("systemctl daemon-reload");
@@ -178,12 +180,12 @@ test("a first apply vendors the runtime, makes each cache, reloads once and star
       fake.calls.some((c) => c.startsWith("systemctl restart")),
       false,
     );
-    assertEquals(fake.calls.includes("php-loopback-sync"), false);
-    assertEquals(await readCacheIndex(fake.io.layout, ENV), [{
-      id: ID_A,
-      username: "alice",
-      configSha256: (await readCacheIndex(fake.io.layout, ENV))[0].configSha256,
-    }]);
+    // The walls are rebuilt from the unit now on disk, port or not.
+    assert(fake.calls.includes("php-loopback-sync"));
+    const index = await readCacheIndex(fake.io.layout, ENV);
+    assertEquals(index.length, 1);
+    assertEquals(index[0].port, null);
+    assertEquals(typeof index[0].configSha256, "string");
   });
 });
 
@@ -483,5 +485,86 @@ test("a destroy deletes the data only when it asked for it", async () => {
     fake.calls.length = 0;
     await removeEnvironmentCaches(fake.io, ENV, true);
     assert(fake.calls.includes(`cache-remove alice ${ID_A} --data`));
+  });
+});
+
+test("a run that failed after installing the new files is retried with a reload and a restart", async () => {
+  await withFake(async (fake) => {
+    const port = { access: "port" as const, port: 18100 };
+    await applyEnvironmentCaches(fake.io, ENV, [cache(ID_A, port)], {
+      pruneUnlisted: true,
+    });
+    // A new password is installed, then the walls cannot be rebuilt.
+    const changed = cache(ID_A, { ...port, passwordSha256: "cd".repeat(32) });
+    fake.failOn.add("php-loopback-sync");
+    const first = await applyEnvironmentCaches(fake.io, ENV, [changed], {
+      pruneUnlisted: true,
+    });
+    assertEquals(first.results[0].state, "failed");
+    const entry = (await readCacheIndex(fake.io.layout, ENV))[0];
+    assertEquals(entry.configSha256, undefined);
+    // The same deploy again, with the walls working.
+    fake.failOn.delete("php-loopback-sync");
+    fake.calls.length = 0;
+    const retry = await applyEnvironmentCaches(fake.io, ENV, [changed], {
+      pruneUnlisted: true,
+    });
+    assertEquals(retry.results[0].state, "ready");
+    assert(fake.calls.includes("systemctl daemon-reload"));
+    assertEquals(
+      fake.calls.filter((c) => c.startsWith("systemctl restart")).length,
+      1,
+    );
+    assertEquals(
+      typeof (await readCacheIndex(fake.io.layout, ENV))[0].configSha256,
+      "string",
+    );
+  });
+});
+
+test("a change from a port to a socket drops the old unit first and rebuilds the walls", async () => {
+  await withFake(async (fake) => {
+    await applyEnvironmentCaches(
+      fake.io,
+      ENV,
+      [cache(ID_A, { access: "port", port: 18100 })],
+      { pruneUnlisted: true },
+    );
+    fake.calls.length = 0;
+    await applyEnvironmentCaches(fake.io, ENV, [cache(ID_A)], {
+      pruneUnlisted: true,
+    });
+    const rm = fake.calls.findIndex((c) => c.startsWith("rm -f"));
+    const conf = fake.calls.findIndex((c) =>
+      c.startsWith("cache-config-install")
+    );
+    assert(rm >= 0 && rm < conf);
+    assert(fake.calls.includes("php-loopback-sync"));
+    assertEquals(
+      fake.calls.filter((c) => c.startsWith("systemctl restart")).length,
+      1,
+    );
+  });
+});
+
+test("a removal acts only on a cache the index lists, for the account the index names", async () => {
+  await withFake(async (fake) => {
+    await applyEnvironmentCaches(fake.io, ENV, [cache(ID_A)], {
+      pruneUnlisted: false,
+    });
+    fake.calls.length = 0;
+    const out = await applyEnvironmentCaches(fake.io, ENV, [], {
+      pruneUnlisted: false,
+      removed: [
+        // Not in this environment's index: nothing is stopped or deleted.
+        { id: ID_B, username: "alice", deleteData: true },
+        // In the index, but for another account.
+        { id: ID_A, username: "bob", deleteData: true },
+      ],
+    });
+    assertEquals(fake.calls.some((c) => c.startsWith("cache-remove")), false);
+    assertEquals(fake.calls.some((c) => c.includes("disable")), false);
+    assertStringIncludes(out.warnings.join("\n"), "another account");
+    assertEquals((await readCacheIndex(fake.io.layout, ENV)).length, 1);
   });
 });
