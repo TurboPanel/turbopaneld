@@ -249,7 +249,44 @@ test("a destroy removes the caches and the helper ports, and trouble is only a w
     });
     assertEquals(warnings, []);
     assert(host.calls.includes(`cache-remove alice ${ID} --data`));
+    // No helper list was ever written, so the destroy costs no call for it.
+    assertEquals(host.calls.includes(`reach-ports-remove ${ENV}`), false);
+    await applyDeployCachesAndReach({
+      layout: host.layout,
+      payload: {
+        environmentId: ENV,
+        helperReach: [{
+          composeServiceName: "search",
+          containerPort: 7700,
+          hostPort: 18200,
+          username: "alice",
+        }],
+      },
+      run: host.run,
+      io,
+    });
+    host.calls.length = 0;
+    await removeEnvironmentCachesAndReach({
+      layout: host.layout,
+      environmentId: ENV,
+      run: host.run,
+      deleteData: false,
+    });
     assert(host.calls.includes(`reach-ports-remove ${ENV}`));
+    await applyDeployCachesAndReach({
+      layout: host.layout,
+      payload: {
+        environmentId: ENV,
+        helperReach: [{
+          composeServiceName: "search",
+          containerPort: 7700,
+          hostPort: 18200,
+          username: "alice",
+        }],
+      },
+      run: host.run,
+      io,
+    });
     host.failOn.add("reach-ports-remove");
     host.failOn.add("systemctl");
     const trouble = await removeEnvironmentCachesAndReach({

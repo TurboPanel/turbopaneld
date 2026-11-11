@@ -52,3 +52,7 @@ one process per cache row of the control plane. Wire feature `project-cache-v1`
   (`cache.apply` only; a deploy ensures the accounts first). The slice is written
   only when `accountLimits` is sent, never rewritten to empty limits.
 - No secret in the unit text; only the password's SHA-256 is in the `0640` config.
+- **Helper port marker.** The root-owned list is unreadable to the daemon, so a
+  deploy that sends `helperReach` keeps `<state>/reach/<environment id>.active`
+  (written before the list); a destroy closes the list only when the marker is
+  there, so a destroy of an environment with none costs no privileged call.

@@ -8,6 +8,7 @@
  * alone and is reported, because the sites it serves still deploy.
  */
 
+import { join } from "node:path";
 import type {
   CacheApplyResult,
   EnvironmentDeployPayload,
@@ -47,6 +48,11 @@ export async function applyDeployCachesAndReach(
 ): Promise<DeployCacheStepOutcome> {
   const { payload, layout, run } = input;
   if (payload.helperReach !== undefined) {
+    await markReachList(
+      layout,
+      payload.environmentId,
+      payload.helperReach.length > 0,
+    );
     await installReachPorts(
       layout,
       run,
@@ -83,6 +89,50 @@ export async function applyDeployCachesAndReach(
     );
   }
   return { warnings, caches: outcome.results };
+}
+
+/**
+ * The daemon cannot read the root-owned helper port list, so it keeps a marker
+ * of its own (`<state>/reach/<environment id>.active`, written before the list
+ * so a crash leaves it) and a destroy closes the list only when the marker is
+ * there. Without one, a destroy costs no privileged call for this.
+ */
+function reachMarkerPath(
+  layout: Pick<CacheLayout, "stateDir">,
+  environmentId: string,
+): string {
+  return join(layout.stateDir, "reach", `${environmentId}.active`);
+}
+
+async function markReachList(
+  layout: Pick<CacheLayout, "stateDir">,
+  environmentId: string,
+  active: boolean,
+): Promise<void> {
+  const path = reachMarkerPath(layout, environmentId);
+  if (!active) {
+    await Deno.remove(path).catch((err) => {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    });
+    return;
+  }
+  await Deno.mkdir(join(layout.stateDir, "reach"), {
+    recursive: true,
+    mode: 0o700,
+  });
+  await Deno.writeTextFile(path, "", { mode: 0o600 });
+}
+
+async function reachMarked(
+  layout: Pick<CacheLayout, "stateDir">,
+  environmentId: string,
+): Promise<boolean> {
+  try {
+    await Deno.stat(reachMarkerPath(layout, environmentId));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export type StopCacheStepInput = {
@@ -123,7 +173,10 @@ export async function removeEnvironmentCachesAndReach(
     );
   }
   try {
-    await removeReachPorts(input.run, input.environmentId);
+    if (await reachMarked(input.layout, input.environmentId)) {
+      await removeReachPorts(input.run, input.environmentId);
+      await markReachList(input.layout, input.environmentId, false);
+    }
   } catch (err) {
     warnings.push(
       `helper ports of ${input.environmentId} were not closed: ${
