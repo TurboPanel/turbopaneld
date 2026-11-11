@@ -309,7 +309,10 @@ Docker Compose. The daemon:
    (the one root hook tp-host pins; if it fails the unit does not start:
    fail closed); and the daemon through `tp-host php-loopback-sync` at its
    boot reconcile (after the private fabric is restored, also when it skips
-   the PHP sweep over an unreadable vhost), after installing (before
+   the PHP sweep over an unreadable vhost; the daemon's start also syncs on
+   its own, before that sweep, and again whenever Docker becomes reachable),
+   after every container deploy (`deploy/account-wall.ts`, throws: compose may
+   have created a network whose gateway only a sync learns), after installing (before
    starting) or removing a PHP runtime, and after native app units are
    installed (before any starts), a check copy is retired or apps are
    removed, so a port the ledger hands on leaves its old account. Everything

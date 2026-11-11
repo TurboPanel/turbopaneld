@@ -55,6 +55,9 @@ const test = Deno.test.bind(Deno);
 
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
+  // The account wall reload after a container deploy must not reach real sudo.
+  runPrivileged: () =>
+    Promise.resolve({ success: true, stdout: "", stderr: "" }),
   waitForHealth: instantlyHealthy,
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
@@ -1200,7 +1203,11 @@ test({
         },
       );
 
-      assertEquals(sudoCalls, []);
+      // Nothing is reclaimed: the only privileged call is the account wall reload.
+      assertEquals(
+        sudoCalls.every((call) => call.args.includes("php-loopback-sync")),
+        true,
+      );
     });
   },
 });

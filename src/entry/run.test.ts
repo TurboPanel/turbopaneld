@@ -33,6 +33,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   fabricReinstalls: number;
   firewallReinstalls: number;
   phpReconciles: number;
+  wallSyncs: number;
   phpPatchArms: number;
   stackHeals: number;
   instanceStops: number;
@@ -47,6 +48,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let fabricReinstalls = 0;
   let firewallReinstalls = 0;
   let phpReconciles = 0;
+  let wallSyncs = 0;
   let phpPatchArms = 0;
   let stackHeals = 0;
   let instanceStops = 0;
@@ -109,6 +111,10 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       stackHeals += 1;
       return Promise.resolve();
     },
+    syncAccountWall: () => {
+      wallSyncs += 1;
+      return Promise.resolve();
+    },
     reconcileSitePhpRuntimes: () => {
       phpReconciles += 1;
       return Promise.resolve();
@@ -161,6 +167,9 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get phpReconciles() {
       return phpReconciles;
     },
+    get wallSyncs() {
+      return wallSyncs;
+    },
     get instanceStops() {
       return instanceStops;
     },
@@ -204,6 +213,9 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 1);
   assertEquals(stub.phpReconciles, 1);
+  // The account wall learns the container networks at start, even when the
+  // PHP reconcile has nothing to do, and again when Docker comes back.
+  assertEquals(stub.wallSyncs >= 1, true);
   // The patch restarts are armed once the runtimes are back.
   assertEquals(stub.phpPatchArms, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);

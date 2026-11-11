@@ -213,6 +213,7 @@ import {
   keptServiceFolders,
   type ReleaseTreeRef,
 } from "../deploy/release/retention.ts";
+import { syncAccountWallOrThrow } from "../deploy/account-wall.ts";
 import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import {
@@ -3530,6 +3531,11 @@ async function deployEnvironmentHolding(
     runPrivileged: runtime.runPrivileged,
     ...(cancel === undefined ? {} : { cancel }),
   });
+
+  // Compose may have created a container network: its gateway is a host
+  // address the account wall only learns by syncing, so site accounts must not
+  // be left reaching it until some later sync. Before the deploy reports done.
+  if (hasContainers) await syncAccountWallOrThrow(runtime.runPrivileged);
 
   // Planned when the payload carries certificate files or names the web
   // server gets a certificate for by itself; otherwise these calls do nothing.
