@@ -131,6 +131,7 @@ export const DAEMON_WIRE_FEATURES = [
   "deploy-config-files-v1",
   "site-php-lifecycle-v1",
   "tunnel-table-generation-v1",
+  "site-db-url-ca-v1",
 ] as const;
 
 /**
@@ -801,3 +802,13 @@ export const SITE_PHP_LIFECYCLE_FEATURE: DaemonWireFeature =
  */
 export const TUNNEL_TABLE_GENERATION_FEATURE: DaemonWireFeature =
   "tunnel-table-generation-v1";
+
+/**
+ * `site-db-url-ca-v1`: `sites[].dbCa` may carry `urlVariables`, the names of
+ * variables holding a PostgreSQL URL. The daemon appends `sslrootcert=<the
+ * site's CA file>` to each such URL whose `sslmode` is `verify-ca` or
+ * `verify-full` and that names no `sslrootcert`, because only the daemon knows
+ * where the site's CA file lives. The control plane sends the field only to a
+ * daemon that lists this feature; an older daemon would drop it silently.
+ */
+export const SITE_DB_URL_CA_FEATURE: DaemonWireFeature = "site-db-url-ca-v1";
