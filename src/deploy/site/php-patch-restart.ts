@@ -544,10 +544,8 @@ export function hostPhpPatchIo(
     changeTime: (series) => phpSeriesChangeTime(series),
     packageRunIdle: async () => {
       try {
-        for await (const _entry of Deno.readDir("/var/lib/dpkg/updates")) {
-          return false;
-        }
-        return true;
+        return (await Array.fromAsync(Deno.readDir("/var/lib/dpkg/updates")))
+          .length === 0;
       } catch {
         return true;
       }
