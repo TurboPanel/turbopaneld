@@ -47,6 +47,7 @@ import {
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   TLS_CAPTURE_FEATURE,
   TUNNEL_CONNECTOR_FEATURE,
+  TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE,
   TUNNEL_FORWARDING_FEATURE,
   TUNNEL_LOCK_FOLLOW_FEATURE,
   TUNNEL_STATUS_FACTS_FEATURE,
@@ -496,6 +497,18 @@ test("the signed session features are advertised and raised no floor", () => {
   ) {
     assertEquals(DAEMON_WIRE_FEATURES.includes(feature), true);
   }
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("tunnel-connector-token-change-v1 is advertised and raised no floor", () => {
+  assertEquals(
+    TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE,
+    "tunnel-connector-token-change-v1",
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE),
+    true,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 

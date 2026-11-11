@@ -491,6 +491,23 @@ export async function controlConnector(
 }
 
 /**
+ * Does the installed connector run on a different run token than `token`?
+ * Compared by digest only (the record never holds the token). False when no
+ * connector is installed for the id.
+ */
+export async function connectorTokenChanged(
+  io: ConnectorIo,
+  id: string,
+  token: string,
+): Promise<boolean> {
+  assertTunnelId(id);
+  const record = await readRecord(io, id);
+  if (!record) return false;
+  const digest = await sha256HexOfBytes(new TextEncoder().encode(token));
+  return record.tokenDigest !== digest;
+}
+
+/**
  * Start an installed connector whose service is stopped or failed (stopped by
  * hand, or given up on by systemd after repeated crashes). A unit that is
  * running or still starting is left alone, so a resend never bounces it.
