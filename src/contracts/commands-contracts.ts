@@ -5105,8 +5105,9 @@ function parseCachePort(value: unknown, field: string): number {
   return port;
 }
 
-function parseCacheEntry(value: unknown): EnvironmentDeployCache {
-  if (!isRecord(value)) throw new TypeError("Invalid caches entry");
+function parseCacheIdentity(
+  value: Record<string, unknown>,
+): Pick<EnvironmentDeployCache, "id" | "name" | "username"> {
   if (typeof value.id !== "string" || !isPathId(value.id)) {
     throw new TypeError("caches id must be a lower-case UUID");
   }
@@ -5116,6 +5117,12 @@ function parseCacheEntry(value: unknown): EnvironmentDeployCache {
   if (!isValidPrincipalUsername(value.username)) {
     throw new TypeError("caches username is not a Hosting Account name");
   }
+  return { id: value.id, name: value.name, username: value.username };
+}
+
+function parseCacheEngine(
+  value: Record<string, unknown>,
+): Pick<EnvironmentDeployCache, "engine" | "version"> {
   if (value.engine !== "valkey") {
     throw new TypeError("caches engine must be valkey");
   }
@@ -5125,12 +5132,31 @@ function parseCacheEntry(value: unknown): EnvironmentDeployCache {
   ) {
     throw new TypeError("caches version is not one the host vendors");
   }
+  return { engine: "valkey", version: value.version };
+}
+
+function parseCacheAccess(
+  value: Record<string, unknown>,
+): Pick<EnvironmentDeployCache, "access" | "port"> {
   if (value.access !== "socket" && value.access !== "port") {
     throw new TypeError("caches access must be socket or port");
   }
   if ((value.access === "port") !== (value.port !== undefined)) {
     throw new TypeError("caches port is set if and only if access is port");
   }
+  return {
+    access: value.access,
+    ...(value.port === undefined
+      ? {}
+      : { port: parseCachePort(value.port, "caches port") }),
+  };
+}
+
+function parseCacheEntry(value: unknown): EnvironmentDeployCache {
+  if (!isRecord(value)) throw new TypeError("Invalid caches entry");
+  const identity = parseCacheIdentity(value);
+  const engine = parseCacheEngine(value);
+  const access = parseCacheAccess(value);
   const maxMemoryMb = parseCacheInt(value.maxMemoryMb, "caches maxMemoryMb");
   if (maxMemoryMb < MIN_CACHE_MEMORY_MB || maxMemoryMb > MAX_CACHE_MEMORY_MB) {
     throw new TypeError(
@@ -5145,15 +5171,9 @@ function parseCacheEntry(value: unknown): EnvironmentDeployCache {
   }
   const accountLimits = parseNativeAppAccountLimits(value.accountLimits);
   return {
-    id: value.id,
-    name: value.name,
-    username: value.username,
-    engine: "valkey",
-    version: value.version,
-    access: value.access,
-    ...(value.port === undefined
-      ? {}
-      : { port: parseCachePort(value.port, "caches port") }),
+    ...identity,
+    ...engine,
+    ...access,
     maxMemoryMb,
     passwordSha256: value.passwordSha256,
     ...(accountLimits === undefined ? {} : { accountLimits }),

@@ -6,7 +6,7 @@ Vendors the Valkey server that project caches run (`src/deploy/cache/`), under
 `vendor/valkey/<version>/bin/valkey-server`, with the upstream licence
 (BSD-3-Clause) at `vendor/valkey/<version>/share/LICENSE` beside it, and a
 `current` link. Run lazily by `playbooks/cache-runtime-apply.yml`
-(`runCacheRuntimeApply` in the daemon) the first time a deploy or `cache.apply`
+(`installCacheRuntime` in `src/deploy/cache/install-runtime.ts`) the first time a deploy or `cache.apply`
 needs a cache on a host; never part of a converge. It does not touch the
 `redis` role: the control plane's own Redis stays separate and is never shared.
 

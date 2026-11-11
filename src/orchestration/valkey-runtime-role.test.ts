@@ -40,7 +40,7 @@ test("the install checks the digest, takes only the server and its licence, and 
   const install = (await tasks()).find((t) =>
     t.name === "Install Valkey into the runtimes directory"
   );
-  const shell = String(install?.["ansible.builtin.shell"]);
+  const shell = `${install?.["ansible.builtin.shell"] ?? ""}`;
   assert(shell.includes("download.valkey.io/releases/${NAME}.tar.gz"));
   assert(shell.includes('NAME="valkey-${VER}-jammy-${ARCH}"'));
   assert(shell.includes('sha256sum "$TMP/valkey.tar.gz"'));

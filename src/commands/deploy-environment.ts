@@ -3617,9 +3617,14 @@ async function deployEnvironmentHolding(
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
+  // A cache that is not running leaves the deploy unrecorded, so the next
+  // identical deploy runs in full and tries it again instead of being skipped.
+  const cachesRunning = (cacheStep.caches ?? []).every((c) =>
+    c.state === "ready"
+  );
   await recordAppliedDeploy(
     earlyDeploymentDir,
-    parsedPayload.desiredHash,
+    cachesRunning ? parsedPayload.desiredHash : undefined,
     sites,
   );
 

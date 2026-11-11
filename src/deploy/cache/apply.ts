@@ -33,7 +33,11 @@ import type {
   EnvironmentDeployCache,
 } from "../../contracts/commands-contracts.ts";
 import { logWarn } from "../../util/logger.ts";
-import { forEachSequential, mapSequential } from "../../util/sequential.ts";
+import {
+  forEachSequential,
+  mapSequential,
+  repeatSequential,
+} from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { syncAccountWalls } from "../reach/reach-ports.ts";
 import {
@@ -304,13 +308,16 @@ async function installOne(
 async function waitActive(io: CacheIo, unit: string): Promise<boolean> {
   const sleep = io.sleep ?? defaultSleep;
   const limit = io.activeTimeoutMs ?? DEFAULT_ACTIVE_TIMEOUT_MS;
-  for (let waited = 0; waited <= limit; waited += ACTIVE_POLL_MS) {
-    if ((await systemctl(io, ["is-active", "--quiet", unit])).success) {
-      return true;
-    }
+  let waited = 0;
+  let active = false;
+  await repeatSequential(async () => {
+    active = (await systemctl(io, ["is-active", "--quiet", unit])).success;
+    if (active || waited >= limit) return false;
     await sleep(ACTIVE_POLL_MS);
-  }
-  return false;
+    waited += ACTIVE_POLL_MS;
+    return true;
+  });
+  return active;
 }
 
 /** Start a new or stopped cache, restart a changed one, and wait for it. */

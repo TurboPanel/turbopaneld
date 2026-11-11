@@ -579,3 +579,30 @@ test("tp-host's cache constants match the daemon's", async () => {
   const { CACHE_ACL_RULES } = await import("../deploy/cache/config.ts");
   assert(script.includes(`TP_CACHE_ACL='${CACHE_ACL_RULES}'`));
 });
+
+test("the unit is compared and installed from the daemon's own staging folder", async () => {
+  await withHost(async (host) => {
+    await setUp(host);
+    const staged = host.path(`var/lib/turbopanel/caches/.stage/${unitName()}`);
+    const target = host.path(`etc/systemd/system/${unitName()}`);
+    await Deno.writeTextFile(staged, unitFor(host));
+    // Not installed yet: cmp says it differs, then install takes it.
+    const before = await host.run(["cmp", "-s", "--", staged, target]);
+    assertEquals(before.code === 0, false);
+    const install = await host.run([
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      staged,
+      target,
+    ]);
+    assertEquals(install.code, 0, install.stderr);
+    // Installed: cmp now agrees, so an unchanged apply restarts nothing.
+    const after = await host.run(["cmp", "-s", "--", staged, target]);
+    assertEquals(after.code, 0, after.stderr);
+  });
+});
