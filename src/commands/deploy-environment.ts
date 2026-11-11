@@ -213,6 +213,10 @@ import {
   keptServiceFolders,
   type ReleaseTreeRef,
 } from "../deploy/release/retention.ts";
+import {
+  syncAccountWallOrThrow,
+  syncAccountWallQuietly,
+} from "../deploy/account-wall.ts";
 import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import {
@@ -2790,7 +2794,22 @@ async function publishDeployedCompose(
     );
     return { labeledServices, composePaths: [] };
   }
-  const deployed = await deployContainerServices(input);
+  // Compose may create a container network: its gateway is a host address the
+  // account wall only learns by syncing, so site accounts would keep reaching
+  // it until some later sync. The wall is reloaded whether the deploy goes on
+  // or fails (a failed one may already have created the network); only a
+  // successful one fails on a reload that did not work.
+  let deployed: Awaited<ReturnType<typeof deployContainerServices>>;
+  try {
+    deployed = await deployContainerServices(input);
+  } catch (err) {
+    await syncAccountWallQuietly(
+      input.runPrivileged ?? defaultRunPrivileged,
+      (message) => logWarn("deploy", message),
+    );
+    throw err;
+  }
+  await syncAccountWallOrThrow(input.runPrivileged ?? defaultRunPrivileged);
   return {
     labeledServices: deployed.serviceNames,
     composePaths: deployed.composePaths,

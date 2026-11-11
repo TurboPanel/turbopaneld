@@ -33,6 +33,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   fabricReinstalls: number;
   firewallReinstalls: number;
   phpReconciles: number;
+  wallSyncs: number;
   phpPatchArms: number;
   stackHeals: number;
   instanceStops: number;
@@ -47,6 +48,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let fabricReinstalls = 0;
   let firewallReinstalls = 0;
   let phpReconciles = 0;
+  let wallSyncs = 0;
   let phpPatchArms = 0;
   let stackHeals = 0;
   let instanceStops = 0;
@@ -109,6 +111,10 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       stackHeals += 1;
       return Promise.resolve();
     },
+    syncAccountWall: () => {
+      wallSyncs += 1;
+      return Promise.resolve();
+    },
     reconcileSitePhpRuntimes: () => {
       phpReconciles += 1;
       return Promise.resolve();
@@ -161,6 +167,9 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get phpReconciles() {
       return phpReconciles;
     },
+    get wallSyncs() {
+      return wallSyncs;
+    },
     get instanceStops() {
       return instanceStops;
     },
@@ -179,6 +188,8 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 0);
   assertEquals(stub.phpReconciles, 0);
+  // The wall is reloaded at start even when orchestration never becomes ready.
+  assertEquals(stub.wallSyncs, 1);
   assertEquals(stub.phpPatchArms, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
@@ -204,6 +215,9 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 1);
   assertEquals(stub.phpReconciles, 1);
+  // The account wall learns the container networks at start, even when the
+  // PHP reconcile has nothing to do, and again when Docker comes back.
+  assertEquals(stub.wallSyncs >= 1, true);
   // The patch restarts are armed once the runtimes are back.
   assertEquals(stub.phpPatchArms, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);
@@ -994,4 +1008,37 @@ test("a failed tools bootstrap on the connect-first path is retried too", async 
   assertEquals(scheduled, 1);
   stop();
   await done;
+});
+
+test("a Docker network create event reloads the account wall", async () => {
+  let onCreated: (() => void) | undefined;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => ({
+      subscribeReachability: () => {},
+      subscribeNetworkCreated: (cb) => {
+        onCreated = cb;
+      },
+    }),
+    startTunnels: () => {
+      onCreated?.();
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  // start, post-orchestration, and the one network create
+  assertEquals(stub.wallSyncs, 3);
+});
+
+test("a throwing fabric restore does not skip the account wall reload", async () => {
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    restoreFabricFromPersistedState: () =>
+      Promise.reject(new Error("fabric went away")),
+  });
+  await runDaemon(stub.io).catch(() => {});
+  // start, then the post-orchestration one from the finally block
+  assertEquals(stub.wallSyncs, 2);
 });

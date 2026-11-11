@@ -1362,6 +1362,9 @@ const SITES: CallSite[] = [
     'src/deploy/site/workers.ts|["-n","rm","-f","--",join(unitDir,workerTemplateFile(base))]',
     { argv: ["rm", "-f", "--", WORKER_UNIT_FILE] },
   ),
+  tpHost('src/deploy/account-wall.ts|["-n","php-loopback-sync"]', {
+    argv: ["php-loopback-sync"],
+  }),
   tpHost('src/deploy/native/apply-native-apps.ts|["-n","php-loopback-sync"]', {
     argv: ["php-loopback-sync"],
   }),

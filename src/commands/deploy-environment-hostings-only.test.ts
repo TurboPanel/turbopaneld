@@ -191,6 +191,8 @@ test("a full deploy keeps the certificate line after the step is done", async ()
       waitForHealth: instantlyHealthy,
       ensureExternalDockerNetworks: () => Promise.resolve(),
       ensureFabricDockerNetworks: () => Promise.resolve(),
+      runPrivileged: () =>
+        Promise.resolve({ success: true, stdout: "", stderr: "" }),
       progress,
     });
     const last = sent.at(-1)?.progress.steps.find((step) =>
