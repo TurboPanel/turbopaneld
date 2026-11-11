@@ -173,6 +173,7 @@ import {
   type SitePhpUnitListing,
 } from "./site/php-runtime-apply.ts";
 import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
+import { removeRecordedSiteEnvFiles } from "./site/site-env-owners.ts";
 import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
 import {
   type FrameworkAlias,
@@ -4827,6 +4828,9 @@ export async function removeSites(
       ...nginxRemoved.services,
       ...apacheRemoved.services,
     ]);
+    // Every unit that loaded a site's variables is gone with its vhost and
+    // runtime: take the root copies of this environment's sites too.
+    await removeRecordedSiteEnvFiles(run, layout, environmentId);
     // Nothing names the PHP or the engines this environment used: remove them
     // once no other environment on the host uses them either.
     await pruneUnusedSoftware(layout);
@@ -4944,6 +4948,7 @@ export async function removeNamedSites(
         );
       }
     }
+    await removeRecordedSiteEnvFiles(run, layout, environmentId, [...only]);
     return [...only].sort((a, b) => a.localeCompare(b));
   });
 }

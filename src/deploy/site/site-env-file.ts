@@ -40,6 +40,7 @@ import {
   writeReleaseHostingWebMetadata,
 } from "../site.ts";
 import { sitePhpKey } from "./php-runtime.ts";
+import { recordSiteEnvOwner } from "./site-env-owners.ts";
 
 /** Folder of the root-owned copies, under the config root. */
 export const SITE_ENV_ROOT_DIRNAME = "site-env";
@@ -196,29 +197,6 @@ async function installSiteEnvFile(
 }
 
 /**
- * Remove the root-owned copy of a site's variables. Call it only after every
- * unit that loads the file is gone. A refusal is an error the caller turns into
- * a warning: the next deploy or stop tries again.
- */
-export async function removeSiteEnvFile(
-  run: RunFn,
-  username: string,
-  siteId: string,
-): Promise<void> {
-  const result = await run(
-    "sudo",
-    hostSudoArgs(["-n", "site-env-remove", username, siteId]),
-  );
-  if (!result.success) {
-    throw new Error(
-      `site ${siteId}: removing its environment file failed: ${
-        result.stderr.trim() || "tp-host refused it"
-      }`,
-    );
-  }
-}
-
-/**
  * Bring every site's environment file in line with this deploy, before
  * anything runs commands or applies a site. Returns transcript lines (names
  * only) for what was left out of a file.
@@ -273,6 +251,11 @@ export async function materializeSiteEnvFiles(
       siteEnvFileId(environmentId, service),
       text,
     );
+    // So the file can be removed when the site leaves or the environment stops.
+    await recordSiteEnvOwner(layout, environmentId, service, {
+      username: owner.username,
+      siteId: siteEnvFileId(environmentId, service),
+    });
     if (release) {
       await writeMetadata(
         layout,

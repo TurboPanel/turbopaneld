@@ -34,6 +34,7 @@ import {
   resetPhpSeriesPruneForTests,
 } from "./site/php-series-prune.ts";
 import { engineHoldKey, holdPruneKeys } from "./site/prune-holds.ts";
+import { recordSiteEnvOwner } from "./site/site-env-owners.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -5197,4 +5198,40 @@ test("the shared php-fpm pools directory follows the engines that need it, so no
   assertEquals(phpFpmPoolsGroup(needs(apacheSite)), "tpapache");
   assertEquals(phpFpmPoolsGroup(needs(nginxSite)), "tpapache");
   assertEquals(phpFpmPoolsGroup(needs(olsPhpSite, apacheSite)), "tpapache");
+});
+
+test("a site that leaves, and an environment that stops, lose their root copy of the site variables", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run, calls } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  const removals = () =>
+    calls.filter((call) => call.args.includes("site-env-remove")).map((call) =>
+      call.args.slice(call.args.indexOf("site-env-remove")).join(" ")
+    );
+  try {
+    await applySites(layout, "envE", [nginxSite, apachePhpSite], {
+      run,
+      runPlaybook,
+    });
+    await recordSiteEnvOwner(layout, "envE", "www", {
+      username: "alice",
+      siteId: "www-0123456789ab",
+    });
+    await recordSiteEnvOwner(layout, "envE", "phpapp", {
+      username: "alice",
+      siteId: "phpapp-0123456789ab",
+    });
+    calls.length = 0;
+    await removeNamedSites(layout, "envE", ["phpapp"], { run });
+    assertEquals(removals(), ["site-env-remove alice phpapp-0123456789ab"]);
+    calls.length = 0;
+    await removeSites(layout, "envE", { run });
+    assertEquals(removals(), ["site-env-remove alice www-0123456789ab"]);
+    // Nothing recorded (a site installed before the record): nothing removed.
+    calls.length = 0;
+    await removeSites(layout, "envE", { run });
+    assertEquals(removals(), []);
+  } finally {
+    await cleanup();
+  }
 });

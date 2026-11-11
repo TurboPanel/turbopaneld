@@ -12,7 +12,6 @@ import type {
 import {
   isSiteEnvPlatformName,
   materializeSiteEnvFiles,
-  removeSiteEnvFile,
   renderSiteEnvFile,
   siteEnvEntries,
   siteEnvFileId,
@@ -187,6 +186,15 @@ test("materializeSiteEnvFiles stages 0600 in a 0700 folder, installs through tp-
       0o700,
     );
     await assertRejects(() => Deno.stat(staged));
+    // The owner is recorded, for the day the site leaves.
+    assertEquals(
+      JSON.parse(
+        await Deno.readTextFile(
+          join(layout.stateDir, "sites", ".env-owners", "env1", "web.json"),
+        ),
+      ),
+      { username: "alice", siteId: id },
+    );
 
     fail = true;
     await assertRejects(
@@ -226,38 +234,4 @@ test("a release-backed site gets its hosting metadata written early, with the CA
     assertEquals(calls.length, 1);
     assert(calls[0]?.webEnv?.DB_CA?.endsWith("managed-ca.pem"));
   });
-});
-
-test("removeSiteEnvFile asks tp-host for the user and site id, and reports a refusal", async () => {
-  const seen: string[][] = [];
-  await removeSiteEnvFile(
-    (_c, args) => {
-      seen.push(args);
-      return Promise.resolve({
-        success: true,
-        code: 0,
-        stdout: "",
-        stderr: "",
-      });
-    },
-    "alice",
-    "web-0123456789ab",
-  );
-  assert(seen[0]?.join(" ").endsWith("site-env-remove alice web-0123456789ab"));
-  await assertRejects(
-    () =>
-      removeSiteEnvFile(
-        () =>
-          Promise.resolve({
-            success: false,
-            code: 1,
-            stdout: "",
-            stderr: "no",
-          }),
-        "alice",
-        "x",
-      ),
-    Error,
-    "removing its environment file failed: no",
-  );
 });

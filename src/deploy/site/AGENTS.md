@@ -450,6 +450,12 @@ root-owned `0550` by design:
   owner's folder now uses the same quoting, so `set -a; . hosting.env; set +a`
   loads it in a shell. The web request still gets its values from the vhost; the
   per-site PHP unit does not load the file.
+  The daemon records which Linux user each site's file was installed for
+  (`<stateDir>/sites/.env-owners/<environment>/<service>.json`, `site-env-owners.ts`);
+  `removeNamedSites`, `removeSites` (and so `environment.stop`) read it back and
+  call `site-env-remove`. A site with no record (installed before it existed)
+  loses nothing and one line is logged; `principal-remove` still takes the whole
+  account folder. A refused removal keeps the record and is retried.
 - **nginx follows no link below a release-backed document root.** It serves
   one with `disable_symlinks on from=$document_root`, so **every** symlink under
   the root answers 403 — including links that stay inside the release, such as
