@@ -2198,7 +2198,7 @@ tp_php_ini_awk='
     return p == "/tmp" || index(p, "/tmp/") == 1
   }
   function ini_init(   a, i) {
-    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension extension", a, " ")
+    split("memory_limit upload_max_filesize post_max_size max_execution_time max_input_time max_input_vars max_file_uploads default_socket_timeout session.gc_maxlifetime session.gc_probability session.gc_divisor display_errors display_startup_errors log_errors allow_url_fopen file_uploads expose_php short_open_tag session.cookie_secure session.cookie_httponly session.use_strict_mode session.cookie_samesite session.cookie_lifetime session.name opcache.enable opcache.enable_cli opcache.memory_consumption opcache.interned_strings_buffer opcache.max_accelerated_files opcache.revalidate_freq opcache.revalidate_path opcache.validate_timestamps opcache.validate_permission opcache.validate_root error_reporting date.timezone disable_functions realpath_cache_size realpath_cache_ttl output_buffering default_charset variables_order request_order zend.exception_ignore_args mail.add_x_header open_basedir error_log session.save_path upload_tmp_dir sys_temp_dir extension_dir zend_extension extension auto_prepend_file turbopanel.site_key allow_url_include", a, " ")
     for (i in a) inikey[a[i]] = 1
     split("error_log session.save_path upload_tmp_dir sys_temp_dir", a, " ")
     for (i in a) pathkey[a[i]] = 1
@@ -2210,8 +2210,14 @@ tp_php_ini_awk='
     if ((key in pathkey) && !path_ok(val)) fail(key "=" val)
     if (key == "open_basedir") {
       n = split(val, parts, ":")
-      for (i = 1; i <= n; i++) if (!path_ok(parts[i])) fail("open_basedir entry " parts[i])
+      for (i = 1; i <= n; i++) if (!path_ok(parts[i]) && !(guard != "" && parts[i] == guard)) fail("open_basedir entry " parts[i])
     }
+    # The site guard: only this runtime own guard file, and a 64 hex key.
+    if (key == "auto_prepend_file" && (guard == "" || val != guard)) fail("auto_prepend_file=" val)
+    if (key == "turbopanel.site_key" && val !~ /^[0-9a-f]+$/) fail("turbopanel.site_key must be 64 lowercase hex characters")
+    if (key == "turbopanel.site_key" && length(val) != 64) fail("turbopanel.site_key must be 64 lowercase hex characters")
+    # URL includes stay off: a request must not run its own body as the site.
+    if (key == "allow_url_include" && val !~ /^(0|[Oo]ff|false|no)$/) fail("allow_url_include must stay off")
     if (key == "extension_dir" && index(val, lsphp) != 1 && val !~ /^\/usr\/lib\/php\/[0-9]+$/) fail("extension_dir=" val)
     if (key == "extension_dir" && val ~ /\.\./) fail("extension_dir=" val)
     if (key == "zend_extension" && val != "opcache.so" && val != "opcache") fail("zend_extension=" val)
@@ -2223,7 +2229,11 @@ tp_php_ini_awk='
 '
 
 tp_php_ini_ok() {
-  awk -v home="$2" -v principals="$R_PRINCIPALS" -v lsphp="$INSTALL_ROOT/vendor/lsphp/" "$tp_php_ini_awk"'
+  _pq_file="$1"
+  _pq_home="$2"
+  _pq_site="$3"
+  _pq_guard="$R_CONFIG/php/sites/$_pq_site/site-guard.php"
+  awk -v home="$_pq_home" -v principals="$R_PRINCIPALS" -v guard="$_pq_guard" -v lsphp="$INSTALL_ROOT/vendor/lsphp/" "$tp_php_ini_awk"'
     BEGIN { ini_init() }
     /\\[ \t\r]*$/ { fail("line continuation") }
     /^[ \t]*$/ || /^[ \t]*;/ { next }
@@ -2241,7 +2251,7 @@ tp_php_ini_ok() {
       ini_ok(trim(substr($0, 1, eq - 1)), substr($0, eq + 1))
     }
     END { if (bad) exit 1 }
-  ' "$1"
+  ' "$_pq_file"
 }
 
 # php-fpm.conf for one site: a [global] block and the one pool named after the
@@ -2250,8 +2260,11 @@ tp_php_ini_ok() {
 # acl_groups) naming a web server account, and the socket sits in the unit's
 # runtime directory.
 tp_php_fpm_conf_ok() {
-  awk -v home="$2" -v principals="$R_PRINCIPALS" -v site="$3" -v run="/run/turbopanel-php-$3" -v web="$PHP_WEB_GROUPS" \
-    -v lsphp="$INSTALL_ROOT/vendor/lsphp/" "$tp_php_ini_awk"'
+  _pm_file="$1"
+  _pm_home="$2"
+  _pm_site="$3"
+  awk -v home="$_pm_home" -v principals="$R_PRINCIPALS" -v site="$_pm_site" -v run="/run/turbopanel-php-$_pm_site" -v web="$PHP_WEB_GROUPS" \
+    -v guard="$R_CONFIG/php/sites/$_pm_site/site-guard.php" -v lsphp="$INSTALL_ROOT/vendor/lsphp/" "$tp_php_ini_awk"'
     function web_ok(v,   n, p, i) {
       n = split(v, p, ",")
       for (i = 1; i <= n; i++) if (index(" " web " ", " " trim(p[i]) " ") == 0) return 0
@@ -2310,17 +2323,48 @@ tp_php_fpm_conf_ok() {
       if (bad) exit 1
       if (pools != 1 || listens != 1) { print "tp-host: php config: exactly one pool [" site "] with one listen" > "/dev/stderr"; exit 1 }
     }
-  ' "$1"
+  ' "$_pm_file"
+}
+
+# The guard script a per-site PHP runtime prepends to every request: the
+# staged file must equal these bytes exactly (sitePhpGuardPhp in
+# src/deploy/site/php-runtime.ts renders the same text; change both together).
+tp_php_guard_ok() {
+  _pg_file="$1"
+  _pg_canon="$TP_STAGE/guard.canonical"
+  cat > "$_pg_canon" <<'TP_GUARD_EOF'
+<?php
+// Managed by TurboPanel: this site's PHP serves only requests its own web server sent.
+if (PHP_SAPI !== 'cli') {
+    $tp_site_key = get_cfg_var('turbopanel.site_key');
+    $tp_sent_key = $_SERVER['TP_SITE_KEY'] ?? null;
+    if (!is_string($tp_site_key) || strlen($tp_site_key) !== 64 || !is_string($tp_sent_key) || !hash_equals($tp_site_key, $tp_sent_key)) {
+        http_response_code(403);
+        exit;
+    }
+    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);
+    if (function_exists('putenv')) {
+        putenv('TP_SITE_KEY');
+    }
+}
+TP_GUARD_EOF
+  cmp -s "$_pg_file" "$_pg_canon" || {
+    printf 'tp-host: php config: site-guard.php differs from the pinned guard\n' >&2
+    return 1
+  }
 }
 
 # Check FILE (staged) as the content of a per-site config path for owner GROUP.
 tp_php_conf_ok() {
-  _pf_conf_site="${2%/*}"
+  _pf_conf_file="$1"
+  _pf_conf_dest="$2"
+  _pf_conf_site="${_pf_conf_dest%/*}"
   _pf_conf_site="${_pf_conf_site##*/}"
   _pf_conf_user="$(tp_php_conf_owner "$3")" || return 1
-  case "${2##*/}" in
-    php.ini) tp_php_ini_ok "$1" "$R_PRINCIPALS/$_pf_conf_user" ;;
-    php-fpm.conf) tp_php_fpm_conf_ok "$1" "$R_PRINCIPALS/$_pf_conf_user" "$_pf_conf_site" ;;
+  case "${_pf_conf_dest##*/}" in
+    php.ini) tp_php_ini_ok "$_pf_conf_file" "$R_PRINCIPALS/$_pf_conf_user" "$_pf_conf_site" ;;
+    php-fpm.conf) tp_php_fpm_conf_ok "$_pf_conf_file" "$R_PRINCIPALS/$_pf_conf_user" "$_pf_conf_site" ;;
+    site-guard.php) tp_php_guard_ok "$_pf_conf_file" ;;
     *) return 1 ;;
   esac
 }
@@ -2343,7 +2387,7 @@ tp_php_path_class() {
   esac
   tp_php_site_id_ok "${_pp_rest%/*}" || return 1
   case "${_pp_rest#*/}" in
-    php.ini|php-fpm.conf|php.ini.tpprev|php-fpm.conf.tpprev) echo phpconf; return 0 ;;
+    php.ini|php-fpm.conf|site-guard.php|php.ini.tpprev|php-fpm.conf.tpprev|site-guard.php.tpprev) echo phpconf; return 0 ;;
   esac
   return 1
 }

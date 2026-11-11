@@ -163,7 +163,13 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
     Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
     0640, root:<owner>, directive allowlist; php.ini's only non-plain
-    section is `[PATH=<owner home>]`, the locked limits; php-fpm pools take
+    section is `[PATH=<owner home>]`, the locked limits; an Apache runtime
+    also has `site-guard.php`, which must equal the bytes held in
+    `tp_php_guard_ok` (rendered by `sitePhpGuardPhp`; change both together),
+    and its ini (or pool) may name `auto_prepend_file` only as that runtime's own
+    guard path, `turbopanel.site_key` only as 64 lowercase hex,
+    `allow_url_include` only as off, and the guard path as an `open_basedir`
+    entry; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner. daemon-install's tp:tp pass over the config tree skips it;

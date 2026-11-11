@@ -992,6 +992,119 @@ test("buildCaddyHostnameRoutes groups hostings by hostname", () => {
   assertEquals(sorted[1]?.pathPrefix, undefined);
 });
 
+const COMPRESS_PAYLOAD = {
+  environmentId: "env-1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "tp-demo",
+  composeFiles: [{
+    filename: "compose.yaml",
+    role: "runtime",
+    content: "services: {}",
+  }],
+};
+
+function compressRoutes(
+  engine: "apache" | "nginx+apache" | "nginx",
+  extraNative = false,
+) {
+  return buildCaddyHostnameRoutes({
+    ...COMPRESS_PAYLOAD,
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["app.example.com"],
+      },
+      ...(extraNative
+        ? [{
+          hostingId: "h2",
+          serviceId: "s2",
+          composeServiceName: "api",
+          hostnames: ["app.example.com"],
+          pathPrefix: "/api",
+        }]
+        : []),
+    ],
+    sites: [{
+      composeServiceName: "web",
+      engine,
+      root: "public",
+      listenPort: 18080,
+    }],
+    ...(extraNative
+      ? {
+        nativeAppServices: [{
+          composeServiceName: "api",
+          listenPort: 18081,
+        }],
+      }
+      : {}),
+  } as never).get("app.example.com")!;
+}
+
+test("an Apache site route is compressed at the front server, a single route and a multi-route block alike", () => {
+  for (const engine of ["apache", "nginx+apache"] as const) {
+    const single = compressRoutes(engine);
+    assertEquals(single.routes[0]?.upstream, {
+      kind: "http",
+      host: "127.0.0.1",
+      port: 18080,
+      compress: true,
+    });
+    const snippet = siteSnippet({
+      hostname: "app.example.com",
+      tlsDir: TLS_DIR,
+      routes: single.routes,
+    });
+    assertStringIncludes(
+      snippet,
+      "  encode zstd gzip\n  reverse_proxy 127.0.0.1:18080\n",
+    );
+  }
+  // A native app next to it on a path: only the Apache route compresses, and
+  // `encode` sits on the line before its own `reverse_proxy`.
+  const multi = compressRoutes("apache", true);
+  const snippet = siteSnippet({
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    routes: multi.routes,
+  });
+  assertStringIncludes(
+    snippet,
+    "  handle {\n    encode zstd gzip\n    reverse_proxy 127.0.0.1:18080\n  }\n",
+  );
+  assertStringIncludes(
+    snippet,
+    "  handle /api/* {\n    reverse_proxy 127.0.0.1:18081\n  }\n",
+  );
+  assertEquals(snippet.match(/encode zstd gzip/g)?.length, 1);
+});
+
+test("nginx sites, native apps and Traefik routes are not given a compression line", () => {
+  const nginx = compressRoutes("nginx");
+  assertEquals(nginx.routes[0]?.upstream, {
+    kind: "http",
+    host: "127.0.0.1",
+    port: 18080,
+  });
+  assertEquals(
+    siteSnippet({
+      hostname: "app.example.com",
+      tlsDir: TLS_DIR,
+      routes: nginx.routes,
+    }).includes("encode"),
+    false,
+  );
+  assertEquals(
+    siteSnippet({ hostname: "app.example.com", tlsDir: TLS_DIR }).includes(
+      "encode",
+    ),
+    false,
+  );
+});
+
 test("assertValidBindAddress rejects garbage before interpolation", () => {
   assertThrows(
     () => assertValidBindAddress("not an ip; rm -rf /"),

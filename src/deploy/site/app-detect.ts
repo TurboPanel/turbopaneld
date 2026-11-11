@@ -145,7 +145,10 @@ async function resolveInside(
   }
 }
 
-async function readCapped(path: string, maxBytes: number): Promise<string> {
+export async function readCapped(
+  path: string,
+  maxBytes: number,
+): Promise<string> {
   const file = await Deno.open(path, { read: true });
   try {
     const buffer = new Uint8Array(maxBytes);

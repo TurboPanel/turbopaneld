@@ -6,7 +6,7 @@ turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') 
 # on the host, never apt install apache2. The APR versions below are only read
 # by the build script (with the source digests below). PHP is a separate vendor role (`php-fpm`); the build
 # enables shared proxy_fcgi.
-apache_version: "2.4.63"
+apache_version: "2.4.70"
 # The version CI builds and publishes (scripts/build-apache.sh, vendor-apache.yml).
 # Hosts install `apache_version`. A bump sets this first; once the release
 # exists, a second change moves `apache_version` and pins `apache_sha256`.
@@ -36,6 +36,9 @@ apache_sha256:
   "2.4.63":
     amd64: "57492bae04e05ca9856645d63a8d6cb06c7bd1bfccfc62ae22ad862e51148cf1"
     arm64: "6e02237ae9fa9999bbaf8dabf3b756abaebbea3f02204c7047bf9222f853da03"
+  "2.4.70":
+    amd64: "ee781d5ea91ab89aa0ffc2edc3b17c42eab51d92979261b419985c9fe656bdce"
+    arm64: "282e030be411dd6ca22e5a28ec39ab3b999db8d421589c5098baec1edb5dd1cd"
 # OpenSSL 3 runtime package: renamed to libssl3t64 (and libssl3 left only as a
 # virtual name) on Debian 13 and Ubuntu 24.04 and later.
 apache_libssl_package: >-
@@ -70,3 +73,27 @@ turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# What a site's `.htaccess` may do on the shared Apache. These are the daemon's
+# own lists (src/deploy/site/apache-overrides.ts, written into every vhost it
+# renders); the role writes them into vhosts rendered before the closed list
+# existed, so a test holds the two copies equal.
+apache_override_classes: "AuthConfig Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch,ExecCGI,Includes,IncludesNOEXEC"
+apache_override_list: >-
+  RewriteEngine RewriteCond RewriteRule RewriteBase RewriteOptions
+  Redirect RedirectMatch RedirectPermanent RedirectTemp
+  ErrorDocument Header RequestHeader
+  AddType RemoveType AddEncoding RemoveEncoding AddCharset RemoveCharset AddDefaultCharset
+  AddLanguage RemoveLanguage DefaultLanguage MultiviewsMatch ForceType
+  SetHandler RemoveHandler
+  AddOutputFilter RemoveOutputFilter AddOutputFilterByType SetOutputFilter
+  SetEnv UnsetEnv SetEnvIf SetEnvIfNoCase SetEnvIfExpr BrowserMatch BrowserMatchNoCase
+  FileETag AcceptPathInfo QualifyRedirectURL
+# Variables every vhost clears before FastCGI sees the request (the vhost
+# lines are `ProxyFCGISetEnvIf "true" !<name>`).
+apache_vhost_strip_names:
+  - PHP_VALUE
+  - PHP_ADMIN_VALUE
+  - PHPRC
+  - PHP_INI_SCAN_DIR
+  - TP_SITE_KEY
