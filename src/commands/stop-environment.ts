@@ -33,6 +33,7 @@ import {
   removeHostingCaddySite,
 } from "../deploy/ingress.ts";
 import { removeCronJobs } from "../deploy/cron/apply.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
 import { removeEnvironmentSiteLifecycle } from "../deploy/site/lifecycle-deploy.ts";
 import { removeRecordedSiteEnvFiles } from "../deploy/site/site-env-owners.ts";
 import { removeSites } from "../deploy/site.ts";
@@ -96,6 +97,8 @@ export type EnvironmentStopHandlerDeps = {
   dockerInstalled?: () => Promise<boolean>;
   /** Test seam — the `sshd` drop-in re-render after principals are retired. */
   applySshAccess?: () => Promise<SshApplyResult>;
+  /** Test seam — removes the environment's worker and command units. */
+  removeSiteLifecycle?: (environmentId: string) => Promise<void>;
   /** Test seam — defaults to {@link removeCronJobs}. */
   removeCronJobs?: (environmentId: string) => Promise<number>;
 };
@@ -248,13 +251,10 @@ async function removeEnvironmentCronJobs(
  */
 async function removeEnvironmentSiteUnits(
   environmentId: string,
-  run: RunFn,
+  remove: (environmentId: string) => Promise<void>,
 ): Promise<void> {
   try {
-    await removeEnvironmentSiteLifecycle(
-      { run, onLine: () => undefined },
-      environmentId,
-    );
+    await remove(environmentId);
   } catch (err) {
     logWarn(
       "commands",
@@ -616,7 +616,12 @@ async function stopEnvironmentLocked(
   // they go before the copy and before the sites.
   await removeEnvironmentSiteUnits(
     parsedPayload.environmentId,
-    deps?.runPrivileged ?? runPrivileged,
+    deps?.removeSiteLifecycle ??
+      ((environmentId) =>
+        removeEnvironmentSiteLifecycle(
+          { run: runHostCommand, onLine: () => undefined },
+          environmentId,
+        )),
   );
   await removeSites(layout, parsedPayload.environmentId);
   // Every unit that loaded a site's variables is gone, so the copies can go.

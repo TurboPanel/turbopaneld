@@ -53,7 +53,7 @@ import {
 import { applyNativeAppLifecycle } from "../deploy/native/apply-native-apps.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { workerLifecycle } from "../deploy/site/workers.ts";
-import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -79,8 +79,8 @@ export type EnvironmentLifecycleHandlerDeps = {
   logSink?: CommandOutputSink;
   decryptSecrets?: DecryptSecretsFn;
   rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
-  /** Test seam: the privileged runner for worker units. */
-  runPrivileged?: RunFn;
+  /** Test seam: the host runner for worker units. */
+  runHost?: RunFn;
 };
 
 function assertSafeLifecycleIdentifiers(
@@ -339,7 +339,7 @@ async function lifecycleLocked(
   try {
     const workerUnits = await workerLifecycle(
       {
-        run: deps?.runPrivileged ?? defaultRunPrivileged,
+        run: deps?.runHost ?? runHostCommand,
         onLine: (stream, line) => logSink.onLine(stream, line),
       },
       parsedPayload.environmentId,

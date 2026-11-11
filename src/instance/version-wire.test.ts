@@ -46,6 +46,7 @@ import {
   SIGNIN_V2_FEATURE,
   SITE_DB_BINDINGS_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
+  SITE_PHP_LIFECYCLE_FEATURE,
   TLS_CAPTURE_FEATURE,
   TUNNEL_CONNECTOR_FEATURE,
   TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE,
@@ -549,4 +550,9 @@ test("deploy-config-files-v1 is advertised", () => {
     DAEMON_WIRE_FEATURES.includes(DEPLOY_CONFIG_FILES_FEATURE),
     true,
   );
+});
+
+test("site-php-lifecycle-v1 is advertised, and is the last entry", () => {
+  assertEquals(SITE_PHP_LIFECYCLE_FEATURE, "site-php-lifecycle-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SITE_PHP_LIFECYCLE_FEATURE);
 });
