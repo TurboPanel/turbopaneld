@@ -149,7 +149,7 @@ export function assertDistinctWorkerBases(
   specs: ReadonlyArray<
     {
       composeServiceName: string;
-      workers?: readonly EnvironmentDeploySiteWorker[] | undefined;
+      workers?: readonly EnvironmentDeploySiteWorker[];
     }
   >,
 ): void {
