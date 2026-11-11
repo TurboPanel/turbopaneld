@@ -52,3 +52,14 @@ test("a path with a space or a percent sign is encoded", () => {
     "postgresql://h/db?sslmode=verify-full&sslrootcert=/a%20b/100%25/ca.pem",
   );
 });
+
+test("a query already ending in an ampersand gets no doubled separator", () => {
+  assertEquals(
+    withPostgresRootCert("postgresql://h/db?sslmode=verify-ca&", PATH),
+    `postgresql://h/db?sslmode=verify-ca&sslrootcert=${PATH}`,
+  );
+  assertEquals(
+    withPostgresRootCert("postgresql://h/db?&sslmode=verify-ca&&", PATH),
+    `postgresql://h/db?&sslmode=verify-ca&&sslrootcert=${PATH}`,
+  );
+});

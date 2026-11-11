@@ -45,7 +45,7 @@ function readQueryFacts(query: string): QueryFacts {
 /** The text that joins a new parameter onto `base` (`?`, `&` or nothing). */
 function querySeparator(queryAt: number, query: string): string {
   if (queryAt === -1) return "?";
-  return query === "" ? "" : "&";
+  return query === "" || query.endsWith("&") ? "" : "&";
 }
 
 /**
