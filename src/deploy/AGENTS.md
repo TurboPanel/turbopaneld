@@ -1187,6 +1187,18 @@ own reader and is not loaded by any engine.
 - Transition: while a running container still routes HTTP (`traefik.http.*` labels) without the routed label, the shared Traefik is rendered without the constraint (`legacyHttpContainersPresent`), so no site goes dark; the render after the last such container is redeployed turns the constraint on. Both the legacy docker.sock file and the socket-proxy shape go through the same `traefikCompose`.
 - The resolved-model policy also refuses, without host-level approval, published host ports inside the platform's bands (`RESERVED_HOST_PORT_RANGES`) and `gpus` / `group_add` / device reservations (the control plane gates `gpus` and `group_add` the same way); it always refuses an authored network that is the hosting-ingress or managed network. Not checkable in the daemon: a volume's `name:` / `external:` pointing at another project's volume — the control plane rewrites its own storage volumes to external named volumes, so only its host-access gate can tell. The legacy-container check lists stopped containers too (`docker ps -a`).
 
+## Project caches and helper ports (`project-cache-v1`)
+
+`environment.deploy` may carry `caches` and `helperReach`, applied right after
+`ensureDeployPrincipals` and before the sites: helper ports first (the deploy
+fails if the walls cannot be rebuilt), then the caches (a cache that fails is a
+warning and a per-cache result). `environment.stop` removes the caches by the
+host index and closes the helper ports before accounts are retired; data goes
+only when the destroy sent `removeVolumes`. `assertComposePolicy` exempts exactly
+the injected `127.0.0.1:<hostPort>:<containerPort>` publish of a service named in
+`helperReach` and refuses a `helperReach` entry with no such publish. Detail:
+`cache/AGENTS.md`, `reach/reach-ports.ts`.
+
 ## Cancelling a running deploy (`deploy-cancel.ts`)
 
 The control plane sends the cell message `deploy-cancel { id, commandId }`

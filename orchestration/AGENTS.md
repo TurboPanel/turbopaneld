@@ -889,6 +889,13 @@ prefix, then `corepack enable pnpm`. The vendored runtime root is defined once i
 `src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`);
 shell helpers live in `scripts/lib/runtime-paths.sh`.
 
+**Valkey (project caches):** the `valkey-runtime` role vendors the pinned Valkey
+release under `vendor/valkey/<version>/` (the upstream `jammy` build, SHA-256
+pinned per architecture) with its LICENSE beside the binary, run lazily by
+`playbooks/cache-runtime-apply.yml`. The role default, the daemon's
+`CACHE_RUNTIMES` (`src/deploy/cache/limits.ts`) and both digests change
+together. Detail: `roles/valkey-runtime/AGENTS.md`, `../src/deploy/cache/AGENTS.md`.
+
 **Manual troubleshooting (retired `/opt/turbopanel/runtimes` shell-rc line):**
 an old Deno bootstrap may have appended a line like
 `. "/opt/turbopanel/runtimes/deno/.install/env"` to `~/.bashrc` / `~/.profile` /

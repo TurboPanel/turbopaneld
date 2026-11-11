@@ -5,6 +5,15 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
+import {
+  CACHE_PORT_MAX,
+  CACHE_PORT_MIN,
+  CACHE_RUNTIMES,
+  MAX_CACHE_MEMORY_MB,
+  MAX_CACHES_PER_COMMAND,
+  MAX_HELPER_REACH_PER_DEPLOY,
+  MIN_CACHE_MEMORY_MB,
+} from "../deploy/cache/limits.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 import {
   type FolderRefParts,
@@ -45,6 +54,7 @@ export const COMMAND_TYPES = [
   "storage.backup",
   "storage.restore",
   "system.reconcile",
+  "cache.apply",
 ] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];
@@ -1080,6 +1090,79 @@ export type EnvironmentDeploySiteDbCa = {
   urlVariables?: string[];
 };
 
+/**
+ * One project cache the host runs for this environment (feature
+ * `project-cache-v1`): a native Valkey process run as the Hosting Account
+ * `username`, with a named login (`app`, the default user off) whose password
+ * the host knows only as `passwordSha256`. The plain password reaches the
+ * sites as a sealed variable, never here.
+ */
+export type EnvironmentDeployCache = {
+  /** Lower-case UUID; it forms the unit name and every path. */
+  id: string;
+  /** Short name unique in the environment: lower case letters, digits and dashes. */
+  name: string;
+  /** The Hosting Account the process runs as. */
+  username: string;
+  engine: "valkey";
+  /** A key of the daemon's `CACHE_RUNTIMES.valkey`, such as `8.1`. */
+  version: string;
+  /** `socket`: a private unix socket only the account can open. `port`: a loopback port open to the account only. */
+  access: "socket" | "port";
+  /** Loopback port from the listen band (18080-18999); present if and only if `access` is `port`. */
+  port?: number;
+  /** `maxmemory` in MiB (16-65536); the unit's memory ceiling is twice this plus 32 MiB. */
+  maxMemoryMb: number;
+  /** Lower-case hex SHA-256 of the login password. */
+  passwordSha256: string;
+  /** The account's ceiling, written to its slice when sent. Never rewritten to empty limits. */
+  accountLimits?: { cpus?: number; memoryBytes?: number; tasksMax?: number };
+};
+
+/**
+ * A helper container's published port (feature `project-cache-v1`): the
+ * control plane has injected `127.0.0.1:<hostPort>:<containerPort>` into the
+ * compose document, and the host opens `hostPort` to the Hosting Account
+ * `username` only.
+ */
+export type EnvironmentDeployHelperReach = {
+  composeServiceName: string;
+  containerPort: number;
+  hostPort: number;
+  username: string;
+};
+
+/** How one cache fared on this host. */
+export type CacheApplyResult = {
+  id: string;
+  /** `pending`: its Linux account is not on this host yet, so it starts with the next deploy. */
+  state: "ready" | "failed" | "pending";
+  /** Plain words, never a secret. Present for `failed` and `pending`. */
+  error?: string;
+  /** The patch release that runs, such as `8.1.11`. Present for `ready`. */
+  runtimeVersion?: string;
+};
+
+/** One cache to remove from this host with `cache.apply`. */
+export type CacheApplyRemoval = {
+  id: string;
+  username: string;
+  /** Delete the data folder too. Without it the data stays on the host. */
+  deleteData: boolean;
+};
+
+/** `cache.apply` (feature `project-cache-v1`): bring this host's caches for one environment in line. */
+export type CacheApplyPayload = {
+  environmentId: string;
+  /** The complete set this environment has on this host. */
+  caches: EnvironmentDeployCache[];
+  removed?: CacheApplyRemoval[];
+};
+
+export type CacheApplyCommandResult = {
+  caches: CacheApplyResult[];
+};
+
 export type EnvironmentDeploySitePrincipal = {
   principalId: string;
   username: string;
@@ -1766,6 +1849,19 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
+   * The complete set of project caches this environment has on this host
+   * (feature `project-cache-v1`). Absent: an old control plane, so the host
+   * leaves every cache alone. Present (even empty): a cache on the host that is
+   * not listed loses its unit and config, and its data stays.
+   */
+  caches?: EnvironmentDeployCache[];
+  /**
+   * Helper container ports to open to a Hosting Account (feature
+   * `project-cache-v1`). Absent leaves the environment's list alone; an empty
+   * list removes it.
+   */
+  helperReach?: EnvironmentDeployHelperReach[];
+  /**
    * Server-owner org effective ProxySQL client listener ports. When present,
    * tenant tcp/udp ingress must also reserve these in addition to the platform
    * defaults (`15432` / `13306`).
@@ -1873,6 +1969,8 @@ export type EnvironmentDeployResult = {
    * Omitted otherwise. Additive: older control planes ignore it.
    */
   unchanged?: boolean;
+  /** One entry per cache the deploy was sent (feature `project-cache-v1`); omitted when none. */
+  caches?: CacheApplyResult[];
 };
 
 /** A service folder a deploy left in place, by its components. */
@@ -4987,6 +5085,230 @@ function parseTakeoverHostnames(
   });
 }
 
+const CACHE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+function parseCacheInt(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new TypeError(`${field} must be an integer`);
+  }
+  return value;
+}
+
+function parseCachePort(value: unknown, field: string): number {
+  const port = parseCacheInt(value, field);
+  if (port < CACHE_PORT_MIN || port > CACHE_PORT_MAX) {
+    throw new TypeError(
+      `${field} must be in ${CACHE_PORT_MIN}-${CACHE_PORT_MAX}`,
+    );
+  }
+  return port;
+}
+
+function parseCacheEntry(value: unknown): EnvironmentDeployCache {
+  if (!isRecord(value)) throw new TypeError("Invalid caches entry");
+  if (typeof value.id !== "string" || !isPathId(value.id)) {
+    throw new TypeError("caches id must be a lower-case UUID");
+  }
+  if (typeof value.name !== "string" || !CACHE_NAME_RE.test(value.name)) {
+    throw new TypeError("caches name is not a short lower-case name");
+  }
+  if (!isValidPrincipalUsername(value.username)) {
+    throw new TypeError("caches username is not a Hosting Account name");
+  }
+  if (value.engine !== "valkey") {
+    throw new TypeError("caches engine must be valkey");
+  }
+  if (
+    typeof value.version !== "string" ||
+    !Object.hasOwn(CACHE_RUNTIMES.valkey, value.version)
+  ) {
+    throw new TypeError("caches version is not one the host vendors");
+  }
+  if (value.access !== "socket" && value.access !== "port") {
+    throw new TypeError("caches access must be socket or port");
+  }
+  if ((value.access === "port") !== (value.port !== undefined)) {
+    throw new TypeError("caches port is set if and only if access is port");
+  }
+  const maxMemoryMb = parseCacheInt(value.maxMemoryMb, "caches maxMemoryMb");
+  if (maxMemoryMb < MIN_CACHE_MEMORY_MB || maxMemoryMb > MAX_CACHE_MEMORY_MB) {
+    throw new TypeError(
+      `caches maxMemoryMb must be ${MIN_CACHE_MEMORY_MB}-${MAX_CACHE_MEMORY_MB}`,
+    );
+  }
+  if (
+    typeof value.passwordSha256 !== "string" ||
+    !SHA256_HEX_RE.test(value.passwordSha256)
+  ) {
+    throw new TypeError("caches passwordSha256 must be 64 lower-case hex");
+  }
+  const accountLimits = parseNativeAppAccountLimits(value.accountLimits);
+  return {
+    id: value.id,
+    name: value.name,
+    username: value.username,
+    engine: "valkey",
+    version: value.version,
+    access: value.access,
+    ...(value.port === undefined
+      ? {}
+      : { port: parseCachePort(value.port, "caches port") }),
+    maxMemoryMb,
+    passwordSha256: value.passwordSha256,
+    ...(accountLimits === undefined ? {} : { accountLimits }),
+  };
+}
+
+/**
+ * The caches of a deploy or a `cache.apply`: absent stays absent (an old
+ * control plane), an empty array stays empty (the environment has none). Ids,
+ * names (per environment) and ports (per host) are each unique.
+ */
+function parseDeployCaches(
+  value: unknown,
+  field: string,
+): EnvironmentDeployCache[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_CACHES_PER_COMMAND) {
+    throw new TypeError(
+      `${field} must be an array of at most ${MAX_CACHES_PER_COMMAND} entries`,
+    );
+  }
+  const caches = value.map(parseCacheEntry);
+  for (const key of ["id", "name", "port"] as const) {
+    const seen = new Set<unknown>();
+    for (const cache of caches) {
+      const item = cache[key];
+      if (item === undefined) continue;
+      if (seen.has(item)) {
+        throw new TypeError(`${field} names a cache ${key} twice`);
+      }
+      seen.add(item);
+    }
+  }
+  return caches;
+}
+
+function parseHelperReachEntry(value: unknown): EnvironmentDeployHelperReach {
+  if (
+    !isRecord(value) || typeof value.composeServiceName !== "string" ||
+    value.composeServiceName === "." || value.composeServiceName === ".." ||
+    !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(value.composeServiceName) ||
+    !isValidPrincipalUsername(value.username)
+  ) {
+    throw new TypeError("Invalid helperReach entry");
+  }
+  const containerPort = parseCacheInt(
+    value.containerPort,
+    "helperReach containerPort",
+  );
+  if (containerPort < 1 || containerPort > 65535) {
+    throw new TypeError("helperReach containerPort must be 1-65535");
+  }
+  return {
+    composeServiceName: value.composeServiceName,
+    containerPort,
+    hostPort: parseCachePort(value.hostPort, "helperReach hostPort"),
+    username: value.username,
+  };
+}
+
+/** Absent stays absent (leave the list), empty stays empty (remove it). One entry per container and per host port. */
+function parseHelperReach(
+  value: unknown,
+): EnvironmentDeployHelperReach[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HELPER_REACH_PER_DEPLOY) {
+    throw new TypeError(
+      `helperReach must be an array of at most ${MAX_HELPER_REACH_PER_DEPLOY} entries`,
+    );
+  }
+  const reach = value.map(parseHelperReachEntry);
+  const names = new Set<string>();
+  const ports = new Set<number>();
+  for (const entry of reach) {
+    if (names.has(entry.composeServiceName) || ports.has(entry.hostPort)) {
+      throw new TypeError("helperReach names a container or port twice");
+    }
+    names.add(entry.composeServiceName);
+    ports.add(entry.hostPort);
+  }
+  return reach;
+}
+
+function parseCacheRemovals(value: unknown): CacheApplyRemoval[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_CACHES_PER_COMMAND) {
+    throw new TypeError("removed must be an array of cache removals");
+  }
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    if (
+      !isRecord(entry) || typeof entry.id !== "string" ||
+      !isPathId(entry.id) || !isValidPrincipalUsername(entry.username) ||
+      typeof entry.deleteData !== "boolean"
+    ) {
+      throw new TypeError("Invalid removed cache entry");
+    }
+    if (seen.has(entry.id)) {
+      throw new TypeError("removed names a cache twice");
+    }
+    seen.add(entry.id);
+    return {
+      id: entry.id,
+      username: entry.username,
+      deleteData: entry.deleteData,
+    };
+  });
+}
+
+/** `cache.apply`. The `caches` set may be empty (the environment has none left); it is never absent. */
+export function parseCacheApplyPayload(value: unknown): CacheApplyPayload {
+  if (!isRecord(value)) throw new TypeError("Invalid cache.apply payload");
+  const caches = parseDeployCaches(value.caches, "caches");
+  if (caches === undefined) {
+    throw new TypeError("cache.apply caches must be an array");
+  }
+  const removed = parseCacheRemovals(value.removed);
+  const listed = new Set(caches.map((cache) => cache.id));
+  if (removed?.some((entry) => listed.has(entry.id))) {
+    throw new TypeError("cache.apply removes a cache it also lists");
+  }
+  return {
+    environmentId: parseNonEmptyString(value, "environmentId"),
+    caches,
+    ...(removed === undefined ? {} : { removed }),
+  };
+}
+
+/** The result of `cache.apply`, as the control plane reads it. */
+export function parseCacheApplyResult(value: unknown): CacheApplyCommandResult {
+  if (!isRecord(value) || !Array.isArray(value.caches)) {
+    throw new TypeError("Invalid cache.apply result");
+  }
+  return {
+    caches: value.caches.map((entry): CacheApplyResult => {
+      if (
+        !isRecord(entry) || typeof entry.id !== "string" ||
+        !isPathId(entry.id) ||
+        (entry.state !== "ready" && entry.state !== "failed" &&
+          entry.state !== "pending")
+      ) {
+        throw new TypeError("Invalid cache.apply result entry");
+      }
+      return {
+        id: entry.id,
+        state: entry.state,
+        ...(typeof entry.error === "string" ? { error: entry.error } : {}),
+        ...(typeof entry.runtimeVersion === "string"
+          ? { runtimeVersion: entry.runtimeVersion }
+          : {}),
+      };
+    }),
+  };
+}
+
 /** The sites that left the compose file: an array of compose service names, or absent. */
 function parseRemovedSites(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
@@ -7125,6 +7447,8 @@ export function parseEnvironmentDeployPayload(
         "serviceHooks",
         parseServiceHook,
       ),
+      caches: parseDeployCaches(value.caches, "caches"),
+      helperReach: parseHelperReach(value.helperReach),
       listenerPorts: value.listenerPorts === undefined
         ? undefined
         : parseManagedIngressListenerPorts(value.listenerPorts),

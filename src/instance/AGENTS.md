@@ -72,7 +72,9 @@ fields. Detail: `src/deploy/site/AGENTS.md`.
 
 **Tunnel table generation (`tunnel-table-generation-v1`).** `server.tunnel.routes` and `hostings[].tunnel` may carry a `generation`; the daemon ignores a table below the highest generation it applied. Detail: `src/deploy/AGENTS.md`.
 
-**Database CA on site URLs (`site-db-url-ca-v1`, the last entry of `DAEMON_WIRE_FEATURES`).** `sites[].dbCa` may carry `urlVariables`; the daemon appends `sslrootcert=<site CA file>` to those PostgreSQL URLs in `verify-ca` or `verify-full` mode. Detail: `src/deploy/site/AGENTS.md`.
+**Database CA on site URLs (`site-db-url-ca-v1`).** `sites[].dbCa` may carry `urlVariables`; the daemon appends `sslrootcert=<site CA file>` to those PostgreSQL URLs in `verify-ca` or `verify-full` mode. Detail: `src/deploy/site/AGENTS.md`.
+
+**Project caches and helper ports (`project-cache-v1`, the last entry of `DAEMON_WIRE_FEATURES`).** `environment.deploy` may carry `caches` and `helperReach`, and the command `cache.apply` brings a host's caches for one environment in line between deploys. Each field is absent (leave the host), empty (clear it) or a list (set it). Detail: `src/deploy/cache/AGENTS.md`.
 
 **Topology generation off the wire (`topology-generation-optional-v1`).** A
 control plane that lists it no longer needs the topology generation numbers.

@@ -30,3 +30,4 @@ turbopanel_daemon_state_leaves:
   - { name: folders, mode: "0750" }
   - { name: ansible, mode: "0750" }
   - { name: reach, mode: "0700" }
+  - { name: caches, mode: "0700" }

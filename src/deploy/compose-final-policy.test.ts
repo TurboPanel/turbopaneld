@@ -281,3 +281,89 @@ test("tmpfs volume options are compared case-insensitively, as in the control pl
     1,
   );
 });
+
+const HELPER = {
+  composeServiceName: "search",
+  containerPort: 7700,
+  hostPort: 18200,
+};
+const helperPort = (extra: Record<string, unknown> = {}) => ({
+  mode: "ingress",
+  host_ip: "127.0.0.1",
+  target: 7700,
+  published: "18200",
+  protocol: "tcp",
+  ...extra,
+});
+const helperDocument = (ports: unknown[]) => ({
+  services: { search: { image: "alpine", ports }, web: { image: "alpine" } },
+});
+
+test("the helper port the control plane injected is allowed, and only that publish", () => {
+  const opts = { helperReach: [HELPER] };
+  assertEquals(
+    collectComposePolicyFindings(helperDocument([helperPort()]), opts),
+    [],
+  );
+  // The same publish with no helper entry is still refused.
+  assertEquals(
+    collectComposePolicyFindings(helperDocument([helperPort()]), {}).length,
+    1,
+  );
+  // Every other publish in the band stays refused, beside the helper's.
+  for (
+    const other of [
+      helperPort({ published: "18201" }),
+      helperPort({ host_ip: "0.0.0.0" }),
+      helperPort({ host_ip: undefined }),
+      helperPort({ host_ip: "127.0.0.2" }),
+      helperPort({ target: 7701 }),
+      helperPort({ protocol: "udp" }),
+      helperPort({ published: "18200-18201" }),
+    ]
+  ) {
+    const findings = collectComposePolicyFindings(
+      helperDocument([helperPort(), other]),
+      opts,
+    );
+    assertEquals(findings.length, 1, JSON.stringify(other));
+  }
+});
+
+test("a helper port belongs to its own service only", () => {
+  const document = {
+    services: {
+      search: { image: "alpine", ports: [helperPort()] },
+      web: { image: "alpine", ports: [helperPort()] },
+    },
+  };
+  const findings = collectComposePolicyFindings(document, {
+    helperReach: [HELPER],
+  });
+  assertEquals(findings.length, 1);
+  assertEquals(findings[0].includes("service web"), true);
+});
+
+test("a helper entry with no matching publish is refused, even for an approved deploy", () => {
+  for (const hostLevelApproved of [false, true]) {
+    for (
+      const document of [
+        helperDocument([]),
+        helperDocument([helperPort({ published: "18201" })]),
+        helperDocument([helperPort({ host_ip: "0.0.0.0" })]),
+        { services: { web: { image: "alpine" } } },
+      ]
+    ) {
+      const findings = collectComposePolicyFindings(document, {
+        hostLevelApproved,
+        helperReach: [HELPER],
+      }).filter((f) => f.includes("helper port"));
+      assertEquals(findings.length, 1, JSON.stringify(document));
+    }
+  }
+  assertThrows(
+    () => assertComposePolicy(helperDocument([]), { helperReach: [HELPER] }),
+    Error,
+    "127.0.0.1:18200:7700",
+  );
+});

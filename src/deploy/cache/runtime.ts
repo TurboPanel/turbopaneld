@@ -10,13 +10,11 @@
 import { join } from "node:path";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalHomePath } from "../../paths/layout.ts";
+import { CACHE_RUNTIMES, MAX_CACHES_PER_COMMAND } from "./limits.ts";
 
 export type CacheEngine = "valkey";
 
-/** Engine series offered on the wire, mapped to the pinned patch release. */
-export const CACHE_RUNTIMES: Readonly<
-  Record<CacheEngine, Readonly<Record<string, string>>>
-> = { valkey: { "8.1": "8.1.11" } };
+export { CACHE_RUNTIMES, MAX_CACHES_PER_COMMAND };
 
 /** The patch release for a series, or undefined when none is vendored. */
 export function cachePatchVersion(
@@ -27,9 +25,6 @@ export function cachePatchVersion(
     ? CACHE_RUNTIMES[engine][series]
     : undefined;
 }
-
-/** Most caches one deploy or one `cache.apply` carries. */
-export const MAX_CACHES_PER_COMMAND = 16;
 
 /** A cache id: a lower-case canonical UUID (it forms paths and unit names). */
 export const CACHE_ID_RE =

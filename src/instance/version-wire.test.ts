@@ -38,6 +38,7 @@ import {
   PANEL_SIGNED_FRAMES_FEATURE,
   parseSemver,
   PHP_SITE_MODES_FEATURE,
+  PROJECT_CACHE_FEATURE,
   REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
   resolveInstanceCapabilities,
@@ -573,11 +574,19 @@ test("tunnel-table-generation-v1 is advertised, right after site-php-lifecycle-v
   );
 });
 
-test("site-db-url-ca-v1 is advertised, and is the last entry", () => {
+test("site-db-url-ca-v1 is advertised, right after tunnel-table-generation-v1", () => {
   assertEquals(SITE_DB_URL_CA_FEATURE, "site-db-url-ca-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), SITE_DB_URL_CA_FEATURE);
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(SITE_DB_URL_CA_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(TUNNEL_TABLE_GENERATION_FEATURE) + 1,
+  );
+});
+
+test("project-cache-v1 is advertised, and is the last entry", () => {
+  assertEquals(PROJECT_CACHE_FEATURE, "project-cache-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), PROJECT_CACHE_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(PROJECT_CACHE_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(SITE_DB_URL_CA_FEATURE) + 1,
   );
 });

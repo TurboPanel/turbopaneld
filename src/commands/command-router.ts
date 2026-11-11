@@ -18,6 +18,7 @@ import type {
 import {
   parseBackupsReconcilePayload,
   parseBackupTargetTestPayload,
+  parseCacheApplyPayload,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -68,6 +69,7 @@ import { handleManagedDestroy } from "../managed/destroy.ts";
 import { handleManagedLifecycle } from "../managed/lifecycle.ts";
 import { handleManagedPromote } from "../managed/promote.ts";
 import { handleManagedHaFailover } from "./managed-ha-failover.ts";
+import { handleCacheApply } from "./cache-apply.ts";
 import { handleManagedHaReconcile } from "./managed-ha-reconcile.ts";
 import { handleManagedIngressReconcile } from "./managed-ingress-reconcile.ts";
 import { handleEnvironmentLifecycle } from "./lifecycle-environment.ts";
@@ -154,6 +156,7 @@ export type CommandRouterHandlerOverrides = {
   handleStorageBackup?: typeof handleStorageBackup;
   handleStorageRestore?: typeof handleStorageRestore;
   handleSystemReconcile?: typeof handleSystemReconcile;
+  handleCacheApply?: typeof handleCacheApply;
 };
 
 let commandRouterHandlerOverrides: CommandRouterHandlerOverrides | null = null;
@@ -721,6 +724,16 @@ export async function handleCommandDispatch(
         result = await pickCommandRouterHandler(
           "handleSystemReconcile",
           handleSystemReconcile,
+        )(payload, daemonReceivedAt);
+        ok = true;
+        daemonRespondedAt = new Date().toISOString();
+        break;
+      }
+      case "cache.apply": {
+        const payload = parseCacheApplyPayload(message.payload);
+        result = await pickCommandRouterHandler(
+          "handleCacheApply",
+          handleCacheApply,
         )(payload, daemonReceivedAt);
         ok = true;
         daemonRespondedAt = new Date().toISOString();

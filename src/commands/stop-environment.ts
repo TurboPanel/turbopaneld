@@ -56,6 +56,7 @@ import {
   actOnEarlierContainers,
   earlierRecordedProjects,
 } from "../deploy/retire-previous-projects.ts";
+import { removeEnvironmentCachesAndReach } from "../deploy/cache/deploy-step.ts";
 import { retirePrincipals } from "../deploy/retire-principals.ts";
 import type { SshApplyResult } from "../deploy/ssh/apply.ts";
 import {
@@ -629,6 +630,15 @@ async function stopEnvironmentLocked(
   // deliberately left behind — other environments of the same account still
   // reference it.
   await removeEnvironmentNativeApps(layout, parsedPayload.environmentId);
+  // The project caches of the environment and its helper ports, by the host's
+  // own index. Their units name the accounts, so they go before the accounts
+  // are retired; the data goes only when the Destroy asked for it.
+  await removeEnvironmentCachesAndReach({
+    layout,
+    environmentId: parsedPayload.environmentId,
+    run: deps?.runPrivileged ?? runPrivileged,
+    deleteData: parsedPayload.removeVolumes !== undefined,
+  });
   const folders = await removeEnvironmentSiteReleases(
     layout,
     parsedPayload.environmentId,
