@@ -647,3 +647,29 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "writeSecretFiles replaces a leftover read-only tmp and widens an old 0600 file to 0444",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-secret-tmp-" });
+    const layout = { runDir: join(root, "run") };
+    const dir = join(layout.runDir, "deployments", "proj", "env", "secrets");
+    try {
+      await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(join(dir, "web--A.tmp"), "half", {
+        mode: 0o444,
+      });
+      await Deno.writeTextFile(join(dir, "web--A"), "old", { mode: 0o600 });
+      await Deno.chmod(join(dir, "web--A"), 0o600);
+      await writeSecretFiles(layout, "proj", "env", [
+        { relativePath: "web--A", plaintext: "new" },
+      ]);
+      assertEquals(await Deno.readTextFile(join(dir, "web--A")), "new");
+      assertEquals((await Deno.stat(join(dir, "web--A"))).mode! & 0o777, 0o444);
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

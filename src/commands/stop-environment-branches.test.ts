@@ -489,3 +489,46 @@ test({
     }
   },
 });
+
+test({
+  name: "handleEnvironmentStop removes the secret and generated config folders",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-configs-" });
+    const previous = snapshotEnv();
+    const runBefore = Deno.env.get("TURBOPANEL_RUN_DIR");
+    Deno.env.set("TURBOPANEL_STATE_DIR", join(root, "state"));
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_RUN_DIR", join(root, "run"));
+    const base = join(root, "run", "deployments", "proj-1", "envstop09");
+    try {
+      for (const name of ["secrets", "configs"]) {
+        await Deno.mkdir(join(base, name), { recursive: true, mode: 0o700 });
+        await Deno.writeTextFile(join(base, name, "web--x"), "v");
+      }
+      await handleEnvironmentStop(
+        {
+          environmentId: "envstop09",
+          projectId: "proj-1",
+          projectName: "tp-demo-envstop9",
+        },
+        new Date().toISOString(),
+        {
+          runDocker: (): Promise<DockerCliResult> =>
+            Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 }),
+        },
+      );
+      for (const name of ["secrets", "configs"]) {
+        await assertRejects(
+          () => Deno.stat(join(base, name)),
+          Deno.errors.NotFound,
+        );
+      }
+    } finally {
+      restoreEnv(previous);
+      if (runBefore === undefined) Deno.env.delete("TURBOPANEL_RUN_DIR");
+      else Deno.env.set("TURBOPANEL_RUN_DIR", runBefore);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

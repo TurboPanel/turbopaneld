@@ -235,6 +235,12 @@ import {
   priorWritableMounts,
 } from "../deploy/compose-host-paths.ts";
 import {
+  materializeConfigFiles,
+  pruneStaleConfigFiles,
+  removeConfigTree,
+  rewriteComposeConfigFilePaths,
+} from "../deploy/config-files.ts";
+import {
   materializeSecretFiles,
   pruneStaleSecretFiles,
   removeSecretTree,
@@ -1319,6 +1325,7 @@ async function buildDeploymentManifest(
   appliedReleases: readonly AppliedRelease[] = [],
 ): Promise<DeploymentManifest> {
   const secrets = secretPlanToManifest(payload.secretPlan ?? []);
+  const configFiles = payload.configFiles ?? [];
   const serviceIds = serviceIdsForManifest(payload);
   const releases = releasesForManifest(payload, appliedReleases);
   return {
@@ -1334,6 +1341,7 @@ async function buildDeploymentManifest(
       singleGeneration(payload.projectName, payload.generation ?? 0),
     ],
     ...(secrets.length > 0 ? { secrets } : {}),
+    ...(configFiles.length > 0 ? { configFiles } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
     ...(releases.length > 0 ? { releases } : {}),
   };
@@ -1814,17 +1822,52 @@ async function pruneDeploySecrets(
   }
 }
 
+/** Same rule for generated config files, which never carry secret plan entries. */
+async function pruneDeployConfigFiles(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const files = payload.configFiles ?? [];
+  try {
+    if (files.length === 0) {
+      await removeConfigTree(layout, payload.projectId, payload.environmentId);
+      return;
+    }
+    await pruneStaleConfigFiles(
+      layout,
+      payload.projectId,
+      payload.environmentId,
+      files,
+    );
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `could not remove generated config files that left the plan: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/** Point both secret and generated config sources at the daemon's files. */
 function applySecretFilePaths(
   yaml: string,
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
 ): string {
-  return rewriteComposeSecretFilePaths(
+  const withSecrets = rewriteComposeSecretFilePaths(
     yaml,
     layout,
     payload.projectId,
     payload.environmentId,
     payload.secretPlan ?? [],
+  );
+  return rewriteComposeConfigFilePaths(
+    withSecrets,
+    layout,
+    payload.projectId,
+    payload.environmentId,
+    payload.configFiles ?? [],
   );
 }
 
@@ -2208,6 +2251,14 @@ async function deployContainerServices(
     await writeComposeFileSecure(stagedPath, yaml);
     await persistComposeEnvFile(stageDir, parsedPayload.envFile);
     await materializeDeploySecrets(layout, parsedPayload, decryptSecrets);
+    await materializeConfigFiles(
+      layout,
+      parsedPayload.projectId,
+      parsedPayload.environmentId,
+      parsedPayload.configFiles ?? [],
+      parsedPayload.variableMaterial ?? [],
+      decryptSecrets,
+    );
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
@@ -2234,6 +2285,9 @@ async function deployContainerServices(
     const daemonSecretNames = new Set(
       (parsedPayload.secretPlan ?? []).map((e) => e.source),
     );
+    const daemonConfigNames = new Set(
+      (parsedPayload.configFiles ?? []).map((e) => e.source),
+    );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
       exemptSecretNames: daemonSecretNames,
@@ -2246,7 +2300,11 @@ async function deployContainerServices(
     // excuses a symlink escape, a nested writable bind, or the staging dir.
     await assertComposeHostPathsConfined(
       [
-        collectResolvedHostPaths(resolved.document ?? {}, daemonSecretNames),
+        collectResolvedHostPaths(
+          resolved.document ?? {},
+          daemonSecretNames,
+          daemonConfigNames,
+        ),
         collectAuthoredHostPaths(yaml),
       ],
       {
@@ -2421,6 +2479,7 @@ async function deployContainerServices(
         onLine,
       });
       await pruneDeploySecrets(layout, parsedPayload);
+      await pruneDeployConfigFiles(layout, parsedPayload);
       return sequential;
     }
     if (serviceHooks.length > 0) {
@@ -2476,6 +2535,7 @@ async function deployContainerServices(
     // The new release is up and its hooks passed: only now may the files the
     // previous one needed (and this plan no longer lists) be removed.
     await pruneDeploySecrets(layout, parsedPayload);
+    await pruneDeployConfigFiles(layout, parsedPayload);
     return {
       serviceNames: labeledServices,
       composePaths: chain,

@@ -321,11 +321,13 @@ function collectFileBacked(
  * Host paths in the model `docker compose config --format json` resolved.
  * Paths there are absolute and lexically cleaned, which is exactly what
  * Compose hands the engine. `exemptSecretNames` are secrets the daemon itself
- * rewrote to its run directory (`rewriteComposeSecretFilePaths`).
+ * rewrote to its run directory (`rewriteComposeSecretFilePaths`);
+ * `exemptConfigNames` likewise for generated config files.
  */
 export function collectResolvedHostPaths(
   document: Record<string, unknown>,
   exemptSecretNames: ReadonlySet<string> = new Set(),
+  exemptConfigNames: ReadonlySet<string> = new Set(),
 ): ComposeHostPathScan {
   const out: ComposeHostPathScan = { entries: [], findings: [] };
   const services = isRecord(document.services) ? document.services : {};
@@ -335,7 +337,7 @@ export function collectResolvedHostPaths(
     collectBuild(name, service.build, out);
   }
   collectTopLevelVolumes(document.volumes, out);
-  collectFileBacked("config", document.configs, new Set(), out);
+  collectFileBacked("config", document.configs, exemptConfigNames, out);
   collectFileBacked("secret", document.secrets, exemptSecretNames, out);
   return out;
 }

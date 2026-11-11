@@ -13,6 +13,7 @@ import {
 } from "../deploy/compose-files.ts";
 import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { removeConfigTree } from "../deploy/config-files.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
   createStreamedRunner,
@@ -623,6 +624,11 @@ async function stopEnvironmentLocked(
   );
 
   await removeSecretTree(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  await removeConfigTree(
     layout,
     parsedPayload.projectId,
     parsedPayload.environmentId,

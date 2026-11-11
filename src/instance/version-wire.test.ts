@@ -10,6 +10,7 @@ import {
   DAEMON_WIRE_FEATURES,
   DENO_NATIVE_APPS_FEATURE,
   DEPLOY_CANCEL_FEATURE,
+  DEPLOY_CONFIG_FILES_FEATURE,
   DEPLOY_HOSTINGS_ONLY_FEATURE,
   FABRIC_LAN_ROUTES_FEATURE,
   FABRIC_PEER_REPORT_FEATURE,
@@ -540,4 +541,12 @@ test("hosting-via-header-v1 is advertised and raised no floor", () => {
   assertEquals(HOSTING_VIA_HEADER_FEATURE, "hosting-via-header-v1");
   assertEquals(DAEMON_WIRE_FEATURES.includes(HOSTING_VIA_HEADER_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("deploy-config-files-v1 is advertised", () => {
+  assertEquals(DEPLOY_CONFIG_FILES_FEATURE, "deploy-config-files-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(DEPLOY_CONFIG_FILES_FEATURE),
+    true,
+  );
 });
