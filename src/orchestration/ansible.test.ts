@@ -1792,6 +1792,68 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
   );
 });
 
+test("the Apache role tests first, restarts by what is running, puts the link back on failure and prunes only after", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
+  );
+  const has = (text: string) => assert(tasks.includes(text), text);
+  has("register: _apache_link");
+  has("register: _apache_conf");
+  has("register: _apache_current_before");
+  // The config is tested as the server's own account, never as root.
+  has("runuser -u {{ apache_service_user }} --");
+  has("{{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t");
+  has("-f {{ turbopanel_config_dir }}/apache/httpd.conf");
+  assert(!tasks.includes("become_user"), "no become_user for the test");
+  // The unit-change restart no longer runs before the test: the only
+  // restarts are inside the tested block and its rescue.
+  assert(
+    !tasks.includes("Restart a running Apache after its unit changed"),
+    "no restart ahead of the test",
+  );
+  const block = tasks.indexOf("Test the config, then move Apache onto it");
+  const test = tasks.indexOf("Test the Apache config with the installed build");
+  const restart = tasks.indexOf("Restart Apache onto the new build");
+  const reload = tasks.indexOf("Reload Apache after its config");
+  const rescue = tasks.indexOf("  rescue:");
+  const prune = tasks.indexOf("Find superseded Apache version directories");
+  assert(
+    block > 0 && block < test && test < restart && restart < reload &&
+      reload < rescue && rescue < prune,
+  );
+  // Sticky: the test runs on every run while Apache is up (the block is only
+  // conditioned on the unit being active), and the restart is decided by the
+  // running binary against the installed one, not by whether this run moved
+  // the link.
+  assert(
+    !/Test the Apache config with the installed build[\s\S]*?when:[\s\S]*?_apache_link\.changed/
+      .test(tasks.slice(test, restart)),
+    "the test does not depend on a change in this run",
+  );
+  has("readlink -f /proc/{{ _apache_main_pid.stdout | trim }}/exe");
+  has("readlink -f {{ turbopanel_vendor_dir }}/apache/current/bin/httpd");
+  has("_apache_needs_restart");
+  has("when: _apache_needs_restart | bool");
+  has("- not (_apache_needs_restart | bool)");
+  // A failed test or restart: link back, restart a failed unit onto the old
+  // build, and end the run in a failure so the prune never runs.
+  const rescued = tasks.slice(rescue, prune);
+  assert(rescued.includes("{{ _apache_current_before.stat.lnk_source }}"));
+  assert(rescued.includes("systemctl restart turbopanel-apache.service"));
+  assert(rescued.includes("_apache_restart is failed"));
+  assert(
+    rescued.lastIndexOf("ansible.builtin.fail") >
+      rescued.lastIndexOf("ansible.builtin.file"),
+    "the rescue ends in a failure",
+  );
+  // The prune keeps `current` and the pinned version only.
+  has('- current\n      - "{{ apache_version }}"');
+  has('paths: "{{ turbopanel_vendor_dir }}/apache"');
+  // Per-site error logs live in a sites folder the server account owns.
+  has('path: "/var/log/{{ apache_logs_directory }}/sites"');
+  has('owner: "{{ apache_service_user }}"');
+});
+
 test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
   const conf = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),

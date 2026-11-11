@@ -3381,7 +3381,11 @@ async function deployEnvironmentHolding(
     containers,
     releases: deployResultReleases(appliedReleases),
     siteApps,
-    warnings: siteWarnings,
+    // The `.htaccess` ones were already written to the transcript at build.
+    warnings: [
+      ...siteWarnings,
+      ...appliedReleases.flatMap((release) => release.htaccessWarnings ?? []),
+    ],
     principals: principalIdReports,
     keptFolders,
   });

@@ -425,6 +425,138 @@ test("applySourceReleases promotes native releases with injected checkout/build/
   });
 });
 
+const HTACCESS_SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000a1";
+const HTACCESS_RELEASE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000a2";
+const BAD_HTACCESS =
+  "RewriteEngine On\nAddHandler application/x-httpd-php .txt\n";
+
+/** One release of a site service whose checkout holds the given `public/.htaccess`. */
+async function releaseWithHtaccess(
+  engine: "apache" | "nginx+apache" | "nginx",
+  htaccess: "file" | "link" | "none",
+) {
+  const fixture = await createTempLayout();
+  try {
+    const layout = layoutFromFixture(fixture);
+    const paths = resolveReleasePaths(layout, {
+      username: "appuser",
+      serviceId: HTACCESS_SERVICE_ID,
+      folder: folderOf(HTACCESS_SERVICE_ID),
+      releaseId: HTACCESS_RELEASE_ID,
+    });
+    await mkdirReleaseTree(paths);
+    const log = fakeLogSink();
+    const applied = await applySourceReleases(
+      layout,
+      basePayload({
+        hostings: [{
+          hostingId: "host-site",
+          composeServiceName: "web",
+          serviceId: HTACCESS_SERVICE_ID,
+          hostnames: ["site.example.com"],
+        }],
+        sites: [{
+          composeServiceName: "web",
+          engine,
+          root: "public",
+          listenPort: 18080,
+          ...(engine === "nginx+apache" ? { backendPort: 18081 } : {}),
+        }],
+        sourceMaterial: [
+          baseSource({
+            composeServiceName: "web",
+            releaseId: HTACCESS_RELEASE_ID,
+            releaseServiceId: HTACCESS_SERVICE_ID,
+            principal: {
+              principalId: "pr-1",
+              username: "appuser",
+              uid: 2000,
+              gid: 2001,
+            },
+          }),
+        ],
+      }),
+      {
+        logSink: log.sink,
+        decryptSecrets: undefined,
+        now: () => "2026-01-01T00:00:00.000Z",
+        runFn: folderRun,
+        sandboxedBuilds: false,
+        checkoutReleaseFn: async (params) => {
+          const workingDir = join(params.scratchDir, "source");
+          const root = join(workingDir, "public");
+          await Deno.mkdir(root, { recursive: true });
+          if (htaccess === "file") {
+            await Deno.writeTextFile(join(root, ".htaccess"), BAD_HTACCESS);
+          } else if (htaccess === "link") {
+            await Deno.writeTextFile(join(workingDir, "real"), BAD_HTACCESS);
+            await Deno.symlink(
+              join(workingDir, "real"),
+              join(root, ".htaccess"),
+            );
+          }
+          return { workingDir, commitSha: "resolved-commit" };
+        },
+        runReleaseBuildFn: () => Promise.resolve(),
+        promoteReleaseFn: async (params) => {
+          await writeReleaseManifest(params.paths.releaseDir, {
+            version: 1,
+            serviceId: HTACCESS_SERVICE_ID,
+            composeServiceName: "web",
+            releaseId: HTACCESS_RELEASE_ID,
+            sourceId: "src-1",
+            commitSha: "resolved-commit",
+            ref: "main",
+            promotedAt: "2026-01-01T00:00:00.000Z",
+            standaloneOutput: false,
+            staticExport: false,
+          });
+          await swapCurrentSymlink(params.paths);
+          return params.paths.releaseDir;
+        },
+        pruneReleasesFn: () => Promise.resolve([]),
+      },
+    );
+    return { applied, log };
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+test("an Apache site whose .htaccess has a refused line gets a warning on the release and in the transcript, and the deploy goes on", async () => {
+  for (const engine of ["apache", "nginx+apache"] as const) {
+    const { applied, log } = await releaseWithHtaccess(engine, "file");
+    const expected =
+      "Site web: .htaccess line 2: AddHandler is not allowed on this server, so Apache answers 500 for that folder.";
+    assertEquals(applied.length, 1);
+    assertEquals(applied[0]?.htaccessWarnings, [expected]);
+    assertEquals(
+      log.lines.filter((line) => line.message === expected).map((line) =>
+        line.stream
+      ),
+      ["stderr"],
+    );
+  }
+});
+
+test("a .htaccess link, a missing file or an nginx site gives no warning", async () => {
+  for (
+    const [engine, htaccess] of [
+      ["apache", "link"],
+      ["apache", "none"],
+      ["nginx", "file"],
+    ] as const
+  ) {
+    const { applied, log } = await releaseWithHtaccess(engine, htaccess);
+    assertEquals(applied.length, 1, `${engine} ${htaccess}`);
+    assertEquals(applied[0]?.htaccessWarnings, undefined);
+    assertEquals(
+      log.lines.some((line) => line.message.includes(".htaccess")),
+      false,
+    );
+  }
+});
+
 test("applySourceReleases publishes a serving Node app's release without moving current", async () => {
   await createTempLayout().then(async (fixture) => {
     try {

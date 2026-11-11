@@ -25,6 +25,7 @@ import {
   siteVhostPorts,
 } from "./site.ts";
 import {
+  sitePhpGuardPhp,
   sitePhpKey,
   sitePhpRuntimeId,
   type SitePhpRuntimeMode,
@@ -350,6 +351,12 @@ const apachePhpSite: SiteApplySpec = {
   },
 };
 
+/** An Apache site with no PHP: Apache PHP always gets its own runtime. */
+const apacheStaticSite: SiteApplySpec = { ...apachePhpSite, php: undefined };
+
+/** PHP on the shared php-fpm master, which only nginx keeps (Apache gets a runtime). */
+const poolPhpSite: SiteApplySpec = { ...apachePhpSite, engine: "nginx" };
+
 const olsSite: SiteApplySpec = {
   composeServiceName: "static",
   engine: "openlitespeed",
@@ -407,7 +414,7 @@ test("applySites nginx with mocked Ansible/Docker sudo install", async () => {
   }
 });
 
-test("applySites apache+php writes pool and site config", async () => {
+test("applySites apache writes its site config with a per-site error log and no pool", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const { run } = createSiteRunMock();
   const { runPlaybook, labels } = capturePlaybooks();
@@ -415,7 +422,7 @@ test("applySites apache+php writes pool and site config", async () => {
     const result = await applySites(
       layout,
       "env2",
-      [apachePhpSite],
+      [apacheStaticSite],
       { run, runPlaybook },
     );
     assertEquals(result.applied, ["phpapp"]);
@@ -425,12 +432,22 @@ test("applySites apache+php writes pool and site config", async () => {
       join(layout.configDir, "apache", "sites", "tp-env2-phpapp.conf"),
     );
     assertStringIncludes(siteConf, "Listen 127.0.0.1:18081");
-    assertStringIncludes(siteConf, "proxy:unix:");
-
-    const poolConf = await Deno.readTextFile(
-      join(layout.configDir, "php", "8.4", "pools", "tp-env2-phpapp.conf"),
+    assertStringIncludes(
+      siteConf,
+      `ErrorLog "${
+        join(
+          layout.logDir,
+          "apache",
+          "sites",
+          `${sitePhpKey("env2", "phpapp")}.error.log`,
+        )
+      }"`,
     );
-    assertStringIncludes(poolConf, "[tp-env2-phpapp]");
+    assertEquals(siteConf.includes("proxy:unix:"), false);
+    // No key of its own, but the strip lines every Apache vhost carries.
+    assertEquals(siteConf.includes('TP_SITE_KEY "'), false);
+    assertStringIncludes(siteConf, 'ProxyFCGISetEnvIf "true" !TP_SITE_KEY');
+    assertStringIncludes(siteConf, 'ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE');
   } finally {
     await cleanup();
   }
@@ -470,7 +487,7 @@ test("applySites applies nginx+apache+ols together", async () => {
     const result = await applySites(
       layout,
       "env4",
-      [nginxSite, apachePhpSite, olsSite],
+      [nginxSite, apacheStaticSite, olsSite],
       { run, runPlaybook },
     );
     assertEquals(result.applied, ["www", "phpapp", "static"]);
@@ -553,7 +570,7 @@ test("removeSites removes nginx/apache/ols configs via mocked sudo", async () =>
     await applySites(
       layout,
       environmentId,
-      [nginxSite, apachePhpSite, olsSite],
+      [nginxSite, apacheStaticSite, olsSite],
       { run, runPlaybook },
     );
 
@@ -628,7 +645,7 @@ test("removeNamedSites removes only the named sites of this environment and noth
     await applySites(
       layout,
       "envA",
-      [nginxSite, apachePhpSite, olsSite],
+      [nginxSite, apacheStaticSite, olsSite],
       { run, runPlaybook },
     );
     await applySites(
@@ -636,7 +653,7 @@ test("removeNamedSites removes only the named sites of this environment and noth
       "envB",
       [
         { ...nginxSite, listenPort: 18190 },
-        { ...apachePhpSite, listenPort: 18191 },
+        { ...apacheStaticSite, listenPort: 18191 },
         { ...olsSite, listenPort: 18192 },
       ],
       { run, runPlaybook },
@@ -863,7 +880,7 @@ test("applySites fails when apache reload and start both fail", async () => {
   try {
     await assertRejects(
       () =>
-        applySites(layout, "envapache", [apachePhpSite], {
+        applySites(layout, "envapache", [apacheStaticSite], {
           run,
           runPlaybook,
         }),
@@ -1307,12 +1324,12 @@ test("applySites fails loudly when no release has been promoted", async () => {
 test("applySites confines a release-backed PHP pool with open_basedir", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
-  const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
 
-    await applySites(layout, "envphp", [apachePhpSite], {
+    await applySites(layout, "envphp", [poolPhpSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("phpapp"),
@@ -1357,7 +1374,7 @@ test("applySites leaves a legacy PHP pool on baseline caching", async () => {
   const { run } = createSiteRunMock();
   const { runPlaybook } = capturePlaybooks();
   try {
-    await applySites(layout, "envphpleg", [apachePhpSite], {
+    await applySites(layout, "envphpleg", [poolPhpSite], {
       run,
       runPlaybook,
     });
@@ -1380,12 +1397,12 @@ test("applySites skips the php-fpm reload on a release promote", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
   const run = withGroupMembership(mock.run, {
-    tpapache: ["tpapache", RELEASE_GROUP],
+    tpnginx: ["tpnginx", RELEASE_GROUP],
   });
   const { runPlaybook } = capturePlaybooks();
   try {
     await seedRelease(layout, "rel-1", "public", "<?php echo 1;");
-    await applySites(layout, "envphpswap", [apachePhpSite], {
+    await applySites(layout, "envphpswap", [poolPhpSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("phpapp"),
@@ -1393,7 +1410,7 @@ test("applySites skips the php-fpm reload on a release promote", async () => {
     const firstApplyCalls = mock.calls.length;
 
     await seedRelease(layout, "rel-2", "public", "<?php echo 2;");
-    await applySites(layout, "envphpswap", [apachePhpSite], {
+    await applySites(layout, "envphpswap", [poolPhpSite], {
       run,
       runPlaybook,
       releaseBindings: releaseBindingsFor("phpapp"),
@@ -1583,7 +1600,7 @@ test("applySites runs two PHP series side by side", async () => {
     await applySites(layout, "envmulti", [
       {
         composeServiceName: "legacy",
-        engine: "apache",
+        engine: "nginx",
         root: "public",
         listenPort: 18090,
         php: { version: "8.3" },
@@ -1643,7 +1660,7 @@ test("applySites reloads only the series a deploy touched", async () => {
     const first = createSiteRunMock();
     await applySites(layout, "envA", [{
       composeServiceName: "legacy",
-      engine: "apache",
+      engine: "nginx",
       root: "public",
       listenPort: 18092,
       php: { version: "8.3" },
@@ -2292,11 +2309,11 @@ test("a managed directory is never recursively chowned", async () => {
 test("a managed-directory PHP pool is confined by open_basedir", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
-  const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     const site: SiteApplySpec = {
-      ...apachePhpSite,
+      ...poolPhpSite,
       sourceKind: "managed-directory",
       principal: { principalId: "pr-1", username: RELEASE_USERNAME },
     };
@@ -3329,7 +3346,7 @@ test("removeSites reloads both PHP series an environment owned", async () => {
     await applySites(layout, environmentId, [
       {
         composeServiceName: "legacy",
-        engine: "apache",
+        engine: "nginx",
         root: "public",
         listenPort: 18090,
         php: { version: "8.3" },
@@ -3535,7 +3552,7 @@ test("applySites creates root-owned engine config dirs through tp-host", async (
       run,
       runPlaybook,
     });
-    await applySites(layout, "envdirs2", [apachePhpSite], {
+    await applySites(layout, "envdirs2", [apacheStaticSite], {
       run,
       runPlaybook,
     });
@@ -3721,6 +3738,112 @@ function callIndex(
 ): number {
   return calls.findIndex((call) => match(call.args));
 }
+
+test("an Apache PHP site with no mode and no Hosting Account is refused, never served from the shared master", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const { run } = createSiteRunMock();
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await assertRejects(
+      () =>
+        applySites(layout, "envnomode", [apachePhpSite], { run, runPlaybook }),
+      Error,
+      "runs as the site's principal, and the site has none",
+    );
+    assertEquals(
+      await exists(
+        join(
+          layout.configDir,
+          "php",
+          "8.4",
+          "pools",
+          "tp-envnomode-phpapp.conf",
+        ),
+      ),
+      false,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("an Apache PHP runtime gets its guard before php.ini and before php-test, with a key its vhost sends; nginx gets none", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const dir = join(h.layout.configDir, "php", "sites", id);
+    const guard = await Deno.readTextFile(join(dir, "site-guard.php"));
+    assertEquals(guard, sitePhpGuardPhp());
+    const ini = await Deno.readTextFile(join(dir, "php.ini"));
+    const key = /^turbopanel\.site_key = ([0-9a-f]{64})$/m.exec(ini)?.[1];
+    assert(key, "php.ini holds the key");
+    assertStringIncludes(
+      ini,
+      `auto_prepend_file = ${join(dir, "site-guard.php")}\n`,
+    );
+    const vhost = await Deno.readTextFile(
+      join(h.layout.configDir, "apache", "sites", "tp-envphp-shop.conf"),
+    );
+    assertStringIncludes(
+      vhost,
+      `ProxyFCGISetEnvIf "true" TP_SITE_KEY "${key}"`,
+    );
+    assertStringIncludes(
+      vhost,
+      `ErrorLog "${
+        join(
+          h.layout.logDir,
+          "apache",
+          "sites",
+          `${sitePhpKey("envphp", "shop")}.error.log`,
+        )
+      }"`,
+    );
+    const installs = h.calls.map((c) => c.args.join(" "));
+    const guardAt = installs.findIndex((a) =>
+      a.includes("install") && a.endsWith("/site-guard.php")
+    );
+    const iniAt = installs.findIndex((a) =>
+      a.includes("install") && a.endsWith("/php.ini")
+    );
+    const phpTest = callIndex(h.calls, (a) => a.includes("php-test"));
+    assert(guardAt >= 0 && guardAt < iniAt, "guard before php.ini");
+    assert(iniAt < phpTest, "config written before php-test");
+    // The key comes from the runtime id: a second deploy renders the same one.
+    const before = h.calls.length;
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    assertEquals(
+      h.calls.slice(before).some((c) =>
+        c.args.includes("install") &&
+        c.args.some((a) => a.endsWith("/site-guard.php"))
+      ),
+      false,
+      "an unchanged guard is not rewritten",
+    );
+  } finally {
+    await h.cleanup();
+  }
+
+  const nginx = await perSitePhpHarness();
+  try {
+    await nginx.apply(perSitePhpSite("nginx", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    assertEquals(
+      await exists(
+        join(nginx.layout.configDir, "php", "sites", id, "site-guard.php"),
+      ),
+      false,
+    );
+    const ini = await Deno.readTextFile(
+      join(nginx.layout.configDir, "php", "sites", id, "php.ini"),
+    );
+    assertEquals(ini.includes("turbopanel.site_key"), false);
+    assertEquals(ini.includes("auto_prepend_file"), false);
+  } finally {
+    await nginx.cleanup();
+  }
+});
 
 test("per-site FastCGI: the runtime is tested and started before the nginx vhost names its socket", async () => {
   const h = await perSitePhpHarness();
@@ -3971,6 +4094,33 @@ test("per-site PHP: a failed config test stages no vhost and leaves no runtime",
       [],
     );
     assertEquals(h.calls.some((c) => c.args.includes("-t")), false);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("an Apache PHP settings change that fails its probe puts php.ini back and leaves the guard intact", async () => {
+  const h = await perSitePhpHarness();
+  try {
+    await h.apply(perSitePhpSite("apache", "fastcgi"));
+    const id = phpRuntimeId("fastcgi");
+    const dir = join(h.layout.configDir, "php", "sites", id);
+    const lastGood = await Deno.readTextFile(join(dir, "php.ini"));
+    h.failProbe(true);
+    await assertRejects(
+      () =>
+        h.apply(perSitePhpSite("apache", "fastcgi", { memory_limit: "64M" })),
+      Error,
+      "did not serve shop",
+    );
+    assertEquals(await Deno.readTextFile(join(dir, "php.ini")), lastGood);
+    assertEquals(
+      await Deno.readTextFile(join(dir, "site-guard.php")),
+      sitePhpGuardPhp(),
+    );
+    for (const name of ["php.ini", "site-guard.php"]) {
+      assertEquals(await exists(join(dir, `${name}.tpprev`)), false, name);
+    }
   } finally {
     await h.cleanup();
   }
@@ -5128,11 +5278,11 @@ test("a managed-directory root other than public is a folder inside public/", as
 test("a managed-directory PHP pool in a service folder is confined to public/ and shared/", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();
-  const run = withGroupMembership(mock.run, { tpapache: ["tpapache"] });
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
   const { runPlaybook } = capturePlaybooks();
   try {
     const site: SiteApplySpec = {
-      ...apachePhpSite,
+      ...poolPhpSite,
       sourceKind: "managed-directory",
       principal: { principalId: "pr-1", username: RELEASE_USERNAME },
     };

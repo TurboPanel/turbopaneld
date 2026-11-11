@@ -20,6 +20,9 @@ const test = Deno.test.bind(Deno);
 
 const DOC_ROOT = "/srv/users/alice/sites/svc-1/current/public";
 const SOCKET = "/run/turbopanel-php-x/php.sock";
+/** A fixed 64-hex fixture, never a real key. */
+const SITE_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 const pairedSite: SiteApplySpec = {
   composeServiceName: "wp",
@@ -140,6 +143,7 @@ test("the static list is images, CSS, JS, fonts and media only", () => {
 test("Apache behind nginx listens on the backend port only and trusts nginx's 127.0.0.2", () => {
   const conf = apacheSiteConfig(pairedSite, DOC_ROOT, {
     phpFpmSocket: SOCKET,
+    phpSiteKey: SITE_KEY,
     dockerBindAddress: "172.17.0.1",
     behindNginxPort: 18090,
   });
@@ -163,7 +167,21 @@ test("Apache behind nginx listens on the backend port only and trusts nginx's 12
   </LocationMatch>`,
   );
   // .htaccess applies, and PHP runs in the site's mode as on plain Apache.
-  assertStringIncludes(conf, "AllowOverride AuthConfig FileInfo");
+  assertStringIncludes(conf, "AllowOverride AuthConfig Indexes Limit Options=");
+  assertEquals(conf.includes("FileInfo"), false);
+  assertStringIncludes(conf, "    Options SymLinksIfOwnerMatch\n");
+  assertStringIncludes(conf, "AllowOverrideList RewriteEngine ");
+  // The site key and strip lines are on the backend vhost, before the
+  // dotfile rule.
+  assertStringIncludes(
+    conf,
+    `ProxyFCGISetEnvIf "true" TP_SITE_KEY "${SITE_KEY}"`,
+  );
+  assertStringIncludes(conf, 'ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE');
+  assertEquals(
+    conf.indexOf("TP_SITE_KEY") < conf.indexOf("<LocationMatch"),
+    true,
+  );
   assertStringIncludes(conf, "ProxyFCGIBackendType GENERIC");
   assertStringIncludes(
     conf,
@@ -175,7 +193,11 @@ test("plain Apache keeps its own listener and trusts only loopback for the clien
   const conf = apacheSiteConfig(
     { ...pairedSite, engine: "apache", backendPort: undefined },
     DOC_ROOT,
-    { phpFpmSocket: SOCKET, dockerBindAddress: "172.17.0.1" },
+    {
+      phpFpmSocket: SOCKET,
+      phpSiteKey: SITE_KEY,
+      dockerBindAddress: "172.17.0.1",
+    },
   );
   assertStringIncludes(conf, "Listen 127.0.0.1:18080\nListen 172.17.0.1:18080");
   assertEquals(conf.match(/RemoteIP\w*Proxy.*/g), [
@@ -247,12 +269,14 @@ test("hiding web server names turns off nginx tokens and the Apache footer", () 
 
   const backend = apacheSiteConfig(hidden, DOC_ROOT, {
     phpFpmSocket: SOCKET,
+    phpSiteKey: SITE_KEY,
     behindNginxPort: 18090,
   });
   assertStringIncludes(backend, "\nServerTokens Prod\nListen 127.0.0.1:18090");
   assertStringIncludes(backend, "\n  ServerSignature Off\n");
   const plain = apacheSiteConfig(pairedSite, DOC_ROOT, {
     phpFpmSocket: SOCKET,
+    phpSiteKey: SITE_KEY,
     behindNginxPort: 18090,
   });
   assertEquals(/ServerTokens|ServerSignature/.test(plain), false);
@@ -260,7 +284,7 @@ test("hiding web server names turns off nginx tokens and the Apache footer", () 
   const alone = apacheSiteConfig(
     { ...hidden, engine: "apache" },
     DOC_ROOT,
-    { phpFpmSocket: SOCKET },
+    { phpFpmSocket: SOCKET, phpSiteKey: SITE_KEY },
   );
   assertStringIncludes(alone, "ServerTokens Prod");
   const nginxOnly = nginxSiteConfig(
@@ -292,6 +316,7 @@ test("nginx tells Apache the visitor's scheme only on a loopback peer's word", (
 test("Apache behind nginx sets HTTPS, port 443 and https for PHP on nginx's word only", () => {
   const conf = apacheSiteConfig(pairedSite, DOC_ROOT, {
     phpFpmSocket: SOCKET,
+    phpSiteKey: SITE_KEY,
     behindNginxPort: 18090,
   });
   const peer =
