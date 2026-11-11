@@ -794,7 +794,10 @@ export const SITE_PHP_LIFECYCLE_FEATURE: DaemonWireFeature =
  * an environment deploy may carry a `generation` (a non-negative safe integer,
  * monotonic per organization tunnel table). The daemon keeps the highest it
  * applied and ignores a table or deploy tunnel field below it, so a deploy and
- * a table update that cross never bring back an older carrier list.
+ * a table update that cross never bring back an older carrier list. The
+ * control plane sends `max(previous + 1, current Unix time in milliseconds)`, so
+ * the counter survives a restore or reset; a table with no `generation` clears
+ * the daemon's record (the way back from a reset counter).
  */
 export const TUNNEL_TABLE_GENERATION_FEATURE: DaemonWireFeature =
   "tunnel-table-generation-v1";

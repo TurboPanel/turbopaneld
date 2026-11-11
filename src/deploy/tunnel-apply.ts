@@ -30,14 +30,15 @@ import {
   tunnelPeerPaths,
 } from "./tunnel-caddy.ts";
 import {
+  clearTunnelGeneration,
   isStaleTunnelGeneration,
   type OwnSiteFile,
   peerMaterialId,
   plannedRelocks,
   readTunnelState,
-  recordTunnelGeneration,
   removeTunnelState,
   renderStoredTunnelFile,
+  tryRecordTunnelGeneration,
   type TunnelState,
   writeTunnelState,
 } from "./tunnel-state.ts";
@@ -150,6 +151,7 @@ async function unchangedResult(
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
   // A site deployed since (or written by an older daemon) may hold other peers.
   if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
+  await settleGeneration(hostingDir, payload.generation);
   return {
     hash: payload.hash,
     applied: false,
@@ -228,6 +230,16 @@ async function swapTunnelFile(
   }
 }
 
+/** After a table is in place: keep its generation, or forget the record when it has none. */
+function settleGeneration(
+  hostingDir: string,
+  generation: number | undefined,
+): Promise<void> {
+  return generation === undefined
+    ? clearTunnelGeneration(hostingDir)
+    : tryRecordTunnelGeneration(hostingDir, generation);
+}
+
 function tunnelStateFor(
   payload: TunnelRoutesPayload,
   peerId: string | undefined,
@@ -241,6 +253,9 @@ function tunnelStateFor(
       : {}),
     ...(peerId === undefined ? {} : { peerId }),
     ...(payload.inbound ? { inbound: payload.inbound } : {}),
+    ...(payload.generation === undefined
+      ? {}
+      : { generation: payload.generation }),
   };
 }
 
@@ -262,7 +277,7 @@ async function applyTunnelRoutesLocked(
 
   // A table older than one already applied (or than a deploy's newer peers)
   // must not bring back carriers the newer one removed.
-  if (await isStaleTunnelGeneration(hostingDir, payload.generation)) {
+  if (await isStaleTunnelGeneration(hostingDir, payload.generation, prior)) {
     logInfo(
       "tunnels",
       `tunnel table generation ${payload.generation} is older than the one in place; left as it is`,
@@ -315,7 +330,7 @@ async function applyTunnelRoutesLocked(
     await (empty
       ? removeTunnelState(hostingDir)
       : writeTunnelState(hostingDir, state));
-    await recordTunnelGeneration(hostingDir, payload.generation);
+    await settleGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
     logInfo(
       "tunnels",

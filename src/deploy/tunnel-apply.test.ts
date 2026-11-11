@@ -803,7 +803,7 @@ test("a table older than the one applied is ignored, an equal or newer one appli
   });
 });
 
-test("a table without a generation applies as before, whatever was recorded", async () => {
+test("a table without a generation applies as before and clears the record", async () => {
   await withHost(async ({ layout, hostingDir }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };
     await applyTunnelRoutes(
@@ -818,7 +818,15 @@ test("a table without a generation applies as before, whatever was recorded", as
     );
     assertEquals(result.applied, true);
     assertEquals((await readTunnelState(hostingDir))?.hash, HASH_2);
-    assertEquals(await readTunnelGeneration(hostingDir), 9);
+    assertEquals(await readTunnelGeneration(hostingDir), undefined);
+    // A reset counter starts below the old record and is accepted again.
+    const reset = await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 3),
+      deps,
+    );
+    assertEquals(reset.applied, true);
+    assertEquals(await readTunnelGeneration(hostingDir), 3);
   });
 });
 
@@ -931,4 +939,106 @@ test("the highest generation of a deploy's hostings is used, and a record only g
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+test("two deploys at a generation above the stored table both keep their own peers until that table lands", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 5),
+      deps,
+    );
+    assertEquals((await readTunnelState(hostingDir))?.generation, 5);
+    for (const _ of [1, 2]) {
+      await rewriteHostingCaddySites(
+        layout,
+        lockedSite("env-1", "site.example.com", ["10.0.0.5"], 6),
+        undefined,
+        noGrant,
+      );
+      assertStringIncludes(await siteText(sitesDir), `${LOCK_LINE} 10.0.0.5\n`);
+    }
+    const landed = await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_2, ["10.0.0.5", "10.0.0.7"], 6),
+      deps,
+    );
+    assertEquals(landed.applied, true);
+    assertStringIncludes(
+      await siteText(sitesDir),
+      `${LOCK_LINE} 10.0.0.5 10.0.0.7\n`,
+    );
+    // Now the table is at 6: a deploy at 6 follows it.
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"], 6),
+      undefined,
+      noGrant,
+    );
+    assertStringIncludes(
+      await siteText(sitesDir),
+      `${LOCK_LINE} 10.0.0.5 10.0.0.7\n`,
+    );
+  });
+});
+
+test("a crash between the stored table and the record leaves the table's own generation in force", async () => {
+  await withHost(async ({ layout, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 5),
+      deps,
+    );
+    await Deno.remove(join(hostingDir, "tunnel-generation.json"));
+    assertEquals(await readTunnelGeneration(hostingDir), undefined);
+    const older = await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_2, ["10.0.0.5"], 4),
+      deps,
+    );
+    assertEquals(older.applied, false);
+  });
+});
+
+test("a record that cannot be written or read never fails a table or removes its key files", async () => {
+  await withHost(async ({ layout, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    // A folder where the record belongs: reads fail, the swap onto it fails.
+    await Deno.mkdir(join(hostingDir, "tunnel-generation.json"), {
+      recursive: true,
+    });
+    assertEquals(await readTunnelGeneration(hostingDir), undefined);
+    const result = await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 5),
+      deps,
+    );
+    assertEquals(result.applied, true);
+    const state = (await readTunnelState(hostingDir))!;
+    assertEquals(state.generation, 5);
+    assertEquals(
+      await exists(tunnelPeerPaths(hostingDir, state.peerId!).dir),
+      true,
+    );
+  });
+});
+
+test("the same table resent with a higher generation raises the record", async () => {
+  await withHost(async ({ layout, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 5),
+      deps,
+    );
+    const again = await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 8),
+      deps,
+    );
+    assertEquals(again.applied, false);
+    assertEquals(await readTunnelGeneration(hostingDir), 8);
+  });
 });

@@ -1291,14 +1291,24 @@ deploy can cross, so a deploy could apply older stored peers and let a removed
 carrier back in until the next table. The control plane may send a `generation`
 (a non-negative safe integer, one counter for the organization's whole table,
 not per tunnel) on `server.tunnel.routes` and in each `hostings[].tunnel` of a
-deploy. The daemon keeps the highest it applied in
-`hosting/tunnel-generation.json` (`tunnel-state.ts`; it outlives an emptied
-table and a restart). A table lower than that is not applied (answer: not
-applied, with a warning). A deploy whose highest generation is above it keeps
-its own peers (the stored table is older) and raises the record; a deploy at or
-below it takes the stored peers as before. Without a generation nothing changes
-(older control plane). A deploy at or below the record with no stored `inbound`
-cannot be corrected here; the next table does it.
+deploy. The contract: it sends `max(previous + 1, current Unix time in
+milliseconds)`, so the counter survives a restore from backup or a wipe.
+Two records exist. The applied table's own generation is stored inside the
+stored table (`TunnelState.generation`, written with it). The high-water file
+`hosting/tunnel-generation.json` (`tunnel-state.ts`) holds the highest generation
+seen, from a table or a deploy, and outlives an emptied table. A table lower than
+the higher of the two is not applied (answer: not applied, with a warning); equal
+or higher applies. A deploy whose highest generation is above the stored table's
+own keeps its own peers, however many deploys at that generation come before
+the table does, and raises the high-water file; otherwise it takes the stored
+peers. With no stored table the high-water file is the comparison. Without a
+generation nothing changes (older control plane), and a table with no generation
+clears the high-water file: only a downgraded or reset control plane sends one.
+Manual recovery if a counter ever drops under the record: delete
+`hosting/tunnel-generation.json` and resend the table (purge removes it). A
+failure to write the high-water file is logged and never fails a table or deploy.
+A deploy at or below the record with no stored `inbound` cannot be corrected
+here; the next table does it.
 
 ## Deploy Hooks
 

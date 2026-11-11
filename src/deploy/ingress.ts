@@ -20,8 +20,8 @@ import {
   plannedTunnelContents,
   readTunnelGeneration,
   readTunnelState,
-  recordTunnelGeneration,
   relockWithStoredPeers,
+  tryRecordTunnelGeneration,
 } from "./tunnel-state.ts";
 import {
   type PeerUpstream,
@@ -3545,30 +3545,18 @@ async function relockForDeploy(
   generation: number | undefined,
 ): Promise<string> {
   try {
+    const state = await readTunnelState(hostingDir);
     // A deploy prepared from a newer table than the stored one keeps its peers.
     if (generation !== undefined) {
-      const last = await readTunnelGeneration(hostingDir);
-      if (last === undefined || generation > last) return contents;
+      const known = state
+        ? state.generation
+        : await readTunnelGeneration(hostingDir);
+      if (generation > (known ?? -1)) return contents;
     }
-    return relockWithStoredPeers(await readTunnelState(hostingDir), contents);
+    return relockWithStoredPeers(state, contents);
   } catch (err) {
     logWarn("deploy", `tunnel name lock kept as sent: ${errorText(err)}`);
     return contents;
-  }
-}
-
-/** Remember the table generation a live deploy used; a failure only costs the ordering guard. */
-async function recordDeployTunnelGeneration(
-  hostingDir: string,
-  generation: number | undefined,
-): Promise<void> {
-  try {
-    await recordTunnelGeneration(hostingDir, generation);
-  } catch (err) {
-    logWarn(
-      "deploy",
-      `tunnel table generation not recorded: ${errorText(err)}`,
-    );
   }
 }
 
@@ -3693,7 +3681,7 @@ async function rewriteHostingCaddySitesLocked(
       : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),
   ]);
 
-  await recordDeployTunnelGeneration(hostingDir, tunnelGeneration);
+  await tryRecordTunnelGeneration(hostingDir, tunnelGeneration);
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry

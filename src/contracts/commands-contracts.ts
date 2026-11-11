@@ -7283,6 +7283,9 @@ export type EnvironmentDeployHostingTunnel = {
    * Generation of the organization tunnel table these peers were taken from
    * (feature `tunnel-table-generation-v1`). A daemon that already applied a
    * higher generation keeps its stored peers. Absent = as before.
+   *
+   * The control plane sends `max(previous + 1, current Unix time in milliseconds)`, so the counter survives a restore or reset;
+   * a table with no generation clears the daemon's record.
    */
   generation?: number;
 };
