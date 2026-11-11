@@ -127,6 +127,7 @@ export const DAEMON_WIRE_FEATURES = [
   "panel-keyset-key-signature-v1",
   "acme-issue-one-cert-v1",
   "tunnel-lock-follow-v1",
+  "tunnel-connector-token-change-v1",
 ] as const;
 
 /**
@@ -202,6 +203,15 @@ export const TUNNEL_STATUS_FACTS_FEATURE: DaemonWireFeature =
  */
 export const TUNNEL_LOCK_FOLLOW_FEATURE: DaemonWireFeature =
   "tunnel-lock-follow-v1";
+/**
+ * `server.tunnel.connectors`: a connector already installed whose run token
+ * differs from the one sent (the tunnel's token was rotated) is restarted on
+ * the new token. An older daemon leaves an installed connector on its old
+ * token, which can no longer reconnect once the token is rotated, so the
+ * control plane rotates only when every carrying server lists this feature.
+ */
+export const TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE: DaemonWireFeature =
+  "tunnel-connector-token-change-v1";
 
 /**
  * This daemon honours `credentials[].kind: "backup"` on `managed.apply`: it

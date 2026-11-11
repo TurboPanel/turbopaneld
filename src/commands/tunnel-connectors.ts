@@ -1,7 +1,8 @@
 /**
  * `server.tunnel.connectors`: start or stop the connectors of organization
  * tunnels on this host, as the control plane's list says. A connector that
- * already runs is left as it is (a resend must not bounce it); one that is
+ * already runs on the same run token is left as it is (a resend must not
+ * bounce it); one whose run token changed is restarted on the new one; one that is
  * installed but stopped or failed is started again, so a resend repairs it;
  * one the list removes is stopped and its token copy deleted. Only the ids
  * named here are touched, never the instance's own tunnel.
@@ -13,6 +14,7 @@ import type {
 import type { DecryptSecretsFn } from "../deploy/materialize-tls.ts";
 import {
   type ConnectorIo,
+  connectorTokenChanged,
   defaultConnectorIo,
   installConnector,
   listConnectorIds,
@@ -38,22 +40,42 @@ export async function handleTunnelConnectors(
 ): Promise<TunnelConnectorsResult> {
   const io = deps.io ?? defaultConnectorIo();
   const present = new Set(await listConnectorIds(io));
-  const unchanged = payload.install.filter((e) => present.has(e.tunnelId));
-  const wanted = payload.install.filter((e) => !present.has(e.tunnelId));
-  if (wanted.length > 0 && !deps.decryptSecrets) {
+  if (payload.install.length > 0 && !deps.decryptSecrets) {
     throw new Error(
-      "tunnel connectors need the secret decryptor to unseal tokens",
+      "tunnel connectors: this daemon cannot unseal run tokens here (no secret decryptor), so no connector was installed or checked for a new token",
     );
   }
-  const tokens = wanted.length > 0
-    ? await deps.decryptSecrets!(wanted.map((e) => e.tokenEnvelope))
+  // Every token is unsealed (locally, never logged), so a connector already
+  // here that runs on an older run token (the token was rotated) is moved to
+  // the new one; one on the same token is left as it is.
+  const tokens = payload.install.length > 0
+    ? await deps.decryptSecrets!(payload.install.map((e) => e.tokenEnvelope))
     : [];
-  const installs = await Promise.allSettled(wanted.map(async (entry, index) => {
+  const plan = await Promise.all(payload.install.map(async (entry, index) => {
     const token = tokens[index];
-    if (typeof token !== "string" || token.length === 0) {
-      throw new Error("could not unseal the run token");
+    const usable = typeof token === "string" && token.length > 0;
+    const here = present.has(entry.tunnelId);
+    const changed = here && usable &&
+      await connectorTokenChanged(io, entry.tunnelId, token);
+    return { entry, token: usable ? token : null, install: !here || changed };
+  }));
+  const wanted = plan.filter((p) => p.install);
+  const unchanged = plan.filter((p) => !p.install).map((p) => p.entry);
+  // A connector already here whose sent token cannot be unsealed is not
+  // "unchanged": it may be on an old token, so the command fails (it is still
+  // started again below if it was stopped).
+  const unreadable = plan
+    .filter((p) => !p.install && p.token === null)
+    .map((p) => `${p.entry.tunnelId}: could not unseal the run token`);
+  const installs = await Promise.allSettled(wanted.map(async (p) => {
+    if (p.token === null) throw new Error("could not unseal the run token");
+    await installConnector(io, p.entry.tunnelId, p.token);
+    if (present.has(p.entry.tunnelId)) {
+      logInfo(
+        "tunnels",
+        `moved the connector of tunnel ${p.entry.tunnelId} to its new run token`,
+      );
     }
-    await installConnector(io, entry.tunnelId, token);
   }));
   // Installed but stopped or failed: start it again (a running one is left as it is).
   const repairs = await Promise.allSettled(
@@ -72,12 +94,13 @@ export async function handleTunnelConnectors(
   const removals = await Promise.allSettled(
     payload.remove.map((id) => removeConnector(io, id)),
   );
-  const installed = settledIds(wanted.map((e) => e.tunnelId), installs);
+  const installed = settledIds(wanted.map((p) => p.entry.tunnelId), installs);
   const removed = settledIds(payload.remove, removals);
   // Report a partial failure as a failed command so the control plane repeats
   // the list; what did work is not redone (installs of running ones are no-ops).
   const failures = [
     ...installed.failures,
+    ...unreadable,
     ...repaired.failures,
     ...removed.failures,
   ];

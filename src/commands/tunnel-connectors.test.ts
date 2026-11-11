@@ -96,7 +96,7 @@ function unitIn(io: ConnectorIo, calls: string[], state: string): ConnectorIo {
   };
 }
 
-test("a connector that already runs is left alone and its token is not unsealed again", async () => {
+test("a connector that already runs on the same token is left alone: no token copy, no restart", async () => {
   await withIo(async (io, calls) => {
     await handleTunnelConnectors(payload(), "now", {
       io,
@@ -109,7 +109,8 @@ test("a connector that already runs is left alone and its token is not unsealed 
       decryptSecrets: unseal(seen),
     });
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
-    assertEquals(seen, []);
+    // Unsealed only to compare it; nothing is written or restarted.
+    assertEquals(seen, [[ENVELOPE]]);
     // Only asked whether it runs: nothing started, stopped or restarted.
     assertEquals(calls.length, 1);
     assert(calls[0]!.includes("is-active"));
@@ -117,7 +118,7 @@ test("a connector that already runs is left alone and its token is not unsealed 
 });
 
 for (const state of ["inactive", "failed"]) {
-  test(`a connector whose service is ${state} is started again by a resend, with no new token`, async () => {
+  test(`a connector whose service is ${state} is started again by a resend, with no token copy`, async () => {
     await withIo(async (io, calls) => {
       await handleTunnelConnectors(payload(), "now", {
         io,
@@ -130,7 +131,8 @@ for (const state of ["inactive", "failed"]) {
         decryptSecrets: unseal(seen),
       });
       assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
-      assertEquals(seen, []);
+      // Unsealed only to compare it; nothing is written or restarted.
+      assertEquals(seen, [[ENVELOPE]]);
       const unit = `turbopanel-tunnel-${ID_A}`;
       const start = calls.findIndex((c) =>
         c.includes(" start ") && c.includes(unit)
@@ -170,6 +172,59 @@ test("a stopped connector the host refuses to start fails the command so it is s
       Error,
       ID_A,
     );
+  });
+});
+
+test("a connector whose run token changed is restarted on the new one and reported as installed", async () => {
+  await withIo(async (io, calls) => {
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    const rotated = "bmV3".repeat(16);
+    const result = await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: (envelopes: string[]) =>
+        Promise.resolve(envelopes.map(() => rotated as string | null)),
+    });
+    assertEquals(result, { installed: [ID_A], unchanged: [], removed: [] });
+    const unit = `turbopanel-tunnel-${ID_A}`;
+    assert(calls.some((c) => c.includes(`tunnel-env-install ${ID_A}`)));
+    assert(calls.some((c) => c.includes(" restart ") && c.includes(unit)));
+    // The token itself is on no command line.
+    assertEquals(calls.filter((c) => c.includes(rotated)), []);
+    // Sent again with the same new token: left alone.
+    calls.length = 0;
+    const again = await handleTunnelConnectors(payload(), "now", {
+      io: unitIn(io, calls, "active"),
+      decryptSecrets: (envelopes: string[]) =>
+        Promise.resolve(envelopes.map(() => rotated as string | null)),
+    });
+    assertEquals(again, { installed: [], unchanged: [ID_A], removed: [] });
+    assertEquals(calls.filter((c) => c.includes("restart")), []);
+  });
+});
+
+test("an installed connector whose token cannot be unsealed is left on its token, still repaired, and the command fails", async () => {
+  await withIo(async (io, calls) => {
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    await assertRejects(
+      () =>
+        handleTunnelConnectors(payload(), "now", {
+          io: unitIn(io, calls, "inactive"),
+          decryptSecrets: (envelopes: string[]) =>
+            Promise.resolve(envelopes.map(() => null)),
+        }),
+      Error,
+      `${ID_A}: could not unseal the run token`,
+    );
+    assertEquals(calls.filter((c) => c.includes("tunnel-env-install")), []);
+    assert(calls.some((c) => c.includes(" start ")));
   });
 });
 
@@ -257,9 +312,32 @@ test("one tunnel failing does not stop the others, and the command still fails",
   });
 });
 
-test("an install needs the secret decryptor", async () => {
-  await withIo(async (io) => {
-    await assertRejects(() => handleTunnelConnectors(payload(), "now", { io }));
+test("any install list needs the secret decryptor, also for a connector already here, and says so", async () => {
+  await withIo(async (io, calls) => {
+    await assertRejects(
+      () => handleTunnelConnectors(payload(), "now", { io }),
+      Error,
+      "no secret decryptor",
+    );
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    // Already installed: the token is still checked for a rotation, so it is refused the same way.
+    await assertRejects(
+      () => handleTunnelConnectors(payload(), "now", { io }),
+      Error,
+      "no secret decryptor",
+    );
+    assertEquals(calls, []);
+    // A list that only removes needs no decryptor.
+    const removed = await handleTunnelConnectors(
+      payload({ install: [], remove: [ID_A] }),
+      "now",
+      { io },
+    );
+    assertEquals(removed.removed, [ID_A]);
   });
 });
 
@@ -324,7 +402,8 @@ test("a tunnel moved to its second unit by an update is still present, so a rese
       decryptSecrets: unseal(seen),
     });
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
-    assertEquals(seen, []);
+    // Unsealed only to compare it; nothing is written or restarted.
+    assertEquals(seen, [[ENVELOPE]]);
     // Only asked whether the unit it runs on now (the second one) runs.
     assertEquals(calls.length, 1);
     assert(calls[0]!.includes(`is-active turbopanel-tunnel-${ID_A}-b.service`));

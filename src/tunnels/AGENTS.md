@@ -106,9 +106,14 @@ decision 2026-10-28: keep the port, but only the daemon and root may reach it.
 The control plane tells each carrying server which organization tunnels to run
 (feature `tunnel-connector-v1`, `src/commands/tunnel-connectors.ts`). Each entry
 is the provider's tunnel id plus the run token as a `tpdaemon.` envelope; the
-handler unseals only the tokens of tunnels that have no connector yet, then
-calls `installConnector`. A connector that already runs (or is still starting)
-is left as it is, so a resend never restarts it. One that is installed but
+handler unseals every token (locally; never logged or put on a command line)
+and calls `installConnector` for a tunnel with no connector yet, and for one
+whose installed connector runs on a different token (compared by digest,
+`connectorTokenChanged`): the token was rotated, so the unit is restarted on
+the new one in place (feature `tunnel-connector-token-change-v1`; an older
+daemon kept the old token, which can no longer reconnect after a rotation). A
+connector on the same token that already runs (or is still starting) is left
+as it is, so a resend never restarts it, and is reported under `unchanged` only then: a connector already here whose sent token cannot be unsealed fails the command (it is still started again if stopped), so `installed` or `unchanged` always means the connector holds the token sent. One that is installed but
 whose service is stopped or failed (stopped by hand, or given up on by systemd
 after repeated crashes; `Restart=always` covers a plain crash) is started again
 (`startStoppedConnector`: `reset-failed`, then `start`, no new token), so a
