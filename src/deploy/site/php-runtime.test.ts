@@ -274,6 +274,8 @@ test("detached lsphp: the vendored binary on a socket, its own php.ini through P
       "Environment=LSAPI_CHILDREN=10\n",
       "User=alice\n",
       "StandardOutput=journal\n",
+      "StartLimitIntervalSec=0\n",
+      "RestartSec=5\nRestartSteps=10\nRestartMaxDelaySec=120\n",
     ]
   ) {
     assertStringIncludes(unit, want);

@@ -1,6 +1,9 @@
 [Unit]
 Description=TurboPanel OpenLiteSpeed (site hosting)
 After=network.target
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=forking
@@ -16,6 +19,8 @@ ExecReload={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl restar
 ExecStop={{ turbopanel_vendor_dir }}/openlitespeed/current/bin/lswsctrl delay-stop
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

@@ -736,8 +736,8 @@ itself refuses to start on an older schema). The script backs up first
 applies only migrations that are on `origin/trunk` unchanged, and otherwise
 fails the start with one plain line in `instance.err.log`. A database that is
 still starting is waited for inside the script (up to a minute per try). A
-checkout from before the script skips the step. `StartLimitBurst=10` in 120 s
-stops a refused pre-start (about a second per try) instead of retrying every
+checkout from before the script skips the step. In this dev layout only, `StartLimitBurst=10` in 120 s
+(every other layout has no start limit and a growing restart delay) stops a refused pre-start (about a second per try) instead of retrying every
 `RestartSec` (`RestartPreventExitStatus` does not cover `ExecStartPre`).
 Manual starts count toward it too; after the unit stops on the limit, fix the
 cause and run `sudo systemctl reset-failed turbopanel-instance`, then start it

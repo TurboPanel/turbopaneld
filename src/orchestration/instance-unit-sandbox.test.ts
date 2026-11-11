@@ -372,7 +372,6 @@ const DEV_SOURCE_VARS = {
 
 const DEV_MIGRATE_KEYS = [
   "ExecStartPre",
-  "StartLimitIntervalSec",
   "StartLimitBurst",
   "TimeoutStartSec",
 ];
@@ -409,6 +408,8 @@ test({
     // A refused pre-start must stop, not retry against the database every 2 s.
     assertEquals(one(unit, "StartLimitBurst"), "10");
     assertEquals(one(unit, "StartLimitIntervalSec"), "120");
+    // A growing delay would spread the ten tries out past the window.
+    assertEquals(unit.get("RestartSteps"), undefined);
     assertEquals(one(unit, "TimeoutStartSec"), "20min");
   },
 });
@@ -439,6 +440,10 @@ test({
           `${label}: ${key}= must be absent`,
         );
       }
+      // No give-up outside the dev migration case, and a growing restart delay.
+      assertEquals(one(unit, "StartLimitIntervalSec"), "0", label);
+      assertEquals(one(unit, "RestartSteps"), "10", label);
+      assertEquals(one(unit, "RestartMaxDelaySec"), "120", label);
       assert(
         !(unit.get("Environment") ?? []).some((e) =>
           e.startsWith("TURBOPANEL_DEV_MIGRATE_BACKUP_DIR=")
