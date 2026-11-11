@@ -366,3 +366,71 @@ test({
     }
   },
 });
+
+test({
+  name:
+    "handleEnvironmentLifecycle start rebuilds generated config files for a deployment with no secret plan",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-life-configs-" });
+    const previous = snapshotEnv();
+    const stateDir = join(root, "state");
+    const runDir = join(root, "run");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    Deno.env.set("TURBOPANEL_RUN_DIR", runDir);
+    const environmentId = "envlife14";
+    const projectId = "proj-1";
+    const projectName = "tp-demo-envlif14";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      projectId,
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true });
+    await writeComposeFileSecure(
+      join(deploymentDir, RUNTIME_COMPOSE_FILENAME),
+      "services:\n  web:\n    image: nginx\n",
+    );
+    await writeDeploymentManifest(deploymentDir, {
+      version: 3,
+      projectId,
+      environmentId,
+      serverId: "srv-1",
+      generation: 1,
+      projectName,
+      composeSha256: "d".repeat(64),
+      services: { web: { replicas: 1 } },
+      configFiles: [{
+        composeServiceName: "web",
+        source: "web_servers",
+        relativePath: "web--servers",
+        parts: [{ text: "{}" }],
+      }],
+    });
+    try {
+      await handleEnvironmentLifecycle(
+        { environmentId, projectId, projectName, action: "start" },
+        new Date().toISOString(),
+        { runDocker: okDocker },
+      );
+      assertEquals(
+        await Deno.readTextFile(
+          join(
+            runDir,
+            "deployments",
+            projectId,
+            environmentId,
+            "configs",
+            "web--servers",
+          ),
+        ),
+        "{}",
+      );
+    } finally {
+      restoreEnv(previous);
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

@@ -1284,3 +1284,17 @@ test("confinement: nothing to check passes, findings of every scan are joined", 
       "compose deploy refused — host paths outside this deployment: one",
     );
   }));
+
+test("an exempt generated config file passes and the same path not exempt is host-level", () => {
+  const document = {
+    configs: {
+      web_conf: { file: "/run/turbopanel/deployments/p/e/configs/x" },
+    },
+  };
+  assertEquals(
+    collectResolvedHostPaths(document, new Set(), new Set(["web_conf"]))
+      .entries,
+    [],
+  );
+  assertEquals(collectResolvedHostPaths(document).entries.length, 1);
+});

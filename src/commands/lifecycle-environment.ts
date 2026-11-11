@@ -247,7 +247,8 @@ async function lifecycleLocked(
   const manifest = await readDeploymentManifest(deploymentDir);
   if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
     const plan = manifest?.secrets ?? [];
-    if (plan.length > 0) {
+    const configFiles = manifest?.configFiles ?? [];
+    if (plan.length > 0 || configFiles.length > 0) {
       await ensureDeploymentSecretFiles({
         layout,
         projectId: parsedPayload.projectId,
@@ -256,6 +257,7 @@ async function lifecycleLocked(
         decryptSecrets,
         rehydrate: deps?.rehydrateDeploymentSecrets,
         plan,
+        configFiles,
       });
     }
   }

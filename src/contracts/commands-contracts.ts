@@ -1482,6 +1482,30 @@ export type EnvironmentDeploySecretPlanEntry = {
   forRuntime: boolean;
 };
 
+/** One piece of a generated config file: literal text or a secret's value. */
+export type EnvironmentDeployConfigFilePart =
+  | { text: string }
+  | { secretKey: string };
+
+/**
+ * A generated config file the daemon puts together on the `/run` tmpfs from
+ * ordered parts. Parts hold text and secret key names, never a value: each
+ * `secretKey` is read from the `variableMaterial[]` entry for the same
+ * `composeServiceName`. Only sent to a daemon that lists
+ * `deploy-config-files-v1`.
+ */
+export type EnvironmentDeployConfigFile = {
+  composeServiceName: string;
+  source: string;
+  relativePath: string;
+  parts: EnvironmentDeployConfigFilePart[];
+};
+
+/** Limits the control plane's own twin enforces too. */
+export const MAX_CONFIG_FILE_TEXT_BYTES = 65_536;
+export const MAX_CONFIG_FILES_PER_SERVICE = 16;
+export const MAX_CONFIG_FILES_TEXT_BYTES_PER_DEPLOY = 262_144;
+
 const DEPLOY_COMPOSE_FILE_ROLES = new Set<EnvironmentDeployComposeFileRole>([
   "project",
   "environment",
@@ -1662,6 +1686,8 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   variableMaterial?: EnvironmentDeployVariableMaterial[];
   envFile?: string;
   secretPlan?: EnvironmentDeploySecretPlanEntry[];
+  /** Generated config files (parts only); see {@link EnvironmentDeployConfigFile}. */
+  configFiles?: EnvironmentDeployConfigFile[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
   /**
    * The folder of every service this deploy runs on the host (a site, a native
@@ -4730,6 +4756,103 @@ function parseSecretPlanEntry(
   };
 }
 
+const textEncoder = new TextEncoder();
+
+function parseConfigFilePart(
+  value: unknown,
+): EnvironmentDeployConfigFilePart {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy configFiles part");
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1) {
+    throw new TypeError("Invalid environment deploy configFiles part");
+  }
+  if (typeof value.text === "string") {
+    if (value.text.includes("\u0000")) {
+      throw new TypeError("configFiles text must not contain NUL");
+    }
+    if (
+      textEncoder.encode(value.text).length > MAX_CONFIG_FILE_TEXT_BYTES
+    ) {
+      throw new TypeError("configFiles text exceeds maximum size");
+    }
+    return { text: value.text };
+  }
+  if (typeof value.secretKey === "string" && value.secretKey.length > 0) {
+    return { secretKey: value.secretKey };
+  }
+  throw new TypeError("Invalid environment deploy configFiles part");
+}
+
+function configFileTextBytes(file: EnvironmentDeployConfigFile): number {
+  let total = 0;
+  for (const part of file.parts) {
+    if ("text" in part) total += textEncoder.encode(part.text).length;
+  }
+  return total;
+}
+
+function parseConfigFileEntry(value: unknown): EnvironmentDeployConfigFile {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy configFiles entry");
+  }
+  const relativePath = parseNonEmptyString(value, "relativePath");
+  const source = parseNonEmptyString(value, "source");
+  if (
+    relativePath.includes("..") || !SECRET_PLAN_NAME_RE.test(relativePath) ||
+    !SECRET_PLAN_NAME_RE.test(source)
+  ) {
+    throw new TypeError("Invalid environment deploy configFiles name");
+  }
+  if (!Array.isArray(value.parts)) {
+    throw new TypeError("configFiles parts must be an array");
+  }
+  const file: EnvironmentDeployConfigFile = {
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    source,
+    relativePath,
+    parts: value.parts.map(parseConfigFilePart),
+  };
+  if (configFileTextBytes(file) > MAX_CONFIG_FILE_TEXT_BYTES) {
+    throw new TypeError("configFiles file exceeds maximum size");
+  }
+  return file;
+}
+
+/** Entry checks plus the limits that span entries (names, per service, total). */
+function parseConfigFiles(
+  value: unknown,
+): EnvironmentDeployConfigFile[] | undefined {
+  const files = parseOptionalMaterialArray(
+    value,
+    "configFiles",
+    parseConfigFileEntry,
+  );
+  if (files === undefined) return undefined;
+  const sources = new Set<string>();
+  const paths = new Set<string>();
+  const perService = new Map<string, number>();
+  let total = 0;
+  for (const file of files) {
+    if (sources.has(file.source) || paths.has(file.relativePath)) {
+      throw new TypeError("configFiles names must be unique");
+    }
+    sources.add(file.source);
+    paths.add(file.relativePath);
+    const count = (perService.get(file.composeServiceName) ?? 0) + 1;
+    if (count > MAX_CONFIG_FILES_PER_SERVICE) {
+      throw new TypeError("too many configFiles for one service");
+    }
+    perService.set(file.composeServiceName, count);
+    total += configFileTextBytes(file);
+  }
+  if (total > MAX_CONFIG_FILES_TEXT_BYTES_PER_DEPLOY) {
+    throw new TypeError("configFiles exceed the maximum total size");
+  }
+  return files;
+}
+
 function parseOptionalEnvFile(value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "string") {
@@ -6773,6 +6896,7 @@ export function parseEnvironmentDeployPayload(
         "secretPlan",
         parseSecretPlanEntry,
       ),
+      configFiles: parseConfigFiles(value.configFiles),
       storageMaterial: parseOptionalMaterialArray(
         value.storageMaterial,
         "storageMaterial",

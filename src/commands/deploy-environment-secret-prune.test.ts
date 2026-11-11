@@ -286,3 +286,136 @@ test({
       ]);
     }),
 });
+
+const confFile = (relativePath: string, secretKey?: string) => ({
+  composeServiceName: "web",
+  source: relativePath.replaceAll("-", "_"),
+  relativePath,
+  parts: [{ text: "pw=" }, ...(secretKey ? [{ secretKey }] : [])],
+});
+
+const confMaterial = (key: string) => ({
+  key,
+  composeServiceName: "web",
+  forBuild: false,
+  forRuntime: false,
+  isLiteral: false,
+  valueEnvelope: "tpdaemon.v1.x",
+});
+
+test({
+  name:
+    "generated config files (with no secret plan) are written before up and pruned only after a successful deploy",
+  permissions: perm,
+  fn: () =>
+    withState(async (secretsDir) => {
+      const dir = join(secretsDir, "..", "configs");
+      await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(join(dir, "web--OLD"), "previous");
+      const body = payload({
+        configFiles: [confFile("web--conf", "PW")],
+        variableMaterial: [confMaterial("PW")],
+      });
+      let seenBeforeUp = "";
+      await assertRejects(
+        () => deploy(body, fakeDocker({ failVerb: "up" })),
+        Error,
+        "up failed",
+      );
+      assertEquals(await names(dir), ["web--OLD", "web--conf"]);
+      await deploy(
+        body,
+        fakeDocker({
+          onVerb: {
+            up: () => {
+              seenBeforeUp = Deno.readTextFileSync(join(dir, "web--conf"));
+            },
+          },
+        }),
+      );
+      assertEquals(seenBeforeUp, "pw=secret");
+      assertEquals(await names(dir), ["web--conf"]);
+      await deploy(payload(), fakeDocker());
+      assertEquals(await names(dir), []);
+    }),
+});
+
+test({
+  name: "a deploy whose config file names a secret with no material is refused",
+  permissions: perm,
+  fn: () =>
+    withState(async (secretsDir) => {
+      await assertRejects(
+        () =>
+          deploy(
+            payload({ configFiles: [confFile("web--conf", "PW")] }),
+            fakeDocker(),
+          ),
+        Error,
+        "no value for secret PW",
+      );
+      assertEquals(
+        await names(join(secretsDir, "..", "configs")),
+        [],
+      );
+    }),
+});
+
+test({
+  name:
+    "a compose with a generated config is rewritten to the configs folder and passes the host-path gate",
+  permissions: perm,
+  fn: () =>
+    withState(async (secretsDir) => {
+      const configsDir = join(secretsDir, "..", "configs");
+      const content = [
+        "services:",
+        "  web:",
+        "    image: nginx:1",
+        "    configs:",
+        "      - source: web_conf",
+        "        target: /etc/app.conf",
+        "configs:",
+        "  web_conf:",
+        "    file: /run/turbopanel/deployments/x/y/configs/web--conf",
+        "",
+      ].join("\n");
+      const resolvedModel = JSON.stringify({
+        services: { web: { image: "x" } },
+        configs: { web_conf: { file: join(configsDir, "web--conf") } },
+      });
+      const docker = (args: string[]) =>
+        args.includes("--format") && args.includes("config")
+          ? ok(resolvedModel)
+          : fakeDocker()(args);
+      await deploy(
+        payload({
+          composeFiles: [{
+            filename: RUNTIME_COMPOSE_FILENAME,
+            role: "runtime",
+            source: "inline",
+            content,
+          }],
+          configFiles: [{ ...confFile("web--conf"), source: "web_conf" }],
+        }),
+        docker,
+      );
+      assertEquals(await names(configsDir), ["web--conf"]);
+      const published = await Deno.readTextFile(
+        join(
+          secretsDir,
+          "..",
+          "..",
+          "..",
+          "..",
+          "..",
+          "state",
+          "deployments",
+          PROJECT_ID,
+          ENVIRONMENT_ID,
+          RUNTIME_COMPOSE_FILENAME,
+        ),
+      );
+      assert(published.includes(`file: ${join(configsDir, "web--conf")}`));
+    }),
+});

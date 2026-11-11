@@ -1742,3 +1742,88 @@ test("parseEnvironmentDeployPayload accepts IPv6 dockerNetworkAddressing inside 
     gateway: "fd00:77::1",
   }]);
 });
+
+function configFile(overrides: Record<string, unknown> = {}) {
+  return {
+    composeServiceName: "web",
+    source: "web_conf",
+    relativePath: "web--conf",
+    parts: [{ text: "a=" }, { secretKey: "KEY" }],
+    ...overrides,
+  };
+}
+
+test("parseEnvironmentDeployPayload accepts absent and valid configFiles", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({ ...DEPLOY_BASE }).configFiles,
+    undefined,
+  );
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      configFiles: [configFile()],
+    }).configFiles,
+    [configFile()],
+  );
+});
+
+test("parseEnvironmentDeployPayload rejects bad configFiles", () => {
+  rejectDeploy({ configFiles: "x" }, "configFiles must be an array");
+  rejectDeploy({ configFiles: [1] }, "Invalid environment deploy configFiles");
+  rejectDeploy(
+    { configFiles: [configFile({ relativePath: "a/b" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ source: "bad name" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ text: "a", secretKey: "K" }] })] },
+    "Invalid environment deploy configFiles part",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ other: 1 }] })] },
+    "Invalid environment deploy configFiles part",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ secretKey: "" }] })] },
+    "Invalid environment deploy configFiles part",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ text: "a\u0000b" }] })] },
+    "must not contain NUL",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ text: "x".repeat(65_537) }] })] },
+    "configFiles text exceeds maximum size",
+  );
+  rejectDeploy(
+    {
+      configFiles: [configFile({
+        parts: [{ text: "x".repeat(40_000) }, { text: "x".repeat(40_000) }],
+      })],
+    },
+    "configFiles file exceeds maximum size",
+  );
+  rejectDeploy(
+    { configFiles: [configFile(), configFile({ source: "other" })] },
+    "configFiles names must be unique",
+  );
+});
+
+test("parseEnvironmentDeployPayload enforces configFiles per service and total limits", () => {
+  const many = Array.from(
+    { length: 17 },
+    (_, i) => configFile({ source: `s${i}`, relativePath: `web--s${i}` }),
+  );
+  rejectDeploy({ configFiles: many }, "too many configFiles for one service");
+  const big = Array.from({ length: 5 }, (_, i) =>
+    configFile({
+      composeServiceName: `svc${i}`,
+      source: `b${i}`,
+      relativePath: `svc${i}--b`,
+      parts: [{ text: "x".repeat(60_000) }],
+    }));
+  rejectDeploy({ configFiles: big }, "exceed the maximum total size");
+});

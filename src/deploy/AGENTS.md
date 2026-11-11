@@ -153,7 +153,29 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    variable, a half-written `.tmp`), and an empty plan removes the whole
    directory. A failed, cancelled or reverted deploy never prunes: the release
    still running, or the one restored, may point at those files. Rehydrate never
-   prunes. Write the payload `.env` (non-secrets only, `0640`)
+   prunes.
+   **Generated config files** (`config-files.ts`): `configFiles[]` on the
+   payload (feature `deploy-config-files-v1`) is a list of files, each with
+   ordered `parts` of literal text or a `secretKey`. The daemon decrypts the
+   named keys from `variableMaterial[]` through the same `decryptEnvelopes`
+   seam as secret files (so `captureDecryptedSecrets` puts every value in the
+   deny-set), joins the parts, and writes
+   `<runDir>/deployments/<p>/<e>/configs/<relativePath>` (`0444`, folder `0700`,
+   daemon-owned, on the `/run` tmpfs; never a state folder, so no state leaf).
+   A deploy whose `secretKey` has no material is refused before anything is
+   written (`requireAll`); rehydrate (`requireAll: false`) skips a file that
+   lacks any value and never writes one with a gap. A text-only file needs no
+   decrypt and no control-plane answer. Error text names the file and key,
+   never content. The parts (no values) are kept in `deployment.json`
+   `configFiles` so a boot rebuilds the files; the missing-file guards at boot,
+   `start` and `restart` count them (a deployment with config files and no
+   secret plan is covered). The prune rule is the secrets' (after the release
+   is up; an empty list removes `configs/`), and `environment.stop` removes the
+   folder. The target and its `.tmp` must be absent or regular files, and the
+   `.tmp` is opened with `createNew` (`O_EXCL`). Parser limits
+   (`parseConfigFiles`): names match the secret plan rule and are unique, text
+   has no NUL, 64 KiB of text per file, 16 files per service, 256 KiB of text
+   per deploy, UTF-8 bytes counted. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the
@@ -486,7 +508,7 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `docker compose config --format json`, before the overlay, publish, hooks or
   `up`, every host path the tenant document mounts or reads is checked on the
   host: bind volumes, bind-type `driver_opts` devices, `configs`/`secrets`
-  `file:` (except the secrets the daemon rewrote to its run dir), build
+  `file:` (except the secrets and configs the daemon rewrote to its run dir), build
   contexts / Dockerfiles / additional contexts, and — from the staged YAML,
   because `config` inlines or cannot render them — `env_file`, `label_file`
   and build SSH keys. Each source is mapped from `.staging` to the live
@@ -551,7 +573,7 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `.env` (non-secrets, `0640`) +
   `deployment.json` (`DEPLOYMENT_MANIFEST_FILENAME`, version 3 — version 2 is still read: project /
   environment / server ids, generation, project name, compose sha256, replica
-  counts, optional `secrets[]` plan, optional `serviceIds` map — compose service
+  counts, optional `secrets[]` plan, optional `configFiles[]` (parts, no values), optional `serviceIds` map — compose service
   name → service UUID, which is what lets the on-demand log tail check container
   ownership from deployment state instead of live container labels — and optional
   `releases[]`, one row per applied `sourceMaterial[]` entry
@@ -612,8 +634,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   call `resolveEnvironmentDeploymentDir` then `resolveDeployedComposePaths`,
   which reads the compiled `compose.yaml`.
   Lifecycle `start`/`restart` call `ensureDeploymentSecretFiles` when
-  `deployment.json` lists `secrets[]`. Stop also `rm -rf`s the matching
-  `/run/.../secrets` tree.
+  `deployment.json` lists `secrets[]` or `configFiles[]`. Stop also `rm -rf`s the
+  matching `/run/.../secrets` and `/run/.../configs` trees.
 - **Local service preflight is tag-aware:** `composeHasContainerServices` /
   `composeFilesHaveContainerServices` parse `!reset` / `!override` so the
   container-services gate before Docker does not fail solely because of

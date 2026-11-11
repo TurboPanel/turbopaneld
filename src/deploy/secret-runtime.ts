@@ -47,18 +47,21 @@ export function secretHostPath(
   );
 }
 
-export async function removeSecretTree(
+/** Remove a whole generated-file folder; an absent folder is fine. */
+export async function removeFileTree(dir: string): Promise<void> {
+  try {
+    await Deno.remove(dir, { recursive: true });
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+}
+
+export function removeSecretTree(
   layout: { runDir: string },
   projectId: string,
   environmentId: string,
 ): Promise<void> {
-  try {
-    await Deno.remove(secretHostDirectory(layout, projectId, environmentId), {
-      recursive: true,
-    });
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
+  return removeFileTree(secretHostDirectory(layout, projectId, environmentId));
 }
 
 /**
@@ -68,13 +71,23 @@ export async function removeSecretTree(
  * Only regular files and links directly in the directory are removed; the
  * caller passes the whole environment's plan, never a per-service slice.
  */
-export async function pruneStaleSecretFiles(
+export function pruneStaleSecretFiles(
   layout: { runDir: string },
   projectId: string,
   environmentId: string,
   plan: readonly { relativePath: string }[],
 ): Promise<string[]> {
-  const dir = secretHostDirectory(layout, projectId, environmentId);
+  return pruneStaleFilesIn(
+    secretHostDirectory(layout, projectId, environmentId),
+    plan,
+  );
+}
+
+/** {@link pruneStaleSecretFiles} for any generated-file folder. */
+export async function pruneStaleFilesIn(
+  dir: string,
+  plan: readonly { relativePath: string }[],
+): Promise<string[]> {
   const keep = new Set(plan.map((entry) => entry.relativePath));
   const removed: string[] = [];
   try {
@@ -89,17 +102,26 @@ export async function pruneStaleSecretFiles(
   return removed;
 }
 
-export async function plannedSecretsMissing(
+export function plannedSecretsMissing(
   layout: { runDir: string },
   projectId: string,
   environmentId: string,
   plan: readonly { relativePath: string }[],
 ): Promise<boolean> {
+  return plannedFilesMissingIn(
+    secretHostDirectory(layout, projectId, environmentId),
+    plan,
+  );
+}
+
+/** {@link plannedSecretsMissing} for any generated-file folder. */
+export async function plannedFilesMissingIn(
+  dir: string,
+  plan: readonly { relativePath: string }[],
+): Promise<boolean> {
   for (const entry of plan) {
     try {
-      const stat = await Deno.stat(
-        secretHostPath(layout, projectId, environmentId, entry.relativePath),
-      );
+      const stat = await Deno.stat(join(dir, entry.relativePath));
       if (!stat.isFile) return true;
     } catch (err) {
       if (err instanceof Deno.errors.NotFound) return true;
@@ -109,7 +131,7 @@ export async function plannedSecretsMissing(
   return false;
 }
 
-async function writeFileAtomic(
+export async function writeFileAtomic(
   path: string,
   content: string,
   mode: number,
@@ -129,7 +151,8 @@ async function writeFileAtomic(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  await Deno.writeTextFile(tmp, content, { mode });
+  // `createNew` is O_EXCL: it never follows a link planted at the tmp name.
+  await Deno.writeTextFile(tmp, content, { mode, createNew: true });
   await Deno.chmod(tmp, mode);
   await Deno.rename(tmp, path);
   await Deno.chmod(path, mode);
@@ -169,6 +192,29 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Point each planned top-level entry (`secrets` or `configs`) at its file in
+ * the daemon's folder. Entries the plan does not name are left as authored.
+ */
+export function rewriteComposeFileSources(
+  yaml: string,
+  topLevelKey: "secrets" | "configs",
+  dir: string,
+  plan: readonly { source: string; relativePath: string }[],
+): string {
+  if (plan.length === 0) return yaml;
+  const doc = parse(yaml) as unknown;
+  if (!isRecord(doc) || !isRecord(doc[topLevelKey])) return yaml;
+  const entries = { ...doc[topLevelKey] };
+  for (const entry of plan) {
+    const existing = entries[entry.source];
+    const next = isRecord(existing) ? { ...existing } : {};
+    next.file = join(dir, entry.relativePath);
+    entries[entry.source] = next;
+  }
+  return stringify({ ...doc, [topLevelKey]: entries }, { lineWidth: 0 });
+}
+
 export function rewriteComposeSecretFilePaths(
   yaml: string,
   layout: { runDir: string },
@@ -176,25 +222,15 @@ export function rewriteComposeSecretFilePaths(
   environmentId: string,
   plan: readonly EnvironmentDeploySecretPlanEntry[],
 ): string {
-  if (plan.length === 0) return yaml;
-  const doc = parse(yaml) as unknown;
-  if (!isRecord(doc) || !isRecord(doc.secrets)) return yaml;
-  const secrets = { ...doc.secrets };
-  for (const entry of plan) {
-    const existing = secrets[entry.source];
-    const next = isRecord(existing) ? { ...existing } : {};
-    next.file = secretHostPath(
-      layout,
-      projectId,
-      environmentId,
-      entry.relativePath,
-    );
-    secrets[entry.source] = next;
-  }
-  return stringify({ ...doc, secrets }, { lineWidth: 0 });
+  return rewriteComposeFileSources(
+    yaml,
+    "secrets",
+    secretHostDirectory(layout, projectId, environmentId),
+    plan,
+  );
 }
 
-function plaintextKey(
+export function plaintextKey(
   entry: EnvironmentDeployVariableMaterial,
 ): string {
   return `${entry.composeServiceName ?? ""}::${entry.key}`;
@@ -220,7 +256,7 @@ export async function decryptEnvelopes(
   return out;
 }
 
-function indexDecryptedMaterial(
+export function indexDecryptedMaterial(
   material: readonly EnvironmentDeployVariableMaterial[],
   plaintexts: readonly (string | null)[],
   requireAll: boolean,
