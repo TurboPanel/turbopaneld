@@ -220,6 +220,32 @@ export async function handleEnvironmentLifecycle(
   );
 }
 
+/** Start and restart put the deployment's secret and config files back first. */
+async function ensureLifecycleSecrets(
+  parsedPayload: EnvironmentLifecyclePayload,
+  layout: ReturnType<typeof resolveLayout>,
+  manifest: Awaited<ReturnType<typeof readDeploymentManifest>>,
+  decryptSecrets: ReturnType<typeof captureDecryptedSecrets>,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<void> {
+  if (parsedPayload.action !== "start" && parsedPayload.action !== "restart") {
+    return;
+  }
+  const plan = manifest?.secrets ?? [];
+  const configFiles = manifest?.configFiles ?? [];
+  if (plan.length === 0 && configFiles.length === 0) return;
+  await ensureDeploymentSecretFiles({
+    layout,
+    projectId: parsedPayload.projectId,
+    environmentId: parsedPayload.environmentId,
+    generation: manifest?.generation,
+    decryptSecrets,
+    rehydrate: deps?.rehydrateDeploymentSecrets,
+    plan,
+    configFiles,
+  });
+}
+
 async function lifecycleLocked(
   parsedPayload: EnvironmentLifecyclePayload,
   daemonReceivedAt: string,
@@ -250,22 +276,13 @@ async function lifecycleLocked(
   // skipped as unchanged.
   await clearAppliedDeployHash(deploymentDir);
   const manifest = await readDeploymentManifest(deploymentDir);
-  if (parsedPayload.action === "start" || parsedPayload.action === "restart") {
-    const plan = manifest?.secrets ?? [];
-    const configFiles = manifest?.configFiles ?? [];
-    if (plan.length > 0 || configFiles.length > 0) {
-      await ensureDeploymentSecretFiles({
-        layout,
-        projectId: parsedPayload.projectId,
-        environmentId: parsedPayload.environmentId,
-        generation: manifest?.generation,
-        decryptSecrets,
-        rehydrate: deps?.rehydrateDeploymentSecrets,
-        plan,
-        configFiles,
-      });
-    }
-  }
+  await ensureLifecycleSecrets(
+    parsedPayload,
+    layout,
+    manifest,
+    decryptSecrets,
+    deps,
+  );
 
   // A stack still running under an earlier, project-wide name (the recorded
   // names do not include this command's). Compose acts on a whole project and

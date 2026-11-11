@@ -74,10 +74,7 @@ import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
 import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
-import {
-  siteCronWritableDirs,
-  siteRunContext,
-} from "../deploy/site/lifecycle-context.ts";
+import { siteRunContext } from "../deploy/site/lifecycle-context.ts";
 import {
   applyDeployWorkers,
   assertSiteLifecyclePhp,
@@ -1398,7 +1395,7 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
-export { siteCronWritableDirs };
+export { siteCronWritableDirs } from "../deploy/site/lifecycle-context.ts";
 
 /** A native app's tree reference: its service id and owner, plus its folder. */
 function nativeRef(
@@ -3118,6 +3115,42 @@ function currentLinksOf(
   );
 }
 
+/**
+ * Which services keep `current` until their new release has passed: a serving
+ * Node app, or a site with before-traffic commands.
+ */
+function holdCurrentFor(
+  layout: LayoutPaths,
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  deps?: EnvironmentDeployDeps,
+): (
+  service: { composeServiceName: string; serviceId: string },
+) => Promise<boolean> {
+  // A Node app that is serving keeps `current` until its new release has
+  // answered beside it, so a crash, a cancel or a failure anywhere before
+  // the switch leaves the serving release live (and the one a restart or a
+  // reboot starts).
+  // A site with before-traffic commands holds `current` the same way until
+  // its commands have passed.
+  return async (service) =>
+    await nativeAppIsServing(
+      parsedPayload.nativeAppServices ?? [],
+      service,
+      deps?.nativeAppIo,
+    ) ||
+    await siteHeldForPostDeploy(
+      layout,
+      parsedPayload.sites ?? [],
+      deployReleaseBindings(parsedPayload),
+      service.composeServiceName,
+      undefined,
+      (parsedPayload.sourceMaterial ?? []).some((entry) =>
+        entry.composeServiceName === service.composeServiceName &&
+        entry.rollbackToReleaseId !== undefined
+      ),
+    );
+}
+
 async function deployEnvironmentHolding(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -3238,29 +3271,7 @@ async function deployEnvironmentHolding(
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
-    // A Node app that is serving keeps `current` until its new release has
-    // answered beside it, so a crash, a cancel or a failure anywhere before
-    // the switch leaves the serving release live (and the one a restart or a
-    // reboot starts).
-    // A site with before-traffic commands holds `current` the same way until
-    // its commands have passed.
-    holdCurrent: async (service) =>
-      await nativeAppIsServing(
-        parsedPayload.nativeAppServices ?? [],
-        service,
-        deps?.nativeAppIo,
-      ) ||
-      await siteHeldForPostDeploy(
-        layout,
-        parsedPayload.sites ?? [],
-        deployReleaseBindings(parsedPayload),
-        service.composeServiceName,
-        undefined,
-        (parsedPayload.sourceMaterial ?? []).some((entry) =>
-          entry.composeServiceName === service.composeServiceName &&
-          entry.rollbackToReleaseId !== undefined
-        ),
-      ),
+    holdCurrent: holdCurrentFor(layout, parsedPayload, deps),
     ensureBuildkitImageBuildFn: (releaseLayout) =>
       runInstallStep(
         runtime,

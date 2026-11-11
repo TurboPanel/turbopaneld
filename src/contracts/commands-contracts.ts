@@ -5835,6 +5835,43 @@ function parseSiteRequiredEnv(
   );
 }
 
+function assertSitePrincipals(site: EnvironmentDeploySite): void {
+  // A managed directory is "a directory **and a principal**": without an owner
+  // there is no account to write into it and nobody the tree could belong to.
+  // Rejected rather than silently falling back to the daemon-owned tree, which
+  // would look like it worked and be unreachable over SFTP.
+  // A timer with no `User=` runs as root. Refused rather than defaulted: there
+  // is no safe account to guess, and running a tenant's job as root because a
+  // field was missing is not a failure mode to leave open.
+  if (site.cron && site.cron.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
+    );
+  }
+  if (site.sourceKind === "managed-directory" && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
+    );
+  }
+  // Commands and workers run as the site's account, never as root.
+  if (site.postDeploy && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: post-deploy commands require a principal to run as`,
+    );
+  }
+  if (site.workers && site.workers.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: workers require a principal to run as`,
+    );
+  }
+  // A managed directory has no release for a command to run in.
+  if (site.postDeploy && site.sourceKind === "managed-directory") {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site has no release to run post-deploy commands in`,
+    );
+  }
+}
+
 function parseSite(
   value: unknown,
 ): EnvironmentDeploySite {
@@ -5880,40 +5917,7 @@ function parseSite(
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);
   if (principal) site.principal = principal;
-  // A managed directory is "a directory **and a principal**": without an owner
-  // there is no account to write into it and nobody the tree could belong to.
-  // Rejected rather than silently falling back to the daemon-owned tree, which
-  // would look like it worked and be unreachable over SFTP.
-  // A timer with no `User=` runs as root. Refused rather than defaulted: there
-  // is no safe account to guess, and running a tenant's job as root because a
-  // field was missing is not a failure mode to leave open.
-  if (site.cron && site.cron.length > 0 && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
-    );
-  }
-  if (site.sourceKind === "managed-directory" && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
-    );
-  }
-  // Commands and workers run as the site's account, never as root.
-  if (site.postDeploy && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: post-deploy commands require a principal to run as`,
-    );
-  }
-  if (site.workers && site.workers.length > 0 && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: workers require a principal to run as`,
-    );
-  }
-  // A managed directory has no release for a command to run in.
-  if (site.postDeploy && site.sourceKind === "managed-directory") {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: a managed-directory site has no release to run post-deploy commands in`,
-    );
-  }
+  assertSitePrincipals(site);
   return site;
 }
 

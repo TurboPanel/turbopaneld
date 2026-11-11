@@ -99,7 +99,7 @@ function builtRelease(
   const release = applied.find((entry) =>
     entry.composeServiceName === composeServiceName
   );
-  if (release === undefined || release.built !== true) return undefined;
+  if (release?.built !== true) return undefined;
   return release.releaseId === release.previousReleaseId ? undefined : release;
 }
 
