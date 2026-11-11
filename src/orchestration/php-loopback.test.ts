@@ -317,7 +317,7 @@ test("with no cache and no helper list there is no guarded set and no guard rule
 test("a cache port and a helper port open for their own account and are guarded against everyone else", async () => {
   await withTree({
     ...HOST_FILES,
-    "etc/turbopanel/reach-ports/env1.list": "bob 18200\ncarol 18200\n",
+    "etc/turbopanel/reach-ports/env1.list": "bob 18200\n",
     "etc/turbopanel/reach-ports/env2.list": "alice 18300\n",
   }, async (run) => {
     const out = await run();
@@ -334,7 +334,6 @@ test("a cache port and a helper port open for their own account and are guarded 
       "15002 . 18200",
       "15002 . 3000",
       "15002 . 41234",
-      "15003 . 18200",
       "15003 . 3001",
     ]);
     const lines = out.stdout.split("\n").map((l) => l.trim());
@@ -349,6 +348,42 @@ test("a cache port and a helper port open for their own account and are guarded 
     );
     assertEquals(lines.filter((l) => l.includes("@guarded")).length, 1);
   }, GUARDED_UNITS);
+});
+
+test("a guarded port claimed by two accounts stays guarded and opens to neither, from any source", async () => {
+  await withTree({
+    ...HOST_FILES,
+    // alice's cache port also in carol's list; bob's list names 18200 and a stale app unit of carol sits on it too.
+    "etc/turbopanel/reach-ports/env1.list": "carol 18100\nbob 18200\n",
+  }, async (run) => {
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assertEquals(setElements(out.stdout, "guarded"), ["18100", "18200"]);
+    const own = setElements(out.stdout, "own_ports");
+    for (
+      const pair of [
+        "15001 . 18100",
+        "15003 . 18100",
+        "15002 . 18200",
+        "15003 . 18200",
+      ]
+    ) {
+      assert(!own.includes(pair), pair);
+    }
+    assertStringIncludes(
+      out.stderr,
+      "port 18100 is claimed by more than one account",
+    );
+    assertStringIncludes(
+      out.stderr,
+      "port 18200 is claimed by more than one account",
+    );
+    // Unrelated pairs stay.
+    assert(own.includes("15002 . 3000"));
+  }, {
+    ...GUARDED_UNITS,
+    "turbopanel-app-stale.service": appUnit("carol", "18200"),
+  });
 });
 
 test("cache units and helper lines that do not fit are skipped, and an app's port is never guarded", async () => {
@@ -395,6 +430,30 @@ test("a symlinked cache unit and a symlinked reach folder entry are not read", a
     const out = await run();
     assertEquals(out.code, 0, out.stderr);
     assert(!out.stdout.includes("guarded"), out.stdout);
+  }, UNITS);
+});
+
+test("one account named twice for one port is not a conflict", async () => {
+  await withTree({
+    ...HOST_FILES,
+    "etc/turbopanel/reach-ports/a.list": "alice 18100\n",
+    "etc/turbopanel/reach-ports/b.list": "alice 18100\n",
+  }, async (run) => {
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assert(setElements(out.stdout, "own_ports").includes("15001 . 18100"));
+    assert(!out.stderr.includes("claimed"));
+  }, GUARDED_UNITS);
+});
+
+test("a user name that starts with a digit is skipped (getent would read it as a uid)", async () => {
+  await withTree({
+    ...HOST_FILES,
+    "etc/turbopanel/reach-ports/a.list": "15001 18400\n",
+  }, async (run) => {
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assert(!out.stdout.includes("18400"));
   }, UNITS);
 });
 

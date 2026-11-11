@@ -5960,11 +5960,13 @@ tp_reach_content_ok() {
     }
     {
       if (NR > lines) fail("more than " lines " lines")
-      if ($0 !~ /^[A-Za-z0-9_.-]+ [0-9]+$/) fail("not <user> <port>")
+      if ($0 !~ /^[A-Za-z_][A-Za-z0-9_.-]* [0-9]+$/) fail("not <user> <port>")
       split($0, f, " ")
       if (length(f[2]) > 5 || f[2] !~ /^[1-9]/ || f[2] + 0 < min || f[2] + 0 > max) fail("port outside the listen band")
       if (($0 in seen)) fail("line repeated")
       seen[$0] = 1
+      if ((f[2] + 0) in ports) fail("port named under two users")
+      ports[f[2] + 0] = 1
     }
     END { if (!bad && NR == 0) { print "tp-host: reach list: empty" > "/dev/stderr"; exit 1 } }
   ' "$1" || return 1
@@ -5994,6 +5996,8 @@ tp_verb_reach_ports_remove() {
   tp_pin_dir "$R_REACH" || return 0
   [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
     tp_die "refusing $R_REACH: not a root-owned 0700 directory"
+  tp_dir_sealed_at .. || tp_config_root_self_sealed .. ||
+    tp_die "refusing $R_REACH: its parent is not sealed (root-owned, not group- or world-writable)"
   rm -f -- "./$1.list"
 }
 

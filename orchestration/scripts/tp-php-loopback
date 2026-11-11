@@ -146,12 +146,12 @@ pair_of() {
   _po_port="$2"
   _po_min="${3:-1}"
   _po_max="${4:-65535}"
-  case "$_po_name" in ''|-*|*[!A-Za-z0-9_.-]*) return 0 ;; esac
-  case "$_po_port" in ''|0*|*[!0-9]*) return 0 ;; esac
+  case "$_po_name" in ''|-*|[0-9]*|*[!A-Za-z0-9_.-]*) return 0 ;; *) ;; esac
+  case "$_po_port" in ''|0*|*[!0-9]*) return 0 ;; *) ;; esac
   [ "${#_po_port}" -le 5 ] && [ "$_po_port" -ge "$_po_min" ] &&
     [ "$_po_port" -le "$_po_max" ] || return 0
   _po_uid="$(uid_of "$_po_name")"
-  case "$_po_uid" in ''|*[!0-9]*) return 0 ;; esac
+  case "$_po_uid" in ''|*[!0-9]*) return 0 ;; *) ;; esac
   [ "${#_po_uid}" -le 10 ] && [ "$_po_uid" -ge "$PRINCIPAL_ID_MIN" ] &&
     [ "$_po_uid" -le "$PRINCIPAL_ID_MAX" ] || return 0
   printf '%s . %s\n' "$_po_uid" "$_po_port"
@@ -160,7 +160,9 @@ pair_of() {
 # `uid . port` for every unit named GLOB (in the units folder) whose User= and
 # Environment=PORT= fit (see pair_of); MIN and MAX bound the port when given.
 unit_pairs() {
-  for _up_u in "$UNITS"/$1; do
+  _up_glob="$1"
+  # shellcheck disable=SC2086 # the glob is meant to expand
+  for _up_u in "$UNITS"/$_up_glob; do
     [ -f "$_up_u" ] && [ ! -L "$_up_u" ] || continue
     _up_name="$(sed -n 's/^User=//p' "$_up_u" | head -1)"
     _up_port="$(sed -n 's/^Environment=PORT=//p' "$_up_u" | head -1)"
@@ -350,11 +352,40 @@ refuse() {
 
 BAND="$PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX"
 
+# PAIRS (`uid . port` lines) without every pair of a guarded port that more
+# than one account claims, from any source (a list, a cache unit, a stale app
+# unit): the port stays guarded, so nobody but root reaches it, and a warning
+# names it. GUARDED is the guarded ports, one per line.
+shared_ports_dropped() {
+  _sp_guarded="$2"
+  printf '%s\n' "$1" | TP_GUARDED="$_sp_guarded" awk '
+    BEGIN {
+      n = split(ENVIRON["TP_GUARDED"], g, "\n")
+      for (i = 1; i <= n; i++) if (g[i] != "") guarded[g[i]] = 1
+    }
+    $0 == "" { next }
+    { line[++m] = $0; port[m] = $3; if (($3 in guarded) && !(($1 SUBSEP $3) in seen)) { seen[$1 SUBSEP $3] = 1; owners[$3]++ } }
+    END {
+      for (k = 1; k <= m; k++) {
+        if ((port[k] in guarded) && owners[port[k]] > 1) {
+          if (!(port[k] in said)) {
+            said[port[k]] = 1
+            printf "tp-php-loopback: port %s is claimed by more than one account; open to none\n", port[k] > "/dev/stderr"
+          }
+          continue
+        }
+        print line[k]
+      }
+    }
+  '
+}
+
 # One set of the guarded ports, or nothing when none is guarded.
 guarded_set() {
-  [ -n "$1" ] || return 0
+  _gs_ports="$1"
+  [ -n "$_gs_ports" ] || return 0
   _gs=""
-  for _g in $1; do _gs="${_gs:+$_gs, }$_g"; done
+  for _g in $_gs_ports; do _gs="${_gs:+$_gs, }$_g"; done
   cat <<SET
   set guarded {
     type inet_service
@@ -419,7 +450,13 @@ $([ -z "$7" ] || refuse "ip6 daddr @pool6")
 RULES
 }
 
+# The lock comes first, before units, lists and `ip` are read: an older sync
+# must not load after a newer one that saw more.
 if [ -z "$TP_TEST" ]; then
+  command -v nft >/dev/null 2>&1 || tp_die "nft is not installed (apt install nftables); site PHP cannot start without its loopback rules"
+  command -v flock >/dev/null 2>&1 || tp_die "flock is not installed"
+  exec 9>/run/turbopanel-php-loopback.lock
+  flock 9
   command -v ip >/dev/null 2>&1 || tp_die "ip is not installed (apt install iproute2); the account rules cannot be built"
 fi
 _addr="$(ip_out addr)" || tp_die "ip -o addr show failed"
@@ -437,8 +474,9 @@ _route6="$(ip_out route6)" || {
 
 _cache="$(cache_pairs)"
 _reach="$(reach_pairs)"
-_own="$(printf '%s\n%s\n%s\n' "$(app_pairs)" "$_cache" "$_reach" | grep -v '^$' | sort -u || :)"
+_pairs="$(printf '%s\n%s\n%s\n' "$(app_pairs)" "$_cache" "$_reach" | grep -v '^$' | sort -u || :)"
 _guarded="$(printf '%s\n%s\n' "$_cache" "$_reach" | sed -n 's/^[0-9]* \. //p' | sort -n -u)"
+_own="$(shared_ports_dropped "$_pairs" "$_guarded")"
 _res="$(loopback_resolvers)"
 _res4="$(printf '%s\n' "$_res" | grep -v ':' | sed 's|$|/32|' | valid_cidrs 4 32 |
   sed 's|/32$||')"
@@ -464,10 +502,6 @@ if [ -n "$TP_TEST" ]; then
   exit 0
 fi
 
-command -v nft >/dev/null 2>&1 || tp_die "nft is not installed (apt install nftables); site PHP cannot start without its loopback rules"
-command -v flock >/dev/null 2>&1 || tp_die "flock is not installed"
-exec 9>/run/turbopanel-php-loopback.lock
-flock 9
 printf '%s\n' "$_rules" | nft -f - || tp_die "nft refused the ruleset"
 # Read it back: the band's rules must be in the live table.
 _live="$(nft list table inet turbopanel_php)" || tp_die "ruleset not loaded"

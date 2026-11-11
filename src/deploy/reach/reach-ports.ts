@@ -13,7 +13,10 @@
  * Each line is `<linux user> <port>`. `tp-host reach-ports-install` checks the
  * staged file and makes the copy; `reach-ports-remove` deletes it. Both are
  * followed by `php-loopback-sync`, which must succeed: a published port that is
- * not yet guarded would be open to every account on the host.
+ * not yet guarded is open to the web servers and the daemon (Hosting Accounts
+ * are always refused by the band rule). The guard covers `127.0.0.1` only, so
+ * a helper container must publish on `127.0.0.1` and nowhere else; a uid
+ * outside the band can still reach a helper container on its bridge address.
  */
 
 import { join } from "node:path";

@@ -144,5 +144,11 @@ port reaches its Hosting Account only through a root-written list:
 a port in 18080-18999), and `reach-ports-remove <id>` deletes it. The daemon
 module is `src/deploy/reach/reach-ports.ts`; it runs `php-loopback-sync` after
 either verb and throws when that fails, because a published port that is not
-yet guarded is open to every account. `<config>/reach-ports` and
+yet guarded is open to the web servers and the daemon (Hosting Accounts are
+always refused by the band rule). The guard covers `127.0.0.1` only: caches
+must bind `127.0.0.1` and helper containers publish on `127.0.0.1` only, and a
+uid outside the band can still reach a helper container on its bridge address.
+A guarded port that more than one account claims (lists, cache units, app
+units) stays guarded and opens to none, with a warning, and `tp-host` refuses
+a list that names one port under two users. `<config>/reach-ports` and
 `<config>/cache` are refused to every generic verb (`tp_path_class`).

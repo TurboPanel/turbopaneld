@@ -101,6 +101,22 @@ test("reach-ports-install refuses every line the daemon never writes", async () 
   });
 });
 
+test("reach-ports-install refuses one port under two users, and a user name that starts with a digit", async () => {
+  await withHost(async (host) => {
+    const passwd = host.path("etc/passwd");
+    await Deno.writeTextFile(
+      passwd,
+      `${await Deno.readTextFile(passwd)}bob:x:15002:15002::/h:/bin/sh\n`,
+    );
+    for (const text of ["alice 18100\nbob 18100\n", "15001 18100\n"]) {
+      await stage(host, text);
+      await refused(host, ["reach-ports-install", ENV]);
+    }
+    await stage(host, "alice 18100\nbob 18101\n");
+    assertEquals((await host.run(["reach-ports-install", ENV])).code, 0);
+  });
+});
+
 test("reach-ports-install takes up to 64 distinct lines", async () => {
   await withHost(async (host) => {
     const lines = Array.from({ length: 64 }, (_, i) => `alice ${18100 + i}`);
