@@ -113,7 +113,7 @@ whose installed connector runs on a different token (compared by digest,
 the new one in place (feature `tunnel-connector-token-change-v1`; an older
 daemon kept the old token, which can no longer reconnect after a rotation). A
 connector on the same token that already runs (or is still starting) is left
-as it is, so a resend never restarts it. One that is installed but
+as it is, so a resend never restarts it, and is reported under `unchanged` only then: a connector already here whose sent token cannot be unsealed fails the command (it is still started again if stopped), so `installed` or `unchanged` always means the connector holds the token sent. One that is installed but
 whose service is stopped or failed (stopped by hand, or given up on by systemd
 after repeated crashes; `Restart=always` covers a plain crash) is started again
 (`startStoppedConnector`: `reset-failed`, then `start`, no new token), so a

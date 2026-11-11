@@ -61,6 +61,12 @@ export async function handleTunnelConnectors(
   }));
   const wanted = plan.filter((p) => p.install);
   const unchanged = plan.filter((p) => !p.install).map((p) => p.entry);
+  // A connector already here whose sent token cannot be unsealed is not
+  // "unchanged": it may be on an old token, so the command fails (it is still
+  // started again below if it was stopped).
+  const unreadable = plan
+    .filter((p) => !p.install && p.token === null)
+    .map((p) => `${p.entry.tunnelId}: could not unseal the run token`);
   const installs = await Promise.allSettled(wanted.map(async (p) => {
     if (p.token === null) throw new Error("could not unseal the run token");
     await installConnector(io, p.entry.tunnelId, p.token);
@@ -94,6 +100,7 @@ export async function handleTunnelConnectors(
   // the list; what did work is not redone (installs of running ones are no-ops).
   const failures = [
     ...installed.failures,
+    ...unreadable,
     ...repaired.failures,
     ...removed.failures,
   ];
