@@ -1178,7 +1178,7 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/site/site-env-file.ts|["-n","site-env-remove",username,siteId]',
+    'src/deploy/site/site-env-owners.ts|["-n","site-env-remove",username,siteId]',
     { argv: ["site-env-remove", "alice", "web-0123456789ab"] },
   ),
   tpHost(
