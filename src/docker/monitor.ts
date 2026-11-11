@@ -83,6 +83,7 @@ export class DockerMonitor {
   #containers: ContainerSummary[] = [];
   #inspects = new Map<string, ContainerInspect>();
   readonly #listeners = new Set<(change: DockerMonitorChange) => void>();
+  readonly #networkCreatedListeners = new Set<() => void>();
   readonly #reachabilityListeners = new Set<(reachable: boolean) => void>();
   #eventsBackoffMs = 1_000;
   #reconcileBackoffMs: number;
@@ -166,6 +167,14 @@ export class DockerMonitor {
 
   getContainerInspect(id: string): ContainerInspect | undefined {
     return this.#inspects.get(id);
+  }
+
+  /** Called on every Docker network `create` event; returns the unsubscribe. */
+  subscribeNetworkCreated(listener: () => void): () => void {
+    this.#networkCreatedListeners.add(listener);
+    return () => {
+      this.#networkCreatedListeners.delete(listener);
+    };
   }
 
   subscribe(listener: (change: DockerMonitorChange) => void): () => void {
@@ -350,6 +359,14 @@ export class DockerMonitor {
   }
 
   async #handleEvent(event: DockerEvent, signal: AbortSignal): Promise<void> {
+    if (event.Type === "network") {
+      if (event.Action === "create") {
+        for (const listener of this.#networkCreatedListeners) listener();
+      }
+      return;
+    }
+    // Only networks need `create`; containers are tracked from `start` on.
+    if (event.Action === "create") return;
     const containerId = event.Actor?.ID;
     if (!containerId) return;
 

@@ -15,6 +15,8 @@ import {
 } from "../commands/fabric.ts";
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
+import { syncAccountWallQuietly } from "../deploy/account-wall.ts";
+import { runPrivileged } from "../deploy/release/release-layout.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { armPhpPatchRestarts } from "../deploy/site/php-patch-restart.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
@@ -81,6 +83,8 @@ export type DockerClientLike = {
 /** Minimal Docker monitor surface used at daemon startup. */
 export type DockerMonitorLike = {
   subscribeReachability(cb: (reachable: boolean) => void): void;
+  /** Docker network `create` events; absent on test doubles. */
+  subscribeNetworkCreated?(cb: () => void): void;
 };
 
 /** Minimal sentinel surface used at daemon startup. */
@@ -136,6 +140,12 @@ export type DaemonRunIo = {
   reinstallFirewallForwardingIfEnabled?: () => Promise<void>;
   /** Start any per-site PHP runtime that is installed but not running. */
   reconcileSitePhpRuntimes?: () => Promise<void>;
+  /**
+   * Reload the Hosting Account wall so it knows every container network's
+   * gateway (at start and when Docker returns); defaults to
+   * {@link syncAccountWallQuietly}. Never throws.
+   */
+  syncAccountWall?: () => Promise<void>;
   /** Start the PHP patch restarts (the boot pass and the watch). */
   armPhpPatchRestarts?: () => void;
   /** Start containers a restore stopped before the daemon died. */
@@ -271,9 +281,16 @@ async function maybeAttachDocker(
   }
   const dockerMonitor = (io.createDockerMonitor ??
     ((client) => new DockerMonitor(client as DockerClient)))(dockerClient);
+  // A network made by anything (a stack, the fabric, ingress, a root
+  // `docker network create`) is walled as soon as Docker says it exists.
+  dockerMonitor.subscribeNetworkCreated?.(() => {
+    void syncWall(io);
+  });
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
     void reinstallForwardingJumps();
+    // Docker may have recreated its bridges while it was away.
+    void syncWall(io);
     void (io.healManagedStacks ?? healManagedStacksAfterDockerReturn)()
       .catch((err) => {
         (io.logWarn ?? logWarn)(
@@ -462,6 +479,16 @@ function scheduleBootRetry(
   });
 }
 
+/** Reload the account wall (never throws; a failure is logged). */
+async function syncWall(io: DaemonRunIo): Promise<void> {
+  await (io.syncAccountWall ??
+    (() =>
+      syncAccountWallQuietly(
+        runPrivileged,
+        (message) => (io.logWarn ?? logWarn)("deploy", message),
+      )))();
+}
+
 /**
  * What a host does once its orchestration runtime is ready: put back its
  * fabric and forwarding rules, start site PHP runtimes, and kick off the
@@ -475,9 +502,16 @@ async function afterOrchestration(
   // The real host keeps tp0 peer readings fresh every 60 s; a test that
   // stands in its own restore never starts that timer.
   if (!io.restoreFabricFromPersistedState) armFabricPeerRefresh();
-  await (io.restoreFabricFromPersistedState ??
-    restoreFabricFromPersistedState)();
-  await reinstallForwardingJumps();
+  try {
+    await (io.restoreFabricFromPersistedState ??
+      restoreFabricFromPersistedState)();
+    await reinstallForwardingJumps();
+  } finally {
+    // Whatever the fabric steps did, the wall must learn today's container
+    // networks before the PHP reconcile, which may have nothing to do or stop
+    // early.
+    await syncWall(io);
+  }
   await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
   // After the runtimes are back: restart what still runs a PHP build older
   // than the installed one, in the background, and keep watching.
@@ -572,6 +606,11 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   };
 
   info("daemon", "starting up");
+
+  // Before any orchestration step: tp-host and lib/tp-php-loopback are root
+  // helpers an earlier converge installed, and orchestration may not be ready
+  // for a long while (or ever, on this start).
+  await syncWall(io);
 
   // First, before anything slow: a stale primary must not keep serving.
   await bestEffort(

@@ -258,8 +258,12 @@ export class DockerClient {
 
   async *streamEvents(signal: AbortSignal): AsyncGenerator<DockerEvent> {
     const filters = {
-      type: ["container"],
+      type: ["container", "network"],
       event: [
+        // A network `create` (the filter has no per-type events; the monitor
+        // ignores a container `create`). Lets the account wall learn a new
+        // bridge's gateway at once.
+        "create",
         "start",
         "stop",
         "die",
