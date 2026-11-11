@@ -829,11 +829,14 @@ guard/attach flow below is for.
 `<install>/lib/update-guard-armed` (the only record the guard decides from; see
 `src/update/AGENTS.md`, Root build floor), its daemon-readable copy
 `<runDir>/update-guard.json` (target commit + deadline), and starts
-`turbopaneld-update-guard.timer` (~10
-minutes, one-shot per attempt). `turbopaneld.service` has no start limit: it
+`turbopaneld-update-guard.timer` (first run 90 s after arming, then every
+30 s until the guard stops it). `turbopaneld.service` has no start limit: it
 keeps restarting with a growing delay, so a full disk never leaves it failed.
-A build that crash-loops therefore reaches the guard through that timer
-deadline. `OnFailure=` still names the guard unit, for a failure that does stop
+A build that crash-loops therefore never reaches `failed`; the guard's early
+check catches it instead: still armed, not disarmed, `NRestarts` at least 3
+above the value root recorded at arm time (`restartsAtArm`) and the unit not
+running steadily for 30 s, so the rollback comes within about two minutes. The
+deadline (~10 minutes, in root's record) stays as the backstop. `OnFailure=` still names the guard unit, for a failure that does stop
 the service. Either way the guard unit runs
 `orchestration/scripts/tp-update-guard` (root, no sudoers entry). The guard
 restores `bin/turbopaneld.prev`, `bin/turbopaneld.js.prev` on JS-mode hosts,

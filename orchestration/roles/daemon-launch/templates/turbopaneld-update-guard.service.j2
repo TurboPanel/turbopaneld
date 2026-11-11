@@ -3,9 +3,9 @@ Description=TurboPanel daemon self-update rollback guard
 After=network-online.target
 
 [Service]
-# Oneshot. A failed restored-daemon restart is scheduled again by
-# tp-update-guard (systemd-run) and by the timer's OnUnitInactiveSec while
-# the guard file remains. Recovery and the attention threshold stop that timer.
+# Oneshot. The timer runs it every OnUnitInactiveSec while the guard file
+# remains (early crash-loop check, then the deadline); a failed restored-daemon
+# restart is also scheduled again by tp-update-guard (systemd-run). Recovery and the attention threshold stop that timer.
 Type=oneshot
 ExecStart={{ turbopanel_update_guard_bin | default(turbopanel_install_root ~ '/lib/tp-update-guard') }}
 Environment=TURBOPANEL_RUN_DIR={{ runtime_socket_dir | default('/run/turbopanel') }}

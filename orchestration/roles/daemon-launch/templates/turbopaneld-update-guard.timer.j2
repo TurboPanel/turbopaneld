@@ -2,10 +2,12 @@
 Description=TurboPanel daemon update guard deadline
 
 [Timer]
-# First fire is the rollback deadline. After each oneshot exit, while this
-# timer stays active, OnUnitInactiveSec schedules the next attempt. The guard
-# stops this unit on confirmed recovery and after the attention threshold.
-OnActiveSec={{ turbopanel_update_guard_deadline_sec | default(600) }}
+# First fire is the early crash-loop check, then every retry interval until the
+# guard stops this unit. The rollback deadline itself is the deadlineAt in
+# root's armed record (about 10 minutes); the early check rolls back sooner
+# when the daemon keeps restarting. The guard stops this unit on a disarm, a
+# rollback, confirmed recovery and after the attention threshold.
+OnActiveSec={{ turbopanel_update_guard_early_check_sec | default(90) }}
 OnUnitInactiveSec={{ turbopanel_update_guard_retry_sec | default(30) }}
 AccuracySec=1s
 Unit=turbopaneld-update-guard.service
