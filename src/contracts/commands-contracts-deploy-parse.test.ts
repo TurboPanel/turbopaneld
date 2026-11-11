@@ -1827,3 +1827,14 @@ test("parseEnvironmentDeployPayload enforces configFiles per service and total l
     }));
   rejectDeploy({ configFiles: big }, "exceed the maximum total size");
 });
+
+test("parseEnvironmentDeployPayload refuses config names ending in .tmp", () => {
+  rejectDeploy(
+    { configFiles: [configFile({ relativePath: "web--conf.tmp" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ source: "web_conf.tmp" })] },
+    "Invalid environment deploy configFiles name",
+  );
+});
