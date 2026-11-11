@@ -550,6 +550,12 @@ test("deploy-config-files-v1 is advertised", () => {
     DAEMON_WIRE_FEATURES.includes(DEPLOY_CONFIG_FILES_FEATURE),
     true,
   );
+  // Appended after the entry that was last when it was added.
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(DEPLOY_CONFIG_FILES_FEATURE) >
+      DAEMON_WIRE_FEATURES.indexOf("tunnel-connector-token-change-v1"),
+    true,
+  );
 });
 
 test("site-php-lifecycle-v1 is advertised, and is the last entry", () => {

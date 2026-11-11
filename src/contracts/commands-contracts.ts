@@ -4846,7 +4846,8 @@ function parseConfigFileEntry(value: unknown): EnvironmentDeployConfigFile {
   const source = parseNonEmptyString(value, "source");
   if (
     relativePath.includes("..") || !SECRET_PLAN_NAME_RE.test(relativePath) ||
-    !SECRET_PLAN_NAME_RE.test(source)
+    !SECRET_PLAN_NAME_RE.test(source) || relativePath.endsWith(".tmp") ||
+    source.endsWith(".tmp")
   ) {
     throw new TypeError("Invalid environment deploy configFiles name");
   }

@@ -127,7 +127,7 @@ test({
     "a deploy with a secret key that has no material is refused, nothing written",
   permissions: perm,
   fn: () =>
-    withLayout(async (layout, dir) => {
+    withLayout(async (layout) => {
       await assertRejects(
         () =>
           materializeConfigFiles(
@@ -147,7 +147,6 @@ test({
         ]),
         true,
       );
-      assertEquals(dir.length > 0, true);
     }),
 });
 
@@ -156,7 +155,7 @@ test({
     "without requireAll a file lacking a value is skipped, never written with a gap",
   permissions: perm,
   fn: () =>
-    withLayout(async (layout, dir) => {
+    withLayout(async (layout) => {
       await materializeConfigFiles(
         layout,
         "proj",
@@ -174,7 +173,6 @@ test({
         await plannedConfigFilesMissing(layout, "proj", "env", [PGPASS]),
         true,
       );
-      assertEquals(dir.length > 0, true);
     }),
 });
 
@@ -268,7 +266,7 @@ test({
     "prune keeps planned files, an empty plan and removeConfigTree remove the folder",
   permissions: perm,
   fn: () =>
-    withLayout(async (layout, dir) => {
+    withLayout(async (layout) => {
       await materializeConfigFiles(
         layout,
         "proj",
@@ -291,7 +289,6 @@ test({
         await plannedConfigFilesMissing(layout, "proj", "env", [TEXT_ONLY]),
         true,
       );
-      assertEquals(dir.length > 0, true);
     }),
 });
 

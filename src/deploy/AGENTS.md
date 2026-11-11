@@ -162,8 +162,8 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    deny-set), joins the parts, and writes
    `<runDir>/deployments/<p>/<e>/configs/<relativePath>` (`0444`, folder `0700`,
    daemon-owned, on the `/run` tmpfs; never a state folder, so no state leaf).
-   A deploy whose `secretKey` has no material is refused before anything is
-   written (`requireAll`); rehydrate (`requireAll: false`) skips a file that
+   A deploy whose `secretKey` has no material is refused before any config file
+   is written (`requireAll`); rehydrate (`requireAll: false`) skips a file that
    lacks any value and never writes one with a gap. A text-only file needs no
    decrypt and no control-plane answer. Error text names the file and key,
    never content. The parts (no values) are kept in `deployment.json`
@@ -173,7 +173,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    is up; an empty list removes `configs/`), and `environment.stop` removes the
    folder. The target and its `.tmp` must be absent or regular files, and the
    `.tmp` is opened with `createNew` (`O_EXCL`). Parser limits
-   (`parseConfigFiles`): names match the secret plan rule and are unique, text
+   (`parseConfigFiles`): names match the secret plan rule, are unique and do not end in `.tmp`, text
    has no NUL, 64 KiB of text per file, 16 files per service, 256 KiB of text
    per deploy, UTF-8 bytes counted. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**

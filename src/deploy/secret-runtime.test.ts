@@ -5,6 +5,7 @@ import {
   plannedSecretsMissing,
   pruneStaleSecretFiles,
   removeSecretTree,
+  rewriteComposeFileSources,
   rewriteComposeSecretFilePaths,
   SECRET_FILE_MODE,
   writeSecretFiles,
@@ -672,4 +673,33 @@ test({
       await Deno.remove(root, { recursive: true });
     }
   },
+});
+
+test("rewriteComposeFileSources drops authored content, environment and external", () => {
+  const yaml = [
+    "configs:",
+    "  web_conf:",
+    "    content: hello",
+    "    environment: HOME",
+    "    external: true",
+    "    name: keep-me",
+    "",
+  ].join("\n");
+  const out = rewriteComposeSecretFilePaths(
+    yaml,
+    { runDir: "/r" },
+    "p",
+    "e",
+    [],
+  );
+  assertEquals(out, yaml);
+  const rewritten = rewriteComposeFileSources(yaml, "configs", "/r/configs", [{
+    source: "web_conf",
+    relativePath: "web--conf",
+  }]);
+  assertEquals(rewritten.includes("content"), false);
+  assertEquals(rewritten.includes("environment"), false);
+  assertEquals(rewritten.includes("external"), false);
+  assertEquals(rewritten.includes("file: /r/configs/web--conf"), true);
+  assertEquals(rewritten.includes("name: keep-me"), true);
 });

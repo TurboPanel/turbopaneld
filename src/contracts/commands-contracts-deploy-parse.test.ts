@@ -1952,3 +1952,14 @@ test("post-deploy commands and workers need a principal, and commands need a rel
     1,
   );
 });
+
+test("parseEnvironmentDeployPayload refuses config names ending in .tmp", () => {
+  rejectDeploy(
+    { configFiles: [configFile({ relativePath: "web--conf.tmp" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ source: "web_conf.tmp" })] },
+    "Invalid environment deploy configFiles name",
+  );
+});
