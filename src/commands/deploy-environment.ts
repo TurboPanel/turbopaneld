@@ -3151,6 +3151,39 @@ function holdCurrentFor(
     );
 }
 
+/** Runs one group of a site's post-deploy commands inside the release-promote phase. */
+async function runPostDeployPhase(
+  runtime: ReturnType<typeof resolveEnvironmentDeployRuntime>,
+  siteLifecycle: Parameters<typeof hasPostDeployWork>[0],
+  siteLifecycleIo: Parameters<typeof runBeforeTrafficPostDeploy>[1],
+  when: "before-traffic" | "after-switch",
+): Promise<void> {
+  if (!hasPostDeployWork(siteLifecycle, when)) return;
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+  if (when === "before-traffic") {
+    await runBeforeTrafficPostDeploy(siteLifecycle, siteLifecycleIo);
+  } else {
+    await runAfterSwitchPostDeploy(siteLifecycle, siteLifecycleIo);
+  }
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+}
+
+/** Marks the deploy applied and asks for a PHP patch pass when a PHP site went live. */
+async function recordAppliedDeploy(
+  deploymentDir: string,
+  desiredHash: string | undefined,
+  sites: Parameters<typeof sitesWithFrameworkLayouts>[0],
+): Promise<void> {
+  if (desiredHash !== undefined) {
+    await writeAppliedDeployHash(deploymentDir, desiredHash);
+  }
+  // A PHP site was applied: look for a PHP build older than the installed one,
+  // in the background (it waits behind this deploy's environment lock).
+  if (sites.some((site) => resolveSitePhpSeries(site) !== undefined)) {
+    requestPhpPatchPassAfterDeploy();
+  }
+}
+
 async function deployEnvironmentHolding(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -3375,11 +3408,12 @@ async function deployEnvironmentHolding(
   };
   // Commands that must pass before the new release takes traffic: every
   // site's run first, then the held sites switch; one failure switches none.
-  if (hasPostDeployWork(siteLifecycle, "before-traffic")) {
-    runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
-    await runBeforeTrafficPostDeploy(siteLifecycle, siteLifecycleIo);
-    runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
-  }
+  await runPostDeployPhase(
+    runtime,
+    siteLifecycle,
+    siteLifecycleIo,
+    "before-traffic",
+  );
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
     appliedReleases,
@@ -3402,11 +3436,12 @@ async function deployEnvironmentHolding(
   );
   // Commands that run right after the switch: a failure stops the deploy here,
   // so no worker restarts onto the release that just failed.
-  if (hasPostDeployWork(siteLifecycle, "after-switch")) {
-    runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
-    await runAfterSwitchPostDeploy(siteLifecycle, siteLifecycleIo);
-    runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
-  }
+  await runPostDeployPhase(
+    runtime,
+    siteLifecycle,
+    siteLifecycleIo,
+    "after-switch",
+  );
 
   // Read-only: what each site's document root runs (WordPress today), reported
   // so the control plane can warn about an unusable database pairing.
@@ -3539,14 +3574,11 @@ async function deployEnvironmentHolding(
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
-  if (parsedPayload.desiredHash !== undefined) {
-    await writeAppliedDeployHash(earlyDeploymentDir, parsedPayload.desiredHash);
-  }
-  // A PHP site was applied: look for a PHP build older than the installed one,
-  // in the background (it waits behind this deploy's environment lock).
-  if (sites.some((site) => resolveSitePhpSeries(site) !== undefined)) {
-    requestPhpPatchPassAfterDeploy();
-  }
+  await recordAppliedDeploy(
+    earlyDeploymentDir,
+    parsedPayload.desiredHash,
+    sites,
+  );
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,
