@@ -1038,7 +1038,28 @@ test("the same table resent with a higher generation raises the record", async (
       generationTable(HASH_1, TWO_PEERS, 8),
       deps,
     );
-    assertEquals(again.applied, false);
+    assertEquals(again.applied, true);
     assertEquals(await readTunnelGeneration(hostingDir), 8);
+    assertEquals((await readTunnelState(hostingDir))?.generation, 8);
+  });
+});
+
+test("an identical table with no generation after a counter reset leaves nothing stuck", async () => {
+  await withHost(async ({ layout, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_1, TWO_PEERS, 9),
+      deps,
+    );
+    await applyTunnelRoutes(layout, generationTable(HASH_1, TWO_PEERS), deps);
+    assertEquals(await readTunnelGeneration(hostingDir), undefined);
+    assertEquals((await readTunnelState(hostingDir))?.generation, undefined);
+    const reset = await applyTunnelRoutes(
+      layout,
+      generationTable(HASH_2, ["10.0.0.5"], 3),
+      deps,
+    );
+    assertEquals(reset.applied, true);
   });
 });

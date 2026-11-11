@@ -1309,6 +1309,12 @@ Manual recovery if a counter ever drops under the record: delete
 failure to write the high-water file is logged and never fails a table or deploy.
 A deploy at or below the record with no stored `inbound` cannot be corrected
 here; the next table does it.
+A stored table without a generation reads as -1, so any deploy with a generation
+keeps its own peers (the old behaviour). A deploy below the record but above the
+stored table's own generation (for example at 6 after a deploy at 7, with the
+table at 5) also keeps its own peers until the next table. A table resent with
+the same content but a different generation is applied in full, so the stored
+table's generation always follows the table last accepted.
 
 ## Deploy Hooks
 

@@ -144,7 +144,10 @@ async function unchangedResult(
   prior: TunnelState | undefined,
   live: string | undefined,
 ): Promise<TunnelRoutesResult | undefined> {
-  if (prior?.hash !== payload.hash) return undefined;
+  // A different generation is a full apply, so the stored table keeps it too.
+  if (
+    prior?.hash !== payload.hash || prior.generation !== payload.generation
+  ) return undefined;
   const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
   const filesOk = prior.peerId === undefined ||
     await peerFilesPresent(hostingDir, prior.peerId);
