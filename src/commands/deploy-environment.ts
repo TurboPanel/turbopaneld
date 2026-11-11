@@ -235,6 +235,7 @@ import {
   priorWritableMounts,
 } from "../deploy/compose-host-paths.ts";
 import {
+  configHostDirectory,
   materializeConfigFiles,
   pruneStaleConfigFiles,
   removeConfigTree,
@@ -2285,8 +2286,16 @@ async function deployContainerServices(
     const daemonSecretNames = new Set(
       (parsedPayload.secretPlan ?? []).map((e) => e.source),
     );
-    const daemonConfigNames = new Set(
-      (parsedPayload.configFiles ?? []).map((e) => e.source),
+    // Config sources are exempt only at the exact path the daemon wrote.
+    const configsDir = configHostDirectory(
+      layout,
+      parsedPayload.projectId,
+      parsedPayload.environmentId,
+    );
+    const daemonConfigFiles = new Map(
+      (parsedPayload.configFiles ?? []).map((
+        e,
+      ) => [e.source, join(configsDir, e.relativePath)]),
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
@@ -2303,7 +2312,7 @@ async function deployContainerServices(
         collectResolvedHostPaths(
           resolved.document ?? {},
           daemonSecretNames,
-          daemonConfigNames,
+          daemonConfigFiles,
         ),
         collectAuthoredHostPaths(yaml),
       ],

@@ -76,6 +76,8 @@ import { collectManagedLogs } from "../managed/logs.ts";
 import { probeManagedMemberHealth } from "../managed/health.ts";
 import { readManagedPermissions } from "../managed/permissions-read.ts";
 import { assertTestRunMayWrite } from "../permissions/test-write-guard.ts";
+import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { createNoopCommandOutputSink } from "../logs/contracts.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import type { SendCommandLogChunkFn } from "../logs/uploader.ts";
 import {
@@ -2774,7 +2776,12 @@ export class InstanceClient {
       : "always";
     clientTestHooks.rehydrateLocalDeployments({
       layout: resolveLayout(Deno.env.toObject()),
-      decryptSecrets: (ciphertexts) => apiClient.decryptSecrets(ciphertexts),
+      // Same wrapper every command's decrypt goes through, so a value rebuilt
+      // at boot or reconnect joins the redaction deny-set.
+      decryptSecrets: captureDecryptedSecrets(
+        (ciphertexts: string[]) => apiClient.decryptSecrets(ciphertexts),
+        createNoopCommandOutputSink(),
+      )!,
       rehydrate: async (deployments) =>
         parseRehydrateDeploymentResults(
           await apiClient.rehydrateDeploymentSecrets(deployments),

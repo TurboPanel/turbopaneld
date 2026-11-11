@@ -209,6 +209,11 @@ export function rewriteComposeFileSources(
   for (const entry of plan) {
     const existing = entries[entry.source];
     const next = isRecord(existing) ? { ...existing } : {};
+    // A file source takes no inline content, environment value or external
+    // reference; whatever the author wrote there must not sit beside `file`.
+    delete next.content;
+    delete next.environment;
+    delete next.external;
     next.file = join(dir, entry.relativePath);
     entries[entry.source] = next;
   }
