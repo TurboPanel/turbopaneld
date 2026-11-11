@@ -135,3 +135,20 @@ it regresses:
   `DENO_DIR` under it. `repointUvCurrent` & co. are no-ops when the root-owned
   `current` symlink is already right; `ensurePython` skips uv when the pinned
   interpreter is present.
+
+**Helper port lists and the account walls.** A helper container's loopback
+port reaches its Hosting Account only through a root-written list:
+`tp-host reach-ports-install <environment id>` copies the daemon's staged
+`<state>/reach/.stage/<id>.list` to `<config>/reach-ports/<id>.list`
+(`root:root 0600` in a `0700` folder) after checking every line (a principal,
+a port in 18080-18999), and `reach-ports-remove <id>` deletes it. The daemon
+module is `src/deploy/reach/reach-ports.ts`; it runs `php-loopback-sync` after
+either verb and throws when that fails, because a published port that is not
+yet guarded is open to the web servers and the daemon (Hosting Accounts are
+always refused by the band rule). The guard covers `127.0.0.1` only: caches
+must bind `127.0.0.1` and helper containers publish on `127.0.0.1` only, and a
+uid outside the band can still reach a helper container on its bridge address.
+A guarded port that more than one account claims (lists, cache units, app
+units) stays guarded and opens to none, with a warning, and `tp-host` refuses
+a list that names one port under two users. `<config>/reach-ports` and
+`<config>/cache` are refused to every generic verb (`tp_path_class`).

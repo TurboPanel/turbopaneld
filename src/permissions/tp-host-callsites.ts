@@ -1368,6 +1368,20 @@ const SITES: CallSite[] = [
   tpHost('src/deploy/native/apply-native-apps.ts|["-n","php-loopback-sync"]', {
     argv: ["php-loopback-sync"],
   }),
+  tpHost(
+    'src/deploy/reach/reach-ports.ts|["-n","reach-ports-install",environmentId]',
+    {
+      argv: ["reach-ports-install", "env-0123"],
+      setup: file(`${STATE}/reach/.stage/env-0123.list`, "alice 18100\n"),
+    },
+  ),
+  tpHost(
+    'src/deploy/reach/reach-ports.ts|["-n","reach-ports-remove",environmentId]',
+    { argv: ["reach-ports-remove", "env-0123"] },
+  ),
+  tpHost('src/deploy/reach/reach-ports.ts|["-n","php-loopback-sync"]', {
+    argv: ["php-loopback-sync"],
+  }),
 
   // --- control-plane hostname certificates ---------------------------------
   tpHost(

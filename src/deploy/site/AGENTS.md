@@ -263,7 +263,7 @@ Docker Compose. The daemon:
    with `IPAddressAllow=127.0.0.1 127.0.0.53` (the database proxy and
    systemd-resolved's stub). systemd filters by address, not port, so the port
    filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`, the
-   **account walls**). Every rule binds the principal band (uids 15001-60000,
+   **account walls**). Every rule but the guard rule below binds the principal band (uids 15001-60000,
    tp-host's `PRINCIPAL_ID_MIN`/`MAX`): every Hosting Account's PHP, cron,
    ssh, sftp, `sudo -u` and native app processes, with or without a PHP site.
    Replies come first (`ct state established,related accept`), so a native
@@ -273,12 +273,22 @@ Docker Compose. The daemon:
    database proxy), port 53 on 127.0.0.53 and on any loopback nameserver
    `/etc/resolv.conf` names, and the account's **own ports**: `uid . port`
    pairs (set `own_ports`) from `User=` and `Environment=PORT=` of every
-   `turbopanel-app-*.service` on disk, check copies included. So ProxySQL
+   `turbopanel-app-*.service` on disk, check copies included, of every
+   `turbopanel-cache-*.service` (a cache that listens on a port) and of the
+   root-written lists `<config>/reach-ports/<environment>.list` (lines of
+   `<user> <port>`, made by `tp-host reach-ports-install` from
+   `deploy/reach/reach-ports.ts`, which syncs the walls after and throws when
+   that fails). A cache's or a helper container's port is **guarded**: it
+   must sit in the listen band 18080-18999, is listed in the set `guarded`,
+   and the chain's first rule refuses a new connection to it from every uid
+   but root and the pair's own account, so other accounts, the web servers,
+   the daemon and builds are all refused. An app's port is never guarded. The
+   set and the rule exist only while a port is guarded, so a host without a
+   cache or helper container gets the same rules as before. So ProxySQL
    admin/metrics, other accounts' apps and loopback publishes, other sites and
    Apache's backend are closed, and a server an account starts by hand on
    loopback is refused to it too (nothing says which account a listener
-   belongs to). The `own_ports` set is the per-account opening the later
-   helper-container work extends. **Container networks:** new connections
+   belongs to). **Container networks:** new connections
    are refused that leave through a Docker bridge (`oifname` docker0 or
    `br-*`, so a network created after the sync is covered; a `br-` interface
    that is not Docker's `br-<12 hex>`, such as a LAN bridge, is left out by

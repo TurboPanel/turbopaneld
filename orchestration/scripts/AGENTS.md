@@ -125,7 +125,15 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
     <id>`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
     sync`, which lets only root and the daemon account reach the connector
-    metrics band on loopback, see `src/tunnels/AGENTS.md`); a control-plane hostname's uploaded certificate pair goes the
+    metrics band on loopback, see `src/tunnels/AGENTS.md`); a project's helper
+    container ports work the same way in `<config>/reach-ports/<environment
+    id>.list` (`reach-ports-install <id>` reads the daemon's staged
+    `<state>/reach/.stage/<id>.list`: one to 64 distinct `<user> <port>`
+    lines, each user a principal and each port in the listen band 18080-18999,
+    `TP_LISTEN_PORT_MIN`/`MAX`, kept equal to `lib/tp-php-loopback` and the
+    compose policy by tests; `reach-ports-remove <id>`; the daemon runs
+    `php-loopback-sync` after either, and no generic verb names
+    `<config>/reach-ports` or `<config>/cache`); a control-plane hostname's uploaded certificate pair goes the
     same way into the instance-certs role's `<state>/tls/certs`
     (`instance-cert-install <id>` reads the daemon's staged
     `<state>/system/instance-certs/<id>.{crt,key}`, checks one PEM chain and
