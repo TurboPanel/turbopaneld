@@ -206,6 +206,24 @@ test("a connector whose run token changed is restarted on the new one and report
   });
 });
 
+test("an installed connector whose token cannot be unsealed is left on its token and still repaired", async () => {
+  await withIo(async (io, calls) => {
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    const result = await handleTunnelConnectors(payload(), "now", {
+      io: unitIn(io, calls, "inactive"),
+      decryptSecrets: (envelopes: string[]) =>
+        Promise.resolve(envelopes.map(() => null)),
+    });
+    assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
+    assertEquals(calls.filter((c) => c.includes("tunnel-env-install")), []);
+    assert(calls.some((c) => c.includes(" start ")));
+  });
+});
+
 test("a removed tunnel's connector is stopped and its token copy deleted", async () => {
   await withIo(async (io, calls) => {
     await handleTunnelConnectors(payload(), "now", {
