@@ -357,7 +357,7 @@ async function lifecycleLocked(
     logWarn(
       "commands",
       `environment.lifecycle worker ${parsedPayload.action} failed env=${parsedPayload.environmentId}: ${
-        err instanceof Error ? err.message : String(err)
+        err instanceof Error ? err.message : Deno.inspect(err)
       }`,
     );
   }

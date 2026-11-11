@@ -211,7 +211,7 @@ export function parseWorkerTemplate(
   environmentId: string,
 ): InstalledWorker | undefined {
   const field = (name: string): string | undefined =>
-    new RegExp(String.raw`^X-TurboPanel-${name}=(.+)$`, "m").exec(text)?.[1]
+    new RegExp(`^X-TurboPanel-${name}=(.+)$`, "m").exec(text)?.[1]
       ?.trim();
   if (field("Environment") !== environmentId) return undefined;
   const service = field("Service");
@@ -258,20 +258,18 @@ async function activeState(io: WorkerIo, unit: string): Promise<string> {
   return result.stdout.trim().split("\n")[0] ?? "unknown";
 }
 
-/**
- * Watch restarted instances for a while. Returns a warning for each worker
- * that did not stay running; a worker finishing its job is only a transcript
- * line. The deploy never fails on a worker.
- */
-export async function watchWorkerInstances(
+type WatchedInstance = { unit: string; label: string };
+
+/** Check the instances until all are active or the attempts run out; returns the rest and their last states. */
+async function pollInstances(
   io: WorkerIo,
-  instances: ReadonlyArray<{ unit: string; label: string }>,
-): Promise<string[]> {
+  instances: readonly WatchedInstance[],
+): Promise<{ pending: WatchedInstance[]; states: Map<string, string> }> {
   const sleep = io.sleep ?? defaultSleep;
   const states = new Map<string, string>();
   let pending = [...instances];
   for (let attempt = 0; attempt < WORKER_POLL_ATTEMPTS; attempt++) {
-    const next: typeof pending = [];
+    const next: WatchedInstance[] = [];
     await forEachSequential(pending, async (entry) => {
       const state = await activeState(io, entry.unit);
       states.set(entry.unit, state);
@@ -283,6 +281,37 @@ export async function watchWorkerInstances(
       await sleep(WORKER_POLL_INTERVAL_MS);
     }
   }
+  return { pending, states };
+}
+
+/** Print an instance's journal tail to the transcript. */
+async function printJournalTail(
+  io: WorkerIo,
+  entry: WatchedInstance,
+): Promise<void> {
+  const journal = await readUnitJournal(
+    io.run,
+    entry.unit,
+    WORKER_JOURNAL_TAIL_LINES,
+  );
+  io.onLine("stderr", `--- ${entry.label} journal ---`);
+  for (const line of journal.split("\n")) {
+    if (line.trim().length > 0) {
+      io.onLine("stderr", line.replace(JOURNAL_PREFIX_RE, ""));
+    }
+  }
+}
+
+/**
+ * Watch restarted instances for a while. Returns a warning for each worker
+ * that did not stay running; a worker finishing its job is only a transcript
+ * line. The deploy never fails on a worker.
+ */
+export async function watchWorkerInstances(
+  io: WorkerIo,
+  instances: ReadonlyArray<WatchedInstance>,
+): Promise<string[]> {
+  const { pending, states } = await pollInstances(io, instances);
   const warnings: string[] = [];
   await forEachSequential(pending, async (entry) => {
     const state = states.get(entry.unit);
@@ -293,17 +322,7 @@ export async function watchWorkerInstances(
       );
       return;
     }
-    const journal = await readUnitJournal(
-      io.run,
-      entry.unit,
-      WORKER_JOURNAL_TAIL_LINES,
-    );
-    io.onLine("stderr", `--- ${entry.label} journal ---`);
-    for (const line of journal.split("\n")) {
-      if (line.trim().length > 0) {
-        io.onLine("stderr", line.replace(JOURNAL_PREFIX_RE, ""));
-      }
-    }
+    await printJournalTail(io, entry);
     warnings.push(entry.label);
   });
   return warnings;

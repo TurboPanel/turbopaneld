@@ -98,7 +98,16 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     below, and a `turbopanel-cron-*.service` may carry exactly one
     `EnvironmentFile=`, equal to `<config>/site-env/<the unit's own
     User=>/<site id>.env` (`tp_site_envfile_ok`: a unit can never load another
-    account's variables; no `-` prefix, no second line). `site-env-install
+    account's variables; no `-` prefix, no second line). A
+    `turbopanel-deploycmd-*.service` or `turbopanel-worker-*@.service` (a site's
+    post-deploy commands and workers) may carry the same file and, beyond the
+    account checks, must carry (`tp_site_lifecycle_ok`) exactly one
+    `ExecStartPre=+<lib>/tp-php-loopback sync` (the only `+` prefix any tenant
+    unit may have), `IPAddressDeny=` and `IPAddressAllow=` equal to
+    `SITE_IP_DENY` / `SITE_IP_ALLOW` (the same strings the per-site PHP unit is
+    pinned to) and `PrivateDevices=yes`; no other unit may carry these keys.
+    `journalctl --unit=` accepts these two name families beside
+    `turbopanel-app-*`. `site-env-install
     USER ID` / `site-env-remove USER ID` fill and empty those per-account
     folders the way `app-env-install` does (staged file
     `<state>/sites/.env-stage/<id>.env`, the same content checker, `0600 root:root`

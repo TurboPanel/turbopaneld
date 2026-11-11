@@ -126,17 +126,20 @@ export async function readPhpRuntimeRecords(
   } catch {
     return [];
   }
-  await forEachSequential(names.sort(), async (name) => {
-    try {
-      const parsed: unknown = JSON.parse(
-        await Deno.readTextFile(join(dir, name)),
-      );
-      if (isRecord(parsed)) records.push(parsed);
-    } catch {
-      // A broken record is ignored; the next apply writes it again.
-    }
-  });
-  return records.sort((a, b) => a.id.localeCompare(b.id));
+  await forEachSequential(
+    names.toSorted((a, b) => a.localeCompare(b)),
+    async (name) => {
+      try {
+        const parsed: unknown = JSON.parse(
+          await Deno.readTextFile(join(dir, name)),
+        );
+        if (isRecord(parsed)) records.push(parsed);
+      } catch {
+        // A broken record is ignored; the next apply writes it again.
+      }
+    },
+  );
+  return records.toSorted((a, b) => a.id.localeCompare(b.id));
 }
 
 /**
@@ -151,11 +154,10 @@ export function readPhpPackageVersions(
   const versions: Record<string, string> = {};
   for (const stanza of statusText.split(/\n\s*\n/)) {
     const field = (name: string): string | undefined =>
-      new RegExp(String.raw`^${name}: (.+)$`, "m").exec(stanza)?.[1]?.trim();
+      new RegExp(`^${name}: (.+)$`, "m").exec(stanza)?.[1]?.trim();
     const series = /^php(\d{1,3}\.\d{1,3})-cli$/.exec(field("Package") ?? "")
       ?.[1];
     if (series === undefined) continue;
-    if (!(field("Status") ?? "").endsWith(" installed")) continue;
     if ((field("Status") ?? "") !== "install ok installed") continue;
     const raw = field("Version");
     if (raw === undefined) continue;
@@ -316,61 +318,64 @@ async function passBody(io: PhpPatchIo): Promise<PhpPatchPassResult> {
   const outdated = new Set<string>();
   let stopped = false;
 
-  await forEachSequential(Object.keys(versions).sort(), async (series) => {
-    if (stopped) return;
-    const changeMs = await io.changeTime(series);
-    if (changeMs === null) return;
-    lastChange.set(series, changeMs);
-    const mine = records.filter((record) => record.series === series);
-    const stale: PhpRuntimeRecord[] = [];
-    const staleWorkers: Array<
-      { record: PhpRuntimeRecord; workers: InstalledWorker[] }
-    > = [];
-    await forEachSequential(mine, async (record) => {
-      const start = await unitStart(io, sitePhpServiceName(record.id));
-      if (isStale(start, changeMs)) outdated.add(record.id);
-      if (failedMarks.get(record.id) === changeMs) return;
-      if (isStale(start, changeMs)) stale.push(record);
-      const workers = await staleWorkersOf(io, record, changeMs);
-      if (workers.length > 0) staleWorkers.push({ record, workers });
-    });
-    const master = `turbopanel-php-fpm@${series}.service`;
-    const masterStale = isStale(await unitStart(io, master), changeMs);
-    if (stale.length === 0 && staleWorkers.length === 0 && !masterStale) {
-      return;
-    }
-    // Wait out the package run: a pass during it would restart onto a
-    // half-installed build.
-    const settled = io.now() - changeMs >= PHP_PATCH_SETTLE_MS &&
-      await io.packageRunIdle();
-    if (!settled) {
-      result.waiting.push(series);
-      resumePending = true;
-      return;
-    }
-    const release = await holdPruneKeys([phpSeriesHoldKey(series)]);
-    try {
-      const outcome = await restartRuntimes(io, series, changeMs, stale);
-      result.restarted.push(...outcome.restarted);
-      for (const id of outcome.restarted) outdated.delete(id);
-      if (outcome.error !== undefined) {
-        lastError = outcome.error;
-        result.stoppedAt = outcome.stoppedAt;
-        resumePending = true;
-        stopped = true;
+  await forEachSequential(
+    Object.keys(versions).toSorted((a, b) => a.localeCompare(b)),
+    async (series) => {
+      if (stopped) return;
+      const changeMs = await io.changeTime(series);
+      if (changeMs === null) return;
+      lastChange.set(series, changeMs);
+      const mine = records.filter((record) => record.series === series);
+      const stale: PhpRuntimeRecord[] = [];
+      const staleWorkers: Array<
+        { record: PhpRuntimeRecord; workers: InstalledWorker[] }
+      > = [];
+      await forEachSequential(mine, async (record) => {
+        const start = await unitStart(io, sitePhpServiceName(record.id));
+        if (isStale(start, changeMs)) outdated.add(record.id);
+        if (failedMarks.get(record.id) === changeMs) return;
+        if (isStale(start, changeMs)) stale.push(record);
+        const workers = await staleWorkersOf(io, record, changeMs);
+        if (workers.length > 0) staleWorkers.push({ record, workers });
+      });
+      const master = `turbopanel-php-fpm@${series}.service`;
+      const masterStale = isStale(await unitStart(io, master), changeMs);
+      if (stale.length === 0 && staleWorkers.length === 0 && !masterStale) {
         return;
       }
-      await restartWorkers(io, staleWorkers);
-      if (masterStale) {
-        const restart = await systemctl(io.run, ["restart", master]);
-        if (!restart.success) {
-          logWarn("deploy", `${master} did not restart: ${restart.stderr}`);
-        }
+      // Wait out the package run: a pass during it would restart onto a
+      // half-installed build.
+      const settled = io.now() - changeMs >= PHP_PATCH_SETTLE_MS &&
+        await io.packageRunIdle();
+      if (!settled) {
+        result.waiting.push(series);
+        resumePending = true;
+        return;
       }
-    } finally {
-      release();
-    }
-  });
+      const release = await holdPruneKeys([phpSeriesHoldKey(series)]);
+      try {
+        const outcome = await restartRuntimes(io, series, changeMs, stale);
+        result.restarted.push(...outcome.restarted);
+        for (const id of outcome.restarted) outdated.delete(id);
+        if (outcome.error !== undefined) {
+          lastError = outcome.error;
+          result.stoppedAt = outcome.stoppedAt;
+          resumePending = true;
+          stopped = true;
+          return;
+        }
+        await restartWorkers(io, staleWorkers);
+        if (masterStale) {
+          const restart = await systemctl(io.run, ["restart", master]);
+          if (!restart.success) {
+            logWarn("deploy", `${master} did not restart: ${restart.stderr}`);
+          }
+        }
+      } finally {
+        release();
+      }
+    },
+  );
 
   await refreshSnapshot(io, versions, records, outdated);
   return result;

@@ -204,6 +204,15 @@ function postDeployIo(io: SiteLifecycleIo): PostDeployIo {
   };
 }
 
+/** Say what runs, run it, and report whether it passed. */
+function runJob(io: SiteLifecycleIo, job: PostDeployJob): Promise<boolean> {
+  io.onLine(
+    "stdout",
+    `running post-deploy commands for ${job.site.composeServiceName} in release ${job.release.releaseId}`,
+  );
+  return runPostDeployUnit(postDeployIo(io), job.opts);
+}
+
 /** Switch a held site's `current` to its new release. */
 function swapHeld(deploy: SiteLifecycleDeploy, job: PostDeployJob) {
   return swapCurrentSymlink(resolveReleasePaths(deploy.layout, {
@@ -226,11 +235,7 @@ export async function runBeforeTrafficPostDeploy(
 ): Promise<void> {
   const jobs = postDeployJobs(deploy, "before-traffic");
   await forEachSequential(jobs, async (job) => {
-    io.onLine(
-      "stdout",
-      `running post-deploy commands for ${job.site.composeServiceName} in release ${job.release.releaseId}`,
-    );
-    const ok = await runPostDeployUnit(postDeployIo(io), job.opts);
+    const ok = await runJob(io, job);
     if (!ok) {
       throw postDeployBeforeTrafficFailure(job.site.composeServiceName);
     }
@@ -258,11 +263,7 @@ export async function runAfterSwitchPostDeploy(
   await forEachSequential(
     postDeployJobs(deploy, "after-switch"),
     async (job) => {
-      io.onLine(
-        "stdout",
-        `running post-deploy commands for ${job.site.composeServiceName} in release ${job.release.releaseId}`,
-      );
-      const ok = await runPostDeployUnit(postDeployIo(io), job.opts);
+      const ok = await runJob(io, job);
       if (!ok) {
         throw new PostDeployFailedAfterSwitchError({
           composeServiceName: job.site.composeServiceName,

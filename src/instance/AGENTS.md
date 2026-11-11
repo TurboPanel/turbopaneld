@@ -63,6 +63,13 @@ needs socket mode. Anywhere else the result is `ok: false` with
 `TUNNEL_TOKEN_REMOTE_REFUSAL` / `PUBLIC_URLS_REMOTE_REFUSAL` and nothing is
 written. Details: `src/tunnels/AGENTS.md`.
 
+**Site commands and workers (`site-php-lifecycle-v1`).** This daemon runs
+`sites[].postDeploy` (commands in each newly built release, before it takes
+traffic or right after the switch) and keeps `sites[].workers` running. It is the
+last entry of `DAEMON_WIRE_FEATURES`; the control plane refuses a deploy that
+carries either for a daemon without it, because an older daemon would drop both
+fields. Detail: `src/deploy/site/AGENTS.md`.
+
 **Topology generation off the wire (`topology-generation-optional-v1`).** A
 control plane that lists it no longer needs the topology generation numbers.
 The daemon then leaves `metadata.topologyGeneration` off metrics samples,

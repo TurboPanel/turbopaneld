@@ -526,6 +526,87 @@ root-owned `0550` by design:
   at the next deploy. A site with no record (installed before it existed)
   loses nothing and one line is logged; `principal-remove` still takes the whole
   account folder. A refused removal keeps the record and is retried.
+- **Post-deploy commands** (`sites[].postDeploy`, `post-deploy.ts`,
+  `lifecycle-deploy.ts`, feature `site-php-lifecycle-v1`). One
+  `turbopanel-deploycmd-<env>-<service>.service` per site: `Type=oneshot`, the
+  site's account, group and slice, `WorkingDirectory=` the **new release's own
+  folder** (not `current`), `EnvironmentFile=` the site's variables copy,
+  `TURBOPANEL_PHP=<series>`, the cron sandbox (`principalHardeningLines`)
+  plus `PrivateDevices=yes`, `IPAddressDeny/Allow` taken from the PHP unit's
+  `SITE_PHP_IP_DENY` / `SITE_PHP_IP_ALLOW`, and the same
+  `ExecStartPre=+<lib>/tp-php-loopback sync` guard the PHP unit has, so a first
+  deploy (no PHP unit yet) is walled too. A Laravel release adds its own
+  `bootstrap/cache` as `ReadWritePaths=-…` (the one folder of a sealed release
+  the site account owns). No `[Install]`: only the daemon starts it. The first
+  `ExecStart` prints `turbopanel-post-deploy-begin <release id>` so the log
+  reader knows where this run starts.
+  **Success is what `systemctl start` says, never the journal**: the commands
+  write to the same journal and could print any marker or "Finished" line. The
+  journal is read only to show the output (after the last marker; read again,
+  at most ten times 300 ms apart, until systemd's own closing line is there).
+  *Timing* is per site: `before-traffic` (the default) holds `current` while
+  the release is published (`siteHeldForPostDeploy`: the site has such commands
+  and a release is serving), runs every such site's commands right after the
+  environment files and **before any site is applied**, and switches the held
+  sites only when all passed (one failure fails the deploy and switches none:
+  "was not switched in … keeps serving"); a first deploy is published at once and
+  its commands still run before any vhost serves it. `after-switch` publishes
+  normally, runs right after the site apply and before the workers restart; a
+  failure throws at that point (`PostDeployFailedAfterSwitchError`, code
+  `post_deploy_failed_after_switch`, both release ids in `details`), so no worker
+  restarts onto the failed release. Neither timing runs for a rollback or a
+  release this deploy did not build (`AppliedRelease.built`). **The command
+  outcome carries only the sentence today** (a failed outcome sends no
+  `result`), so the control plane cannot yet read the code and ids. Commands
+  need a principal and a release-backed site; a site with no PHP is refused
+  before the build (`assertSiteLifecyclePhp`).
+- **Background workers** (`sites[].workers`, `workers.ts`). One template
+  `turbopanel-worker-<env>-<service>-<name>@.service` per worker, instances
+  `@1…@<processes>` (at most 8), `Restart=always`, `RestartSec=5`,
+  `TimeoutStopSec=<stop timeout>` (default 90) with the default kill mode and
+  SIGTERM: a queue worker finishes its job and systemd waits before it kills.
+  Same account, variables and walls as the command unit; `WorkingDirectory=`
+  is `current` (the document root for a managed-directory site). The template
+  names its environment, site and instance count in `X-TurboPanel-*` lines so
+  stop, lifecycle and the patch restarts find a site's workers from the unit
+  files. Every deploy that reaches the apply installs changed templates,
+  enables instances `@1…@N`, disables `@N+1…@8`, and restarts `@1…@N` in **one**
+  `systemctl restart --no-block` (systemd stops them in parallel and a long job
+  never holds the deploy), then checks `is-active` every 2 s for at most 30 s:
+  a worker still starting or stopping is a transcript line, one that did not
+  stay running is a result warning with its journal tail (never a failed
+  deploy). A worker the payload no longer names is disabled, stopped and
+  removed; `environment.stop` removes every worker and command unit before the
+  sites (and so before the variables copy); `environment.lifecycle` starts,
+  stops or restarts the instances. After installing or removing either unit
+  family the daemon runs `tp-host php-loopback-sync`; the loopback rules cover
+  the whole principal uid band, so no unit file is needed for a user to be
+  walled. tp-host pins the unit lines (`tp_site_lifecycle_ok`): exactly one
+  `ExecStartPre=+<lib>/tp-php-loopback sync`, the two address-filter strings and
+  `PrivateDevices=yes`, and reads `journalctl` for these two names only.
+- **PHP patch restarts** (`php-patch-restart.ts`, owner decision 2026-11-10:
+  daily and automatic). The PHP package archive joins the automatic update
+  origins (`os-security-updates`). When a package run replaces a series'
+  binaries, running runtimes keep the old build until restarted. The daemon
+  watches the binaries' `ctime` every ten minutes (no `systemctl` call when none
+  moved), after its boot reconcile and after each deploy that applied a PHP
+  site. A change is *settled* when it is 120 s old and `/var/lib/dpkg/updates`
+  is empty (both are daemon read grants). A pass takes the series' prune hold,
+  then per series restarts, in record order and each under its environment's
+  deploy lock: every stale runtime (`systemctl show` says active and started
+  before the change; an inactive FastCGI runtime needs nothing), with a probe
+  before and after; then the stale workers (gracefully); then the shared master
+  `turbopanel-php-fpm@<series>`. The first site that answered before and does
+  not after **stops the whole pass** (later runtimes keep the old build) and is
+  shown on the server page; the next pass skips it for that change and carries
+  on with the rest, and a deploy of the site or a newer change clears the mark.
+  A site that was not answering before is restarted and does not stop the pass.
+  Records (`<state>/sites/.php-runtimes/<id>.json`: series, mode, environment,
+  service, probe URL, patch version) are written when a runtime is committed and
+  removed with it; the patch versions and the sites' versions go out in the
+  presence snapshot's `runtimes.php` (`versions`, `sites`, `restartError`) from
+  a cache the pass fills (`host/php-patch-cache.ts`). `systemctl show` is run
+  without sudo; that is unproven on a managed host (tp-host has no `show` verb).
 - **nginx follows no link below a release-backed document root.** It serves
   one with `disable_symlinks on from=$document_root`, so **every** symlink under
   the root answers 403 — including links that stay inside the release, such as

@@ -258,7 +258,7 @@ async function removeEnvironmentSiteUnits(
     logWarn(
       "commands",
       `environment.stop worker teardown failed env=${environmentId}: ${
-        err instanceof Error ? err.message : String(err)
+        err instanceof Error ? err.message : Deno.inspect(err)
       }`,
     );
   }
