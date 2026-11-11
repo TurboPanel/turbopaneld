@@ -1,0 +1,92 @@
+---
+- name: Assert supported CPU architecture
+  ansible.builtin.assert:
+    that:
+      - ansible_architecture in ['aarch64', 'x86_64']
+    fail_msg: >-
+      Unsupported CPU architecture '{{ ansible_architecture }}'.
+      TurboPanel supports 64-bit Linux only: aarch64 (arm64), x86_64 (amd64).
+
+- name: Resolve Valkey release architecture
+  ansible.builtin.set_fact:
+    valkey_runtime_arch: "{{ 'arm64' if ansible_architecture == 'aarch64' else 'x86_64' }}"
+
+# setfacl, for the traverse-only grants below.
+- name: Ensure ACL tooling is present
+  ansible.builtin.apt:
+    lock_timeout: 300
+    name: acl
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Check vendored Valkey binary
+  ansible.builtin.stat:
+    path: "{{ valkey_runtime_root }}/{{ valkey_runtime_version }}/bin/valkey-server"
+  register: _valkey_runtime_pinned
+
+# Before vendoring: the install below writes into this directory. It stays 0750
+# with an `other:x` ACL (runtime-access, below): every Hosting Account reaches a
+# version by its path without being able to list what else is installed.
+- name: Ensure the Valkey tree root
+  ansible.builtin.file:
+    path: "{{ valkey_runtime_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Let every site owner's Linux user reach the Valkey tree
+  ansible.builtin.include_role:
+    name: runtime-access
+  vars:
+    runtime_access_dirs: ["{{ valkey_runtime_root }}"]
+
+# Only the server and its licence are taken from the tarball; nothing in it is
+# ever executed here. A digest that differs refuses the install with a message
+# naming the pin.
+- name: Install Valkey into the runtimes directory
+  when: not _valkey_runtime_pinned.stat.exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    VER="{{ valkey_runtime_version }}"
+    ARCH="{{ valkey_runtime_arch }}"
+    SHA256="{{ valkey_runtime_sha256[valkey_runtime_arch] }}"
+    TMP="$(mktemp -d)"
+    DEST="{{ valkey_runtime_root }}/${VER}"
+    NAME="valkey-${VER}-jammy-${ARCH}"
+    curl -fsSL -o "$TMP/valkey.tar.gz" "https://download.valkey.io/releases/${NAME}.tar.gz"
+    GOT="$(sha256sum "$TMP/valkey.tar.gz" | cut -d' ' -f1)"
+    [ "$GOT" = "${SHA256}" ] || {
+      echo "Valkey ${VER} (${ARCH}): SHA-256 mismatch, expected ${SHA256}, got ${GOT}; refusing to install. To accept a re-published file, update valkey_runtime_sha256 in orchestration/roles/valkey-runtime/defaults/main.yml" >&2
+      rm -rf "$TMP"
+      exit 1
+    }
+    mkdir "$TMP/extract"
+    tar -xzf "$TMP/valkey.tar.gz" -C "$TMP/extract" --strip-components=1 \
+      "${NAME}/bin/valkey-server" "${NAME}/share/LICENSE"
+    install -d -m 0755 -o root -g root "$DEST" "$DEST/bin" "$DEST/share"
+    install -m 0755 -o root -g root "$TMP/extract/bin/valkey-server" "$DEST/bin/valkey-server"
+    install -m 0644 -o root -g root "$TMP/extract/share/LICENSE" "$DEST/share/LICENSE"
+    rm -rf "$TMP"
+  args:
+    executable: /bin/bash
+    creates: "{{ valkey_runtime_root }}/{{ valkey_runtime_version }}/bin/valkey-server"
+
+- name: Point the Valkey current link at the pinned version
+  ansible.builtin.file:
+    src: "{{ valkey_runtime_root }}/{{ valkey_runtime_version }}"
+    dest: "{{ valkey_runtime_root }}/current"
+    state: link
+    force: true
+
+# The default snapshot forks the server; without this the fork can fail under
+# memory pressure. Host-wide, so it is set only on a server that runs a cache.
+- name: Enable memory overcommit for cache snapshots
+  ansible.posix.sysctl:
+    name: vm.overcommit_memory
+    value: "1"
+    state: present
+    sysctl_set: true
+    reload: true
+    sysctl_file: /etc/sysctl.d/99-turbopanel-cache.conf

@@ -360,6 +360,16 @@ export const NODE_APP_RUNTIME_APPLY_PLAYBOOK = join(
   "node-app-runtime-apply.yml",
 );
 /**
+ * Vendors the Valkey server that project caches run, under
+ * `vendor/valkey/<version>`, with its licence beside the binary. Run lazily,
+ * only when the pinned binary is missing.
+ */
+export const CACHE_RUNTIME_APPLY_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "cache-runtime-apply.yml",
+);
+/**
  * Vendors the **tenant** Deno release for native `runtime: deno` apps, under
  * `vendor/deno-app/<series>/current`. Nothing else on the host runs it: the
  * panel itself is not started from this tree.

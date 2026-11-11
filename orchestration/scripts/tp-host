@@ -108,6 +108,15 @@ TP_LISTEN_PORT_MIN=18080
 TP_LISTEN_PORT_MAX=18999
 # Most lines one list may hold (the daemon's helperReach cap is 32 per deploy).
 TP_REACH_MAX_LINES=64
+# Project caches: one folder per cache under <config>/cache (root:<account>
+# 0750, the unit's config), the daemon's staged configs under
+# <state>/caches/.stage, and the memory limit the API accepts in MiB
+# (MAX_CACHE_MEMORY_MB in the daemon's contracts; a test keeps them equal).
+R_CACHE="$R_CONFIG/cache"
+R_CACHE_STAGE="$R_STATE/caches/.stage"
+TP_CACHE_MEM_MIN_MB=16
+TP_CACHE_MEM_MAX_MB=65536
+TP_CACHE_CONF_MAX=4096
 # Longest run token tunnel-env-install accepts (TUNNEL_TOKEN_RE in
 # src/tunnels/connector-unit.ts; a test keeps the two equal).
 TP_TUNNEL_TOKEN_MAX=2048
@@ -382,7 +391,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible|"$R_STATE"/reach) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible|"$R_STATE"/reach|"$R_STATE"/caches) return 0 ;;
   esac
   return 1
 }
@@ -1373,6 +1382,10 @@ tp_unit_ok() {
       ;;
     turbopanel-tunnel-*)
       tp_tunnel_unit_ok "$_uk_file" "$_uk_name"
+      return
+      ;;
+    turbopanel-cache-*)
+      tp_cache_unit_ok "$_uk_file" "$_uk_name"
       return
       ;;
     *) ;;
@@ -3193,7 +3206,7 @@ tp_verb_systemctl() {
 tp_verb_journalctl() {
   [ "$#" -eq 5 ] || tp_die "journalctl: unsupported form"
   case "$1" in
-    --unit=turbopanel-app-*|--unit=turbopanel-deploycmd-*|--unit=turbopanel-worker-*) ;;
+    --unit=turbopanel-app-*|--unit=turbopanel-cache-*|--unit=turbopanel-deploycmd-*|--unit=turbopanel-worker-*) ;;
     *) tp_die "journalctl: refusing unit $1" ;;
   esac
   tp_unit_name_ok "${1#--unit=}" || tp_die "journalctl: refusing unit $1"
@@ -5999,6 +6012,300 @@ tp_verb_reach_ports_remove() {
   rm -f -- "./$1.list"
 }
 
+# --- project caches ---------------------------------------------------------
+# A project cache is a Valkey process run as one Hosting Account. Four things
+# are root's here, each tied to the account and the cache id:
+#   <home>/cache/<id>           data folder, <account>:<account> 0700 (the parent
+#                               <home>/cache is root:root 0755, so the account
+#                               cannot swap it for a link)
+#   <config>/cache/<id>         root:<account> 0750, holding valkey.conf 0640
+#   turbopanel-cache-<id>.service   the unit
+#   <state>/caches/.stage/<id>.conf the daemon's staged config, copied by
+#                               cache-config-install
+# Neither the unit nor the config is checked line by line: each must BE the text
+# the daemon renders (src/deploy/cache/{unit,config}.ts), rebuilt below from the
+# few values that vary, so no other directive can ride along. Persistence and
+# eviction stay at the engine defaults: there is no save, appendonly or
+# maxmemory-policy line, and CONFIG is denied to the login.
+
+tp_cache_id_ok() { tp_uuid_ok "$1"; }
+
+# The login's rules: the daemon's CACHE_ACL_RULES.
+TP_CACHE_ACL='~* &* +@all -config -debug -module -shutdown -replicaof -slaveof -sync -psync -failover -migrate -cluster -pfdebug -pfselftest -script|debug -acl +acl|whoami +acl|cat'
+
+# The cache id belongs to one account: its config folder's group and an
+# installed unit's User= must name that account. The test host cannot chown, so
+# the group is only read for real.
+tp_cache_owner_ok() {
+  _co_id="$1"
+  _co_user="$2"
+  if [ -z "$TP_TEST" ] && [ -d "$R_CACHE/$_co_id" ] && [ ! -L "$R_CACHE/$_co_id" ]; then
+    [ "$(stat -c '%g' "$R_CACHE/$_co_id")" = "$(tp_gid_of_group "$_co_user")" ] ||
+      return 1
+  fi
+  if [ -f "$R_UNITS/turbopanel-cache-$_co_id.service" ]; then
+    _co_have="$(sed -n '/^User=/{s/^User=//p;q}' "$R_UNITS/turbopanel-cache-$_co_id.service")"
+    [ -z "$_co_have" ] || [ "$_co_have" = "$_co_user" ] || return 1
+  fi
+  return 0
+}
+
+# A port the daemon may give a cache: inside the listen band, no leading zero.
+tp_cache_port_ok() {
+  case "$1" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 5 ] && [ "$1" -ge "$TP_LISTEN_PORT_MIN" ] && [ "$1" -le "$TP_LISTEN_PORT_MAX" ]
+}
+
+# valkey.conf for ID, ACCOUNT, MB, PORT ("" for a socket cache) and the login
+# password's SHA-256, exactly as renderCacheConfig writes it.
+tp_cache_conf_text() {
+  _cx_id="$1"
+  _cx_user="$2"
+  _cx_mb="$3"
+  _cx_port="$4"
+  _cx_sha="$5"
+  printf '%s\n' \
+    '# Managed by TurboPanel; regenerated on every apply.' \
+    'supervised systemd' \
+    'daemonize no' \
+    'logfile ""' \
+    "dir $R_PRINCIPALS/$_cx_user/cache/$_cx_id"
+  if [ -z "$_cx_port" ]; then
+    printf '%s\n' \
+      'port 0' \
+      "unixsocket /run/turbopanel-cache-$_cx_id/valkey.sock" \
+      'unixsocketperm 600'
+  else
+    printf '%s\n' "port $_cx_port" 'bind 127.0.0.1'
+  fi
+  printf '%s\n' \
+    'maxclients 1000' \
+    "maxmemory ${_cx_mb}mb" \
+    'sanitize-dump-payload yes' \
+    'enable-debug-command no' \
+    'enable-module-command no' \
+    'enable-protected-configs no' \
+    'user default off' \
+    "user app on #$_cx_sha $TP_CACHE_ACL"
+}
+
+# The staged config for cache ID of ACCOUNT: the memory limit, the port (0 means
+# a socket cache) and the password hash come from its own lines (each must pass
+# its shape), then the whole file must equal tp_cache_conf_text.
+tp_cache_conf_ok() {
+  _cf_file="$1"
+  _cf_id="$2"
+  _cf_user="$3"
+  tp_content_plain "$_cf_file" || return 1
+  _cf_mb="$(sed -n '/^maxmemory /{s/^maxmemory \([0-9]\{1,5\}\)mb$/\1/p;q}' "$_cf_file")"
+  case "$_cf_mb" in ''|0*) return 1 ;; esac
+  [ "$_cf_mb" -ge "$TP_CACHE_MEM_MIN_MB" ] && [ "$_cf_mb" -le "$TP_CACHE_MEM_MAX_MB" ] || return 1
+  _cf_port="$(sed -n '/^port /{s/^port \([0-9]\{1,5\}\)$/\1/p;q}' "$_cf_file")"
+  case "$_cf_port" in
+    0) _cf_port="" ;;
+    '') return 1 ;;
+    *) tp_cache_port_ok "$_cf_port" || return 1 ;;
+  esac
+  _cf_sha="$(sed -n '/^user app on #/{s/^user app on #\([0-9a-f]\{64\}\) .*$/\1/p;q}' "$_cf_file")"
+  [ -n "$_cf_sha" ] || return 1
+  _cf_have="$(cat -- "$_cf_file"; printf x)"
+  _cf_want="$(tp_cache_conf_text "$_cf_id" "$_cf_user" "$_cf_mb" "$_cf_port" "$_cf_sha"; printf x)"
+  [ "$_cf_have" = "$_cf_want" ]
+}
+
+# turbopanel-cache-<id>.service for ID, ACCOUNT, the Valkey patch release,
+# MemoryMax in bytes and PORT ("" for a socket cache), exactly as
+# renderCacheUnit writes it.
+tp_cache_unit_text() {
+  _ct_id="$1"
+  _ct_user="$2"
+  _ct_ver="$3"
+  _ct_mem="$4"
+  _ct_port="$5"
+  printf '%s\n' \
+    '[Unit]' \
+    "Description=TurboPanel project cache $_ct_id" \
+    'After=network.target' \
+    'StartLimitIntervalSec=0' \
+    '' \
+    '[Service]' \
+    'Type=notify' \
+    "ExecStart=$INSTALL_ROOT/vendor/valkey/$_ct_ver/bin/valkey-server $R_CONFIG/cache/$_ct_id/valkey.conf" \
+    "User=$_ct_user" \
+    "Group=$_ct_user" \
+    "Slice=$(tp_principal_slice "$_ct_user")" \
+    "MemoryMax=$_ct_mem" \
+    'TasksMax=64' \
+    'UMask=0077' \
+    "WorkingDirectory=$R_PRINCIPALS/$_ct_user/cache/$_ct_id" \
+    "ReadWritePaths=$R_PRINCIPALS/$_ct_user/cache/$_ct_id" \
+    "TemporaryFileSystem=$R_CONFIG:ro" \
+    "BindReadOnlyPaths=$R_CONFIG/cache/$_ct_id" \
+    "RuntimeDirectory=turbopanel-cache-$_ct_id" \
+    'RuntimeDirectoryMode=0700' \
+    'NoNewPrivileges=yes' \
+    'PrivateTmp=yes' \
+    'ProtectSystem=strict' \
+    'ProtectKernelTunables=yes' \
+    'ProtectKernelModules=yes' \
+    'ProtectControlGroups=yes' \
+    'RestrictSUIDSGID=yes' \
+    'RestrictRealtime=yes' \
+    'LockPersonality=yes' \
+    'CapabilityBoundingSet=' \
+    'AmbientCapabilities=' \
+    'PrivateDevices=yes' \
+    'MemoryDenyWriteExecute=yes' \
+    'RestrictNamespaces=yes' \
+    'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
+    'IPAddressDeny=any'
+  if [ -n "$_ct_port" ]; then
+    printf '%s\n' 'IPAddressAllow=127.0.0.1' "Environment=PORT=$_ct_port"
+  fi
+  printf '%s\n' \
+    'TimeoutStartSec=300' \
+    'TimeoutStopSec=120' \
+    'Restart=always' \
+    'RestartSec=2' \
+    'RestartSteps=10' \
+    'RestartMaxDelaySec=120' \
+    'StandardOutput=journal' \
+    'StandardError=journal' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target'
+}
+
+# The values a cache unit carries are read from its own lines (id from the
+# name; account, patch release, MemoryMax and port each from their one line),
+# then the whole file must equal tp_cache_unit_text. Beyond the text: the
+# account is a principal with its own group, the id belongs to it, the binary is
+# a root-owned regular file (not a link) of that release, and the installed
+# config names the same port (or none), so the unit's PORT= (which the account
+# walls read) can never differ from the port the process listens on.
+tp_cache_unit_ok() {
+  _cu_file="$1"
+  _cu_name="$2"
+  _cu_id="${_cu_name#turbopanel-cache-}"
+  _cu_id="${_cu_id%.service}"
+  [ "turbopanel-cache-$_cu_id.service" = "$_cu_name" ] || return 1
+  tp_cache_id_ok "$_cu_id" || return 1
+  _cu_user="$(sed -n '/^User=/{s/^User=//p;q}' "$_cu_file")"
+  tp_is_principal "$_cu_user" || return 1
+  tp_principal_own_group "$_cu_user" || return 1
+  tp_cache_owner_ok "$_cu_id" "$_cu_user" || return 1
+  _cu_rest="$(sed -n '/^ExecStart=/{s/^ExecStart=//p;q}' "$_cu_file")"
+  _cu_rest="${_cu_rest#"$INSTALL_ROOT/vendor/valkey/"}"
+  _cu_ver="${_cu_rest%%/*}"
+  case "$_cu_ver" in
+    ''|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+  esac
+  _cu_bin="$INSTALL_ROOT/vendor/valkey/$_cu_ver/bin/valkey-server"
+  [ -f "$_cu_bin" ] && [ ! -L "$_cu_bin" ] || return 1
+  [ "$(stat -c '%u' -- "$_cu_bin")" = "$ROOT_UID" ] || return 1
+  _cu_mem="$(sed -n '/^MemoryMax=/{s/^MemoryMax=\([0-9]\{1,12\}\)$/\1/p;q}' "$_cu_file")"
+  case "$_cu_mem" in ''|0*) return 1 ;; esac
+  [ "$_cu_mem" -ge "$((TP_CACHE_MEM_MIN_MB * 2097152 + 33554432))" ] &&
+    [ "$_cu_mem" -le "$((TP_CACHE_MEM_MAX_MB * 2097152 + 33554432))" ] || return 1
+  _cu_port="$(sed -n '/^Environment=PORT=/{s/^Environment=PORT=//p;q}' "$_cu_file")"
+  [ -z "$_cu_port" ] || tp_cache_port_ok "$_cu_port" || return 1
+  [ -f "$R_CACHE/$_cu_id/valkey.conf" ] && [ ! -L "$R_CACHE/$_cu_id/valkey.conf" ] || return 1
+  _cu_cfgport="$(sed -n '/^port /{s/^port //p;q}' "$R_CACHE/$_cu_id/valkey.conf")"
+  [ "$_cu_cfgport" = "${_cu_port:-0}" ] || return 1
+  _cu_have="$(cat -- "$_cu_file"; printf x)"
+  _cu_want="$(tp_cache_unit_text "$_cu_id" "$_cu_user" "$_cu_ver" "$_cu_mem" "$_cu_port"; printf x)"
+  [ "$_cu_have" = "$_cu_want" ]
+}
+
+# cache-prepare USER ID: make the cache's folders. <home>/cache (root:root 0755)
+# and <home>/cache/<id> (USER:USER 0700) for the data, <config>/cache/<id>
+# (root:USER 0750) for the config. The unit's namespace needs the data folder to
+# exist before it starts.
+tp_verb_cache_prepare() {
+  [ $# -eq 2 ] || tp_die "cache-prepare: takes a user and a cache id"
+  _cp_user="$1"
+  _cp_id="$2"
+  tp_is_principal "$_cp_user" || tp_die "cache-prepare: $_cp_user is not a principal"
+  tp_principal_own_group "$_cp_user" || tp_die "cache-prepare: $_cp_user has no group of its own"
+  tp_cache_id_ok "$_cp_id" || tp_die "cache-prepare: refusing cache id $_cp_id"
+  tp_cache_owner_ok "$_cp_id" "$_cp_user" ||
+    tp_die "cache-prepare: $_cp_id belongs to another account"
+  tp_pin_dir "$R_PRINCIPALS/$_cp_user" || tp_die "cache-prepare: $_cp_user has no home"
+  tp_dir_sealed_at . || tp_die "cache-prepare: the home of $_cp_user is not root-owned"
+  if [ ! -d ./cache ]; then
+    [ ! -e ./cache ] && [ ! -L ./cache ] || tp_die "cache-prepare: $R_PRINCIPALS/$_cp_user/cache is not a folder"
+    mkdir -m 0755 -- ./cache
+  fi
+  tp_pin_dir "$R_PRINCIPALS/$_cp_user/cache" || tp_die "cache-prepare: cannot enter the cache folder"
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 755" ] ||
+    tp_die "cache-prepare: $R_PRINCIPALS/$_cp_user/cache is not a root-owned 0755 folder"
+  if [ ! -d "./$_cp_id" ]; then
+    [ ! -e "./$_cp_id" ] && [ ! -L "./$_cp_id" ] || tp_die "cache-prepare: the data path of $_cp_id is not a folder"
+    mkdir -m 0700 -- "./$_cp_id"
+    tp_run chown -h -- "$_cp_user:$_cp_user" "./$_cp_id"
+  else
+    [ ! -L "./$_cp_id" ] || tp_die "cache-prepare: the data path of $_cp_id is a link"
+    [ -n "$TP_TEST" ] || [ "$(stat -c '%u' -- "./$_cp_id")" = "$(tp_uid_of "$_cp_user")" ] ||
+      tp_die "cache-prepare: the data folder of $_cp_id belongs to another account"
+  fi
+  tp_mkdir_pinned "$R_CACHE/$_cp_id" 0755
+  chmod 0750 .
+  tp_run chown -h -- "root:$_cp_user" .
+}
+
+# cache-config-install USER ID: check the staged config and copy it to
+# <config>/cache/<id>/valkey.conf (root:USER 0640).
+tp_verb_cache_config_install() {
+  [ $# -eq 2 ] || tp_die "cache-config-install: takes a user and a cache id"
+  _ci_user="$1"
+  _ci_id="$2"
+  tp_is_principal "$_ci_user" || tp_die "cache-config-install: $_ci_user is not a principal"
+  tp_principal_own_group "$_ci_user" || tp_die "cache-config-install: $_ci_user has no group of its own"
+  tp_cache_id_ok "$_ci_id" || tp_die "cache-config-install: refusing cache id $_ci_id"
+  tp_cache_owner_ok "$_ci_id" "$_ci_user" ||
+    tp_die "cache-config-install: $_ci_id belongs to another account"
+  tp_stage_dir
+  tp_read_staged "$_ci_id" "$_ci_id.conf" "$R_CACHE_STAGE" "$TP_CACHE_CONF_MAX" \
+    "$TP_STAGE/cachesrc" "cache config"
+  tp_cache_conf_ok "$TP_STAGE/cachesrc" "$_ci_id" "$_ci_user" ||
+    tp_die "refusing the cache config for $_ci_id: content outside the allowed shape"
+  tp_pin_dir "$R_CACHE/$_ci_id" || tp_die "cache-config-install: run cache-prepare first"
+  tp_put_file "$R_CACHE/$_ci_id/valkey.conf" 0640 root "$_ci_user" < "$TP_STAGE/cachesrc"
+}
+
+# cache-remove USER ID [--data]: delete the config folder, and with --data the
+# data too. The data is emptied as its owner (never as root through a path the
+# account controls), then the folder goes.
+tp_verb_cache_remove() {
+  { [ $# -eq 2 ] || { [ $# -eq 3 ] && [ "$3" = "--data" ]; }; } ||
+    tp_die "cache-remove: takes a user, a cache id and optionally --data"
+  _cr_user="$1"
+  _cr_id="$2"
+  _cr_data="${3:-}"
+  tp_is_principal "$_cr_user" || tp_die "cache-remove: $_cr_user is not a principal"
+  tp_cache_id_ok "$_cr_id" || tp_die "cache-remove: refusing cache id $_cr_id"
+  tp_cache_owner_ok "$_cr_id" "$_cr_user" ||
+    tp_die "cache-remove: $_cr_id belongs to another account"
+  if tp_pin_dir "$R_CACHE"; then
+    [ ! -L "./$_cr_id" ] || tp_die "cache-remove: $R_CACHE/$_cr_id is a link"
+    [ ! -e "./$_cr_id" ] || rm -rf --one-file-system -- "./$_cr_id"
+  fi
+  [ -n "$_cr_data" ] || return 0
+  tp_pin_dir "$R_PRINCIPALS/$_cr_user/cache" || return 0
+  [ ! -L "./$_cr_id" ] || tp_die "cache-remove: the data path of $_cr_id is a link"
+  [ -d "./$_cr_id" ] || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 755" ] ||
+    tp_die "cache-remove: $R_PRINCIPALS/$_cr_user/cache is not a root-owned 0755 folder"
+  [ -n "$TP_TEST" ] || [ "$(stat -c '%u' -- "./$_cr_id")" = "$(tp_uid_of "$_cr_user")" ] ||
+    tp_die "cache-remove: the data folder of $_cr_id belongs to another account"
+  tp_pin_dir "$R_PRINCIPALS/$_cr_user/cache/$_cr_id" || tp_die "cache-remove: cannot enter the data folder"
+  tp_as "$(tp_uid_of "$_cr_user")" "$(tp_gid_of_group "$_cr_user")" \
+    find -P . -mindepth 1 -delete ||
+    tp_die "cache-remove: could not empty the data folder of $_cr_id"
+  tp_pin_dir "$R_PRINCIPALS/$_cr_user/cache" || return 0
+  rmdir -- "./$_cr_id"
+}
+
 # --- control-plane uploaded certificates ------------------------------------
 # A certificate pair for one of the control plane's own hostnames (uploaded by
 # an administrator, or issued by the control plane over DNS-01) reaches the
@@ -6664,6 +6971,9 @@ case "$_verb" in
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
   reach-ports-install) tp_verb_reach_ports_install "$@" ;;
   reach-ports-remove) tp_verb_reach_ports_remove "$@" ;;
+  cache-prepare) tp_verb_cache_prepare "$@" ;;
+  cache-config-install) tp_verb_cache_config_install "$@" ;;
+  cache-remove) tp_verb_cache_remove "$@" ;;
   tunnel-loopback-sync) tp_verb_tunnel_loopback_sync "$@" ;;
   instance-cert-install) tp_verb_instance_cert_install "$@" ;;
   instance-cert-prune) tp_verb_instance_cert_prune "$@" ;;
