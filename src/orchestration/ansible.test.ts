@@ -1792,7 +1792,7 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
   );
 });
 
-test("the Apache role moves to a new build by restart, tests the config first, puts the link back on failure and prunes the old tree", async () => {
+test("the Apache role tests first, restarts by what is running, puts the link back on failure and prunes only after", async () => {
   const tasks = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
   );
@@ -1800,32 +1800,51 @@ test("the Apache role moves to a new build by restart, tests the config first, p
   has("register: _apache_link");
   has("register: _apache_conf");
   has("register: _apache_current_before");
-  has("register: _apache_vhosts_fixed");
   // The config is tested as the server's own account, never as root.
-  has(
-    "runuser -u {{ apache_service_user }} --",
-  );
+  has("runuser -u {{ apache_service_user }} --");
   has("{{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t");
   has("-f {{ turbopanel_config_dir }}/apache/httpd.conf");
   assert(!tasks.includes("become_user"), "no become_user for the test");
-  // Failed test: the previous build comes back, then the play stops.
-  has("Put the previous Apache build back after a failed config test");
-  has('src: "{{ _apache_current_before.stat.lnk_source }}"');
-  has("Stop when the Apache config test failed");
-  has("ansible.builtin.fail");
-  // A new build is a restart (a reload keeps the old master); a changed
-  // config or vhost default on the same build is a reload.
-  const restart = tasks.indexOf("Restart Apache onto the new build");
-  const reload = tasks.indexOf("Reload Apache after its main config");
-  const prune = tasks.indexOf("Find superseded Apache version directories");
-  assert(restart > 0 && restart < reload && reload < prune);
-  has("systemctl try-restart turbopanel-apache.service");
-  has("- not _apache_link.changed");
-  has("_apache_conf.changed or _apache_vhosts_fixed.changed");
-  // Both the test and the reload also run for the vhost-default fix.
+  // The unit-change restart no longer runs before the test: the only
+  // restarts are inside the tested block and its rescue.
   assert(
-    (tasks.match(/_apache_vhosts_fixed\.changed/g) ?? []).length >= 2,
-    "the vhost fix is treated like a config change",
+    !tasks.includes("Restart a running Apache after its unit changed"),
+    "no restart ahead of the test",
+  );
+  const block = tasks.indexOf("Test the config, then move Apache onto it");
+  const test = tasks.indexOf("Test the Apache config with the installed build");
+  const restart = tasks.indexOf("Restart Apache onto the new build");
+  const reload = tasks.indexOf("Reload Apache after its config");
+  const rescue = tasks.indexOf("  rescue:");
+  const prune = tasks.indexOf("Find superseded Apache version directories");
+  assert(
+    block > 0 && block < test && test < restart && restart < reload &&
+      reload < rescue && rescue < prune,
+  );
+  // Sticky: the test runs on every run while Apache is up (the block is only
+  // conditioned on the unit being active), and the restart is decided by the
+  // running binary against the installed one, not by whether this run moved
+  // the link.
+  assert(
+    !/Test the Apache config with the installed build[\s\S]*?when:[\s\S]*?_apache_link\.changed/
+      .test(tasks.slice(test, restart)),
+    "the test does not depend on a change in this run",
+  );
+  has("readlink -f /proc/{{ _apache_main_pid.stdout | trim }}/exe");
+  has("readlink -f {{ turbopanel_vendor_dir }}/apache/current/bin/httpd");
+  has("_apache_needs_restart");
+  has("when: _apache_needs_restart | bool");
+  has("- not (_apache_needs_restart | bool)");
+  // A failed test or restart: link back, restart a failed unit onto the old
+  // build, and end the run in a failure so the prune never runs.
+  const rescued = tasks.slice(rescue, prune);
+  assert(rescued.includes("{{ _apache_current_before.stat.lnk_source }}"));
+  assert(rescued.includes("systemctl restart turbopanel-apache.service"));
+  assert(rescued.includes("_apache_restart is failed"));
+  assert(
+    rescued.lastIndexOf("ansible.builtin.fail") >
+      rescued.lastIndexOf("ansible.builtin.file"),
+    "the rescue ends in a failure",
   );
   // The prune keeps `current` and the pinned version only.
   has('- current\n      - "{{ apache_version }}"');
@@ -1833,37 +1852,6 @@ test("the Apache role moves to a new build by restart, tests the config first, p
   // Per-site error logs live in a sites folder the server account owns.
   has('path: "/var/log/{{ apache_logs_directory }}/sites"');
   has('owner: "{{ apache_service_user }}"');
-});
-
-test("the Apache role drops Indexes only from the exact default line of vhosts already on disk", async () => {
-  const tasks = await Deno.readTextFile(
-    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
-  );
-  const find = tasks.slice(
-    tasks.indexOf("Find site vhosts written before listing became opt-in"),
-    tasks.indexOf("Drop Indexes from the default Options of those vhosts"),
-  );
-  assert(find.includes('paths: "{{ turbopanel_config_dir }}/apache/sites"'));
-  assert(find.includes('- "*.conf"') && find.includes('- "*.tpprev"'));
-  assert(find.includes("recurse: false") && find.includes("follow: false"));
-  assert(
-    tasks.includes(
-      String.raw`regexp: '^(\s+)Options Indexes SymLinksIfOwnerMatch$'`,
-    ),
-  );
-  assert(tasks.includes(String.raw`replace: '\1Options SymLinksIfOwnerMatch'`));
-  // The regex matches the line the daemon rendered before this change and
-  // nothing else.
-  const re = /^(\s+)Options Indexes SymLinksIfOwnerMatch$/m;
-  assertEquals(
-    "  <Directory x>\n    Options Indexes SymLinksIfOwnerMatch\n".replace(
-      re,
-      "$1Options SymLinksIfOwnerMatch",
-    ),
-    "  <Directory x>\n    Options SymLinksIfOwnerMatch\n",
-  );
-  assertEquals(re.test("    Options Indexes FollowSymLinks"), false);
-  assertEquals(re.test("    Options +Indexes SymLinksIfOwnerMatch"), false);
 });
 
 test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {

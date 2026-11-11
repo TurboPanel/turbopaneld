@@ -158,3 +158,26 @@ test("a long or odd token is never echoed into a warning", () => {
   const [warning] = htaccessWarnings("web", checkHtaccess(`${long} on\n`));
   assertEquals(warning.length < 200, true);
 });
+
+test("IfDefine, IfFile, IfDirective and IfSection are looked into, not reported", () => {
+  for (
+    const tag of [
+      "IfDefine FOO",
+      "IfFile /x",
+      "IfDirective Bar",
+      "IfSection Baz",
+    ]
+  ) {
+    const name = tag.split(" ")[0];
+    assertEquals(
+      checkHtaccess(`<${tag}>\nHeader set X-A b\n</${name}>\n`),
+      [],
+      tag,
+    );
+    assertEquals(
+      checkHtaccess(`<${tag}>\nAddHandler a .b\n</${name}>\n`),
+      [{ line: 2, directive: "AddHandler", reason: "not allowed" }],
+      tag,
+    );
+  }
+});

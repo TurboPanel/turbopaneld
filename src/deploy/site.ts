@@ -1357,8 +1357,8 @@ export type ApacheSiteConfigOpts = Readonly<{
   errorLogPath?: string | null;
   /**
    * The runtime's site key (64 lowercase hex): sent to PHP as `TP_SITE_KEY`
-   * and the PHP parameters a `.htaccess` could set are stripped. Required for
-   * a PHP site, ignored for a static one.
+   * after the strip lines every vhost carries. Required for a PHP site; a
+   * static site gets the strip lines without it.
    */
   phpSiteKey?: string | null;
 }>;
@@ -1366,19 +1366,28 @@ export type ApacheSiteConfigOpts = Readonly<{
 const PHP_SITE_KEY_RE = /^[0-9a-f]{64}$/;
 
 /**
- * The vhost lines that bind a site to its own PHP runtime. At vhost level, not
- * inside a `<FilesMatch>`, so they also cover `RewriteRule [P]`, `[H=]` and
- * `SetHandler` requests from any folder; a `.htaccess` cannot undo them
- * (`ProxyFCGISetEnvIf` is not an allowed override, and `SetEnv` / `[E=]`
- * values are replaced or removed by these lines when the request is built).
+ * The vhost lines that wall every Apache site off from every PHP runtime.
+ * At vhost level, not inside a `<FilesMatch>`, so they also cover
+ * `RewriteRule [P]`, `[H=]` and `SetHandler` requests from any folder, and
+ * they are on every vhost, static ones too: a static site can still proxy to
+ * another site's socket, so it must not be able to hand that runtime PHP
+ * settings or a key through `SetEnv`, `[E=]` or `SetEnvIf`. A `.htaccess`
+ * cannot undo them (`ProxyFCGISetEnvIf` is not an allowed override).
+ *
+ * Order matters: `mod_proxy_fcgi` applies the fixups in the order written
+ * (vhost lines first, then folder ones), so the unset of `TP_SITE_KEY` must
+ * come before the line that sets this site's own key.
  */
-function apacheSiteKeyLines(siteKey: string): string[] {
+function apacheWallLines(siteKey: string | null): string[] {
   return [
-    `  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${siteKey}"`,
     '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
     '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
     '  ProxyFCGISetEnvIf "true" !PHPRC',
     '  ProxyFCGISetEnvIf "true" !PHP_INI_SCAN_DIR',
+    '  ProxyFCGISetEnvIf "true" !TP_SITE_KEY',
+    ...(siteKey === null
+      ? []
+      : [`  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${siteKey}"`]),
   ];
 }
 
@@ -1509,7 +1518,7 @@ export function apacheSiteConfig(
     dockerBindAddress,
     opts?.behindNginxPort ?? null,
     opts?.errorLogPath ?? null,
-    siteNeedsPhp(site) && siteKey !== null ? apacheSiteKeyLines(siteKey) : [],
+    apacheWallLines(siteNeedsPhp(site) ? siteKey : null),
   );
 
   return `${head}
@@ -3499,6 +3508,9 @@ function sitePhpRuntimeFiles(
   }
   const pool = phpFpmPoolOverrides(site.php);
   const workers = sitePhpRuntimeChildren(mode, pool);
+  const guard = siteKey === null
+    ? undefined
+    : { key: siteKey, path: sitePhpGuardPath(layout.configDir, spec.id) };
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
@@ -3506,20 +3518,14 @@ function sitePhpRuntimeFiles(
       limits: sitePhpUnitLimits(values, workers),
     }),
     socket: sitePhpSocketActivated(mode) ? sitePhpSocketUnit(spec) : null,
-    ini: sitePhpIni(
-      values,
-      home,
-      spec,
-      siteKey === null
-        ? undefined
-        : { key: siteKey, path: sitePhpGuardPath(layout.configDir, spec.id) },
-    ),
-    guard: siteKey === null ? null : sitePhpGuardPhp(),
+    ini: sitePhpIni(values, home, spec, guard),
+    guard: guard === undefined ? null : sitePhpGuardPhp(),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
         pool,
         chdir: paths.documentRoot,
         admin: sitePhpLockedValues(values),
+        guard,
       })
       : null,
   };

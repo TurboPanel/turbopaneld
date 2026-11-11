@@ -808,7 +808,10 @@ if (PHP_SAPI !== 'cli') {
         http_response_code(403);
         exit;
     }
-    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY']);
+    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);
+    if (function_exists('putenv')) {
+        putenv('TP_SITE_KEY');
+    }
 }
 `,
   );
@@ -829,6 +832,9 @@ test("a runtime with a guard carries the key and the prepend file in both sectio
   const [main, locked] = ini.split("[PATH=");
   assertStringIncludes(main, `auto_prepend_file = ${GUARD_PATH}\n`);
   assertStringIncludes(locked, `auto_prepend_file = ${GUARD_PATH}\n`);
+  // URL includes are off, in both sections.
+  assertStringIncludes(main, "allow_url_include = Off\n");
+  assertStringIncludes(locked, "allow_url_include = Off\n");
   assertStringIncludes(
     main,
     `open_basedir = /srv/users/alice/site:/tmp:${GUARD_PATH}\n`,
@@ -878,4 +884,20 @@ test("an Apache PHP site with no mode runs FastCGI and warns once; nginx keeps t
     null,
   );
   sitePhpModeWarnings(true);
+});
+
+test("an Apache php-fpm pool pins the guard and switches URL includes off; without a guard it has neither", () => {
+  const pool = [{ key: "pm.max_children", value: "8" }];
+  const withGuard = sitePhpFpmConf(SPEC, {
+    pool,
+    guard: { key: GUARD_KEY, path: GUARD_PATH },
+  });
+  assertStringIncludes(
+    withGuard,
+    `php_admin_value[auto_prepend_file] = ${GUARD_PATH}\n`,
+  );
+  assertStringIncludes(withGuard, "php_admin_flag[allow_url_include] = off\n");
+  const without = sitePhpFpmConf(SPEC, { pool });
+  assertEquals(without.includes("auto_prepend_file"), false);
+  assertEquals(without.includes("allow_url_include"), false);
 });

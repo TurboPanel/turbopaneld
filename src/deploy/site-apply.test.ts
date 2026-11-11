@@ -444,7 +444,10 @@ test("applySites apache writes its site config with a per-site error log and no 
       }"`,
     );
     assertEquals(siteConf.includes("proxy:unix:"), false);
-    assertEquals(siteConf.includes("TP_SITE_KEY"), false);
+    // No key of its own, but the strip lines every Apache vhost carries.
+    assertEquals(siteConf.includes('TP_SITE_KEY "'), false);
+    assertStringIncludes(siteConf, 'ProxyFCGISetEnvIf "true" !TP_SITE_KEY');
+    assertStringIncludes(siteConf, 'ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE');
   } finally {
     await cleanup();
   }

@@ -321,14 +321,24 @@ included, as `tpapache` (`User=`/`Group=` in the unit, none in
 engines' logs; systemd leaves the existing parent alone and gives the inner
 folder to `tpapache`) and the pidfile in `RuntimeDirectory=turbopanel-apache`
 (`/run/turbopanel-apache`, removed with the unit). A changed unit restarts a running server (`try-restart`);
-a reload would keep the old master. So does a new build: when `current` moves
-the role tests the config with the new binary as `tpapache` (`runuser`; root
-never parses it), puts the old link back and fails the run if the test fails
-(the running server is left alone), then restarts onto the new build and prunes
-the superseded version folders (only `current` and `apache_version` stay). A
-changed `httpd.conf` on the same build is a reload. The role also drops
-`Indexes` from the default `Options` line of vhosts rendered before listing
-became opt-in (one anchored `replace`), and creates `sites/` under the Apache
+a reload would keep the old master. So does a new build, and the role decides by what is running: it reads the
+binary the master was started from (`/proc/<pid>/exe`) and restarts when that is
+not the installed `current` (or the unit changed), so a run after a failed one
+still restarts. Before any restart or reload it tests the config on every run
+while Apache is up, with the installed binary as `tpapache` (`runuser`; root
+never parses it). A failed test or restart puts the previous link back (a failed
+restart also starts the old build again) and ends the run in a failure, so the
+prune is skipped and the next run tests again. A changed `httpd.conf` or vhost
+on the same build is a reload. After the restart it prunes the superseded
+version folders (only `current` and `apache_version` stay). The role also
+brings every vhost on disk (`*.conf`, `*.tpprev`) to the closed override list at
+the host's first Apache deploy, without waiting for each site's own deploy: the
+exact lines the daemon rendered earlier (`Options Indexes …`, `AllowOverride All`
+or the `FileInfo` class) are replaced by the new classes and the named list
+(`apache_override_classes` / `apache_override_list`, held equal to
+`apache-overrides.ts` by a test), `Indexes` leaves the default `Options`, and the
+strip lines go in (`lineinfile`, idempotent); a vhost that still allows
+`FileInfo` or `All` afterwards stops the run. It creates `sites/` under the Apache
 log folder for the per-site error logs (`tpapache`-owned `0750`; no rotation
 yet). The daemon's config test is
 `sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,

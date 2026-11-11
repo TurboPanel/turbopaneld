@@ -246,23 +246,32 @@ const KEYED_PHP_SITE = {
   php: { version: "8.4" },
 } as const;
 
-test("an Apache PHP vhost sends its site key and strips the PHP parameters at vhost level, before the dotfile rule", () => {
+const WALL_STRIPS = [
+  '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
+  '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
+  '  ProxyFCGISetEnvIf "true" !PHPRC',
+  '  ProxyFCGISetEnvIf "true" !PHP_INI_SCAN_DIR',
+  '  ProxyFCGISetEnvIf "true" !TP_SITE_KEY',
+];
+
+test("an Apache PHP vhost clears the PHP parameters and any key at vhost level, then sets its own key, before the dotfile rule", () => {
   const conf = apacheSiteConfig(KEYED_PHP_SITE, "/srv/www", {
     phpFpmSocket: "/run/x.sock",
     phpSiteKey: TEST_SITE_KEY,
   });
+  // mod_proxy_fcgi applies the fixups in the order written: the unset of
+  // TP_SITE_KEY must come before the line that sets this site's own key, or
+  // the vhost would clear its own key and every page would answer 403.
   const lines = [
+    ...WALL_STRIPS,
     `  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${TEST_SITE_KEY}"`,
-    '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
-    '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
-    '  ProxyFCGISetEnvIf "true" !PHPRC',
-    '  ProxyFCGISetEnvIf "true" !PHP_INI_SCAN_DIR',
   ].join("\n");
   assertStringIncludes(conf, `${lines}\n`);
   const at = conf.indexOf(lines);
   assertEquals(at > conf.indexOf("RemoteIPInternalProxy"), true);
   assertEquals(at < conf.indexOf("<LocationMatch"), true);
   assertEquals(at < conf.indexOf("<Directory"), true);
+  assertEquals(conf.match(/TP_SITE_KEY/g)?.length, 2);
 });
 
 test("an Apache PHP vhost behind nginx carries the same key lines, before its dotfile rule", () => {
@@ -271,21 +280,38 @@ test("an Apache PHP vhost behind nginx carries the same key lines, before its do
     phpSiteKey: TEST_SITE_KEY,
     behindNginxPort: 18091,
   });
-  assertStringIncludes(conf, `TP_SITE_KEY "${TEST_SITE_KEY}"`);
+  assertStringIncludes(
+    conf,
+    `${
+      WALL_STRIPS.join("\n")
+    }\n  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${TEST_SITE_KEY}"\n`,
+  );
   assertEquals(
-    conf.indexOf("TP_SITE_KEY") < conf.indexOf("<LocationMatch"),
+    conf.indexOf(`TP_SITE_KEY "${TEST_SITE_KEY}"`) <
+      conf.indexOf("<LocationMatch"),
     true,
   );
 });
 
-test("a static Apache vhost has no site key lines", () => {
-  const conf = apacheSiteConfig(
-    { ...KEYED_PHP_SITE, php: undefined },
-    "/srv/www",
-    { phpSiteKey: TEST_SITE_KEY },
-  );
-  assertEquals(conf.includes("TP_SITE_KEY"), false);
-  assertEquals(conf.includes("!PHP_VALUE"), false);
+test("a static Apache vhost clears the PHP parameters and any key, and sets none", () => {
+  const site = { ...KEYED_PHP_SITE, php: undefined };
+  for (
+    const opts of [
+      { phpSiteKey: TEST_SITE_KEY },
+      { phpSiteKey: TEST_SITE_KEY, behindNginxPort: 18091 },
+      {},
+    ]
+  ) {
+    const conf = apacheSiteConfig(site, "/srv/www", opts);
+    // A static site can still proxy to another site's socket, so it gets the
+    // same strip lines; it never sets a key of its own.
+    assertStringIncludes(conf, `${WALL_STRIPS.join("\n")}\n`);
+    assertEquals(conf.includes('TP_SITE_KEY "'), false);
+    assertEquals(
+      conf.indexOf(WALL_STRIPS[0]) < conf.indexOf("<LocationMatch"),
+      true,
+    );
+  }
 });
 
 test("an Apache PHP site without a valid site key is refused", () => {

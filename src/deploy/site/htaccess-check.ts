@@ -52,6 +52,10 @@ const CONTAINERS = new Set<string>([
   "requireall",
   "requireany",
   "requirenone",
+  "ifdefine",
+  "iffile",
+  "ifdirective",
+  "ifsection",
 ]);
 
 /** Directives the override classes allow (AuthConfig, Limit, Indexes). */

@@ -158,9 +158,10 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     section is `[PATH=<owner home>]`, the locked limits; an Apache runtime
     also has `site-guard.php`, which must equal the bytes held in
     `tp_php_guard_ok` (rendered by `sitePhpGuardPhp`; change both together),
-    and its ini may name `auto_prepend_file` only as that runtime's own guard
-    path, `turbopanel.site_key` only as 64 lowercase hex, and the guard path as
-    an `open_basedir` entry; php-fpm pools take
+    and its ini (or pool) may name `auto_prepend_file` only as that runtime's own
+    guard path, `turbopanel.site_key` only as 64 lowercase hex,
+    `allow_url_include` only as off, and the guard path as an `open_basedir`
+    entry; php-fpm pools take
     `listen.acl_users`, never `user`/`group`/`listen.group`);
     `php-test <siteId>` runs the installed unit's binary on that config as
     the owner. daemon-install's tp:tp pass over the config tree skips it;

@@ -73,3 +73,27 @@ turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# What a site's `.htaccess` may do on the shared Apache. These are the daemon's
+# own lists (src/deploy/site/apache-overrides.ts, written into every vhost it
+# renders); the role writes them into vhosts rendered before the closed list
+# existed, so a test holds the two copies equal.
+apache_override_classes: "AuthConfig Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch,ExecCGI,Includes,IncludesNOEXEC"
+apache_override_list: >-
+  RewriteEngine RewriteCond RewriteRule RewriteBase RewriteOptions
+  Redirect RedirectMatch RedirectPermanent RedirectTemp
+  ErrorDocument Header RequestHeader
+  AddType RemoveType AddEncoding RemoveEncoding AddCharset RemoveCharset AddDefaultCharset
+  AddLanguage RemoveLanguage DefaultLanguage MultiviewsMatch ForceType
+  SetHandler RemoveHandler
+  AddOutputFilter RemoveOutputFilter AddOutputFilterByType SetOutputFilter
+  SetEnv UnsetEnv SetEnvIf SetEnvIfNoCase SetEnvIfExpr BrowserMatch BrowserMatchNoCase
+  FileETag AcceptPathInfo QualifyRedirectURL
+# Variables every vhost clears before FastCGI sees the request (the vhost
+# lines are `ProxyFCGISetEnvIf "true" !<name>`).
+apache_vhost_strip_names:
+  - PHP_VALUE
+  - PHP_ADMIN_VALUE
+  - PHPRC
+  - PHP_INI_SCAN_DIR
+  - TP_SITE_KEY

@@ -190,12 +190,16 @@
     mode: "0640"
   register: _apache_conf
 
-# Loading mod_autoindex (httpd.conf) would make every site whose vhost was
-# rendered before listing became opt-in list folders that have no index file:
-# those vhosts still say `Options Indexes SymLinksIfOwnerMatch`. Drop Indexes
-# from that one exact line; the next deploy of each site writes the full new
-# vhost anyway.
-- name: Find site vhosts written before listing became opt-in
+# Vhosts rendered before this release keep the broad `FileInfo` override and a
+# listing default, so one site's `.htaccess` could still hand another site's PHP
+# settings (`ProxyFCGISetEnvIf`, `SetEnv PHP_VALUE`). Without waiting for each
+# site's own deploy, bring every vhost on disk to the closed list: the exact
+# lines the daemon rendered before are replaced (anchored, idempotent) by the
+# new classes plus the named list, the default `Options` loses `Indexes` (the
+# listing module is loaded now), and the strip lines go in. A new vhost already
+# has all of it and is left as it is. What the daemon renders is in
+# src/deploy/site.ts; apache_override_* below are held equal to it by a test.
+- name: Find site vhosts written before the closed override list
   ansible.builtin.find:
     paths: "{{ turbopanel_config_dir }}/apache/sites"
     patterns:
@@ -209,12 +213,61 @@
 - name: Drop Indexes from the default Options of those vhosts
   ansible.builtin.replace:
     path: "{{ item.path }}"
-    regexp: '^(\s+)Options Indexes SymLinksIfOwnerMatch$'
+    regexp: '^(\s+)Options Indexes (FollowSymLinks|SymLinksIfOwnerMatch)$'
     replace: '\1Options SymLinksIfOwnerMatch'
   loop: "{{ _apache_old_vhosts.files }}"
   loop_control:
     label: "{{ item.path }}"
   register: _apache_vhosts_fixed
+
+- name: Give those vhosts the closed override list instead of FileInfo
+  ansible.builtin.replace:
+    path: "{{ item.path }}"
+    regexp: '^(\s+)AllowOverride (All|AuthConfig FileInfo Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch)$'
+    replace: '\1AllowOverride {{ apache_override_classes }}\n\1AllowOverrideList {{ apache_override_list }}'
+  loop: "{{ _apache_old_vhosts.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+  register: _apache_vhosts_overrides
+
+- name: Strip PHP settings and the site key at the top of those vhosts
+  ansible.builtin.lineinfile:
+    path: "{{ item.0.path }}"
+    regexp: '^  ProxyFCGISetEnvIf "true" !{{ item.1 }}$'
+    line: '  ProxyFCGISetEnvIf "true" !{{ item.1 }}'
+    insertafter: '^  ServerName localhost$'
+  loop: "{{ _apache_old_vhosts.files | product(apache_vhost_strip_names) | list }}"
+  loop_control:
+    label: "{{ item.0.path }} {{ item.1 }}"
+  register: _apache_vhosts_strips
+
+# Nothing on disk may keep the broad override: a vhost in a shape this role does
+# not know stops the run instead of staying open.
+- name: Find vhosts that still carry FileInfo or All
+  ansible.builtin.find:
+    paths: "{{ turbopanel_config_dir }}/apache/sites"
+    patterns:
+      - "*.conf"
+    file_type: file
+    recurse: false
+    follow: false
+    contains: '^\s+AllowOverride .*(FileInfo|All)(\s|$)'
+  register: _apache_vhosts_open
+
+- name: Stop when a vhost still carries FileInfo or All
+  ansible.builtin.fail:
+    msg: >-
+      These Apache vhosts still allow FileInfo or All and are in a shape this
+      role does not rewrite: {{ _apache_vhosts_open.files | map(attribute='path') | join(', ') }}.
+      Redeploy their sites.
+  when: _apache_vhosts_open.matched | default(0) | int > 0
+
+- name: Note whether any vhost on disk was tightened
+  ansible.builtin.set_fact:
+    _apache_vhosts_edited: >-
+      {{ (_apache_vhosts_fixed.changed | default(false))
+      or (_apache_vhosts_overrides.changed | default(false))
+      or (_apache_vhosts_strips.changed | default(false)) }}
 
 - name: Install turbopanel-apache systemd unit
   ansible.builtin.template:
@@ -230,20 +283,13 @@
     daemon_reload: true
   when: _apache_unit.changed # noqa: no-handler
 
-# A reload keeps the running master, and with it the account it runs as. A
-# changed unit (for example the move from a root master to User=tpapache)
-# only takes effect on a restart. try-restart leaves a stopped unit stopped:
-# the daemon starts Apache when the first site needs it.
-- name: Restart a running Apache after its unit changed
-  ansible.builtin.command:
-    cmd: systemctl try-restart turbopanel-apache.service
-  when: _apache_unit.changed # noqa: no-handler
-  changed_when: true
-
-# A reload keeps the old master, and with it the old binary: `httpd -k graceful`
-# would load the new build's modules into it. So a new build is a restart, never
-# a reload. The config is tested first, as the account that runs the server
-# (root never parses this config), against the build `current` now names.
+# A reload keeps the running master, and with it the binary and the account it
+# runs as. A new build or a changed unit (for example the move from a root
+# master to User=tpapache) only takes effect on a restart, and `httpd -k
+# graceful` would load the new build's modules into the old master. So the
+# restart is decided by what is running, not by whether this run moved the
+# link: a run that follows a failed one still restarts. try-restart leaves a
+# stopped unit stopped: the daemon starts Apache when the first site needs it.
 - name: Check whether Apache is running
   ansible.builtin.command:
     cmd: systemctl is-active --quiet turbopanel-apache.service
@@ -251,52 +297,104 @@
   changed_when: false
   failed_when: false
 
-- name: Test the Apache config with the installed build
+- name: Read the running Apache main pid
   ansible.builtin.command:
-    cmd: >-
-      runuser -u {{ apache_service_user }} --
-      {{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t
-      -f {{ turbopanel_config_dir }}/apache/httpd.conf
-  register: _apache_test
+    cmd: systemctl show --property=MainPID --value turbopanel-apache.service
+  register: _apache_main_pid
+  changed_when: false
+  failed_when: false
+  when: _apache_active.rc == 0
+
+- name: Resolve the binary the running Apache was started from
+  ansible.builtin.command:
+    cmd: readlink -f /proc/{{ _apache_main_pid.stdout | trim }}/exe
+  register: _apache_running_bin
   changed_when: false
   failed_when: false
   when:
-    - _apache_link.changed or _apache_conf.changed or _apache_vhosts_fixed.changed  # noqa: no-handler
     - _apache_active.rc == 0
+    - (_apache_main_pid.stdout | default('') | trim) is match('^[1-9][0-9]*$')
 
-- name: Put the previous Apache build back after a failed config test
-  ansible.builtin.file:
-    src: "{{ _apache_current_before.stat.lnk_source }}"
-    dest: "{{ turbopanel_vendor_dir }}/apache/current"
-    state: link
-    force: true
-  when:
-    - _apache_link.changed  # noqa: no-handler
-    - (_apache_test.rc | default(0)) != 0
-    - (_apache_current_before.stat.lnk_source | default('')) | length > 0
-
-- name: Stop when the Apache config test failed
-  ansible.builtin.fail:
-    msg: >-
-      The Apache config did not pass `httpd -t` with the installed build
-      (apache_version {{ apache_version }}); the previous build is back and the
-      running server was left alone: {{ _apache_test.stderr | default('') }}
-  when: (_apache_test.rc | default(0)) != 0
-
-- name: Restart Apache onto the new build
+- name: Resolve the installed Apache binary
   ansible.builtin.command:
-    cmd: systemctl try-restart turbopanel-apache.service
-  when: _apache_link.changed and _apache_active.rc == 0 # noqa: no-handler
-  changed_when: true
+    cmd: readlink -f {{ turbopanel_vendor_dir }}/apache/current/bin/httpd
+  register: _apache_installed_bin
+  changed_when: false
+  failed_when: false
+  when: _apache_active.rc == 0
 
-- name: Reload Apache after its main config or a vhost default changed
-  ansible.builtin.systemd:
-    name: turbopanel-apache
-    state: reloaded
-  when:
-    - not _apache_link.changed
-    - _apache_conf.changed or _apache_vhosts_fixed.changed  # noqa: no-handler
-    - _apache_active.rc == 0
+- name: Note whether the running Apache is not the installed build
+  ansible.builtin.set_fact:
+    _apache_needs_restart: >-
+      {{ (_apache_unit.changed | default(false))
+      or ((_apache_running_bin.stdout | default('') | trim)
+      != (_apache_installed_bin.stdout | default('') | trim)) }}
+  when: _apache_active.rc == 0
+
+# Test first, then restart or reload, and put the previous build back if either
+# fails. The config is tested as the account that runs the server (root never
+# parses this config), against the build `current` names. It runs on every run
+# while Apache is up, not only when this run changed something, so a failure is
+# sticky: the next run tests again and restarts instead of reloading. The
+# rescue ends in a failure, so nothing after it (the prune) runs.
+- name: Test the config, then move Apache onto it
+  when: _apache_active.rc == 0
+  block:
+    - name: Test the Apache config with the installed build
+      ansible.builtin.command:
+        cmd: >-
+          runuser -u {{ apache_service_user }} --
+          {{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t
+          -f {{ turbopanel_config_dir }}/apache/httpd.conf
+      register: _apache_test
+      changed_when: false
+      failed_when: false
+
+    - name: Stop when the Apache config test failed
+      ansible.builtin.fail:
+        msg: "The Apache config did not pass `httpd -t`: {{ _apache_test.stderr | default('') }}"
+      when: (_apache_test.rc | default(0)) != 0
+
+    - name: Restart Apache onto the new build
+      ansible.builtin.command:
+        cmd: systemctl try-restart turbopanel-apache.service
+      register: _apache_restart
+      changed_when: true
+      when: _apache_needs_restart | bool
+
+    - name: Reload Apache after its config or a vhost changed
+      ansible.builtin.systemd:
+        name: turbopanel-apache
+        state: reloaded
+      when:
+        - not (_apache_needs_restart | bool)
+        - (_apache_conf.changed or (_apache_vhosts_edited | bool))  # noqa: no-handler
+  rescue:
+    - name: Put the previous Apache build back after a failure
+      ansible.builtin.file:
+        src: "{{ _apache_current_before.stat.lnk_source }}"
+        dest: "{{ turbopanel_vendor_dir }}/apache/current"
+        state: link
+        force: true
+      when:
+        - _apache_link.changed  # noqa: no-handler
+        - (_apache_current_before.stat.lnk_source | default('')) | length > 0
+
+    # `restart`, not `try-restart`: a restart that failed leaves the unit
+    # failed, and try-restart would leave a failed unit down.
+    - name: Start the previous Apache build again after a failed restart
+      ansible.builtin.command:
+        cmd: systemctl restart turbopanel-apache.service
+      changed_when: true
+      failed_when: false
+      when: _apache_restart is defined and _apache_restart is failed
+
+    - name: Stop after a failed Apache config test or restart
+      ansible.builtin.fail:
+        msg: >-
+          Apache was not moved onto apache_version {{ apache_version }}; the
+          previous build is back. {{ _apache_test.stderr | default('') }}
+          {{ ansible_failed_result.msg | default('') }}
 
 # `current` now resolves to the pin and the server runs it: a sibling version
 # left by an earlier pin is dead weight.

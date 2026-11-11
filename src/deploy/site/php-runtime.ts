@@ -604,7 +604,10 @@ export function sitePhpGuardPhp(): string {
     "        http_response_code(403);",
     "        exit;",
     "    }",
-    "    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY']);",
+    "    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);",
+    "    if (function_exists('putenv')) {",
+    "        putenv('TP_SITE_KEY');",
+    "    }",
     "}",
     "",
   ].join("\n");
@@ -728,7 +731,9 @@ function lockedIniSection(
     .filter((key) => merged.has(key))
     .map((key) => `${key} = ${merged.get(key)}`);
   // Again here, so a `.user.ini` cannot change it for scripts under the home.
-  if (guardPath !== undefined) lines.push(`auto_prepend_file = ${guardPath}`);
+  if (guardPath !== undefined) {
+    lines.push(`auto_prepend_file = ${guardPath}`, "allow_url_include = Off");
+  }
   return [`[PATH=${root}]`, ...lines];
 }
 
@@ -760,6 +765,8 @@ export function sitePhpIni(
   if (guard !== undefined) {
     merged.set("turbopanel.site_key", guard.key);
     merged.set("auto_prepend_file", guard.path);
+    // A request must not be able to turn URL includes on and run its own body.
+    merged.set("allow_url_include", "Off");
     const basedir = merged.get("open_basedir");
     if (basedir !== undefined && basedir !== "") {
       merged.set("open_basedir", `${basedir}:${guard.path}`);
@@ -820,6 +827,8 @@ export function sitePhpFpmConf(
     chdir?: string;
     /** Limits scripts must not raise, as `php_admin_value[...]`. */
     admin?: readonly SitePhpIniValue[];
+    /** Apache runtimes: pin the guard and switch URL includes off. */
+    guard?: SitePhpGuard;
   }>,
 ): string {
   const tuning = new Map<string, string>([
@@ -845,6 +854,12 @@ export function sitePhpFpmConf(
     ...(opts.admin ?? []).map(({ key, value }) =>
       `php_admin_value[${key}] = ${value}`
     ),
+    ...(opts.guard
+      ? [
+        `php_admin_value[auto_prepend_file] = ${opts.guard.path}`,
+        "php_admin_flag[allow_url_include] = off",
+      ]
+      : []),
     "catch_workers_output = yes",
     "decorate_workers_output = no",
     "clear_env = no",

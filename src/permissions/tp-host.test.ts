@@ -3171,12 +3171,46 @@ test("per-site PHP guard: the exact guard text and an ini that names only this r
     const accepted = await installPhpConf(host, "php.ini", ini());
     assertEquals(accepted.code, 0, accepted.stderr);
 
+    // URL includes may only be off; the pool takes the same lines.
+    assertEquals(
+      (await installPhpConf(host, "php.ini", ini("allow_url_include = Off")))
+        .code,
+      0,
+    );
+    const pool = phpFpmConf(host);
+    for (
+      const good of [
+        `php_admin_value[auto_prepend_file] = ${guardPath}`,
+        "php_admin_flag[allow_url_include] = off",
+      ]
+    ) {
+      const ok = await installPhpConf(host, "php-fpm.conf", `${pool}${good}\n`);
+      assertEquals(ok.code, 0, `${good}: ${ok.stderr}`);
+    }
+    for (
+      const bad of [
+        "php_admin_value[auto_prepend_file] = /tmp/x.php",
+        `php_admin_value[auto_prepend_file] = ${otherGuard}`,
+        "php_admin_flag[allow_url_include] = on",
+        "php_value[allow_url_include] = 1",
+      ]
+    ) {
+      assertEquals(
+        (await installPhpConf(host, "php-fpm.conf", `${pool}${bad}\n`)).code ===
+          0,
+        false,
+        bad,
+      );
+    }
+
     // Another path, another site's guard, a bad key, or a foreign
     // open_basedir entry is refused.
     for (
       const bad of [
         ini("auto_prepend_file = /tmp/x.php"),
         ini(`auto_prepend_file = ${otherGuard}`),
+        ini("allow_url_include = On"),
+        ini("allow_url_include = 1"),
         ini("turbopanel.site_key = abc"),
         ini(`turbopanel.site_key = ${GUARD_TEST_KEY.toUpperCase()}`),
         ini(`turbopanel.site_key = ${GUARD_TEST_KEY}0`),
@@ -3652,6 +3686,7 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
             sitePhpFpmConf(spec, {
               pool: [{ key: "pm.max_children", value: "8" }],
               chdir: `${site}/current/public`,
+              guard,
             }),
           ]);
         }

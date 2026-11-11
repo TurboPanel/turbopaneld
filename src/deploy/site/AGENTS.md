@@ -40,23 +40,36 @@ Docker Compose. The daemon:
    socket path is no boundary. Every Apache PHP runtime therefore has a site
    key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
    daemon-only secret (`<daemonStateDir>/sites/php-site-key`, `0600`, created on
-   first use). The vhost sends it as the FastCGI parameter `TP_SITE_KEY` and,
-   at vhost level, strips `PHP_VALUE`, `PHP_ADMIN_VALUE`, `PHPRC` and
-   `PHP_INI_SCAN_DIR` (`ProxyFCGISetEnvIf "true" !NAME`), so a `.htaccess`
-   cannot set them through `SetEnv` or `[E=]`, and `ProxyFCGISetEnvIf` itself is
-   not an allowed override. The runtime's own `php.ini` holds the expected key
-   (`turbopanel.site_key`) and names `site-guard.php` (`sitePhpGuardPhp`, pinned
+   first use). **Every** Apache vhost, static ones too, clears `PHP_VALUE`,
+   `PHP_ADMIN_VALUE`, `PHPRC`, `PHP_INI_SCAN_DIR` and `TP_SITE_KEY` at vhost
+   level (`ProxyFCGISetEnvIf "true" !NAME`): a static site can still proxy to
+   another site's socket, and must not hand that runtime settings or a key
+   through `SetEnv`, `SetEnvIf` or `[E=]`. A PHP vhost then sets its own
+   `TP_SITE_KEY` after those lines (`mod_proxy_fcgi` applies the fixups in the
+   order written, so the unset must come first, or the vhost would clear its own
+   key); `ProxyFCGISetEnvIf` itself is not an allowed override. The runtime's own
+   `php.ini` holds the expected key (`turbopanel.site_key`), switches
+   `allow_url_include` off and names `site-guard.php` (`sitePhpGuardPhp`, pinned
    byte for byte by tp-host) as `auto_prepend_file`, in `[PHP]` and again in
-   `[PATH=<home>]`; the guard answers 403 unless the two keys match, so a
+   `[PATH=<home>]`; a php-fpm runtime pins the same two settings in its pool
+   (`php_admin_value[auto_prepend_file]`, `php_admin_flag[allow_url_include]`).
+   The guard answers 403 unless the key the vhost sent equals the one in the
+   runtime's own `php.ini`, then drops the key from `$_SERVER` and `$_ENV` and
+   asks `putenv` to unset it (when `putenv` is not disabled); whether `getenv()`
+   in site code can still read it is not proven yet and is a canary case. A
    `RewriteRule [P]`, `[H=]` or `SetHandler` from site A to site B's socket
-   carries A's key and B refuses it. A hosting setting that names its own
-   `auto_prepend_file` loses to the guard. An Apache PHP site with no mode runs
-   FastCGI (warned once), so one with no Hosting Account is refused; nginx keeps
-   its shared master for now. A runtime with the guard behind a vhost without
-   the key answers 403 (fail closed). The first deploy of an existing site
-   changes the runtime and the vhost together, so its PHP pages can answer 403
-   for the few seconds between the PHP restart and the Apache reload. The
-   walls reach a site only when that site is deployed. Known limit: a `[P]` to a
+   carries A's key (or none) and B refuses it. A hosting setting, or a site's own
+   `.user.ini`, that names an `auto_prepend_file` no longer takes effect: the
+   guard wins, which is intended. An Apache PHP site with no mode runs FastCGI
+   (warned once), so one with no Hosting Account is refused; nginx keeps its
+   shared master for now. A runtime with the guard behind a vhost without the key
+   answers 403 (fail closed). The first deploy of an existing site changes the
+   runtime and the vhost together, so its PHP pages can answer 403 for the few
+   seconds between the PHP restart and the Apache reload. A runtime has its guard
+   only after its own site is deployed; until then another site can still proxy
+   to it and run its existing scripts. The Apache role does tighten every vhost
+   already on disk at the host's first Apache deploy (`orchestration/AGENTS.md`):
+   no `FileInfo`, the closed list, the strip lines. Known limit: a `[P]` to a
    FastCGI listener on loopback that is not a site runtime is not covered by the
    key (none exists today). `AuthUserFile` may name any file `tpapache` can read;
    Apache only checks passwords against it, so the worst case is a guessing
