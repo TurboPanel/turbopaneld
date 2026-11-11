@@ -83,6 +83,8 @@ export type DockerClientLike = {
 /** Minimal Docker monitor surface used at daemon startup. */
 export type DockerMonitorLike = {
   subscribeReachability(cb: (reachable: boolean) => void): void;
+  /** Docker network `create` events; absent on test doubles. */
+  subscribeNetworkCreated?(cb: () => void): void;
 };
 
 /** Minimal sentinel surface used at daemon startup. */
@@ -279,6 +281,11 @@ async function maybeAttachDocker(
   }
   const dockerMonitor = (io.createDockerMonitor ??
     ((client) => new DockerMonitor(client as DockerClient)))(dockerClient);
+  // A network made by anything (a stack, the fabric, ingress, a root
+  // `docker network create`) is walled as soon as Docker says it exists.
+  dockerMonitor.subscribeNetworkCreated?.(() => {
+    void syncWall(io);
+  });
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
     void reinstallForwardingJumps();
@@ -495,12 +502,16 @@ async function afterOrchestration(
   // The real host keeps tp0 peer readings fresh every 60 s; a test that
   // stands in its own restore never starts that timer.
   if (!io.restoreFabricFromPersistedState) armFabricPeerRefresh();
-  await (io.restoreFabricFromPersistedState ??
-    restoreFabricFromPersistedState)();
-  await reinstallForwardingJumps();
-  // On its own, before the PHP reconcile: the wall must learn today's container
-  // networks even when that reconcile has nothing to do or stops early.
-  await syncWall(io);
+  try {
+    await (io.restoreFabricFromPersistedState ??
+      restoreFabricFromPersistedState)();
+    await reinstallForwardingJumps();
+  } finally {
+    // Whatever the fabric steps did, the wall must learn today's container
+    // networks before the PHP reconcile, which may have nothing to do or stop
+    // early.
+    await syncWall(io);
+  }
   await (io.reconcileSitePhpRuntimes ?? reconcileSitePhpRuntimesAtBoot)();
   // After the runtimes are back: restart what still runs a PHP build older
   // than the installed one, in the background, and keep watching.
@@ -595,6 +606,11 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   };
 
   info("daemon", "starting up");
+
+  // Before any orchestration step: tp-host and lib/tp-php-loopback are root
+  // helpers an earlier converge installed, and orchestration may not be ready
+  // for a long while (or ever, on this start).
+  await syncWall(io);
 
   // First, before anything slow: a stale primary must not keep serving.
   await bestEffort(

@@ -79,8 +79,10 @@
 #     units, and after it installs, retires or removes native app units (so a
 #     port that goes back to the ledger leaves its old account's pairs).
 #     It also syncs after every container deploy (compose may have created a
-#     network, whose gateway address only a sync learns), at start of the
-#     daemon's post-orchestration steps, and when Docker becomes reachable again.
+#     network, whose gateway address only a sync learns), at the very start of
+#     the daemon (before orchestration), after its post-orchestration fabric
+#     steps, when Docker becomes reachable again and on every Docker network
+#     create event.
 #
 # Needs the `nft`, `flock` and `ip` programs (Ansible installs the nftables,
 # util-linux and iproute2 packages in turbopanel-user/root-helpers.yml). When

@@ -188,6 +188,8 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 0);
   assertEquals(stub.phpReconciles, 0);
+  // The wall is reloaded at start even when orchestration never becomes ready.
+  assertEquals(stub.wallSyncs, 1);
   assertEquals(stub.phpPatchArms, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
@@ -1006,4 +1008,37 @@ test("a failed tools bootstrap on the connect-first path is retried too", async 
   assertEquals(scheduled, 1);
   stop();
   await done;
+});
+
+test("a Docker network create event reloads the account wall", async () => {
+  let onCreated: (() => void) | undefined;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => ({
+      subscribeReachability: () => {},
+      subscribeNetworkCreated: (cb) => {
+        onCreated = cb;
+      },
+    }),
+    startTunnels: () => {
+      onCreated?.();
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  // start, post-orchestration, and the one network create
+  assertEquals(stub.wallSyncs, 3);
+});
+
+test("a throwing fabric restore does not skip the account wall reload", async () => {
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    restoreFabricFromPersistedState: () =>
+      Promise.reject(new Error("fabric went away")),
+  });
+  await runDaemon(stub.io).catch(() => {});
+  // start, then the post-orchestration one from the finally block
+  assertEquals(stub.wallSyncs, 2);
 });
