@@ -1781,8 +1781,8 @@ test({
       // The owner's files stay: only an explicit delete removes a folder. The
       // one privileged call is the account wall reload after the deploy.
       assertEquals(
-        sudo.calls.every((call) => call.args.includes("php-loopback-sync")),
-        true,
+        sudo.calls.map((call) => call.args.includes("php-loopback-sync")),
+        [true],
       );
     });
   },
@@ -1848,6 +1848,59 @@ test({
         "nft refused the ruleset",
       );
       assertEquals(typeof stateDir, "string");
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy reloads the account wall when the deploy fails after compose up",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async () => {
+      const syncs: string[][] = [];
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            {
+              environmentId: "envwall3",
+              projectId: "proj-1",
+              organizationId: "org-1",
+              projectName: "tp-demo-wall3",
+              composeFiles: [{
+                filename: RUNTIME_COMPOSE_FILENAME,
+                role: "runtime" as const,
+                source: "inline" as const,
+                content: "services:\n  web:\n    image: nginx:alpine\n",
+              }],
+              hostings: [],
+            },
+            new Date().toISOString(),
+            {
+              ...hermeticDeployDeps,
+              runDocker: (args: string[]) =>
+                args.includes("up")
+                  ? Promise.resolve({
+                    success: false,
+                    stdout: "",
+                    stderr: "compose up failed",
+                    code: 1,
+                  })
+                  : fakeReclaimRunDocker(args),
+              runPrivileged: (_command: string, args: string[]) => {
+                if (args.includes("php-loopback-sync")) syncs.push(args);
+                return Promise.resolve({
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                });
+              },
+            },
+          ),
+        Error,
+        "compose up failed",
+      );
+      assertEquals(syncs.length, 1);
     });
   },
 });

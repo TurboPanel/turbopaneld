@@ -1205,8 +1205,8 @@ test({
 
       // Nothing is reclaimed: the only privileged call is the account wall reload.
       assertEquals(
-        sudoCalls.every((call) => call.args.includes("php-loopback-sync")),
-        true,
+        sudoCalls.map((call) => call.args.includes("php-loopback-sync")),
+        [true],
       );
     });
   },
