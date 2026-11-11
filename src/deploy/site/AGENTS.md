@@ -54,9 +54,15 @@ Docker Compose. The daemon:
    `[PATH=<home>]`; a php-fpm runtime pins the same two settings in its pool
    (`php_admin_value[auto_prepend_file]`, `php_admin_flag[allow_url_include]`).
    The guard answers 403 unless the key the vhost sent equals the one in the
-   runtime's own `php.ini`, then drops the key from `$_SERVER` and `$_ENV` and
-   asks `putenv` to unset it (when `putenv` is not disabled); whether `getenv()`
-   in site code can still read it is not proven yet and is a canary case. A
+   runtime's own `php.ini`, then drops the key from `$_SERVER` and `$_ENV`. A
+   site's own PHP can still read its own site key (`getenv()` reads the FastCGI
+   request values first, and `get_cfg_var` shows the expected key). That is
+   safe: every PHP vhost forces its own key after the clears and
+   `ProxyFCGISetEnvIf` is not an allowed override, so a site's key never opens
+   another site's PHP runtime (canary-proven 403 or 500 across sites in
+   fastcgi and fpm, 2026-11-11). tp-host accepts the previous guard bytes (with
+   the useless `putenv` call) as well as the current ones, for hosts that have
+   not re-rendered yet. A
    `RewriteRule [P]`, `[H=]` or `SetHandler` from site A to site B's socket
    carries A's key (or none) and B refuses it. A hosting setting, or a site's own
    `.user.ini`, that names an `auto_prepend_file` no longer takes effect: the

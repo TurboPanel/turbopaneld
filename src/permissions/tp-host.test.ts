@@ -3159,6 +3159,15 @@ test("per-site PHP guard: the exact guard text and an ini that names only this r
 
     // The renderer's own bytes are accepted, a changed byte is not.
     const guard = sitePhpGuardPhp();
+    // The previous guard (with the putenv call) stays accepted for hosts that
+    // have not re-rendered yet.
+    const previousGuard = guard.replace(
+      "$_ENV['TP_SITE_KEY']);\n",
+      "$_ENV['TP_SITE_KEY']);\n    if (function_exists('putenv')) {\n        putenv('TP_SITE_KEY');\n    }\n",
+    );
+    assertEquals(previousGuard === guard, false);
+    const prev = await installPhpConf(host, "site-guard.php", previousGuard);
+    assertEquals(prev.code, 0, prev.stderr);
     const ok = await installPhpConf(host, "site-guard.php", guard);
     assertEquals(ok.code, 0, ok.stderr);
     assertEquals(await Deno.readTextFile(guardPath), guard);

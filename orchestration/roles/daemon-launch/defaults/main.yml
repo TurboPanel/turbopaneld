@@ -47,7 +47,9 @@ turbopanel_update_guard_bin: "{{ turbopanel_install_root }}/lib/tp-update-guard"
 # Scheduled-backup runner a policy's timer service execs (rendered per exec
 # mode); kept under <install>/lib beside tp-update-guard for the same reason.
 turbopanel_backup_run_bin: "{{ turbopanel_install_root }}/lib/tp-backup-run"
-turbopanel_update_guard_deadline_sec: 600
+# First run of the guard timer after arming: the early crash-loop check. The
+# rollback deadline (about 10 minutes) is written by scripts/run.sh.
+turbopanel_update_guard_early_check_sec: 90
 # Follow-up after a restored daemon fails to come back. The guard stops the
 # timer on recovery and after the attention threshold.
 turbopanel_update_guard_retry_sec: 30

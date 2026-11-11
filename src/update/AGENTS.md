@@ -110,7 +110,8 @@ its own floor:
 - Automatic rollback (`tp-update-guard`) acts only on root's own record,
   `<install>/lib/update-guard-armed`, which `tp_arm_update_guard` writes next to
   the daemon's `update-guard.json` copy: target and previous commit, deadline,
-  boot id, restart count. The guard moves back only the previous build root
+  boot id, restart count, and the daemon unit's `NRestarts` at arm time (the
+  early crash-loop rollback). The guard moves back only the previous build root
   recorded (it checks `bin/turbopaneld.prev --version`), consumes the record
   on rollback, disarm or the attention threshold, and drops it after a reboot
   or an hour past the deadline. A daemon-written `update-guard.json` alone

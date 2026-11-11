@@ -811,9 +811,6 @@ if (PHP_SAPI !== 'cli') {
         exit;
     }
     unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);
-    if (function_exists('putenv')) {
-        putenv('TP_SITE_KEY');
-    }
 }
 `,
   );

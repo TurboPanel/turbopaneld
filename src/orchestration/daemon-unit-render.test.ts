@@ -287,6 +287,9 @@ for (const variant of VARIANTS) {
         only(timer, "Timer", "Unit"),
         "turbopaneld-update-guard.service",
       );
+      // First run is the early crash-loop check, then every 30 s.
+      assertEquals(only(timer, "Timer", "OnActiveSec"), "90");
+      assertEquals(only(timer, "Timer", "OnUnitInactiveSec"), "30");
     },
   });
 }
