@@ -42,7 +42,7 @@ export async function handleTunnelConnectors(
   const present = new Set(await listConnectorIds(io));
   if (payload.install.length > 0 && !deps.decryptSecrets) {
     throw new Error(
-      "tunnel connectors need the secret decryptor to unseal tokens",
+      "tunnel connectors: this daemon cannot unseal run tokens here (no secret decryptor), so no connector was installed or checked for a new token",
     );
   }
   // Every token is unsealed (locally, never logged), so a connector already

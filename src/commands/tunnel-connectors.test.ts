@@ -308,9 +308,32 @@ test("one tunnel failing does not stop the others, and the command still fails",
   });
 });
 
-test("an install needs the secret decryptor", async () => {
-  await withIo(async (io) => {
-    await assertRejects(() => handleTunnelConnectors(payload(), "now", { io }));
+test("any install list needs the secret decryptor, also for a connector already here, and says so", async () => {
+  await withIo(async (io, calls) => {
+    await assertRejects(
+      () => handleTunnelConnectors(payload(), "now", { io }),
+      Error,
+      "no secret decryptor",
+    );
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    // Already installed: the token is still checked for a rotation, so it is refused the same way.
+    await assertRejects(
+      () => handleTunnelConnectors(payload(), "now", { io }),
+      Error,
+      "no secret decryptor",
+    );
+    assertEquals(calls, []);
+    // A list that only removes needs no decryptor.
+    const removed = await handleTunnelConnectors(
+      payload({ install: [], remove: [ID_A] }),
+      "now",
+      { io },
+    );
+    assertEquals(removed.removed, [ID_A]);
   });
 });
 
