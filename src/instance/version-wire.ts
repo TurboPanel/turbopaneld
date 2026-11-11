@@ -128,6 +128,7 @@ export const DAEMON_WIRE_FEATURES = [
   "acme-issue-one-cert-v1",
   "tunnel-lock-follow-v1",
   "tunnel-connector-token-change-v1",
+  "deploy-config-files-v1",
 ] as const;
 
 /**
@@ -764,3 +765,13 @@ export function resolveInstanceCapabilities(
 ): Record<string, boolean> {
   return resolvePeerCapabilities(reportedVersion, floors);
 }
+
+/**
+ * This daemon puts generated config files together from `configFiles[]` on
+ * `environment.deploy` (text parts plus secret keys read from
+ * `variableMaterial[]`) and mounts them read-only. The control plane sends
+ * `configFiles` only when the daemon of every target server lists this
+ * feature; an older daemon would silently drop the field.
+ */
+export const DEPLOY_CONFIG_FILES_FEATURE: DaemonWireFeature =
+  "deploy-config-files-v1";

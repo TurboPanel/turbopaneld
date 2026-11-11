@@ -997,7 +997,9 @@ control plane, the contract check fails a control plane that lists a feature
 this daemon lacks, and an older control plane ignores names it does not know) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `command-progress` (the
+ignored by a peer that does not list the feature. `deploy-config-files-v1` gates the `configFiles` field of
+`environment.deploy`: the control plane sends it only when every target daemon
+lists it, because an older daemon would drop the field. `command-progress` (the
 deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too
 but carries no feature of its own: both control-plane inbound paths drop an
 unknown message type, so an older peer just never draws the step rail. `php-site-modes-v1` is advertised by a daemon that runs each PHP site in its
