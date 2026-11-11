@@ -1072,6 +1072,12 @@ export type EnvironmentDeployHostingPhp = {
 export type EnvironmentDeploySiteDbCa = {
   variables: string[];
   pem: string;
+  /**
+   * Names of variables holding a PostgreSQL URL (feature `site-db-url-ca-v1`).
+   * A URL in `verify-ca` or `verify-full` mode with no `sslrootcert` gets the
+   * CA file's path appended. Only the listed names are touched.
+   */
+  urlVariables?: string[];
 };
 
 export type EnvironmentDeploySitePrincipal = {
@@ -5770,7 +5776,7 @@ function parseNativeAppService(
 
 /** Largest CA bundle accepted for a site (a handful of certificates). */
 const MAX_SITE_DB_CA_BYTES = 65_536;
-const MAX_SITE_DB_CA_VARIABLES = 8;
+const MAX_SITE_DB_CA_VARIABLES = 16;
 const MAX_SITE_REQUIRED_ENV = 64;
 const PEM_CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----";
 
@@ -5813,7 +5819,7 @@ function parseSiteDbCa(
       `Invalid ${field}: expected certificate PEM blocks only`,
     );
   }
-  return {
+  const dbCa: EnvironmentDeploySiteDbCa = {
     variables: parseSiteEnvNames(
       value.variables,
       MAX_SITE_DB_CA_VARIABLES,
@@ -5821,6 +5827,14 @@ function parseSiteDbCa(
     ),
     pem: value.pem,
   };
+  if (value.urlVariables !== undefined) {
+    dbCa.urlVariables = parseSiteEnvNames(
+      value.urlVariables,
+      MAX_SITE_DB_CA_VARIABLES,
+      `${field}.urlVariables`,
+    );
+  }
+  return dbCa;
 }
 
 function parseSiteRequiredEnv(
