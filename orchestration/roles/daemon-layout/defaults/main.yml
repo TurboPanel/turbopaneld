@@ -29,3 +29,4 @@ turbopanel_daemon_state_leaves:
   - { name: release-build, mode: "0700" }
   - { name: folders, mode: "0750" }
   - { name: ansible, mode: "0750" }
+  - { name: reach, mode: "0700" }

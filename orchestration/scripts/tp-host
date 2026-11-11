@@ -95,6 +95,19 @@ R_SITEENV_STAGE="$R_STATE/sites/.env-stage"
 # <state>/cloudflared/tunnels/<id>.env; tunnel-env-install checks and copies it.
 R_TUNNELENV="$R_CONFIG/tunnel-env"
 R_TUNNEL_STAGE="$R_STATE/cloudflared/tunnels"
+# The loopback ports a project's helper containers publish, one list per
+# environment as lib/tp-php-loopback reads them (root:root 0600, in a root:root
+# 0700 folder): lines of `<user> <port>`. The daemon stages
+# <state>/reach/.stage/<environment id>.list and reach-ports-install checks and
+# copies it; the port band is the listen band (TP_LISTEN_PORT_MIN/MAX in
+# lib/tp-php-loopback, compose-final-policy.ts reserved range; a test keeps
+# them equal). No generic verb accepts a path in it or in <config>/cache.
+R_REACH="$R_CONFIG/reach-ports"
+R_REACH_STAGE="$R_STATE/reach/.stage"
+TP_LISTEN_PORT_MIN=18080
+TP_LISTEN_PORT_MAX=18999
+# Most lines one list may hold (the daemon's helperReach cap is 32 per deploy).
+TP_REACH_MAX_LINES=64
 # Longest run token tunnel-env-install accepts (TUNNEL_TOKEN_RE in
 # src/tunnels/connector-unit.ts; a test keeps the two equal).
 TP_TUNNEL_TOKEN_MAX=2048
@@ -260,6 +273,8 @@ tp_path_class() {
     "$R_APPENV"|"$R_APPENV"/*) return 1 ;;
     "$R_SITEENV"|"$R_SITEENV"/*) return 1 ;;
     "$R_TUNNELENV"|"$R_TUNNELENV"/*) return 1 ;;
+    "$R_REACH"|"$R_REACH"/*) return 1 ;;
+    "$R_CONFIG"/cache|"$R_CONFIG"/cache/*) return 1 ;;
   esac
   # State that belongs to an engine account or to a root service, though it sits
   # in the state tree: the hosting Caddy's store (tpedge) and the Docker gate's
@@ -367,7 +382,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible|"$R_STATE"/reach) return 0 ;;
   esac
   return 1
 }
@@ -5926,6 +5941,60 @@ tp_verb_tunnel_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# --- helper container ports (lib/tp-php-loopback) --------------------------
+# A helper container publishes one port on 127.0.0.1 for the Hosting Account of
+# its project, and lib/tp-php-loopback opens that port to that account only. The
+# list it reads is <config>/reach-ports/<environment id>.list, made here from the
+# file the daemon staged: at most TP_REACH_MAX_LINES lines of `<user> <port>`,
+# each user a principal and each port in the listen band. The daemon runs
+# php-loopback-sync after either verb.
+
+tp_reach_content_ok() {
+  tp_content_plain "$1" || return 1
+  LC_ALL=C awk -v min="$TP_LISTEN_PORT_MIN" -v max="$TP_LISTEN_PORT_MAX" -v lines="$TP_REACH_MAX_LINES" '
+    function fail(msg) {
+      print "tp-host: reach list: " msg > "/dev/stderr"
+      bad = 1; exit 1
+    }
+    {
+      if (NR > lines) fail("more than " lines " lines")
+      if ($0 !~ /^[A-Za-z0-9_.-]+ [0-9]+$/) fail("not <user> <port>")
+      split($0, f, " ")
+      if (length(f[2]) > 5 || f[2] !~ /^[1-9]/ || f[2] + 0 < min || f[2] + 0 > max) fail("port outside the listen band")
+      if (($0 in seen)) fail("line repeated")
+      seen[$0] = 1
+    }
+    END { if (!bad && NR == 0) { print "tp-host: reach list: empty" > "/dev/stderr"; exit 1 } }
+  ' "$1" || return 1
+  while IFS=' ' read -r _rc_user _rc_port; do
+    tp_is_principal "$_rc_user" || {
+      printf 'tp-host: reach list: %s is not a principal\n' "$_rc_user" >&2
+      return 1
+    }
+  done < "$1"
+}
+
+tp_verb_reach_ports_install() {
+  [ $# -eq 1 ] || tp_die "reach-ports-install: takes one environment id"
+  tp_appenv_id_ok "$1" || tp_die "reach-ports-install: refusing environment id $1"
+  tp_stage_dir
+  tp_read_staged "$1" "$1.list" "$R_REACH_STAGE" 4096 "$TP_STAGE/reachsrc" "reach list"
+  tp_reach_content_ok "$TP_STAGE/reachsrc" ||
+    tp_die "refusing the reach list for $1: content outside the allowed shape"
+  tp_appenv_enter "$R_REACH"
+  tp_put_file "$R_REACH/$1.list" 600 < "$TP_STAGE/reachsrc"
+}
+
+tp_verb_reach_ports_remove() {
+  [ $# -eq 1 ] || tp_die "reach-ports-remove: takes one environment id"
+  tp_appenv_id_ok "$1" || tp_die "reach-ports-remove: refusing environment id $1"
+  # No folder yet: no environment has had a helper port, nothing to remove.
+  tp_pin_dir "$R_REACH" || return 0
+  [ "$(stat -c '%u %a' .)" = "$ROOT_UID 700" ] ||
+    tp_die "refusing $R_REACH: not a root-owned 0700 directory"
+  rm -f -- "./$1.list"
+}
+
 # --- control-plane uploaded certificates ------------------------------------
 # A certificate pair for one of the control plane's own hostnames (uploaded by
 # an administrator, or issued by the control plane over DNS-01) reaches the
@@ -6589,6 +6658,8 @@ case "$_verb" in
   site-env-remove) tp_verb_site_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  reach-ports-install) tp_verb_reach_ports_install "$@" ;;
+  reach-ports-remove) tp_verb_reach_ports_remove "$@" ;;
   tunnel-loopback-sync) tp_verb_tunnel_loopback_sync "$@" ;;
   instance-cert-install) tp_verb_instance_cert_install "$@" ;;
   instance-cert-prune) tp_verb_instance_cert_prune "$@" ;;

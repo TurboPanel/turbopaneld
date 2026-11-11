@@ -1029,3 +1029,16 @@ test("a file name the host wrapper admits into a drop-in folder is guarded", asy
     ["/etc/ssh/sshd_config.d/61-new.conf"],
   );
 });
+
+test("the helper port lists and their staging folder sit inside trees purge.sh removes", async () => {
+  const trees = shellList(await purgeCode(), "TP_OWNED_TREES");
+  // <config>/reach-ports/<environment>.list and <state>/reach/.stage/<environment>.list
+  for (const root of ["/etc/turbopanel", "/var/lib/turbopanel"]) {
+    assert(trees.includes(root), `${root} is not purged`);
+  }
+  const tpHost = await Deno.readTextFile(
+    join(dirname(purgePath), "../orchestration/scripts/tp-host"),
+  );
+  assert(tpHost.includes('R_REACH="$R_CONFIG/reach-ports"'));
+  assert(tpHost.includes('R_REACH_STAGE="$R_STATE/reach/.stage"'));
+});

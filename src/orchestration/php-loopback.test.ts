@@ -1,5 +1,6 @@
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { RESERVED_HOST_PORT_RANGES } from "../deploy/compose-final-policy.ts";
 import { MYSQL_PORT, PGSQL_PORT } from "../managed/proxysql.ts";
 
 /**
@@ -284,6 +285,135 @@ test("native app units that do not fit are skipped, never fatal", async () => {
     "turbopanel-app-pword.service": appUnit("bob", "3000 3001"),
     "turbopanel-app-noport.service": "[Service]\nUser=bob\n",
   });
+});
+
+const cacheUnit = (user: string, port?: string) =>
+  `[Service]\nType=notify\nUser=${user}\n${
+    port === undefined ? "" : `Environment=PORT=${port}\n`
+  }`;
+
+const GUARD_RULE =
+  "ct state new ip daddr 127.0.0.1 tcp dport @guarded meta skuid != 0 meta skuid . tcp dport != @own_ports reject with tcp reset";
+
+/** A host with a port cache for alice, a socket-only cache for bob and one helper list. */
+const GUARDED_UNITS: Record<string, string> = {
+  ...UNITS,
+  "turbopanel-cache-c1.service": cacheUnit("alice", "18100"),
+  "turbopanel-cache-c2.service": cacheUnit("bob"),
+};
+
+test("with no cache and no helper list there is no guarded set and no guard rule", async () => {
+  const out = (await render()).stdout;
+  assert(!out.includes("guarded"), out);
+  assert(!out.includes("ct state new"), out);
+  // A socket-only cache has no port: nothing is added either.
+  await withTree(HOST_FILES, async (run) => {
+    const only = await run();
+    assertEquals(only.code, 0, only.stderr);
+    assertEquals(only.stdout, out);
+  }, { ...UNITS, "turbopanel-cache-c2.service": cacheUnit("bob") });
+});
+
+test("a cache port and a helper port open for their own account and are guarded against everyone else", async () => {
+  await withTree({
+    ...HOST_FILES,
+    "etc/turbopanel/reach-ports/env1.list": "bob 18200\ncarol 18200\n",
+    "etc/turbopanel/reach-ports/env2.list": "alice 18300\n",
+  }, async (run) => {
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assertEquals(setElements(out.stdout, "guarded"), [
+      "18100",
+      "18200",
+      "18300",
+    ]);
+    // alice 15001, bob 15002, carol 15003; apps stay in the set, unguarded.
+    assertEquals(setElements(out.stdout, "own_ports"), [
+      "15001 . 18100",
+      "15001 . 18300",
+      "15002 . 18200",
+      "15002 . 3000",
+      "15002 . 41234",
+      "15003 . 18200",
+      "15003 . 3001",
+    ]);
+    const lines = out.stdout.split("\n").map((l) => l.trim());
+    // The guard rule is the first rule of the chain, before the replies rule.
+    const hook = lines.findIndex((l) =>
+      l.startsWith("type filter hook output")
+    );
+    assertEquals(lines[hook + 1], GUARD_RULE);
+    assertEquals(
+      lines[hook + 2],
+      `meta skuid ${BAND} ct state established,related accept`,
+    );
+    assertEquals(lines.filter((l) => l.includes("@guarded")).length, 1);
+  }, GUARDED_UNITS);
+});
+
+test("cache units and helper lines that do not fit are skipped, and an app's port is never guarded", async () => {
+  await withTree({
+    ...HOST_FILES,
+    "etc/turbopanel/reach-ports/ok.list":
+      "alice 18400\nroot 18401\ndaemon 18402\nnobody 18403\nalice 18079\nalice 19000\nalice 018404\nalice 18405 extra\nalice\n\nalice x\n-x 18406\n",
+    "etc/turbopanel/reach-ports/not-a-list.txt": "alice 18500\n",
+  }, async (run, dir) => {
+    await Deno.symlink(
+      join(dir, "etc/turbopanel/reach-ports/ok.list"),
+      join(dir, "etc/turbopanel/reach-ports/link.list"),
+    );
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assertEquals(setElements(out.stdout, "guarded"), ["18400"]);
+    assert(setElements(out.stdout, "own_ports").includes("15001 . 18400"));
+    // App ports sit in the band's neighbours or outside it; none is guarded.
+    assert(!setElements(out.stdout, "guarded").includes("3000"));
+  }, {
+    ...UNITS,
+    // Outside the band, a root unit, a port out of range, a leading zero.
+    "turbopanel-cache-c1.service": cacheUnit("alice", "13306"),
+    "turbopanel-cache-c2.service": cacheUnit("root", "18100"),
+    "turbopanel-cache-c3.service": cacheUnit("alice", "70000"),
+    "turbopanel-cache-c4.service": cacheUnit("alice", "018100"),
+    "turbopanel-cache-c5.service": cacheUnit("nobody", "18101"),
+  });
+});
+
+test("a symlinked cache unit and a symlinked reach folder entry are not read", async () => {
+  await withTree(HOST_FILES, async (run, dir) => {
+    await Deno.writeTextFile(
+      join(dir, "real.service"),
+      cacheUnit("alice", "18100"),
+    );
+    await Deno.symlink(
+      join(dir, "real.service"),
+      join(dir, "etc/systemd/system/turbopanel-cache-link.service"),
+    );
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assert(!out.stdout.includes("guarded"), out.stdout);
+  }, UNITS);
+});
+
+test("a helper list holds at most its first 64 lines", async () => {
+  const lines = Array.from({ length: 70 }, (_, i) => `alice ${18100 + i}`);
+  await withTree({
+    ...HOST_FILES,
+    "etc/turbopanel/reach-ports/big.list": `${lines.join("\n")}\n`,
+  }, async (run) => {
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assertEquals(setElements(out.stdout, "guarded").length, 64);
+  }, UNITS);
+});
+
+test("the guarded band is the compose policy's reserved listen band", async () => {
+  const script = await Deno.readTextFile(SCRIPT);
+  assertStringIncludes(script, "TP_LISTEN_PORT_MIN=18080\n");
+  assertStringIncludes(script, "TP_LISTEN_PORT_MAX=18999\n");
+  assert(
+    RESERVED_HOST_PORT_RANGES.some(([lo, hi]) => lo === 18080 && hi === 18999),
+  );
 });
 
 test("no native apps is an empty port set, not an error, and the walls still stand", async () => {
@@ -633,11 +763,16 @@ test("the rendered ruleset passes `nft -c -f`, overlapping pools and bridges inc
       { base: "fd00::/8", size: 64 },
     ],
   });
+  const guardedFiles = {
+    ...HOST_FILES,
+    "etc/turbopanel/reach-ports/env1.list": "bob 18200\n",
+  };
   for (
-    const files of [
-      HOST_FILES,
-      { ...HOST_FILES, "etc/docker/daemon.json": overlapping },
-    ]
+    const [files, units] of [
+      [HOST_FILES, UNITS],
+      [{ ...HOST_FILES, "etc/docker/daemon.json": overlapping }, UNITS],
+      [guardedFiles, GUARDED_UNITS],
+    ] as const
   ) {
     await withTree(files, async (run) => {
       const rendered = await run();
@@ -650,7 +785,7 @@ test("the rendered ruleset passes `nft -c -f`, overlapping pools and bridges inc
         return;
       }
       assert(out.success, err);
-    }, UNITS);
+    }, units);
   }
 });
 

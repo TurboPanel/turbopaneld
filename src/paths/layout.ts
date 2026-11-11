@@ -587,6 +587,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.
   { name: "ansible", mode: "0750" },
+  // Staged helper port lists, in `.stage`, that `tp-host reach-ports-install` copies (deploy/reach).
+  { name: "reach", mode: "0700" },
 ];
 
 /** `<backupDir>/<kind>`: the top folder of one kind of backup. */
@@ -680,6 +682,12 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
     root: "config",
     name: "tunnel-env",
     madeBy: "tp-host tunnel-env-install, root:root 0700; the unit reads it",
+  },
+  {
+    root: "config",
+    name: "reach-ports",
+    madeBy:
+      "tp-host reach-ports-install, root:root 0700; lib/tp-php-loopback reads it",
   },
   { root: "config", name: "instance", madeBy: "instance-launch role" },
   { root: "config", name: "caddy", madeBy: "instance-launch role" },

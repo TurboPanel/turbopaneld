@@ -45,6 +45,8 @@ const EXEMPT: Record<string, string> = {
     "root-owned: tp-host site-env-install makes it, a 0700 folder per Linux user, and its files; the cron unit's EnvironmentFile= names it, the daemon never writes it",
   "config/tunnel-env":
     "root-owned: tp-host tunnel-env-install makes it and its files; the connector unit's EnvironmentFile= names it, the daemon never writes it",
+  "config/reach-ports":
+    "root-owned: tp-host reach-ports-install makes it and its files; lib/tp-php-loopback reads it, the daemon never writes it",
   "config/system": "root role (system stack)",
   "config/instance": "control plane (state root not sealed co-located)",
   "state/instance": "control plane (state root not sealed co-located)",

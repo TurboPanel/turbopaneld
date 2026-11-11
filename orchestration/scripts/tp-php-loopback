@@ -24,16 +24,28 @@
 #     nameserver /etc/resolv.conf names (a local caching resolver)
 #   - the account's own ports: 127.0.0.1:<PORT> of each of its native apps
 #     (User= and Environment=PORT= of /etc/systemd/system/turbopanel-app-*.service,
-#     the check copy beside a serving release included), as uid . port pairs
-#     in the set `own_ports`. This set is the per-account opening: a
-#     project's own helper containers will be added to it, for that one
-#     account, when they get loopback ports of their own.
+#     the check copy beside a serving release included), of its project
+#     caches (turbopanel-cache-*.service, the same two lines) and of its
+#     project's helper containers (the root-written lists
+#     /etc/turbopanel/reach-ports/<environment>.list, one `<user> <port>` per
+#     line), as uid . port pairs in the set `own_ports`. This set is the
+#     per-account opening.
 #
 # so ProxySQL's admin (6032) and metrics (6070) ports, other accounts' apps
 # and loopback publishes, other sites' ports and Apache's backend port are
 # closed. A server an account starts by hand on loopback (from its shell) is
 # refused too, to that account as well: nothing on the host can say which
 # account a loopback listener belongs to.
+#
+# Guarded ports. A cache's or a helper container's port sits in the listen
+# band 18080-18999 (tp-host's TP_LISTEN_PORT_MIN/MAX, compose-final-policy's
+# reserved range) and, unlike an app's, is open to its own account only. Those
+# ports go in the set `guarded`, and the first rule of the chain refuses a new
+# connection to one of them from every uid but root and the pair's own
+# account: other accounts, the web servers, the daemon and builds alike. The
+# set and the rule exist only while a port is guarded, so a host with no cache
+# and no helper container gets the same rules as before. Ports outside the
+# band, and lines that do not fit, are skipped.
 #
 # Container networks: new connections are refused
 #
@@ -94,6 +106,9 @@ PRINCIPAL_ID_MIN=15001
 PRINCIPAL_ID_MAX=60000
 DB_PORT=13306
 PG_PORT=15432
+# The listen band a guarded port must sit in (tp-host's TP_LISTEN_PORT_MIN/MAX).
+TP_LISTEN_PORT_MIN=18080
+TP_LISTEN_PORT_MAX=18999
 RESOLVED_STUB=127.0.0.53
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -111,6 +126,7 @@ else
   P="$TP_HOST_TEST_PREFIX"
 fi
 UNITS="$P/etc/systemd/system"
+REACH_DIR="$P/etc/turbopanel/reach-ports"
 
 [ "$#" -eq 1 ] && [ "$1" = "sync" ] || tp_die "only: sync"
 
@@ -122,26 +138,57 @@ uid_of() {
   fi
 }
 
-# `uid . port` for every native app unit whose User= is a Hosting Account and
-# whose PORT= is a port. A unit that does not fit is skipped, never fatal:
-# a skipped pair only keeps that account off that port.
-own_ports() {
-  _acc=""
-  for _u in "$UNITS"/turbopanel-app-*.service; do
-    [ -f "$_u" ] && [ ! -L "$_u" ] || continue
-    _name="$(sed -n 's/^User=//p' "$_u" | head -1)"
-    case "$_name" in ''|-*|*[!A-Za-z0-9_.-]*) continue ;; esac
-    _port="$(sed -n 's/^Environment=PORT=//p' "$_u" | head -1)"
-    case "$_port" in ''|0*|*[!0-9]*) continue ;; esac
-    [ "${#_port}" -le 5 ] && [ "$_port" -le 65535 ] || continue
-    _uid="$(uid_of "$_name")"
-    case "$_uid" in ''|*[!0-9]*) continue ;; esac
-    [ "${#_uid}" -le 10 ] && [ "$_uid" -ge "$PRINCIPAL_ID_MIN" ] &&
-      [ "$_uid" -le "$PRINCIPAL_ID_MAX" ] || continue
-    _acc="$_acc$_uid . $_port
-"
+# `uid . port` for USER and PORT when USER is a Hosting Account and PORT is a
+# port (inside MIN-MAX when given); nothing otherwise. A line that does not fit
+# is skipped, never fatal: a skipped pair only keeps that account off that port.
+pair_of() {
+  _po_name="$1"
+  _po_port="$2"
+  _po_min="${3:-1}"
+  _po_max="${4:-65535}"
+  case "$_po_name" in ''|-*|*[!A-Za-z0-9_.-]*) return 0 ;; esac
+  case "$_po_port" in ''|0*|*[!0-9]*) return 0 ;; esac
+  [ "${#_po_port}" -le 5 ] && [ "$_po_port" -ge "$_po_min" ] &&
+    [ "$_po_port" -le "$_po_max" ] || return 0
+  _po_uid="$(uid_of "$_po_name")"
+  case "$_po_uid" in ''|*[!0-9]*) return 0 ;; esac
+  [ "${#_po_uid}" -le 10 ] && [ "$_po_uid" -ge "$PRINCIPAL_ID_MIN" ] &&
+    [ "$_po_uid" -le "$PRINCIPAL_ID_MAX" ] || return 0
+  printf '%s . %s\n' "$_po_uid" "$_po_port"
+}
+
+# `uid . port` for every unit named GLOB (in the units folder) whose User= and
+# Environment=PORT= fit (see pair_of); MIN and MAX bound the port when given.
+unit_pairs() {
+  for _up_u in "$UNITS"/$1; do
+    [ -f "$_up_u" ] && [ ! -L "$_up_u" ] || continue
+    _up_name="$(sed -n 's/^User=//p' "$_up_u" | head -1)"
+    _up_port="$(sed -n 's/^Environment=PORT=//p' "$_up_u" | head -1)"
+    pair_of "$_up_name" "$_up_port" "${2:-}" "${3:-}"
   done
-  printf '%s' "$_acc" | sort -u
+}
+
+# Native apps' own ports: never guarded.
+app_pairs() {
+  unit_pairs 'turbopanel-app-*.service'
+}
+
+# Project caches that listen on a loopback port (a socket-only cache has no
+# PORT=): guarded, so the port must be in the listen band.
+cache_pairs() {
+  unit_pairs 'turbopanel-cache-*.service' "$TP_LISTEN_PORT_MIN" "$TP_LISTEN_PORT_MAX"
+}
+
+# Helper containers' ports: every `<user> <port>` line of the root-written
+# lists, regular files only, at most 64 lines each; guarded like a cache's.
+reach_pairs() {
+  for _rp_f in "$REACH_DIR"/*.list; do
+    [ -f "$_rp_f" ] && [ ! -L "$_rp_f" ] || continue
+    head -n 64 "$_rp_f" | while IFS=' ' read -r _rp_user _rp_port _rp_rest; do
+      [ -z "$_rp_rest" ] || continue
+      pair_of "$_rp_user" "$_rp_port" "$TP_LISTEN_PORT_MIN" "$TP_LISTEN_PORT_MAX"
+    done
+  done
 }
 
 # Loopback nameservers /etc/resolv.conf names, besides resolved's stub.
@@ -303,8 +350,22 @@ refuse() {
 
 BAND="$PRINCIPAL_ID_MIN-$PRINCIPAL_ID_MAX"
 
-# ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP6 FOREIGN_BR
+# One set of the guarded ports, or nothing when none is guarded.
+guarded_set() {
+  [ -n "$1" ] || return 0
+  _gs=""
+  for _g in $1; do _gs="${_gs:+$_gs, }$_g"; done
+  cat <<SET
+  set guarded {
+    type inet_service
+    elements = { $_gs }
+  }
+SET
+}
+
+# ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP6 FOREIGN_BR GUARDED
 ruleset() {
+  _guarded="${10}"
   _own=""
   while IFS= read -r _pair; do
     [ -n "$_pair" ] && _own="${_own:+$_own, }$_pair"
@@ -324,6 +385,7 @@ table inet turbopanel_php {
     type uid . inet_service
 ${_own:+    elements = { $_own \}}
   }
+$(guarded_set "$_guarded")
 $(range_set bridge4 ipv4_addr "$4")
 $(range_set bridge6 ipv6_addr "$5")
 $(range_set pool4 ipv4_addr "$6")
@@ -331,6 +393,7 @@ $(range_set pool6 ipv6_addr "$7")
 $([ -z "$7" ] || range_set keep6 ipv6_addr "$8")
   chain output {
     type filter hook output priority -150; policy accept;
+$([ -z "$_guarded" ] || printf '    ct state new ip daddr 127.0.0.1 tcp dport @guarded meta skuid != 0 meta skuid . tcp dport != @own_ports reject with tcp reset\n')
     meta skuid $BAND ct state established,related accept
     meta skuid $BAND ip daddr 127.0.0.1 tcp dport $DB_PORT accept
     meta skuid $BAND ip daddr 127.0.0.1 tcp dport $PG_PORT accept
@@ -372,7 +435,10 @@ _route6="$(ip_out route6)" || {
   _route6=""
 }
 
-_own="$(own_ports)"
+_cache="$(cache_pairs)"
+_reach="$(reach_pairs)"
+_own="$(printf '%s\n%s\n%s\n' "$(app_pairs)" "$_cache" "$_reach" | grep -v '^$' | sort -u || :)"
+_guarded="$(printf '%s\n%s\n' "$_cache" "$_reach" | sed -n 's/^[0-9]* \. //p' | sort -n -u)"
 _res="$(loopback_resolvers)"
 _res4="$(printf '%s\n' "$_res" | grep -v ':' | sed 's|$|/32|' | valid_cidrs 4 32 |
   sed 's|/32$||')"
@@ -390,7 +456,7 @@ _rules="$(ruleset "$_own" "$_res4" "$_res6" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 4)" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 6)" \
   "$_pools4" "$_pools6" "$_routes6" \
-  "$(foreign_br_links "$_link")")"
+  "$(foreign_br_links "$_link")" "$_guarded")"
 _rules="$(printf '%s\n' "$_rules" | grep -v '^[[:space:]]*$')"
 
 if [ -n "$TP_TEST" ]; then
