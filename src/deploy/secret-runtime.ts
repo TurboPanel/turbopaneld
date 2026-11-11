@@ -11,7 +11,13 @@ import type {
   EnvironmentDeployVariableMaterial,
 } from "../contracts/commands-contracts.ts";
 
-export const SECRET_FILE_MODE = 0o600;
+/**
+ * Readable by every user inside the one container the file is bound into, so
+ * images that run as a fixed non-root user can read it. Host accounts are
+ * stopped by the private folder (`SECRET_DIR_MODE`), and each file is bound
+ * into one compose service only.
+ */
+export const SECRET_FILE_MODE = 0o444;
 export const SECRET_DIR_MODE = 0o700;
 const DECRYPT_BATCH_SIZE = 100;
 
@@ -116,6 +122,13 @@ async function writeFileAtomic(
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
   const tmp = `${path}.tmp`;
+  // A leftover read-only tmp from an interrupted write would make the next
+  // write fail, so clear it first.
+  try {
+    await Deno.remove(tmp);
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
   await Deno.writeTextFile(tmp, content, { mode });
   await Deno.chmod(tmp, mode);
   await Deno.rename(tmp, path);
