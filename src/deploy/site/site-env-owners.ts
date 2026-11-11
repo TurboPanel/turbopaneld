@@ -26,7 +26,10 @@ export type SiteEnvOwner = { username: string; siteId: string };
 
 const USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,27}$/;
 const SITE_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const FILE_SAFE_RE = /^[A-Za-z0-9._-]+$/;
+/** The daemon's own environment id rule (`site.ts` SAFE_ID_RE): no dots at all. */
+const ENVIRONMENT_ID_RE = /^[A-Za-z0-9_-]+$/;
+/** A compose service name as one file name: no leading dot, so never `.` or `..`. */
+const FILE_SAFE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 function ownersDir(
   layout: Pick<LayoutPaths, "stateDir">,
@@ -51,7 +54,8 @@ export async function recordSiteEnvOwner(
   owner: SiteEnvOwner,
 ): Promise<void> {
   if (
-    !FILE_SAFE_RE.test(environmentId) || !FILE_SAFE_RE.test(composeServiceName)
+    !ENVIRONMENT_ID_RE.test(environmentId) ||
+    !FILE_SAFE_RE.test(composeServiceName)
   ) {
     throw new Error(
       `site ${composeServiceName}: cannot record its environment file owner`,
@@ -63,6 +67,21 @@ export async function recordSiteEnvOwner(
     join(dir, `${composeServiceName}.json`),
     `${JSON.stringify(owner)}\n`,
     { mode: 0o600 },
+  );
+}
+
+/** The recorded owner of one site's environment file, if any. */
+export function readSiteEnvOwner(
+  layout: Pick<LayoutPaths, "stateDir">,
+  environmentId: string,
+  composeServiceName: string,
+): Promise<SiteEnvOwner | undefined> {
+  if (
+    !ENVIRONMENT_ID_RE.test(environmentId) ||
+    !FILE_SAFE_RE.test(composeServiceName)
+  ) return Promise.resolve(undefined);
+  return readOwner(
+    join(ownersDir(layout, environmentId), `${composeServiceName}.json`),
   );
 }
 
@@ -109,6 +128,7 @@ export async function removeRecordedSiteEnvFiles(
   environmentId: string,
   services?: readonly string[],
 ): Promise<string[]> {
+  if (!ENVIRONMENT_ID_RE.test(environmentId)) return [];
   const dir = ownersDir(layout, environmentId);
   let names: string[];
   if (services !== undefined) {

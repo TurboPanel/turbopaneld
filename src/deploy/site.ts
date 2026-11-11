@@ -1995,11 +1995,16 @@ function openlitespeedVhostsDir(layout: LayoutPaths): string {
  * (`deploy/site/site-env-file.ts`) are rendered by the same function.
  */
 export function formatHostingEnvFile(env: Record<string, string>): string {
+  // A name that is not an environment variable name (`X;cmd;Y`) would be
+  // read by a shell as code, so it is left out, as in the root copy.
   const entries = Object.keys(env)
+    .filter((name) => HOSTING_ENV_NAME_RE.test(name))
     .sort((a, b) => a.localeCompare(b))
     .map((name) => ({ name, value: env[name] ?? "" }));
   return renderNativeAppEnvFile(entries);
 }
+
+const HOSTING_ENV_NAME_RE = /^[A-Za-z_]\w{0,254}$/;
 
 /** The managed database's CA bundle, in the site's hosting folder. */
 export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
@@ -4964,8 +4969,8 @@ export async function removeSites(
       ...nginxRemoved.services,
       ...apacheRemoved.services,
     ]);
-    // Every unit that loaded a site's variables is gone with its vhost and
-    // runtime: take the root copies of this environment's sites too.
+    // `environment.stop` has already removed the environment's cron units
+    // (their timers load the file), so take the root copies of its sites too.
     await removeRecordedSiteEnvFiles(run, layout, environmentId);
     // Nothing names the PHP or the engines this environment used: remove them
     // once no other environment on the host uses them either.

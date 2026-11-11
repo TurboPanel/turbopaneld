@@ -672,6 +672,21 @@ test("formatHostingEnvFile sorts keys and renders what a shell and systemd read 
   );
 });
 
+test("formatHostingEnvFile leaves out a name a shell would read as code", () => {
+  const file = formatHostingEnvFile({
+    OK: "1",
+    "X;cmd;Y": "2",
+    "A B": "3",
+    "1BAD": "4",
+    "$(id)": "5",
+    "dot.name": "6",
+  });
+  assertEquals(
+    file,
+    "# Managed by TurboPanel — rewritten on every deploy; edits are overwritten.\nOK='1'\n",
+  );
+});
+
 test("defaultIndexHtml includes the compose service name", () => {
   assertStringIncludes(defaultIndexHtml("marketing"), "marketing");
 });

@@ -235,3 +235,62 @@ test("a release-backed site gets its hosting metadata written early, with the CA
     assert(calls[0]?.webEnv?.DB_CA?.endsWith("managed-ca.pem"));
   });
 });
+
+test("a site that changed Linux user has the old user's copy removed before the record is replaced", async () => {
+  await withLayout(async (layout) => {
+    const asked: string[] = [];
+    const run: RunFn = (_command, args) => {
+      asked.push(
+        args.slice(args.findIndex((a) => a.startsWith("site-env-"))).join(" "),
+      );
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    };
+    const id = siteEnvFileId("env1", "web");
+    const bob = { ...OWNER, username: "bob" } as SiteManagedDirectory;
+    await materializeSiteEnvFiles(
+      layout,
+      "env1",
+      [site({ webEnv: { A: "1" } })],
+      new Map(),
+      new Map([["web", OWNER]]),
+      run,
+    );
+    await materializeSiteEnvFiles(
+      layout,
+      "env1",
+      [site({ webEnv: { A: "1" } })],
+      new Map(),
+      new Map([["web", bob]]),
+      run,
+    );
+    assertEquals(asked, [
+      `site-env-install alice ${id}`,
+      `site-env-remove alice ${id}`,
+      `site-env-install bob ${id}`,
+    ]);
+    assertEquals(
+      JSON.parse(
+        await Deno.readTextFile(
+          join(layout.stateDir, "sites", ".env-owners", "env1", "web.json"),
+        ),
+      ),
+      { username: "bob", siteId: id },
+    );
+    // The same user again removes nothing.
+    asked.length = 0;
+    await materializeSiteEnvFiles(
+      layout,
+      "env1",
+      [site({ webEnv: { A: "1" } })],
+      new Map(),
+      new Map([["web", bob]]),
+      run,
+    );
+    assertEquals(asked, [`site-env-install bob ${id}`]);
+  });
+});

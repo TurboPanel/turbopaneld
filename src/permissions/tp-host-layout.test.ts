@@ -178,6 +178,25 @@ test("a shipped bootstrap/cache link stays root's and read-only; a missing folde
   });
 });
 
+test("a bootstrap/cache that is a file is refused with a clear message", async () => {
+  await withHost(async (host) => {
+    const leaf = await openLeaf(host);
+    await write(join(leaf, "artisan"));
+    await write(join(leaf, "bootstrap/app.php"));
+    await write(join(leaf, "bootstrap/cache"));
+    const result = await host.run(["publish", ...SIX, "layout=laravel"]);
+    assertEquals(result.code === 0, false);
+    assertStringIncludes(
+      result.stderr,
+      "bootstrap/cache is a file, not a folder",
+    );
+    assertEquals(
+      await exists(host.path(`${SERVICE}/releases/${RELEASE_ID}`)),
+      false,
+    );
+  });
+});
+
 test("WordPress shares wp-content/uploads only; wp-content/cache stays in the release", async () => {
   await withHost(async (host) => {
     const leaf = await openLeaf(host);

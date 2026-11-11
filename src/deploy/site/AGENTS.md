@@ -520,8 +520,10 @@ root-owned `0550` by design:
   per-site PHP unit does not load the file.
   The daemon records which Linux user each site's file was installed for
   (`<stateDir>/sites/.env-owners/<environment>/<service>.json`, `site-env-owners.ts`);
-  `removeNamedSites`, `removeSites` (and so `environment.stop`) read it back and
-  call `site-env-remove`. A site with no record (installed before it existed)
+  `removeNamedSites`, `removeSites` (and so `environment.stop`, which first removes
+  the environment's cron units, since their timers load the file) read it back and
+  call `site-env-remove`. A site that changes user has the old user's copy removed
+  at the next deploy. A site with no record (installed before it existed)
   loses nothing and one line is logged; `principal-remove` still takes the whole
   account folder. A refused removal keeps the record and is retried.
 - **nginx follows no link below a release-backed document root.** It serves

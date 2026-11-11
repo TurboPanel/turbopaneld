@@ -769,9 +769,9 @@ async function publishKeepingCurrent(
 
 /**
  * The daemon-owned layout, framework part: the recipe's links in place of what
- * the build shipped there, and the shared folders they point into. Run after
- * the build's own links were checked (a link through a recipe link is refused
- * by that check on the host path; here the recipe is applied after it), and
+ * the build shipped there, and the shared folders they point into. Run before
+ * the build's links are checked (the check then excuses only the recipe's own
+ * links, so a link that goes through one is refused, as on the host path) and
  * before `shared` is linked.
  */
 async function applyFrameworkLayoutInPlace(
@@ -802,16 +802,18 @@ async function sealReleaseInPlace(
   runFn: RunFn,
 ): Promise<void> {
   const releaseDir = params.paths.releaseDir;
+  const layout = params.manifest?.frameworkLayout;
   // Before the `shared` link exists, so `../shared/…` cannot be resolved
   // through what the tenant keeps in `shared/` (release-links.ts).
   await removeReleaseSharedEntry(releaseDir, runFn);
-  await assertStagedLinksStayInRelease(releaseDir, runFn);
-  if (params.manifest?.frameworkLayout !== undefined) {
-    await applyFrameworkLayoutInPlace(
-      params.paths,
-      params.manifest.frameworkLayout,
-    );
+  // The layout's recipe links go in first and the check runs with them in
+  // place, exactly as tp-host orders it: a build's `public/x -> ../storage/app`
+  // then resolves through the recipe link into `shared/` and is refused, and
+  // only the recipe's own link is excused.
+  if (layout !== undefined) {
+    await applyFrameworkLayoutInPlace(params.paths, layout);
   }
+  await assertStagedLinksStayInRelease(releaseDir, runFn, layout);
   await linkReleaseSharedDir(releaseDir, runFn);
   await prepareStagedTree(params, releaseDir, runFn);
   await sealPublishedRelease(releaseDir, params.username, runFn);

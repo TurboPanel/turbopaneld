@@ -701,3 +701,76 @@ test("linksLeavingReleaseLexically excuses a recipe link only for its layout", (
     ["public/x -> ../storage/app (reaches into shared/)"],
   );
 });
+
+/** A daemon-owned Laravel promote, with `files` committed in the checkout. */
+async function promoteLaravel(
+  root: string,
+  links: Readonly<Record<string, string>>,
+) {
+  const paths = resolveReleasePaths(
+    { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+    {
+      username: "alice",
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      folder: FOLDER,
+      publishId: PUBLISH_ID,
+    },
+  );
+  await Deno.mkdir(paths.sharedDir, { recursive: true });
+  const workingDir = join(root, "checkout");
+  await Deno.mkdir(join(workingDir, "public"), { recursive: true });
+  await Deno.writeTextFile(join(workingDir, "artisan"), "<?php\n");
+  await Deno.mkdir(join(workingDir, "storage", "app"), { recursive: true });
+  await Promise.all(
+    Object.entries(links).map(([path, text]) =>
+      Deno.symlink(text, join(workingDir, path))
+    ),
+  );
+  const promoted = promoteRelease({
+    paths,
+    workingDir,
+    username: "alice",
+    manifest: {
+      version: 1,
+      serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+      composeServiceName: "web",
+      releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+      sourceId: "src-1",
+      commitSha: "abc",
+      ref: "main",
+      promotedAt: "2026-01-15T12:00:00.000Z",
+      frameworkLayout: "laravel",
+    },
+    healthProbe: () => Promise.resolve(),
+    runFn: runSeam,
+  });
+  return { paths, promoted };
+}
+
+test("a daemon-owned Laravel promote refuses a link that goes through the storage link", async () => {
+  await withHomes(async (root) => {
+    const { paths, promoted } = await promoteLaravel(root, {
+      "public/x": "../storage/app",
+    });
+    const err = await assertRejects(() => promoted);
+    assertStringIncludes(String(err), "shared");
+    // Never published: no `current`, no half-staged release left behind.
+    await assertRejects(() => Deno.lstat(paths.currentLink));
+    await assertRejects(() => Deno.lstat(paths.releaseDir));
+  });
+});
+
+test("a daemon-owned Laravel promote accepts the storage link itself and an in-release link", async () => {
+  await withHomes(async (root) => {
+    const { paths, promoted } = await promoteLaravel(root, {
+      "public/home": "../artisan",
+    });
+    await promoted;
+    assertEquals(
+      await Deno.readLink(join(paths.releaseDir, "storage")),
+      "shared/storage",
+    );
+    assert((await Deno.lstat(paths.currentLink)).isSymlink);
+  });
+});

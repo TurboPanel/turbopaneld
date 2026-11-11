@@ -5415,6 +5415,9 @@ tp_publish_bootstrap_cache() {
     return 0
   fi
   [ -d ./bootstrap ] || return 0
+  if [ -e ./bootstrap/cache ] && [ ! -d ./bootstrap/cache ]; then
+    tp_die "publish: refusing $PUB_NAME: bootstrap/cache is a file, not a folder"
+  fi
   if [ ! -d ./bootstrap/cache ]; then
     mkdir -m 0750 -- ./bootstrap/cache
   fi

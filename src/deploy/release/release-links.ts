@@ -194,12 +194,22 @@ export async function assertReleaseLinksStayHome(
 export async function assertStagedLinksStayInRelease(
   releaseDir: string,
   runFn: RunFn,
+  /**
+   * The framework layout whose recipe links were already put in the staged
+   * tree (a daemon-owned release applies them before this check, the way
+   * tp-host does). Each recipe link's own resolution, `<release>/shared/<folder>`,
+   * is excused once; a link that goes through it resolves deeper and is refused.
+   */
+  layout?: FrameworkLayout,
 ): Promise<void> {
   const targets = await releaseLinkTargets(releaseDir, runFn);
-  const leaving = linkTargetsLeavingRelease(
-    targets,
-    await physicalPath(releaseDir),
-  );
+  const physical = await physicalPath(releaseDir);
+  let rest = [...targets];
+  for (const expected of recipeLinkTargets(layout, physical)) {
+    const at = rest.indexOf(expected);
+    if (at !== -1) rest = rest.toSpliced(at, 1);
+  }
+  const leaving = linkTargetsLeavingRelease(rest, physical);
   if (leaving.length === 0) return;
   throw new Error(
     `release ${releaseDir} has symlinks that leave the release or reach into ` +

@@ -200,5 +200,30 @@ test("the record holds the user and site id and is private", async () => {
       Error,
       "cannot record",
     );
+    for (const bad of ["..", ".", "a/b", ""]) {
+      await assertRejects(
+        () =>
+          recordSiteEnvOwner(layout, bad, "web", {
+            username: "alice",
+            siteId: ID_WEB,
+          }),
+        Error,
+        "cannot record",
+      );
+    }
+    await assertRejects(
+      () =>
+        recordSiteEnvOwner(layout, "env1", "..", {
+          username: "alice",
+          siteId: ID_WEB,
+        }),
+      Error,
+      "cannot record",
+    );
+    // Removal never walks a folder an odd environment id would name.
+    assertEquals(
+      await removeRecordedSiteEnvFiles(recorder().run, layout, ".."),
+      [],
+    );
   });
 });

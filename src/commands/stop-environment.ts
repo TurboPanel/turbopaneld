@@ -31,6 +31,7 @@ import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
 } from "../deploy/ingress.ts";
+import { removeCronJobs } from "../deploy/cron/apply.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
 import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
@@ -92,6 +93,8 @@ export type EnvironmentStopHandlerDeps = {
   dockerInstalled?: () => Promise<boolean>;
   /** Test seam — the `sshd` drop-in re-render after principals are retired. */
   applySshAccess?: () => Promise<SshApplyResult>;
+  /** Test seam — defaults to {@link removeCronJobs}. */
+  removeCronJobs?: (environmentId: string) => Promise<number>;
 };
 
 /**
@@ -202,6 +205,34 @@ async function removeEnvironmentNativeApps(
     logWarn(
       "commands",
       `environment.stop native app teardown failed env=${environmentId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Disable and remove the environment's scheduled-job units (timers and their
+ * services) before the sites go: once a site's root-side variables copy is
+ * deleted, a timer that still fires would fail on the missing file at every
+ * tick. Best effort, like the rest of the teardown.
+ */
+async function removeEnvironmentCronJobs(
+  environmentId: string,
+  remove: (environmentId: string) => Promise<number>,
+): Promise<void> {
+  try {
+    const removed = await remove(environmentId);
+    if (removed > 0) {
+      logInfo(
+        "commands",
+        `environment.stop removed ${removed} cron unit(s) env=${environmentId}`,
+      );
+    }
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.stop cron teardown failed env=${environmentId}: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -549,6 +580,12 @@ async function stopEnvironmentLocked(
   }
 
   await removeHostingCaddySite(layout, parsedPayload.environmentId);
+  // Before the sites: removing a site also removes its root-side variables
+  // copy, which its cron units load.
+  await removeEnvironmentCronJobs(
+    parsedPayload.environmentId,
+    deps?.removeCronJobs ?? removeCronJobs,
+  );
   await removeSites(layout, parsedPayload.environmentId);
   // Disable + remove the generated app units before the release trees they run
   // out of are reclaimed, so systemd never restarts a unit whose

@@ -1284,3 +1284,79 @@ Deno.test({
     }
   },
 });
+
+test({
+  name:
+    "handleEnvironmentStop removes the environment's cron units, and a failure there does not stop the teardown",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-stop-cron-" });
+    const previous = {
+      TURBOPANEL_STATE_DIR: Deno.env.get("TURBOPANEL_STATE_DIR"),
+      TURBOPANEL_CONFIG_DIR: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    };
+    const stateDir = join(root, "state");
+    Deno.env.set("TURBOPANEL_STATE_DIR", stateDir);
+    Deno.env.set("TURBOPANEL_CONFIG_DIR", join(root, "config"));
+    const environmentId = "envstopcron";
+    const deploymentDir = join(
+      stateDir,
+      "deployments",
+      "proj-1",
+      environmentId,
+    );
+    await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(
+      join(deploymentDir, "compose.yaml"),
+      "services:\n  web: {}\n",
+    );
+    const runDocker = (): Promise<DockerCliResult> =>
+      Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+    try {
+      const asked: string[] = [];
+      const result = await handleEnvironmentStop(
+        {
+          environmentId,
+          projectId: "proj-1",
+          projectName: "tp-demo-envstopcron",
+        },
+        new Date().toISOString(),
+        {
+          runDocker,
+          removeCronJobs: (id) => {
+            asked.push(id);
+            return Promise.resolve(2);
+          },
+        },
+      );
+      assertEquals(result.summary.includes("Stopped"), true);
+      assertEquals(asked, [environmentId]);
+
+      const failing = await handleEnvironmentStop(
+        {
+          environmentId,
+          projectId: "proj-1",
+          projectName: "tp-demo-envstopcron",
+        },
+        new Date().toISOString(),
+        {
+          runDocker,
+          removeCronJobs: () => Promise.reject(new Error("systemctl failed")),
+        },
+      );
+      assertEquals(failing.summary.includes("stopped"), true);
+    } finally {
+      if (previous.TURBOPANEL_STATE_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_STATE_DIR", previous.TURBOPANEL_STATE_DIR);
+      }
+      if (previous.TURBOPANEL_CONFIG_DIR === undefined) {
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      } else {
+        Deno.env.set("TURBOPANEL_CONFIG_DIR", previous.TURBOPANEL_CONFIG_DIR);
+      }
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});

@@ -40,7 +40,11 @@ import {
   writeReleaseHostingWebMetadata,
 } from "../site.ts";
 import { sitePhpKey } from "./php-runtime.ts";
-import { recordSiteEnvOwner } from "./site-env-owners.ts";
+import {
+  readSiteEnvOwner,
+  recordSiteEnvOwner,
+  removeSiteEnvFile,
+} from "./site-env-owners.ts";
 
 /** Folder of the root-owned copies, under the config root. */
 export const SITE_ENV_ROOT_DIRNAME = "site-env";
@@ -243,6 +247,19 @@ export async function materializeSiteEnvFiles(
       );
     }
     const text = renderSiteEnvFile(service, entries);
+    // A site that changed Linux user leaves the old user's copy behind: take
+    // it away before the record is overwritten and the old user is forgotten.
+    const previous = await readSiteEnvOwner(layout, environmentId, service);
+    if (previous !== undefined && previous.username !== owner.username) {
+      await removeSiteEnvFile(run, previous.username, previous.siteId)
+        .catch((err) => {
+          lines.push(
+            `Site ${service}: the previous owner's environment file could not be removed (${
+              err instanceof Error ? err.message : String(err)
+            }).`,
+          );
+        });
+    }
     await installSiteEnvFile(
       layout,
       run,
