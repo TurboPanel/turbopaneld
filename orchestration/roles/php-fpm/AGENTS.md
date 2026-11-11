@@ -83,7 +83,7 @@ Two seams exist only because the interpreter is now packaged:
 runs it through the PHP shell dispatcher so it follows `TURBOPANEL_PHP`),
 checked against the publisher's SHA-256 by `get_url`, fast-pathed when the
 file is there, `current` linked, older versions pruned, the tree opened to every
-account with an `other:x` ACL and `u=rwX,go=rX` like the other runtime trees.
+account with an `other:x` ACL on the tree root and `u=rwx,go=rx` inside, like the other runtime trees.
 Bump `php_fpm_composer_version` and `php_fpm_composer_sha256` together. Site
 builds put its `bin` directory on `PATH`; they never download it.
 

@@ -61,7 +61,7 @@ const SITE_ENV_PLATFORM_NAMES = new Set([
 ]);
 
 /** What tp-host's file checker accepts as a name. */
-const SITE_ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,254}$/;
+const SITE_ENV_NAME_RE = /^[A-Za-z_]\w{0,254}$/;
 
 export function isSiteEnvPlatformName(name: string): boolean {
   const upper = name.toUpperCase();

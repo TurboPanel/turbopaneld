@@ -778,20 +778,22 @@ async function applyFrameworkLayoutInPlace(
   paths: ReleasePaths,
   layout: FrameworkLayout,
 ): Promise<void> {
-  for (const recipe of platformLayoutLinks(layout)) {
+  await forEachSequential(platformLayoutLinks(layout), async (recipe) => {
     const linkPath = join(paths.releaseDir, recipe.path);
     await Deno.remove(linkPath, { recursive: true }).catch((err) => {
       if (!(err instanceof Deno.errors.NotFound)) throw err;
     });
     await Deno.mkdir(join(linkPath, ".."), { recursive: true });
     await createSymlink(recipe.text, linkPath);
-    for (const folder of recipe.sharedFolders) {
-      await Deno.mkdir(join(paths.sharedDir, folder), {
-        recursive: true,
-        mode: 0o750,
-      });
-    }
-  }
+    await forEachSequential(
+      recipe.sharedFolders,
+      (folder) =>
+        Deno.mkdir(join(paths.sharedDir, folder), {
+          recursive: true,
+          mode: 0o750,
+        }),
+    );
+  });
 }
 
 /** The daemon-owned layout: the same steps, run on the release in place. */

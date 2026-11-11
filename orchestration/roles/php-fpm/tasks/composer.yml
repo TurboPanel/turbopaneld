@@ -10,7 +10,9 @@
 #
 # `composer/` is 0750 with an `other:x` ACL, the traverse-without-list contract
 # of every vendored runtime tree, so the build's throwaway account and every
-# site owner's Linux user can run it without listing the vendor tree.
+# site owner's Linux user can run it without listing the vendor tree. Inside
+# the version folder everything is read and run by every account, owner write
+# only, the way the node and deno trees are opened (install-series.sh).
 - name: Check the vendored PHP package manager
   ansible.builtin.stat:
     path: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/composer.phar"
@@ -37,7 +39,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0750"
+    mode: "u=rwx,go=rx" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
 
 # get_url verifies the digest before the file is kept: a mismatch fails the task
 # and leaves nothing behind.
@@ -48,7 +50,7 @@
     checksum: "sha256:{{ php_fpm_composer_sha256 }}"
     owner: root
     group: root
-    mode: "0600"
+    mode: "u=rw,go=r" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
   when: not _php_fpm_composer_pinned.stat.exists
 
 - name: Ensure the PHP package manager wrapper directory
@@ -57,7 +59,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0750"
+    mode: "u=rwx,go=rx" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
 
 - name: Install the PHP package manager wrapper
   ansible.builtin.template:
@@ -65,16 +67,7 @@
     dest: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/bin/composer"
     owner: root
     group: root
-    mode: "0750"
-
-# The version tree is read and run by every account, the way the node and deno
-# trees are opened (install-series.sh). Owner write only.
-- name: Open the PHP package manager version tree to every account
-  ansible.builtin.file:
-    path: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}"
-    state: directory
-    recurse: true
-    mode: "u=rwX,go=rX" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
+    mode: "u=rwx,go=rx" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
 
 - name: Point the PHP package manager current link at the pinned version
   ansible.builtin.file:

@@ -874,29 +874,33 @@ function nginxServerTokensLine(site: SiteApplySpec): string {
  * `.phar` from it (a nested location, so it wins over the PHP location below).
  */
 function nginxAliasLocations(aliases: readonly FrameworkAlias[]): string {
-  return aliases.map((alias) => `
+  return aliases.map((alias) =>
+    String.raw`
   location ^~ ${alias.urlPrefix} {
     alias ${alias.dir}/;
     disable_symlinks if_not_owner;
-    location ~* \\.(php[0-9]?|phtml|phar)$ {
+    location ~* \.(php[0-9]?|phtml|phar)$ {
       return 403;
     }
   }
-`).join("");
+`
+  ).join("");
 }
 
 /** The same folder in an Apache vhost: an `Alias` that runs and reads nothing. */
 function apacheAliasBlock(aliases: readonly FrameworkAlias[]): string {
-  return aliases.map((alias) => `
+  return aliases.map((alias) =>
+    String.raw`
   Alias "${alias.urlPrefix}" "${alias.dir}/"
   <Directory "${alias.dir}">
     Options SymLinksIfOwnerMatch
     AllowOverride None
     Require all granted
-    <FilesMatch "\\.(?i:php[0-9]?|phtml|phar)$">
+    <FilesMatch "\.(?i:php[0-9]?|phtml|phar)$">
       Require all denied
     </FilesMatch>
-  </Directory>`).join("");
+  </Directory>`
+  ).join("");
 }
 
 /**

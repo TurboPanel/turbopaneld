@@ -33,7 +33,8 @@ test("the role downloads once, checks the digest, opens the tree and prunes old 
     'checksum: "sha256:{{ php_fpm_composer_sha256 }}"',
   );
   assertStringIncludes(tasks, "etype: other");
-  assertStringIncludes(tasks, 'mode: "u=rwX,go=rX"');
+  assertStringIncludes(tasks, 'mode: "u=rwx,go=rx"');
+  assertStringIncludes(tasks, 'mode: "u=rw,go=r"');
   assertStringIncludes(tasks, 'dest: "{{ php_fpm_composer_root }}/current"');
   assertStringIncludes(tasks, "- current");
   assertStringIncludes(tasks, '- "{{ php_fpm_composer_version }}"');

@@ -21,11 +21,6 @@ import { safeConfigPath } from "../../contracts/config-values.ts";
 
 export type FrameworkLayout = "laravel" | "wordpress";
 
-export const FRAMEWORK_LAYOUTS: readonly FrameworkLayout[] = [
-  "laravel",
-  "wordpress",
-];
-
 export function isFrameworkLayout(value: unknown): value is FrameworkLayout {
   return value === "laravel" || value === "wordpress";
 }
@@ -104,9 +99,6 @@ export function platformLayoutLinks(
 ): readonly LayoutLink[] {
   return RECIPES[layout];
 }
-
-/** The release's own `bootstrap/cache`, the one folder the site account owns. */
-export const LARAVEL_CACHE_DIR = "bootstrap/cache";
 
 /** Whether a link is exactly one the layout's recipe puts there. */
 export function isRecipeLink(
