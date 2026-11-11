@@ -2402,11 +2402,29 @@ if (PHP_SAPI !== 'cli') {
         exit;
     }
     unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);
+}
+TP_GUARD_EOF
+  # The previous guard (it also asked putenv to unset the key, which does
+  # nothing for the FastCGI request values) stays accepted so a host that has
+  # not re-rendered yet is not refused during the update window.
+  _pg_old="$TP_STAGE/guard.previous"
+  cat > "$_pg_old" <<'TP_GUARD_OLD_EOF'
+<?php
+// Managed by TurboPanel: this site's PHP serves only requests its own web server sent.
+if (PHP_SAPI !== 'cli') {
+    $tp_site_key = get_cfg_var('turbopanel.site_key');
+    $tp_sent_key = $_SERVER['TP_SITE_KEY'] ?? null;
+    if (!is_string($tp_site_key) || strlen($tp_site_key) !== 64 || !is_string($tp_sent_key) || !hash_equals($tp_site_key, $tp_sent_key)) {
+        http_response_code(403);
+        exit;
+    }
+    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);
     if (function_exists('putenv')) {
         putenv('TP_SITE_KEY');
     }
 }
-TP_GUARD_EOF
+TP_GUARD_OLD_EOF
+  cmp -s "$_pg_file" "$_pg_old" && return 0
   cmp -s "$_pg_file" "$_pg_canon" || {
     printf 'tp-host: php config: site-guard.php differs from the pinned guard\n' >&2
     return 1
