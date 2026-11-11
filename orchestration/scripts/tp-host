@@ -1367,7 +1367,7 @@ tp_unit_ok() {
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
       for (i in a) ok["Unit", a[i]] = 1
-      split("Type User Group Slice WorkingDirectory Environment ExecStart ExecReload Restart RestartSec NoNewPrivileges PrivateTmp ProtectSystem ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality CapabilityBoundingSet AmbientCapabilities ReadWritePaths CPUQuota MemoryMax MemoryHigh TimeoutStartSec TimeoutStopSec StandardOutput StandardError SyslogIdentifier", b, " ");
+      split("Type User Group Slice WorkingDirectory Environment ExecStart ExecReload Restart RestartSec RestartSteps RestartMaxDelaySec NoNewPrivileges PrivateTmp ProtectSystem ProtectHome ProtectKernelTunables ProtectKernelModules ProtectControlGroups RestrictSUIDSGID RestrictRealtime LockPersonality CapabilityBoundingSet AmbientCapabilities ReadWritePaths CPUQuota MemoryMax MemoryHigh TimeoutStartSec TimeoutStopSec StandardOutput StandardError SyslogIdentifier", b, " ");
       for (i in b) ok["Service", b[i]] = 1
       split("OnCalendar Persistent Unit AccuracySec RandomizedDelaySec", c, " ");
       for (i in c) ok["Timer", c[i]] = 1
@@ -1883,7 +1883,7 @@ tp_php_unit_lines() {
       } else {
         ok["Unit", "StartLimitBurst"] = 1
         ok["Unit", "StartLimitIntervalSec"] = 1
-        split("Type User Group Slice ExecStartPre ExecStart ExecReload Environment Restart RestartSec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups IPAddressDeny IPAddressAllow RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
+        split("Type User Group Slice ExecStartPre ExecStart ExecReload Environment Restart RestartSec RestartSteps RestartMaxDelaySec NoNewPrivileges CapabilityBoundingSet AmbientCapabilities ProtectSystem ProtectHome PrivateDevices ProtectKernelTunables ProtectKernelModules ProtectControlGroups IPAddressDeny IPAddressAllow RestrictSUIDSGID RestrictRealtime LockPersonality BindPaths BindReadOnlyPaths TemporaryFileSystem ReadWritePaths RuntimeDirectory RuntimeDirectoryMode StandardInput StandardOutput StandardError SyslogIdentifier CPUQuota MemoryMax MemoryHigh TasksMax TimeoutStartSec TimeoutStopSec", b, " ")
         for (i in b) ok["Service", b[i]] = 1
       }
       body = (kind == "socket") ? "Socket" : "Service"
@@ -2017,7 +2017,8 @@ tp_php_tuning_ok() {
       case "${1#*=}" in no|on-failure|on-abnormal|always) return 0 ;; esac
       return 1
       ;;
-    Service.RestartSec=*|Service.TimeoutStartSec=*|Service.TimeoutStopSec=*|\
+    Service.RestartSec=*|Service.RestartSteps=*|Service.RestartMaxDelaySec=*|\
+Service.TimeoutStartSec=*|Service.TimeoutStopSec=*|\
 Service.CPUQuota=*|Service.MemoryMax=*|Service.MemoryHigh=*|Service.TasksMax=*|\
 Unit.StartLimitBurst=*|Unit.StartLimitIntervalSec=*)
       case "${1#*=}" in ''|*[!0-9A-Za-z%.]*) return 1 ;; esac

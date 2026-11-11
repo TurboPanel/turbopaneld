@@ -7,6 +7,9 @@ After=network.target
 # sury's own unit for this series is masked by the role; this keeps systemd from
 # ever running both masters against the same sockets if someone unmasks it.
 Conflicts=php%i-fpm.service
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=forking
@@ -26,6 +29,8 @@ ExecReload=/bin/kill -USR2 $MAINPID
 ExecStop=/bin/kill -QUIT $MAINPID
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

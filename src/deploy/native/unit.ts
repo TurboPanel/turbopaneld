@@ -222,14 +222,26 @@ export function nativeAppRuntimeTarget(
 const NATIVE_RUNTIME_PATH_TAIL = "/usr/bin:/bin";
 
 /**
- * Crash-loop budget applied when the author declared no `restart_policy`:
- * ten starts inside two minutes. systemd's own default (five in ten seconds)
- * never trips with `RestartSec=2`, because the sixth start lands after the
- * first has aged out of the window, so a unit that fails instantly restarted
- * for ever.
+ * Without a `restart_policy` limit the unit has no start limit at all
+ * (`StartLimitIntervalSec=0`) and its restart delay grows from `RestartSec` to
+ * {@link NATIVE_APP_RESTART_MAX_DELAY_SEC}, so a burst of failed starts (a full
+ * disk, say) never leaves the app stopped until someone logs in; an author's own
+ * `delay` is kept as written, with no growing delay. An author who
+ * set `max_attempts` or `window` asked for a give-up, and gets exactly that,
+ * with {@link DEFAULT_NATIVE_APP_START_LIMIT_BURST} and
+ * {@link DEFAULT_NATIVE_APP_START_LIMIT_INTERVAL_SEC} filling the half they left out.
  */
 export const DEFAULT_NATIVE_APP_START_LIMIT_BURST = 10;
 export const DEFAULT_NATIVE_APP_START_LIMIT_INTERVAL_SEC = 120;
+const NATIVE_APP_RESTART_STEPS = 10;
+const NATIVE_APP_RESTART_MAX_DELAY_SEC = 120;
+
+/** True when the author's restart policy asked for a limit on restarts. */
+function authoredStartLimit(
+  policy: EnvironmentDeployNativeAppRestartPolicy | undefined,
+): boolean {
+  return policy?.maxAttempts !== undefined || policy?.window !== undefined;
+}
 
 /** `/etc/systemd/system/turbopanel-app-<serviceId>.service`. */
 export function nativeAppUnitName(serviceId: string): string {
@@ -613,6 +625,10 @@ function restartLines(
         : systemdRestartDirective(condition)
     }`,
     `RestartSec=${policy?.delay ?? DEFAULT_NATIVE_APP_RESTART_SEC}`,
+    ...(authoredStartLimit(policy) || policy?.delay !== undefined ? [] : [
+      `RestartSteps=${NATIVE_APP_RESTART_STEPS}`,
+      `RestartMaxDelaySec=${NATIVE_APP_RESTART_MAX_DELAY_SEC}`,
+    ]),
   ];
   return lines;
 }
@@ -626,6 +642,7 @@ function restartLines(
 function startLimitLines(
   policy: EnvironmentDeployNativeAppRestartPolicy | undefined,
 ): string[] {
+  if (!authoredStartLimit(policy)) return ["StartLimitIntervalSec=0"];
   const burst = policy?.maxAttempts === undefined
     ? DEFAULT_NATIVE_APP_START_LIMIT_BURST
     : Math.max(1, Math.round(policy.maxAttempts));

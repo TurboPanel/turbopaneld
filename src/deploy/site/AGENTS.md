@@ -566,7 +566,8 @@ root-owned `0550` by design:
   before the build (`assertSiteLifecyclePhp`, which also refuses two workers that would share a unit name, such as `web` with `a-b` and `web-a` with `b`). Worker output on the patch-update path carries no journal text: that log is not redacted.
 - **Background workers** (`sites[].workers`, `workers.ts`). One template
   `turbopanel-worker-<env>-<service>-<name>@.service` per worker, instances
-  `@1…@<processes>` (at most 8), `Restart=always`, `RestartSec=5`,
+  `@1…@<processes>` (at most 8), `Restart=always`, `RestartSec=5` growing to 120 s
+  (`RestartSteps=10`, `RestartMaxDelaySec=120`), no start limit,
   `TimeoutStopSec=<stop timeout>` (default 90) with the default kill mode and
   SIGTERM: a queue worker finishes its job and systemd waits before it kills.
   Same account, variables and walls as the command unit; `WorkingDirectory=`

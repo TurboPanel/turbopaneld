@@ -514,6 +514,7 @@ export function sitePhpServiceUnit(
     ...(sitePhpSocketActivated(spec.mode)
       ? [`Requires=${socket}`, `After=${socket}`]
       : []),
+    "StartLimitIntervalSec=0",
     "",
     "[Service]",
     // Root (`+`), before PHP starts: loads the per-user loopback rules. When it
@@ -546,6 +547,9 @@ export function sitePhpServiceUnit(
     "StandardOutput=journal",
     "StandardError=journal",
     "Restart=on-failure",
+    "RestartSec=5",
+    "RestartSteps=10",
+    "RestartMaxDelaySec=120",
     ...(spec.mode === "fpm"
       ? ["", "[Install]", "WantedBy=multi-user.target"]
       : []),

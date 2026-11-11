@@ -312,11 +312,12 @@ the single place it becomes systemd's: `condition` → `Restart=` (`any` is
 `RestartSec=`, `max_attempts` → `StartLimitBurst=`, `window` →
 `StartLimitIntervalSec=`. The two rate-limit directives are `[Unit]`, not
 `[Service]`, so they are emitted apart from `Restart=`; systemd would ignore
-them under `[Service]`. A payload carrying no policy renders the historical
-`Restart=on-failure` / `RestartSec=2` and a bounded crash-loop budget
-(`StartLimitBurst=10`, `StartLimitIntervalSec=120`): systemd's own default (five
-in ten seconds) never trips at `RestartSec=2`, so an app that failed instantly
-restarted for ever. The unit `PATH` leads with the release's
+them under `[Service]`. A payload carrying no `max_attempts` or `window`
+renders `Restart=on-failure` / `RestartSec=2`, `StartLimitIntervalSec=0` (no
+start limit) and `RestartSteps=10` / `RestartMaxDelaySec=120`, so a burst of
+failed starts (a full disk) never leaves the app stopped, and the delay grows
+instead of hammering the host (an authored `delay` is kept as written, with no growing delay). An author who sets either limit asked for a
+give-up and gets exactly it, without the growing delay. The unit `PATH` leads with the release's
 `node_modules/.bin` (then the vendored Node, then `/usr/bin:/bin`) so a start
 command naming a local binary resolves it; a standalone Next.js release has no
 `.bin`, so leave its start command empty. A deploy whose app never answers

@@ -11,6 +11,10 @@ Requires=docker.service
 # starts count too; after a stop: systemctl reset-failed turbopanel-instance.
 StartLimitIntervalSec=120
 StartLimitBurst=10
+{% else %}
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 {% endif %}
 
 [Service]
@@ -155,6 +159,13 @@ ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,ho
 {% endif %}
 Restart=always
 RestartSec=2
+{% if not (turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno') %}
+# The delay grows from 2 s to 120 s (systemd 254 and newer; older systemd only
+# warns). The co-located dev unit above keeps its start limit, so it keeps a
+# fixed delay: a growing one would spread the ten tries out past the window.
+RestartSteps=10
+RestartMaxDelaySec=120
+{% endif %}
 # On SIGTERM the instance flushes its queues and metrics, ends its database
 # pool and exits by itself in about a second (src/platform/deno/
 # instance-shutdown.ts; it force-exits at 6 s). Deno.serve alone would wait on

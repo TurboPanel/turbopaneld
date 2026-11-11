@@ -329,3 +329,32 @@ test({
     assertEquals(failures, []);
   },
 });
+
+/** Templates whose service must keep restarting, as `role/template` paths. */
+const KEEP_RESTARTING = [
+  "nginx/templates/turbopanel-nginx.service.j2",
+  "apache/templates/turbopanel-apache.service.j2",
+  "openlitespeed/templates/turbopanel-openlitespeed.service.j2",
+  "php-fpm/templates/turbopanel-php-fpm@.service.j2",
+  "site-caddy/templates/turbopanel-site-caddy.service.j2",
+  "stripe-listen/templates/turbopanel-stripe-listen.service.j2",
+  "instance-launch/templates/turbopanel-instance.service.j2",
+];
+
+test("services that must not stay down have no start limit and a growing restart delay", async () => {
+  for (const name of KEEP_RESTARTING) {
+    const text = await Deno.readTextFile(join(ORCHESTRATION, "roles", name));
+    const unitSection = text.slice(0, text.indexOf("\n[Service]"));
+    assert(
+      /^StartLimitIntervalSec=0$/m.test(unitSection),
+      `${name}: StartLimitIntervalSec=0 in [Unit]`,
+    );
+    const serviceSection = text.slice(text.indexOf("\n[Service]"));
+    for (const key of ["RestartSec", "RestartSteps", "RestartMaxDelaySec"]) {
+      assert(
+        new RegExp(`^${key}=\\d+$`, "m").test(serviceSection),
+        `${name}: ${key} in [Service]`,
+      );
+    }
+  }
+});

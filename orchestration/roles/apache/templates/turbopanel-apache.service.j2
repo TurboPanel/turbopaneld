@@ -3,6 +3,9 @@ Description=TurboPanel Apache httpd (site hosting)
 After=network.target
 # Prefer the vendored unit over any leftover distro apache2 package unit.
 Conflicts=apache2.service
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=forking
@@ -24,6 +27,8 @@ ExecReload={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel
 ExecStop={{ turbopanel_vendor_dir }}/apache/current/bin/httpd -f {{ turbopanel_config_dir }}/apache/httpd.conf -k graceful-stop
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

@@ -98,8 +98,7 @@ export function workerUnitContent(opts: WorkerUnitOpts): string {
     `X-TurboPanel-Environment=${opts.environmentId}`,
     `X-TurboPanel-Service=${service}`,
     `X-TurboPanel-Instances=${worker.processes ?? 1}`,
-    "StartLimitBurst=10",
-    "StartLimitIntervalSec=120",
+    "StartLimitIntervalSec=0",
     "",
     "[Service]",
     "Type=simple",
@@ -107,6 +106,8 @@ export function workerUnitContent(opts: WorkerUnitOpts): string {
     `ExecStart=${worker.command.map(quoteExecArg).join(" ")}`,
     "Restart=always",
     "RestartSec=5",
+    "RestartSteps=10",
+    "RestartMaxDelaySec=120",
     `TimeoutStopSec=${
       worker.stopTimeoutSeconds ?? DEFAULT_WORKER_STOP_TIMEOUT_SECONDS
     }`,

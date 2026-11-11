@@ -1,6 +1,9 @@
 [Unit]
 Description=TurboPanel site Caddy (per-site hosting on loopback)
 After=network.target
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -26,6 +29,8 @@ ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ si
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target
