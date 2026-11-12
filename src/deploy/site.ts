@@ -70,7 +70,10 @@ import {
 } from "../runtime/registry.ts";
 import { principalHomePath, serviceTree } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
-import { currentReleaseDirExists } from "./release/promote.ts";
+import {
+  currentReleaseDirExists,
+  releasePathExists,
+} from "./release/promote.ts";
 import {
   ConfigValueError,
   hasLineBreakOrControl,
@@ -2043,16 +2046,19 @@ export function withDbCaVariables(
 }
 
 /**
- * Whether `path` is already there. A file the previous deploy left behind has
- * to be rewritten when this deploy declares nothing for it; a site that never
- * had one must not gain an empty file.
+ * Whether `path` is already there, for the daemon-owned tree. A file the
+ * previous deploy left behind has to be rewritten when this deploy declares
+ * nothing for it; a site that never had one must not gain an empty file. The
+ * owner's tree of a release or managed-directory site is not the daemon's to
+ * stat, so those lanes ask through `releasePathExists`.
  */
 async function hostingFileExists(path: string): Promise<boolean> {
   try {
     await Deno.stat(path);
     return true;
   } catch (err) {
-    return !(err instanceof Deno.errors.NotFound);
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
   }
 }
 
@@ -2140,7 +2146,7 @@ export async function writeReleaseHostingWebMetadata(
   const metaDir = siteMetadataDir(layout, release);
   const files = hostingWebMetadataFiles(
     site,
-    await hostingFileExists(join(metaDir, "hosting.env")),
+    await releasePathExists(join(metaDir, "hosting.env"), run),
   );
   if (files.length === 0) return;
 

@@ -5466,6 +5466,86 @@ test("a second daemon-owned site deploy with no variables empties hosting.env", 
   );
 });
 
+/**
+ * The daemon cannot traverse an owner's tree in production, so its stat of
+ * `hosting.env` is denied and the answer comes from tp-host's `test -e`. The
+ * metadata folder is made untraversable until that question is asked.
+ */
+async function assertDeniedStatDecides(
+  envId: string,
+  site: SiteApplySpec,
+  lane: Record<string, unknown>,
+  fileThere: boolean,
+  seed?: (layout: LayoutPaths) => Promise<unknown>,
+): Promise<void> {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const group = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  const metaDir = join(siteTreeRoot(layout), ".turbopanel-hosting");
+  const asked: string[][] = [];
+  const run: SiteRunFn = async (command, args) => {
+    if (command === "sudo" && args.includes("test") && args.includes("-e")) {
+      asked.push([...args]);
+      await Deno.chmod(metaDir, 0o755);
+      try {
+        await Deno.stat(args.at(-1) as string);
+        return { success: true, stdout: "", stderr: "" };
+      } catch {
+        return { success: false, stdout: "", stderr: "" };
+      }
+    }
+    return await group(command, args);
+  };
+  try {
+    await seed?.(layout);
+    await Deno.mkdir(metaDir, { recursive: true });
+    if (fileThere) {
+      await Deno.writeTextFile(
+        join(metaDir, "hosting.env"),
+        "CACHE_PASSWORD=stale-secret-value\n",
+      );
+    }
+    await Deno.chmod(metaDir, 0o000);
+    await applySites(layout, envId, [{ ...site, webEnv: {} }], {
+      run,
+      runPlaybook,
+      ...lane,
+    });
+    assertEquals(asked.length, 1);
+    const path = join(metaDir, "hosting.env");
+    if (fileThere) {
+      assertNoStaleHostingEnv(await Deno.readTextFile(path));
+    } else {
+      await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
+    }
+  } finally {
+    await Deno.chmod(metaDir, 0o755).catch(() => {});
+    await cleanup();
+  }
+}
+
+for (const fileThere of [true, false]) {
+  const verb = fileThere ? "rewrites" : "does not create";
+  test(`a release site with a denied stat ${verb} hosting.env`, async () => {
+    await assertDeniedStatDecides(
+      `envdeny-r${fileThere}`,
+      nginxSite,
+      { releaseBindings: releaseBindingsFor("www") },
+      fileThere,
+      (layout) => seedRelease(layout, "rel-1", "public", "<h1>one</h1>"),
+    );
+  });
+  test(`a managed-directory site with a denied stat ${verb} hosting.env`, async () => {
+    await assertDeniedStatDecides(
+      `envdeny-m${fileThere}`,
+      managedSite,
+      { managedDirectoryBindings: managedBindingsFor("www") },
+      fileThere,
+    );
+  });
+}
+
 test("a site that never had variables gets no hosting.env", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const mock = createSiteRunMock();

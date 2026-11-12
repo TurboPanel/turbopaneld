@@ -474,8 +474,10 @@ root-owned `0550` by design:
   their file. A deploy that leaves a site with no variables rewrites an
   existing `hosting.env` with none in it (never removes it, so a shell that
   sources it keeps working, and never creates one for a site that had none;
-  `hostingWebMetadataFiles`), on all three lanes.
-  their file. The daemon-owned lane keeps `<base>/.turbopanel/` at
+  `hostingWebMetadataFiles`), on all three lanes. The release and
+  managed-directory lanes ask whether the file is there through
+  `releasePathExists` (the daemon cannot stat the owner's tree; tp-host
+  answers `test -e`). The daemon-owned lane keeps `<base>/.turbopanel/` at
   `0700`/`0600` (only the daemon account owns that tree).
 - **Caddy follows no link inside a site owner's tree.** Caddy's `file_server`
   always follows symlinks, and `tpcaddysite` sits in every owner's group, so the
