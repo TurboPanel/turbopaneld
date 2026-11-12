@@ -10,6 +10,7 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import {
   applySites,
   confServiceName,
+  managedCodeFolder,
   phpFpmPoolsGroup,
   RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES,
   removeNamedSites,
@@ -5565,6 +5566,226 @@ test("a site that never had variables gets no hosting.env", async () => {
         ),
       Deno.errors.NotFound,
     );
+  } finally {
+    await cleanup();
+  }
+});
+
+const frameworkRootSite: SiteApplySpec = {
+  ...poolPhpSite,
+  sourceKind: "managed-directory",
+  principal: { principalId: "pr-1", username: RELEASE_USERNAME },
+  root: "app/public",
+};
+
+function poolFile(layout: LayoutPaths): string {
+  return join(layout.configDir, "php", "8.4", "pools", "tp-envmd-phpapp.conf");
+}
+
+function openBasedirOf(pool: string): string[] {
+  const line = pool.split("\n").find((l) => l.includes("open_basedir"));
+  return (line?.split("=").slice(1).join("=").trim() ?? "").split(":");
+}
+
+test("a managed-directory root inside an app folder lets PHP read the whole app folder", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const publicDir = join(serviceFolderRoot(layout), "public");
+    await Deno.mkdir(join(publicDir, "app", "public"), { recursive: true });
+    await applySites(layout, "envmd", [frameworkRootSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: new Map([["phpapp", folderBinding]]),
+    });
+    const entries = openBasedirOf(await Deno.readTextFile(poolFile(layout)));
+    assertEquals(entries, [
+      join(publicDir, "app"),
+      join(serviceFolderRoot(layout), "shared"),
+      "/tmp",
+    ]);
+    // Never wider than the account's own uploaded folder.
+    assertEquals(entries.includes(publicDir), false);
+    assertEquals(entries.includes(serviceFolderRoot(layout)), false);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("managedCodeFolder stays at the document root for the default and one-name roots", () => {
+  const pub = "/srv/users/u/svc/public";
+  assertEquals(managedCodeFolder(pub, "public", pub), pub);
+  assertEquals(managedCodeFolder(pub, "dist", `${pub}/dist`), `${pub}/dist`);
+  assertEquals(
+    managedCodeFolder(pub, "app/public", `${pub}/app/public`),
+    `${pub}/app`,
+  );
+  assertEquals(
+    managedCodeFolder(pub, "a/b/public", `${pub}/a/b/public`),
+    `${pub}/a`,
+  );
+  assertEquals(managedCodeFolder(pub, "..", `${pub}/x`), `${pub}/x`);
+});
+
+test("a managed-directory root whose parent folder is missing is refused and nothing is created", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    const publicDir = join(serviceFolderRoot(layout), "public");
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [frameworkRootSite], {
+          run,
+          runPlaybook,
+          managedDirectoryBindings: new Map([["phpapp", folderBinding]]),
+        }),
+      Error,
+      "relative to the uploaded folder",
+    );
+    assertEquals(await exists(join(publicDir, "app")), false);
+    // The folder to upload into is still there, owned by the account.
+    assertEquals(await exists(publicDir), true);
+    assertEquals(
+      mock.calls.some((c) =>
+        c.args.includes("install") && c.args.includes("-d") &&
+        c.args.at(-1) === publicDir &&
+        c.args.includes(RELEASE_USERNAME) && c.args.includes("tpnginx")
+      ),
+      true,
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a failed engine rollout puts the previous php-fpm pool back too", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  let failNginx = false;
+  const run = withGroupMembership(async (command, args) => {
+    if (
+      failNginx && args.includes("-t") &&
+      args.some((arg) => arg.endsWith("/nginx"))
+    ) {
+      return fail("nginx: config test failed");
+    }
+    return await mock.run(command, args);
+  }, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await Deno.mkdir(
+      join(serviceFolderRoot(layout), "public", "app", "public"),
+      { recursive: true },
+    );
+    const bindings = new Map([["phpapp", folderBinding]]);
+    await applySites(layout, "envmd", [frameworkRootSite], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: bindings,
+    });
+    const lastGood = await Deno.readTextFile(poolFile(layout));
+
+    failNginx = true;
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [{
+          ...frameworkRootSite,
+          php: {
+            version: "8.4",
+            settings: { memory_limit: "512M" },
+          },
+          listenPort: 18090,
+        }], {
+          run,
+          runPlaybook,
+          managedDirectoryBindings: bindings,
+        }),
+      Error,
+      "config test failed",
+    );
+    assertEquals(await Deno.readTextFile(poolFile(layout)), lastGood);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a Caddy site that answers 500 after the reload puts the previous pool back", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const publicDir = join(serviceFolderRoot(layout), "public");
+  const mock = createSiteRunMock({
+    before: [publicDir],
+    afterRestart: [publicDir],
+  });
+  let failProbe = false;
+  const run = withGroupMembership(async (command, args) => {
+    if (failProbe && command === "curl") {
+      return { success: true, stdout: "500", stderr: "" };
+    }
+    return await mock.run(command, args);
+  }, { tpcaddysite: ["tpcaddysite"], tpapache: ["tpapache"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await Deno.mkdir(
+      join(serviceFolderRoot(layout), "public", "app", "public"),
+      { recursive: true },
+    );
+    const site: SiteApplySpec = { ...frameworkRootSite, engine: "caddy" };
+    const bindings = new Map([["phpapp", folderBinding]]);
+    await applySites(layout, "envmd", [site], {
+      run,
+      runPlaybook,
+      managedDirectoryBindings: bindings,
+    });
+    const lastGood = await Deno.readTextFile(poolFile(layout));
+
+    failProbe = true;
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [{
+          ...site,
+          php: { version: "8.4", settings: { memory_limit: "512M" } },
+        }], { run, runPlaybook, managedDirectoryBindings: bindings }),
+      Error,
+    );
+    assertEquals(await Deno.readTextFile(poolFile(layout)), lastGood);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a first deploy that fails its probe leaves no pool file behind", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const publicDir = join(serviceFolderRoot(layout), "public");
+  const mock = createSiteRunMock({
+    before: [publicDir],
+    afterRestart: [publicDir],
+  });
+  const run = withGroupMembership(async (command, args) => {
+    if (command === "curl") {
+      return { success: true, stdout: "500", stderr: "" };
+    }
+    return await mock.run(command, args);
+  }, { tpcaddysite: ["tpcaddysite"], tpapache: ["tpapache"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await Deno.mkdir(join(publicDir, "app", "public"), { recursive: true });
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [{
+          ...frameworkRootSite,
+          engine: "caddy",
+        }], {
+          run,
+          runPlaybook,
+          managedDirectoryBindings: new Map([["phpapp", folderBinding]]),
+        }),
+      Error,
+    );
+    assertEquals(await exists(poolFile(layout)), false);
   } finally {
     await cleanup();
   }

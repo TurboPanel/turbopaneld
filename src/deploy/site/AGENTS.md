@@ -238,7 +238,7 @@ Docker Compose. The daemon:
    `.tpprev` config for one it changed in place (PHP config cannot use
    `.tpnew`: tp-host's PHP path class takes only the live names and
    `.tpprev`). A runtime changed in place with no vhost change is probed on
-   its own. A site's runtimes are matched by exact id
+   its own. A shared php-fpm pool is reverted by the same failure: `reloadSiteEngines` keeps each series' pool rollout open until every engine has answered, so a failed deploy never leaves the new pool behind the old vhost. A site's runtimes are matched by exact id
    (`isSitePhpRuntimeOf`: `<key>-(fcgi|fpm|lsd)<digits>`), never by prefix — one
    site's key can begin another's. A site moving onto a runtime gives up its
    pool on the shared master (any series) once its vhost serves the new
@@ -855,8 +855,15 @@ uploaded folder for this lane) for the PHP unit, cron and `open_basedir`.
 `public/` is made here, `<owner>:<engine group> 0750` (the folder itself, its
 `releases/`, `shared/` and `logs/` come from `ensureAssetFolder`). The default
 root name `public` means `public/` itself in the folder tree (an uploaded
-folder is already the web root); any other `root` is a folder inside it. The
-site Caddy mounts `public/` and `releases/` `nosymfollow`
+folder is already the web root); any other `root` is a folder inside it, so
+`root` is relative to the uploaded `public/` folder, never to the service
+folder. A framework's own `public/` can be the root (Laravel uploaded to
+`public/app` takes `root: app/public`): PHP's `open_basedir` then covers the top
+folder of the root (`public/app`, so `vendor/` and `.env` read), plus `shared/`
+and `/tmp`, and never more than the uploaded folder (`managedCodeFolder`). A
+root of more than one name is refused when its parent folder was not uploaded
+(`install -d` would leave root-owned folders behind); the one-name and default
+roots are still made here. The site Caddy mounts `public/` and `releases/` `nosymfollow`
 (`tp-site-caddy-run roots` reads both shapes).
 
 A site's content comes from one of two lanes, named by `sourceKind` on the wire
