@@ -23,8 +23,10 @@
  *   trunk drop's absent `version`) is not a downgrade: no evidence, no refusal.
  *
  * Break-glass is host-side only: `TURBOPANEL_ALLOW_DOWNGRADE=1` in the
- * daemon's environment, or the operator re-running `run.sh --manifest-url`
- * by hand. Nothing a manifest or a WebSocket message carries can switch it on.
+ * daemon's environment. run.sh applies the same rule as root against its own
+ * record (`tp_daemon_build_older`, `<install>/lib/installed-build`), with its
+ * own operator-only override (`run.sh --allow-downgrade`). Nothing a manifest
+ * or a WebSocket message carries can switch either on.
  */
 import { compareSemver, parseSemver } from "../instance/version-wire.ts";
 import { RollbackRefusedError } from "./errors.ts";

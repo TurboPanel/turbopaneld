@@ -9,7 +9,7 @@ import { join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
 import { readProcFile } from "../collector/proc-read.ts";
-import { writeTextFileAtomic } from "../atomic-write.ts";
+import { writeTextFileAtomicOrSkipWhenFull } from "../atomic-write.ts";
 
 export const PROC_BOOT_ID = "/proc/sys/kernel/random/boot_id";
 export const BOOT_GENERATION_RELATIVE_PATH = "metrics/boot-generation.json";
@@ -55,7 +55,7 @@ async function writePersistedState(
   path: string,
   state: BootGenerationState,
 ): Promise<void> {
-  await writeTextFileAtomic(path, JSON.stringify(state));
+  await writeTextFileAtomicOrSkipWhenFull(path, JSON.stringify(state));
 }
 
 /**

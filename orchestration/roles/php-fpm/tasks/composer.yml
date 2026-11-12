@@ -1,0 +1,95 @@
+---
+# The PHP package manager, vendored for site builds: one pinned release,
+# checked against the publisher's SHA-256 before it is kept, run through the PHP
+# shell dispatcher so it follows the site's series (TURBOPANEL_PHP). Builds
+# never download it; only this role does.
+#
+#   <vendor>/composer/<version>/composer.phar
+#   <vendor>/composer/<version>/bin/composer   (wrapper: php composer.phar "$@")
+#   <vendor>/composer/current -> <version>
+#
+# `composer/` is 0750 with an `other:x` ACL, the traverse-without-list contract
+# of every vendored runtime tree, so the build's throwaway account and every
+# site owner's Linux user can run it without listing the vendor tree. Inside
+# the version folder everything is read and run by every account, owner write
+# only, the way the node and deno trees are opened (install-series.sh).
+- name: Check the vendored PHP package manager
+  ansible.builtin.stat:
+    path: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/composer.phar"
+  register: _php_fpm_composer_pinned
+
+- name: Ensure the PHP package manager tree root
+  ansible.builtin.file:
+    path: "{{ php_fpm_composer_root }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Let every account traverse to the PHP package manager tree
+  ansible.posix.acl:
+    path: "{{ php_fpm_composer_root }}"
+    etype: other
+    permissions: x
+    state: present
+
+- name: Ensure the PHP package manager version directory
+  ansible.builtin.file:
+    path: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "u=rwx,go=rx" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
+
+# get_url verifies the digest before the file is kept: a mismatch fails the task
+# and leaves nothing behind.
+- name: Download the PHP package manager (SHA-256 verified)
+  ansible.builtin.get_url:
+    url: "{{ php_fpm_composer_url }}"
+    dest: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/composer.phar"
+    checksum: "sha256:{{ php_fpm_composer_sha256 }}"
+    owner: root
+    group: root
+    mode: "u=rw,go=r" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
+  when: not _php_fpm_composer_pinned.stat.exists
+
+- name: Ensure the PHP package manager wrapper directory
+  ansible.builtin.file:
+    path: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/bin"
+    state: directory
+    owner: root
+    group: root
+    mode: "u=rwx,go=rx" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
+
+- name: Install the PHP package manager wrapper
+  ansible.builtin.template:
+    src: composer-wrapper.sh.j2
+    dest: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}/bin/composer"
+    owner: root
+    group: root
+    mode: "u=rwx,go=rx" # NOSONAR ansible:S2612 world-readable by design: a public runtime tree behind the 0750 root and its other:x ACL
+
+- name: Point the PHP package manager current link at the pinned version
+  ansible.builtin.file:
+    src: "{{ php_fpm_composer_root }}/{{ php_fpm_composer_version }}"
+    dest: "{{ php_fpm_composer_root }}/current"
+    state: link
+    force: true
+
+- name: Find superseded PHP package manager versions
+  ansible.builtin.find:
+    paths: "{{ php_fpm_composer_root }}"
+    file_type: directory
+    recurse: false
+    excludes:
+      - current
+      - "{{ php_fpm_composer_version }}"
+  register: _php_fpm_composer_stale
+
+- name: Remove superseded PHP package manager versions
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: absent
+  loop: "{{ _php_fpm_composer_stale.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"

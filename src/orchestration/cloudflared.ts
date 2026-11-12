@@ -13,6 +13,7 @@ import { logInfo, logWarn } from "../util/logger.ts";
 import {
   createSymlink,
   installVendorExecutable,
+  makeVendorDirTraversable,
 } from "../permissions/scoped-writes.ts";
 
 async function fileExists(path: string): Promise<boolean> {
@@ -25,7 +26,7 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-/** Returns the installed cloudflared version (e.g. "2026.5.2") or null. */
+/** Returns the installed cloudflared version (e.g. "2026.10.7") or null. */
 async function installedCloudflaredVersion(
   bin: string,
 ): Promise<string | null> {
@@ -38,7 +39,7 @@ async function installedCloudflaredVersion(
     });
     const { success, stdout } = await command.output();
     if (!success) return null;
-    // Output looks like: "cloudflared version 2026.5.2 (built ...)"
+    // Output looks like: "cloudflared version 2026.10.7 (built ...)"
     const match = /version\s+(\S+)/.exec(new TextDecoder().decode(stdout));
     return match ? match[1] : null;
   } catch {
@@ -54,6 +55,19 @@ async function fetchBytes(url: string): Promise<Uint8Array> {
     );
   }
   return new Uint8Array(await res.arrayBuffer());
+}
+
+/**
+ * Each connector runs as its own service under a throwaway account that is not
+ * in the daemon's group, so the version folder must be traversable by it (no
+ * listing). A folder an earlier daemon made under a tighter umask is fixed too.
+ */
+async function allowConnectorToReachBinary(): Promise<void> {
+  try {
+    await makeVendorDirTraversable(cloudflaredDir());
+  } catch (err) {
+    logWarn("cloudflared", "could not make the folder traversable:", err);
+  }
 }
 
 /** Point the stable `current` symlink at the given version directory. */
@@ -95,6 +109,7 @@ export async function ensureCloudflared(
   const current = await installedCloudflaredVersion(bin);
   if (current === CLOUDFLARED_VERSION) {
     logInfo("cloudflared", `${CLOUDFLARED_VERSION} already installed`);
+    await allowConnectorToReachBinary();
     await repointCurrent();
     return bin;
   }
@@ -111,6 +126,7 @@ export async function ensureCloudflared(
   );
 
   await Deno.mkdir(cloudflaredDir(), { recursive: true });
+  await allowConnectorToReachBinary();
   // cloudflared is on the run allowlist, which Deno treats as a write refusal
   // on that exact path — stage the download and install it with `cp` instead.
   const staging = await Deno.makeTempDir({ prefix: "turbopanel-cloudflared-" });

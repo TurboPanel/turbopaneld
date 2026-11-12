@@ -56,6 +56,18 @@ export type ManagedEngineContext = {
    * account hosts with these; Postgres admission is pg_hba (config-side).
    */
   clientSourceHosts?: readonly string[];
+  /**
+   * MySQL/MariaDB: logins whose open connections still have to be ended after
+   * a revoke. The apply records a login before it revokes and clears it once
+   * its connections are gone, so a failure in between is finished by the next
+   * apply (a retry finds no grant row left to revoke). Absent: nothing is
+   * remembered across applies.
+   */
+  sessionEnds?: {
+    pending(): Promise<readonly string[]>;
+    add(username: string): Promise<void>;
+    done(username: string): Promise<void>;
+  };
 };
 
 /** What `readPermissions` is asked for (already validated by the caller). */

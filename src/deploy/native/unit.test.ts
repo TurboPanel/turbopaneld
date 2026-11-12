@@ -329,7 +329,7 @@ test("principalSliceContent emits account limits when provided", () => {
   assertStringIncludes(slice, "TasksMax=128");
 });
 
-test("an app with no restart_policy still gets a bounded crash-loop budget", () => {
+test("an app with no restart_policy limit keeps restarting with a growing delay", () => {
   const content = nativeAppUnitContent({
     layout,
     app,
@@ -338,15 +338,14 @@ test("an app with no restart_policy still gets a bounded crash-loop budget", () 
     environmentId: "env-1",
   });
   const unitSection = content.slice(0, content.indexOf("[Service]"));
-  assertStringIncludes(unitSection, "StartLimitBurst=10\n");
-  assertStringIncludes(unitSection, "StartLimitIntervalSec=120\n");
+  assertStringIncludes(unitSection, "StartLimitIntervalSec=0\n");
+  assertEquals(unitSection.includes("StartLimitBurst"), false);
+  assertStringIncludes(content, "\nRestartSteps=10\nRestartMaxDelaySec=120\n");
 });
 
 test("an app with no restart_policy keeps the historical supervision lines", () => {
-  // The regression that matters most: adding the field must not rewrite units
-  // that existed before it. A payload without a policy has to render exactly
-  // the two lines the lane has always emitted, or the next deploy reinstalls
-  // and restarts every tenant app for no reason.
+  // A payload without a policy keeps `Restart=on-failure` and `RestartSec=2`;
+  // only the start limit and the growing delay changed (see the test above).
   const content = nativeAppUnitContent({
     layout,
     app,
@@ -390,6 +389,8 @@ test("an authored restart_policy becomes the unit's supervision directives", () 
   const unitSection = content.slice(0, content.indexOf("[Service]"));
   assertStringIncludes(unitSection, "StartLimitBurst=3");
   assertStringIncludes(unitSection, "StartLimitIntervalSec=1m30s");
+  // The author asked for a give-up and a delay: no growing delay on top.
+  assertEquals(content.includes("RestartSteps"), false);
 });
 
 test("restart condition none disables restarting without touching the backoff", () => {

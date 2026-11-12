@@ -42,7 +42,7 @@
  * {@link RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES}.
  */
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -70,7 +70,10 @@ import {
 } from "../runtime/registry.ts";
 import { principalHomePath, serviceTree } from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
-import { currentReleaseDirExists } from "./release/promote.ts";
+import {
+  currentReleaseDirExists,
+  releasePathExists,
+} from "./release/promote.ts";
 import {
   ConfigValueError,
   hasLineBreakOrControl,
@@ -90,7 +93,6 @@ import {
   ownedConfigFileMatches as ownedConfigFileMatchesVia,
   phpFpmDriver,
   removeStagedFile,
-  rolloutSiteConfigs,
   SITE_ENGINE_DRIVERS,
   SITE_ENGINE_ORDER,
   siteCaddyConfigDir,
@@ -141,6 +143,8 @@ import {
   isSitePhpRuntimeId,
   isSitePhpRuntimeOf,
   sitePhpFpmConf,
+  sitePhpGuardPath,
+  sitePhpGuardPhp,
   sitePhpIni,
   sitePhpKey,
   sitePhpLockedValues,
@@ -158,6 +162,11 @@ import {
   type SitePhpWebAccount,
 } from "./site/php-runtime.ts";
 import {
+  APACHE_OVERRIDE_CLASSES,
+  apacheOverrideListLine,
+} from "./site/apache-overrides.ts";
+import { cachedPhpSiteKeySecret, phpSiteKey } from "./site/php-site-key.ts";
+import {
   holdSitePhpRuntime,
   installSitePhpRuntime,
   listSitePhpUnits,
@@ -173,6 +182,14 @@ import {
   type SitePhpUnitListing,
 } from "./site/php-runtime-apply.ts";
 import { SYSTEMD_UNIT_DIR } from "./native/unit.ts";
+import { removeRecordedSiteEnvFiles } from "./site/site-env-owners.ts";
+import { withPostgresRootCert } from "./site/db-url-ca.ts";
+import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
+import {
+  type FrameworkAlias,
+  frameworkAliases,
+  type FrameworkLayout,
+} from "./release/framework-layout.ts";
 
 const SAFE_ID_RE = /^[A-Za-z0-9_-]+$/;
 const SAFE_ROOT_RE = /^[A-Za-z0-9._/-]+$/;
@@ -180,6 +197,12 @@ const PRINCIPAL_USERNAME_RE = /^[A-Za-z_][A-Za-z0-9_-]*$/;
 const decoder = new TextDecoder();
 
 export type SiteApplySpec = EnvironmentDeploySite & {
+  /**
+   * The framework layout of the release this site serves (Laravel or
+   * WordPress): daemon-internal, never on the wire. The vhost then serves the
+   * layout's shared folders by URL (`frameworkAliases`).
+   */
+  frameworkLayout?: FrameworkLayout;
   /**
    * Set by {@link applySites} from the deploy: render the vhost so the engine
    * names neither itself nor its version (error-page footers, `Server`).
@@ -831,6 +854,11 @@ export type NginxSiteConfigOpts = Readonly<{
    * proxy everything else to Apache on this loopback port. No PHP location.
    */
   apacheBackendPort?: number | null;
+  /**
+   * Shared folders the site's framework layout serves by URL (never through a
+   * link): each gets a location that refuses PHP.
+   */
+  frameworkAliases?: readonly FrameworkAlias[];
 }>;
 
 /**
@@ -851,6 +879,54 @@ function nginxServerTokensLine(site: SiteApplySpec): string {
   return site.hideWebServerNames ? "\n  server_tokens off;" : "";
 }
 
+/**
+ * A shared folder served by URL: a prefix location with its own `alias`, links
+ * followed only when link and target share an owner, and no PHP, `.phtml` or
+ * `.phar` from it (a nested location, so it wins over the PHP location below).
+ */
+function nginxAliasLocations(aliases: readonly FrameworkAlias[]): string {
+  return aliases.map((alias) =>
+    String.raw`
+  location ^~ ${alias.urlPrefix} {
+    alias ${alias.dir}/;
+    disable_symlinks if_not_owner;
+    location ~* \.(php[0-9]?|phtml|phar)$ {
+      return 403;
+    }
+  }
+`
+  ).join("");
+}
+
+/** The same folder in an Apache vhost: an `Alias` that runs and reads nothing. */
+function apacheAliasBlock(aliases: readonly FrameworkAlias[]): string {
+  return aliases.map((alias) =>
+    String.raw`
+  Alias "${alias.urlPrefix}" "${alias.dir}/"
+  <Directory "${alias.dir}">
+    Options SymLinksIfOwnerMatch
+    AllowOverride None
+    Require all granted
+    <FilesMatch "\.(?i:php[0-9]?|phtml|phar)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>`
+  ).join("");
+}
+
+/**
+ * Deploy warnings for a site whose framework layout this engine cannot serve by
+ * URL: only Apache and nginx sites get the aliases for now.
+ */
+export function planSiteFrameworkAliases(site: SiteApplySpec): string[] {
+  const aliases = frameworkAliases(site.frameworkLayout, "/shared");
+  if (aliases.length === 0) return [];
+  if (site.engine === "apache" || site.engine === "nginx") return [];
+  return aliases.map((alias) =>
+    `Site ${site.composeServiceName}: files under ${alias.urlPrefix} are served only on Apache and nginx sites for now.`
+  );
+}
+
 export function nginxSiteConfig(
   site: SiteApplySpec,
   documentRoot: string,
@@ -867,7 +943,9 @@ export function nginxSiteConfig(
   listen [::1]:${site.listenPort};${dockerListen}
   server_name _;${nginxServerTokensLine(site)}
   root ${documentRoot};
-  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}
+  ${nginxDisableSymlinks(opts?.releaseBacked ?? false)}${
+      nginxAliasLocations(opts?.frameworkAliases ?? [])
+    }
 ${nginxApacheLocations(backendPort)}
 }
 `;
@@ -898,7 +976,7 @@ ${nginxApacheLocations(backendPort)}
 ${nginxForwardedLines().join("\n")}
   index ${indexFiles};
 ${nginxDotfileDenyLines().join("\n")}
-
+${nginxAliasLocations(opts?.frameworkAliases ?? [])}
   location / {
     try_files $uri $uri/ =404;
   }${phpBlock}
@@ -1156,19 +1234,62 @@ export function phpFpmPoolAdminDirectives(
 }
 
 /**
- * `open_basedir` allow-list for a release-backed PHP site: the document root it
- * serves, the site's writable `shared/` state, and a temp dir. Reachable
- * through `current/shared` as well, which is why the release `shared` symlink
- * (`release/promote.ts`) is part of the layout contract.
+ * `open_basedir` allow-list for a release-backed PHP site: the whole release
+ * through the stable `current` link (PHP reads `vendor/`, `bootstrap/` and
+ * `config/` as well as the folder the web root serves, which stays
+ * `current/<root>`), the site's writable `shared/` state, a temp dir, and the
+ * managed database's CA file when the site has one (a PHP file function reads
+ * it; the database driver does not need the entry). `realpath_cache_ttl = 0`
+ * on release-backed pools keeps `current` fresh after a promote.
  */
 export function releasePhpOpenBasedir(
   layout: LayoutPaths,
   release: SiteRelease,
+  caFile?: string,
+): string[] {
+  const tree = serviceTree(layout, release);
+  return [
+    tree.currentLink,
+    tree.sharedDir,
+    PHP_OPEN_BASEDIR_TMP,
+    ...(caFile === undefined ? [] : [caFile]),
+  ];
+}
+
+/**
+ * The folder of a managed directory that holds the application, as far as
+ * `open_basedir` is concerned.
+ *
+ * A framework keeps its code one level above its own `public/` folder
+ * (`vendor/`, `.env`, `bootstrap/`), so a root of `app/public` must let PHP
+ * read `app/`, not only `app/public`. The allowance is the top folder of the
+ * root inside the uploaded folder: the document root itself for a root of one
+ * name (and for the default `public`), the first folder for a longer one.
+ * It never leaves the uploaded folder, so another account's tree and the rest
+ * of the site directory stay out of reach.
+ */
+export function managedCodeFolder(
+  publicDir: string,
+  root: string,
+  documentRoot: string,
+): string {
+  if (root === DEFAULT_SITE_ROOT) return documentRoot;
+  const top = root.split("/").find((part) => part !== "");
+  if (top === undefined || top === "." || top === "..") return documentRoot;
+  return join(publicDir, top);
+}
+
+/** `open_basedir` allow-list for a managed-directory PHP site. */
+export function managedPhpOpenBasedir(
+  layout: LayoutPaths,
+  managed: SiteRelease,
+  root: string,
   documentRoot: string,
 ): string[] {
+  const tree = serviceTree(layout, managed);
   return [
-    documentRoot,
-    serviceTree(layout, release).sharedDir,
+    managedCodeFolder(tree.publicDir, root, documentRoot),
+    tree.sharedDir,
     PHP_OPEN_BASEDIR_TMP,
   ];
 }
@@ -1342,7 +1463,56 @@ export type ApacheSiteConfigOpts = Readonly<{
    * nginx's `X-Forwarded-For`.
    */
   behindNginxPort?: number | null;
+  /** Shared folders the site's framework layout serves by URL. */
+  frameworkAliases?: readonly FrameworkAlias[];
+  /**
+   * This site's own error log (a file under the daemon-run `sites/` log
+   * folder, never inside the site tree). Left out, Apache logs to the
+   * server-wide error log.
+   */
+  errorLogPath?: string | null;
+  /**
+   * The runtime's site key (64 lowercase hex): sent to PHP as `TP_SITE_KEY`
+   * after the strip lines every vhost carries. Required for a PHP site; a
+   * static site gets the strip lines without it.
+   */
+  phpSiteKey?: string | null;
 }>;
+
+const PHP_SITE_KEY_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * The vhost lines that wall every Apache site off from every PHP runtime.
+ * At vhost level, not inside a `<FilesMatch>`, so they also cover
+ * `RewriteRule [P]`, `[H=]` and `SetHandler` requests from any folder, and
+ * they are on every vhost, static ones too: a static site can still proxy to
+ * another site's socket, so it must not be able to hand that runtime PHP
+ * settings or a key through `SetEnv`, `[E=]` or `SetEnvIf`. A `.htaccess`
+ * cannot undo them (`ProxyFCGISetEnvIf` is not an allowed override).
+ *
+ * Order matters: `mod_proxy_fcgi` applies the fixups in the order written
+ * (vhost lines first, then folder ones), so the unset of `TP_SITE_KEY` must
+ * come before the line that sets this site's own key.
+ */
+function apacheWallLines(siteKey: string | null): string[] {
+  return [
+    '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
+    '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
+    '  ProxyFCGISetEnvIf "true" !PHPRC',
+    '  ProxyFCGISetEnvIf "true" !PHP_INI_SCAN_DIR',
+    '  ProxyFCGISetEnvIf "true" !TP_SITE_KEY',
+    ...(siteKey === null
+      ? []
+      : [`  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${siteKey}"`]),
+  ];
+}
+
+/** `lines` with `extra` placed right before the dotfile refusal, if present. */
+function linesBeforeDotfileDeny(lines: string[], extra: string[]): string[] {
+  const at = lines.findIndex((line) => line.startsWith("  <LocationMatch "));
+  if (at < 0) return [...lines, ...extra];
+  return [...lines.slice(0, at), ...extra, ...lines.slice(at)];
+}
 
 /**
  * One `SetEnv` line, or a refusal naming the variable (never its value: it may
@@ -1378,6 +1548,8 @@ function apacheVhostHead(
   site: SiteApplySpec,
   dockerBindAddress: string | null,
   behindNginxPort: number | null,
+  errorLogPath: string | null,
+  keyLines: string[],
 ): string {
   const name = site.composeServiceName;
   // `ServerTokens` is server-wide only (not valid inside a VirtualHost), so it
@@ -1386,6 +1558,9 @@ function apacheVhostHead(
   const hide = site.hideWebServerNames === true;
   const tokens = hide ? ["ServerTokens Prod"] : [];
   const signature = hide ? ["  ServerSignature Off"] : [];
+  const errorLog = errorLogPath === null
+    ? []
+    : [`  ErrorLog "${errorLogPath}"`];
   if (behindNginxPort !== null) {
     return [
       `# TurboPanel site ${name} (behind nginx)`,
@@ -1393,8 +1568,9 @@ function apacheVhostHead(
       `Listen 127.0.0.1:${behindNginxPort}`,
       `<VirtualHost 127.0.0.1:${behindNginxPort}>`,
       "  ServerName localhost",
+      ...errorLog,
       ...signature,
-      ...apacheBehindNginxLines(),
+      ...linesBeforeDotfileDeny(apacheBehindNginxLines(), keyLines),
     ].join("\n");
   }
   const addrs = [`127.0.0.1:${site.listenPort}`];
@@ -1405,8 +1581,10 @@ function apacheVhostHead(
     ...addrs.map((addr) => `Listen ${addr}`),
     `<VirtualHost ${addrs.join(" ")}>`,
     "  ServerName localhost",
+    ...errorLog,
     ...signature,
     ...apacheForwardedLines(FORWARDED_TRUSTED_LOOPBACK),
+    ...keyLines,
     ...apacheDotfileDenyLines(),
   ].join("\n");
 }
@@ -1421,6 +1599,14 @@ export function apacheSiteConfig(
   if (siteNeedsPhp(site) && !phpFpmSocket) {
     throw new Error(
       `site Apache PHP site ${site.composeServiceName} is missing phpFpmSocket`,
+    );
+  }
+  const siteKey = opts?.phpSiteKey ?? null;
+  if (
+    siteNeedsPhp(site) && (siteKey === null || !PHP_SITE_KEY_RE.test(siteKey))
+  ) {
+    throw new Error(
+      `site Apache PHP site ${site.composeServiceName} needs a 64 hex site key`,
     );
   }
 
@@ -1447,15 +1633,20 @@ export function apacheSiteConfig(
     site,
     dockerBindAddress,
     opts?.behindNginxPort ?? null,
+    opts?.errorLogPath ?? null,
+    apacheWallLines(siteNeedsPhp(site) ? siteKey : null),
   );
 
   return `${head}
   DocumentRoot "${documentRoot}"
   <Directory "${documentRoot}">
-    Options Indexes SymLinksIfOwnerMatch
-    AllowOverride AuthConfig FileInfo Indexes Limit Options=Indexes,MultiViews,SymLinksIfOwnerMatch
+    Options SymLinksIfOwnerMatch
+    AllowOverride ${APACHE_OVERRIDE_CLASSES}
+    AllowOverrideList ${apacheOverrideListLine()}
     Require all granted
-  </Directory>${phpBlock}${setenvBlock}
+  </Directory>${
+    apacheAliasBlock(opts?.frameworkAliases ?? [])
+  }${phpBlock}${setenvBlock}
 </VirtualHost>
 `;
 }
@@ -1837,20 +2028,24 @@ function openlitespeedVhostsDir(layout: LayoutPaths): string {
   return join(openlitespeedConfigDir(layout), "vhosts");
 }
 
-/** Dotenv-style file for host-native stacks (the engine apply path reads it later). */
+/**
+ * The site's variables as a file a shell can load
+ * (`set -a; . hosting.env; set +a`) and systemd's `EnvironmentFile=` reads back
+ * exactly: the native app format (single quotes, or double quotes with `\ " \``
+ * and `$` escaped), sorted by name. The owner's copy and the root copy
+ * (`deploy/site/site-env-file.ts`) are rendered by the same function.
+ */
 export function formatHostingEnvFile(env: Record<string, string>): string {
-  const keys = Object.keys(env).sort((a, b) => a.localeCompare(b));
-  const lines: string[] = [];
-  for (const key of keys) {
-    const value = env[key] ?? "";
-    const escaped = value
-      .replaceAll("\\", String.raw`\\`)
-      .replaceAll('"', String.raw`\"`)
-      .replaceAll("\n", String.raw`\n`);
-    lines.push(`${key}="${escaped}"`);
-  }
-  return `${lines.join("\n")}\n`;
+  // A name that is not an environment variable name (`X;cmd;Y`) would be
+  // read by a shell as code, so it is left out, as in the root copy.
+  const entries = Object.keys(env)
+    .filter((name) => HOSTING_ENV_NAME_RE.test(name))
+    .sort((a, b) => a.localeCompare(b))
+    .map((name) => ({ name, value: env[name] ?? "" }));
+  return renderNativeAppEnvFile(entries);
 }
+
+const HOSTING_ENV_NAME_RE = /^[A-Za-z_]\w{0,254}$/;
 
 /** The managed database's CA bundle, in the site's hosting folder. */
 export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
@@ -1859,7 +2054,9 @@ export const SITE_DB_CA_FILE_NAME = "managed-ca.pem";
  * Point every `dbCa.variables` name at the CA file the owner's folder will
  * hold, so the site's engine renders a path instead of a multi-line value. The
  * file lives with the other hosting files and is written by the same call, so
- * only a site with a Linux user owning its tree can take one.
+ * only a site with a Linux user owning its tree can take one. A PostgreSQL URL
+ * named in `dbCa.urlVariables` also gets `sslrootcert=<path>` in the verify
+ * modes (`withPostgresRootCert`); the URL's value is never logged.
  */
 export function withDbCaVariables(
   layout: LayoutPaths,
@@ -1878,12 +2075,39 @@ export function withDbCaVariables(
   );
   const webEnv = { ...site.webEnv };
   for (const variable of site.dbCa.variables) webEnv[variable] = path;
+  for (const variable of site.dbCa.urlVariables ?? []) {
+    const url = webEnv[variable];
+    if (url !== undefined) webEnv[variable] = withPostgresRootCert(url, path);
+  }
   return { ...site, webEnv };
 }
 
-/** `hosting.env` / `php.json` contents, or `null` when the site declares neither. */
+/**
+ * Whether `path` is already there, for the daemon-owned tree. A file the
+ * previous deploy left behind has to be rewritten when this deploy declares
+ * nothing for it; a site that never had one must not gain an empty file. The
+ * owner's tree of a release or managed-directory site is not the daemon's to
+ * stat, so those lanes ask through `releasePathExists`.
+ */
+async function hostingFileExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+/**
+ * `hosting.env` / `php.json` contents (and the database CA file). With
+ * `hadHostingEnv`, a site that now has no variables still gets a
+ * `hosting.env` with none in it, so a shell that loads the file does not read
+ * the names, values and passwords of an earlier deploy.
+ */
 export function hostingWebMetadataFiles(
   site: SiteApplySpec,
+  hadHostingEnv = false,
 ): Array<{ name: string; contents: string }> {
   const files: Array<{ name: string; contents: string }> = [];
   if (site.dbCa !== undefined) {
@@ -1894,10 +2118,11 @@ export function hostingWebMetadataFiles(
         : `${site.dbCa.pem}\n`,
     });
   }
-  if (site.webEnv !== undefined && Object.keys(site.webEnv).length > 0) {
+  const webEnv = site.webEnv ?? {};
+  if (Object.keys(webEnv).length > 0 || hadHostingEnv) {
     files.push({
       name: "hosting.env",
-      contents: formatHostingEnvFile(site.webEnv),
+      contents: formatHostingEnvFile(webEnv),
     });
   }
   if (site.php !== undefined && Object.keys(site.php).length > 0) {
@@ -1914,10 +2139,13 @@ async function writeHostingWebMetadata(
   siteBase: string,
   site: SiteApplySpec,
 ): Promise<void> {
-  const files = hostingWebMetadataFiles(site);
+  const metaDir = join(siteBase, ".turbopanel");
+  const files = hostingWebMetadataFiles(
+    site,
+    await hostingFileExists(join(metaDir, "hosting.env")),
+  );
   if (files.length === 0) return;
 
-  const metaDir = join(siteBase, ".turbopanel");
   // Private to the daemon account: the web engines share its group, and a
   // document root of `.` would otherwise serve these files.
   await Deno.mkdir(metaDir, { recursive: true, mode: 0o700 });
@@ -1946,16 +2174,19 @@ async function writeHostingWebMetadata(
  * the same `sudo -n install` seam every other managed config file uses, so the
  * destination's owner and mode are set by the same call that publishes it.
  */
-async function writeReleaseHostingWebMetadata(
+export async function writeReleaseHostingWebMetadata(
   layout: LayoutPaths,
   environmentId: string,
   site: SiteApplySpec,
   release: SiteRelease,
 ): Promise<void> {
-  const files = hostingWebMetadataFiles(site);
+  const metaDir = siteMetadataDir(layout, release);
+  const files = hostingWebMetadataFiles(
+    site,
+    await releasePathExists(join(metaDir, "hosting.env"), run),
+  );
   if (files.length === 0) return;
 
-  const metaDir = siteMetadataDir(layout, release);
   const mkdir = await run(
     "sudo",
     hostSudoArgs([
@@ -2917,6 +3148,7 @@ async function removeReplacedPhpRuntimes(
     layout.configDir,
     replaced,
     phpUnits,
+    layout.stateDir,
   );
 }
 
@@ -3051,26 +3283,56 @@ async function reloadSiteEngines(
 ): Promise<string[]> {
   const touched: string[] = [];
   // Roll php-fpm out first so its sockets exist before nginx/Apache config-test
-  // the `fastcgi_pass` / `proxy:unix:` lines that point at them.
-  await forEachSequential(
-    [...plan.staged.phpFpm.keys()].sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true })
-    ),
-    async (series) => {
-      const staged = plan.staged.phpFpm.get(series) ?? [];
-      if (staged.length === 0) return;
-      await rolloutSiteConfigs({
-        run,
-        layout,
-        target: phpFpmDriver(series),
-        restart: false,
-        staged,
-      });
-      touched.push(`php-fpm ${series}`);
-    },
-  );
-  // nginx in front of Apache: Apache rolls out first but stays revertible, and
-  // its runtimes unsettled, until nginx has answered through it as well.
+  // the `fastcgi_pass` / `proxy:unix:` lines that point at them. Pools and
+  // engines all stay revertible until every engine has answered, and then
+  // commit together: a failure puts back the engines and the pools as one, so
+  // no committed vhost ever names a pool that was taken away. If a commit has
+  // already happened when a later step fails, the pools are kept: they are
+  // additive, and a committed vhost may name them.
+  const pools: PendingSiteRollout[] = [];
+  const state = { committed: false };
+  try {
+    await forEachSequential(
+      [...plan.staged.phpFpm.keys()].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true })
+      ),
+      async (series) => {
+        const staged = plan.staged.phpFpm.get(series) ?? [];
+        if (staged.length === 0) return;
+        pools.push(
+          await openSiteRollout({
+            run,
+            layout,
+            target: phpFpmDriver(series),
+            restart: false,
+            staged,
+          }),
+        );
+        touched.push(`php-fpm ${series}`);
+      },
+    );
+    await rolloutEngines(layout, plan, touched, state);
+  } catch (err) {
+    if (!state.committed) {
+      await forEachSequential(pools.toReversed(), (pool) => pool.rollback());
+    }
+    throw err;
+  }
+  await forEachSequential(pools, (pool) => pool.commit());
+  return touched;
+}
+
+/**
+ * Open every engine's rollout, then commit and settle them in order. A failure
+ * before the first commit reverts every engine still held; one after it leaves
+ * the committed engines as they are and reverts the rest.
+ */
+async function rolloutEngines(
+  layout: LayoutPaths,
+  plan: SiteReloadPlan,
+  touched: string[],
+  state: { committed: boolean },
+): Promise<void> {
   const held: EngineRolloutStep[] = [];
   try {
     await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
@@ -3079,22 +3341,20 @@ async function reloadSiteEngines(
         ? await openEngineRollout(layout, plan, engine)
         : null;
       if (reload) touched.push(engine);
-      const step = { engine, reload, rollout };
-      if (engine === "apache" && plan.paired) {
-        held.push(step);
-        return;
-      }
+      held.push({ engine, reload, rollout });
+    });
+    await forEachSequential(held.slice(), async (step) => {
+      state.committed ||= step.rollout !== null;
       await settleEngineRollout(plan, step);
-      await forEachSequential(
-        held.splice(0),
-        (heldStep) => settleEngineRollout(plan, heldStep),
-      );
+      held.splice(held.indexOf(step), 1);
     });
   } catch (err) {
-    await forEachSequential(held, (step) => step.rollout?.rollback());
+    await forEachSequential(
+      held.toReversed(),
+      (step) => step.rollout?.rollback(),
+    );
     throw err;
   }
-  return touched;
 }
 
 /** One engine's rollout, awaiting its commit and its runtimes' settling. */
@@ -3190,24 +3450,29 @@ type ApplySiteResult = {
 function sitePhpAdminOpts(
   layout: LayoutPaths,
   paths: SitePaths,
+  site: Pick<SiteApplySpec, "dbCa" | "root">,
 ): PhpFpmPoolAdminOpts | undefined {
   if (paths.release) {
+    const caFile = site.dbCa === undefined
+      ? undefined
+      : join(siteMetadataDir(layout, paths.release), SITE_DB_CA_FILE_NAME);
     return {
       openBasedir: releasePhpOpenBasedir(
         layout,
         paths.release,
-        paths.documentRoot,
+        caFile,
       ),
       releaseSymlinkSwap: true,
     };
   }
   if (paths.managed) {
     return {
-      openBasedir: [
+      openBasedir: managedPhpOpenBasedir(
+        layout,
+        paths.managed,
+        site.root,
         paths.documentRoot,
-        serviceTree(layout, paths.managed).sharedDir,
-        PHP_OPEN_BASEDIR_TMP,
-      ],
+      ),
     };
   }
   return undefined;
@@ -3238,7 +3503,7 @@ async function applyPhpFpmPool(
     site,
     paths.documentRoot,
     socketPath,
-    sitePhpAdminOpts(layout, paths),
+    sitePhpAdminOpts(layout, paths, site),
   );
   return await stageOwnedConfigFile(
     poolPath,
@@ -3257,6 +3522,8 @@ function stagedList(
 /** The socket a site's vhost hands PHP to, and what reaching it took. */
 type SitePhpBackend = {
   socket: string | null;
+  /** The runtime's site key (Apache PHP runtimes only). */
+  siteKey: string | null;
   result: Omit<ApplySiteResult, "staged">;
 };
 
@@ -3275,16 +3542,39 @@ async function applySitePhpBackend(
   paths: SitePaths,
 ): Promise<SitePhpBackend> {
   const series = resolveSitePhpSeries(site);
-  if (!series) return { socket: null, result: { phpFpmStaged: [] } };
+  if (!series) {
+    return { socket: null, siteKey: null, result: { phpFpmStaged: [] } };
+  }
   const mode = sitePhpRuntimeMode(site, environmentId);
   if (mode !== null) {
+    // Only an Apache runtime carries a key: Apache reaches every per-site
+    // socket, so each runtime answers only requests that carry its own key.
+    const siteKey = SITE_PHP_WEB_ACCOUNT[site.engine] === "tpapache"
+      ? await phpSiteKey(
+        await cachedPhpSiteKeySecret(layout),
+        siteRuntimeId(environmentId, site, mode, series),
+      )
+      : null;
     const phpRuntime = await installSitePhpRuntime(
       sitePhpIo(),
-      sitePhpRuntimeFiles(layout, environmentId, site, paths, mode, series),
-      { existing: paths.phpUnits ?? new Map(), probe: siteProbeTarget(site) },
+      sitePhpRuntimeFiles(
+        layout,
+        environmentId,
+        site,
+        paths,
+        mode,
+        series,
+        siteKey,
+      ),
+      {
+        existing: paths.phpUnits ?? new Map(),
+        probe: siteProbeTarget(site),
+        record: { stateDir: layout.stateDir, environmentId },
+      },
     );
     return {
       socket: sitePhpSocketPath(phpRuntime.files.spec.id),
+      siteKey,
       result: { phpFpmStaged: [], phpRuntime },
     };
   }
@@ -3304,6 +3594,7 @@ async function applySitePhpBackend(
   );
   return {
     socket,
+    siteKey: null,
     result: { phpFpmStaged: stagedList(pool), phpSeries: series },
   };
 }
@@ -3351,6 +3642,20 @@ const SITE_PHP_WEB_ACCOUNT: Readonly<
   openlitespeed: "tpols",
 };
 
+/** The runtime id of a site's per-site PHP (one per site, mode and series). */
+function siteRuntimeId(
+  environmentId: string,
+  site: SiteApplySpec,
+  mode: SitePhpRuntimeMode,
+  series: string,
+): string {
+  return sitePhpRuntimeId(
+    sitePhpKey(environmentId, site.composeServiceName),
+    mode,
+    series,
+  );
+}
+
 /** Render one site's per-site PHP runtime (units and config). */
 function sitePhpRuntimeFiles(
   layout: LayoutPaths,
@@ -3359,6 +3664,7 @@ function sitePhpRuntimeFiles(
   paths: SitePaths,
   mode: SitePhpRuntimeMode,
   series: string,
+  siteKey: string | null,
 ): SitePhpRuntimeFiles {
   if (!site.principal) {
     throw new Error(
@@ -3369,11 +3675,7 @@ function sitePhpRuntimeFiles(
   const user = resolveSiteOwnership(site).user;
   const home = principalHomePath(layout, user);
   const spec: SitePhpRuntimeSpec = {
-    id: sitePhpRuntimeId(
-      sitePhpKey(environmentId, site.composeServiceName),
-      mode,
-      series,
-    ),
+    id: siteRuntimeId(environmentId, site, mode, series),
     mode,
     series,
     user,
@@ -3384,8 +3686,14 @@ function sitePhpRuntimeFiles(
     runtimesDir: layout.runtimesDir,
     webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };
+  const webAccount = SITE_PHP_WEB_ACCOUNT[site.engine];
+  if (siteKey !== null && webAccount !== "tpapache") {
+    throw new Error(
+      `site ${site.composeServiceName}: only an Apache PHP runtime takes a site key`,
+    );
+  }
   const values = site.php
-    ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths))
+    ? phpAdminValues(site.php, sitePhpAdminOpts(layout, paths, site))
     : [];
   // The runtime runs as the owner, who cannot enter the daemon's state tree
   // (`tp:tp 0750`), and its limits are locked for scripts under the home.
@@ -3396,6 +3704,9 @@ function sitePhpRuntimeFiles(
   }
   const pool = phpFpmPoolOverrides(site.php);
   const workers = sitePhpRuntimeChildren(mode, pool);
+  const guard = siteKey === null
+    ? undefined
+    : { key: siteKey, path: sitePhpGuardPath(layout.configDir, spec.id) };
   return {
     spec,
     service: sitePhpServiceUnit(spec, {
@@ -3403,12 +3714,14 @@ function sitePhpRuntimeFiles(
       limits: sitePhpUnitLimits(values, workers),
     }),
     socket: sitePhpSocketActivated(mode) ? sitePhpSocketUnit(spec) : null,
-    ini: sitePhpIni(values, home, spec),
+    ini: sitePhpIni(values, home, spec, guard),
+    guard: guard === undefined ? null : sitePhpGuardPhp(),
     fpmConf: mode === "fpm"
       ? sitePhpFpmConf(spec, {
         pool,
         chdir: paths.documentRoot,
         admin: sitePhpLockedValues(values),
+        guard,
       })
       : null,
   };
@@ -3435,6 +3748,19 @@ async function applyCaddySite(
   return { staged: stagedList(staged), ...php.result };
 }
 
+/** The shared folders a release-backed site's layout serves by URL. */
+function siteFrameworkAliases(
+  layout: LayoutPaths,
+  site: SiteApplySpec,
+  paths: SitePaths,
+): FrameworkAlias[] {
+  if (paths.release === undefined) return [];
+  return frameworkAliases(
+    site.frameworkLayout,
+    serviceTree(layout, paths.release).sharedDir,
+  );
+}
+
 async function applyNginxSite(
   layout: LayoutPaths,
   environmentId: string,
@@ -3450,11 +3776,27 @@ async function applyNginxSite(
     phpFpmSocket: php.socket,
     fastcgiParamsPath: nginxFastcgiParamsPath(layout),
     releaseBacked: paths.release !== undefined,
+    frameworkAliases: siteFrameworkAliases(layout, site, paths),
   });
   const staged = await SITE_ENGINE_DRIVERS.nginx
     .stageSiteConfig(run, configPath, contents);
   await applySiteTreeOwnership(site, paths);
   return { staged: stagedList(staged), ...php.result };
+}
+
+/**
+ * One error log per site, in the `sites/` folder the Apache role keeps under
+ * the Apache log folder (owned by `tpapache`, which opens the files): never
+ * inside the site tree, where the owner could rename or link the file Apache
+ * opens.
+ */
+function apacheSiteErrorLogPath(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: SiteApplySpec,
+): string {
+  const key = sitePhpKey(environmentId, site.composeServiceName);
+  return join(layout.logDir, "apache", "sites", `${key}.error.log`);
 }
 
 async function applyApacheSite(
@@ -3471,6 +3813,9 @@ async function applyApacheSite(
   const contents = apacheSiteConfig(site, paths.documentRoot, {
     dockerBindAddress: dockerBind,
     phpFpmSocket: php.socket,
+    frameworkAliases: siteFrameworkAliases(layout, site, paths),
+    phpSiteKey: php.siteKey,
+    errorLogPath: apacheSiteErrorLogPath(layout, environmentId, site),
   });
   const staged = await SITE_ENGINE_DRIVERS.apache
     .stageSiteConfig(run, configPath, contents);
@@ -3499,6 +3844,9 @@ async function applyNginxApacheSite(
     apacheSiteConfig(site, paths.documentRoot, {
       phpFpmSocket: php.socket,
       behindNginxPort: backendPort,
+      frameworkAliases: siteFrameworkAliases(layout, site, paths),
+      phpSiteKey: php.siteKey,
+      errorLogPath: apacheSiteErrorLogPath(layout, environmentId, site),
     }),
   );
   const front = await SITE_ENGINE_DRIVERS.nginx.stageSiteConfig(
@@ -3507,6 +3855,7 @@ async function applyNginxApacheSite(
     nginxSiteConfig(site, paths.documentRoot, dockerBind, {
       releaseBacked: paths.release !== undefined,
       apacheBackendPort: backendPort,
+      frameworkAliases: siteFrameworkAliases(layout, site, paths),
     }),
   );
   await applySiteTreeOwnership(site, paths);
@@ -3565,7 +3914,7 @@ async function applyOpenLiteSpeedSite(
     site,
     olsName,
     backend.result.phpRuntime,
-    sitePhpAdminOpts(layout, paths),
+    sitePhpAdminOpts(layout, paths, site),
   );
   const vhostStaged = await stageOwnedConfigFile(
     vhConfigPath,
@@ -3639,20 +3988,50 @@ async function ensureManagedDirectory(
     ...managed.folder,
     kind: "service",
   }, run);
-  // Parent before child: the directories are created in this order.
-  await forEachSequential(
-    [...new Set([tree.publicDir, tree.sharedDir, documentRoot])],
-    (dir) =>
-      ensureDirectoryWithOwner(
-        dir,
-        "0750",
-        dir === tree.sharedDir
-          ? `${managed.username}:${principalUnixGroupName(managed.username)}`
-          : owner,
-        run,
-      ),
-  );
+  const ensure = (dir: string) =>
+    ensureDirectoryWithOwner(
+      dir,
+      "0750",
+      dir === tree.sharedDir
+        ? `${managed.username}:${principalUnixGroupName(managed.username)}`
+        : owner,
+      run,
+    );
+  // The uploaded folder and `shared/` first: the tenant cannot make them, and
+  // a refused document root below must still leave a folder to upload into.
+  await forEachSequential([tree.publicDir, tree.sharedDir], ensure);
+  await assertManagedDocumentRoot(site, tree.publicDir, documentRoot);
+  if (documentRoot !== tree.publicDir) await ensure(documentRoot);
   await seedManagedIndexHtml(site, documentRoot, owner);
+}
+
+/**
+ * Refuse a document root whose parent folder the tenant has not uploaded.
+ *
+ * The default root (the uploaded folder itself) and a one-name root are made
+ * here: their parent is the uploaded folder, which exists. Creating a longer
+ * path would leave root-owned folders behind (`install -d` sets the owner of
+ * the last folder only) and publish a placeholder for what is usually a
+ * mistyped root, so the deploy says what is missing instead.
+ */
+async function assertManagedDocumentRoot(
+  site: SiteApplySpec,
+  publicDir: string,
+  documentRoot: string,
+): Promise<void> {
+  const parent = dirname(documentRoot);
+  if (documentRoot === publicDir || parent === publicDir) return;
+  const present = await run("sudo", hostSudoArgs(["-n", "test", "-d", parent]));
+  if (present.success) return;
+  const refusal = present.stderr.trim();
+  if (refusal !== "") {
+    throw new Error(
+      `Could not check the document root "${site.root}" of ${site.composeServiceName}: ${refusal}`,
+    );
+  }
+  throw new Error(
+    `The document root "${site.root}" of ${site.composeServiceName} is not inside the uploaded folder: ${parent} does not exist. The root is relative to the uploaded folder (${publicDir}), not to the site folder. Upload the files first or fix the root.`,
+  );
 }
 
 /** Write the placeholder only into a genuinely empty document root. */
@@ -4731,6 +5110,9 @@ export async function removeSites(
       ...nginxRemoved.services,
       ...apacheRemoved.services,
     ]);
+    // `environment.stop` has already removed the environment's cron units
+    // (their timers load the file), so take the root copies of its sites too.
+    await removeRecordedSiteEnvFiles(run, layout, environmentId);
     // Nothing names the PHP or the engines this environment used: remove them
     // once no other environment on the host uses them either.
     await pruneUnusedSoftware(layout);
@@ -4845,9 +5227,11 @@ export async function removeNamedSites(
           layout.configDir,
           ids,
           listing,
+          layout.stateDir,
         );
       }
     }
+    await removeRecordedSiteEnvFiles(run, layout, environmentId, [...only]);
     return [...only].sort((a, b) => a.localeCompare(b));
   });
 }
@@ -4893,5 +5277,11 @@ async function removeEnvironmentPhpRuntimes(
     );
   }
   const ids = [...new Set([...named, ...(orphans ?? [])])];
-  await removeSitePhpRuntimes(sitePhpIo(), layout.configDir, ids, listing);
+  await removeSitePhpRuntimes(
+    sitePhpIo(),
+    layout.configDir,
+    ids,
+    listing,
+    layout.stateDir,
+  );
 }

@@ -26,6 +26,7 @@
 
 - name: Install apt transport prerequisites for the sury repo
   ansible.builtin.apt:
+    lock_timeout: 300
     name:
       - apt-transport-https
       - ca-certificates
@@ -82,6 +83,7 @@
 
 - name: Refresh apt cache after sury repo or key change
   ansible.builtin.apt:
+    lock_timeout: 300
     update_cache: true
   when: >- # noqa: no-handler
     _sury_repo.changed
@@ -132,6 +134,10 @@
   loop: "{{ php_fpm_versions | map('trim') | reject('equalto', '') | unique | list }}"
   loop_control:
     loop_var: php_fpm_series_item
+
+# The PHP package manager site builds use, vendored and digest-checked.
+- name: Vendor the PHP package manager
+  ansible.builtin.include_tasks: composer.yml
 
 # Left over from the single-series layout, where config lived directly under
 # `php/` and the unit was not templated. Removed so a host converged before

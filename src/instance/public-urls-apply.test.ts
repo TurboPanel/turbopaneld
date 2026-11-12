@@ -3,10 +3,23 @@ import { dirname, fromFileUrl, join } from "@std/path";
 import { INSTANCE_CERTS_APPLY_PLAYBOOK } from "../orchestration/assets.ts";
 import { PROD_INSTANCE_DIR_DEFAULT } from "../paths/layout.ts";
 import {
+  ansibleHostname,
   applyPublicUrls,
+  installUploadedCertViaHost,
+  INSTANCE_CERT_KEEP_MAX,
+  instanceCertStageDir,
+  pruneUploadedCertsDirect,
+  pruneUploadedCertsViaHost,
+  pruneUploadedInstanceCerts,
+  resolveInstanceCertsDir,
   resolveInstanceDir,
   runInstanceCertsApply,
+  staleUploadedCertFiles,
+  uploadedCertIdsInUse,
+  uploadedCertPair,
   upsertPublicUrlsInEnv,
+  writeUploadedCertDirect,
+  writeUploadedInstanceCerts,
 } from "./public-urls-apply.ts";
 
 /**
@@ -310,6 +323,7 @@ test({
         host: "https://apply.example",
         source: "platform-ca",
       }], {
+        pruneUploadedCerts: () => Promise.resolve(),
         runCertsApply: (instanceDir, hostnames) => {
           certCalls.push({
             dir: instanceDir,
@@ -375,6 +389,7 @@ test({
               directoryUrl: "https://acme-v02.api.letsencrypt.org/directory",
               useStaging: false,
             },
+            pruneUploadedCerts: () => Promise.resolve(),
             runCertsApply: () => {
               certs += 1;
               return Promise.resolve();
@@ -430,6 +445,7 @@ test({
           order.push("issue");
           return Promise.resolve();
         },
+        pruneUploadedCerts: () => Promise.resolve(),
         runCertsApply: () => {
           order.push("certs");
           return Promise.resolve();
@@ -483,6 +499,7 @@ test({
                 closed += 1;
                 return Promise.resolve();
               },
+              pruneUploadedCerts: () => Promise.resolve(),
               runCertsApply: () => {
                 certs += 1;
                 return Promise.resolve();
@@ -544,6 +561,7 @@ test({
         preflightLetsEncrypt: () => Promise.resolve(),
         issueLetsEncrypt: () => Promise.resolve(),
         closeWindow: () => Promise.resolve(),
+        pruneUploadedCerts: () => Promise.resolve(),
         runCertsApply: () => Promise.resolve(),
       });
       assertEquals(openedInside, true);
@@ -778,6 +796,627 @@ test("upsertPublicUrlsInEnv creates no folder beside runtime.env (sealed config 
     );
     assertEquals(source.includes(".write-tmp"), false);
   } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a hostname row carries public_port only for a valid port", () => {
+  const base = {
+    host: "https://panel.example.com:8443",
+    source: "platform-ca",
+  } as const;
+  assertEquals(ansibleHostname({ ...base, publicPort: 443 }), {
+    host: base.host,
+    source: "platform-ca",
+    cert_id: "",
+    public_port: 443,
+  });
+  assertEquals(
+    ansibleHostname({ ...base, publicPort: 8443 }).public_port,
+    8443,
+  );
+  for (const publicPort of [undefined, 0, 65536, 44.3, Number.NaN]) {
+    assertEquals(
+      "public_port" in ansibleHostname({ ...base, publicPort }),
+      false,
+    );
+  }
+});
+
+const EDGE_TRUST = {
+  cidrs: ["198.51.100.0/24", "203.0.113.7/32"],
+  hash: "b".repeat(64),
+  cloudflare: ["198.51.100.0/24"],
+  bunny: ["203.0.113.7/32"],
+};
+
+async function certsApplyArgs(
+  edgeTrust: typeof EDGE_TRUST | undefined,
+): Promise<string[]> {
+  let captured: string[] = [];
+  await runInstanceCertsApply("/opt/turbopanel", [], {
+    readForwardHosts: () => "",
+    env: {},
+    edgeTrust,
+    runPlaybook: (_playbook, extraArgs = []) => {
+      captured = [...extraArgs];
+      return Promise.resolve();
+    },
+  });
+  return captured;
+}
+
+test("an apply without edgeTrust passes no edge extra-var, so the persisted set stays", async () => {
+  const args = await certsApplyArgs(undefined);
+  assertEquals(
+    args.some((a) => a.startsWith("turbopanel_edge_trust_json=")),
+    false,
+  );
+});
+
+test("an apply with edgeTrust passes the per-provider lists and the hash only", async () => {
+  const args = await certsApplyArgs(EDGE_TRUST);
+  const value = args.find((a) => a.startsWith("turbopanel_edge_trust_json="));
+  assertEquals(
+    JSON.parse(value!.slice("turbopanel_edge_trust_json=".length)),
+    {
+      hash: EDGE_TRUST.hash,
+      cloudflare: EDGE_TRUST.cloudflare,
+      bunny: EDGE_TRUST.bunny,
+    },
+  );
+});
+
+test("an edge range that is not a CIDR literal is refused before the playbook runs", async () => {
+  await assertRejects(
+    () =>
+      certsApplyArgs({
+        ...EDGE_TRUST,
+        cloudflare: ["1.2.3.0/24; id"],
+        cidrs: ["1.2.3.0/24; id"],
+      }),
+    Error,
+    "refusing edge range",
+  );
+  await assertRejects(
+    () => certsApplyArgs({ ...EDGE_TRUST, cloudflare: ["192.0.2.0/24"] }),
+    Error,
+    "not in the union",
+  );
+});
+
+test("edge ranges that are catch-all, loopback or private are refused on the daemon", async () => {
+  const bad = [
+    "0.0.0.0/0",
+    "::/0",
+    "10.0.0.0/8",
+    "127.0.0.0/8",
+    "192.168.1.0/24",
+    "fc00::/7",
+    "::1/128",
+    "1.0.0.0/7",
+  ];
+  await Promise.all(bad.map((range) =>
+    assertRejects(
+      () =>
+        certsApplyArgs({
+          ...EDGE_TRUST,
+          cidrs: [range],
+          cloudflare: [range],
+          bunny: [],
+        }),
+      Error,
+      "refusing edge range",
+    )
+  ));
+});
+
+// --- uploaded certificate pairs -----------------------------------------------
+
+const CERT_ID = "01a1a47c-5b2d-7e3f-9a4b-6c7d8e9f0a1b";
+/** PEM labels built from parts, so no key header sits in the source. */
+const KEY_LABEL = ["PRIVATE", "KEY"].join(" ");
+const pem = (label: string, body: string) =>
+  `-----BEGIN ${label}-----\n${body}\n-----END ${label}-----\n`;
+const CERT_PEM = pem("CERTIFICATE", "MIIBszCCAVmgAwIBAgIUZm9yIHRlc3Rz");
+const KEY_PEM = pem(KEY_LABEL, "MC4CAQAwBQYDK2VwBCIEIGZvciB0ZXN0cw==");
+const uploadedRow = (host: string, id = CERT_ID) => ({
+  host,
+  source: "uploaded" as const,
+  uploadedCertId: id,
+  certPem: CERT_PEM,
+  keyPem: KEY_PEM,
+});
+
+const pathExists = (path: string) =>
+  Deno.lstat(path).then(() => true, () => false);
+
+test("a managed host stages the pair 0600 and asks tp-host to install it, never writing the certs dir", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const stageDir = join(root, "system", "instance-certs");
+    const certsDir = join(root, "tls", "certs");
+    const calls: string[][] = [];
+    const seen: Record<string, { text: string; mode: number }> = {};
+    const install = installUploadedCertViaHost({
+      stageDir,
+      run: async (command, args) => {
+        assertEquals(command, "sudo");
+        calls.push(args);
+        for (const ext of ["crt", "key"]) {
+          const path = join(stageDir, `${CERT_ID}.${ext}`);
+          seen[ext] = {
+            text: await Deno.readTextFile(path),
+            mode: (await Deno.stat(path)).mode! & 0o777,
+          };
+        }
+        return { success: true, stdout: "", stderr: "" };
+      },
+    });
+    await writeUploadedInstanceCerts(
+      [
+        uploadedRow("https://a.example"),
+        // The same certificate on a second name is installed once.
+        uploadedRow("https://b.example"),
+        { host: "https://c.example", source: "platform-ca" },
+      ],
+      certsDir,
+      install,
+    );
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0]!.slice(-2), ["instance-cert-install", CERT_ID]);
+    assertEquals(calls[0]![0], "-n");
+    assertEquals(seen.crt, { text: CERT_PEM, mode: 0o600 });
+    assertEquals(seen.key, { text: KEY_PEM, mode: 0o600 });
+    assertEquals((await Deno.stat(stageDir)).mode! & 0o777, 0o700);
+    // The staged copies are gone and the daemon never touched the certs dir.
+    assertEquals([...Deno.readDirSync(stageDir)], []);
+    assertEquals(await pathExists(certsDir), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a tp-host refusal surfaces as the apply's error and leaves nothing staged", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const stageDir = join(root, "instance-certs");
+    const install = installUploadedCertViaHost({
+      stageDir,
+      run: () =>
+        Promise.resolve({
+          success: false,
+          stdout: "",
+          stderr:
+            "tp-host: refusing the private key for x: not one PEM private key\n",
+        }),
+    });
+    const err = await assertRejects(
+      () =>
+        writeUploadedInstanceCerts(
+          [uploadedRow("https://a.example")],
+          join(root, "certs"),
+          install,
+        ),
+      Error,
+    );
+    assertEquals(
+      err.message,
+      `installing uploaded certificate ${CERT_ID} failed: tp-host: refusing the private key for x: not one PEM private key`,
+    );
+    assertEquals([...Deno.readDirSync(stageDir)], []);
+    const silent = installUploadedCertViaHost({
+      stageDir,
+      run: () => Promise.resolve({ success: false, stdout: "", stderr: "" }),
+    });
+    await assertRejects(
+      () => silent(CERT_ID, { cert: CERT_PEM, key: KEY_PEM }),
+      Error,
+      "tp-host refused it",
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a pair that is not PEM certificates and one key is refused before anything is staged", async () => {
+  const calls: string[] = [];
+  const install = (id: string) => {
+    calls.push(id);
+    return Promise.resolve();
+  };
+  const bad = [
+    { certPem: KEY_PEM, keyPem: KEY_PEM },
+    { certPem: CERT_PEM, keyPem: CERT_PEM },
+    { certPem: CERT_PEM, keyPem: `${KEY_PEM}${KEY_PEM}` },
+    { certPem: `junk\n${CERT_PEM}`, keyPem: KEY_PEM },
+    { certPem: CERT_PEM, keyPem: pem(`ENCRYPTED ${KEY_LABEL}`, "MC4C") },
+    { certPem: CERT_PEM.repeat(11), keyPem: KEY_PEM },
+    {
+      certPem: pem("CERTIFICATE", "A".repeat(64)).repeat(1100),
+      keyPem: KEY_PEM,
+    },
+  ];
+  for (const pair of bad) {
+    await assertRejects(
+      () =>
+        writeUploadedInstanceCerts(
+          [{ ...uploadedRow("https://a.example"), ...pair }],
+          "/nonexistent",
+          install,
+        ),
+      Error,
+      `refusing uploaded certificate ${CERT_ID}`,
+    );
+  }
+  // A certificate id that is not a UUID is refused too.
+  for (
+    const id of [
+      "-".repeat(36),
+      "a".repeat(36),
+      `${CERT_ID}\nx`,
+      CERT_ID.toUpperCase(),
+    ]
+  ) {
+    await assertRejects(
+      () =>
+        writeUploadedInstanceCerts(
+          [uploadedRow("https://a.example", id)],
+          "/nonexistent",
+          install,
+        ),
+      Error,
+      "refusing uploaded certificate id",
+    );
+  }
+  assertEquals(calls, []);
+  // CRLF line endings and a missing final newline are normalized, not refused.
+  assertEquals(
+    uploadedCertPair(
+      CERT_ID,
+      CERT_PEM.replaceAll("\n", "\r\n").trimEnd(),
+      KEY_PEM,
+    ),
+    { cert: CERT_PEM, key: KEY_PEM },
+  );
+});
+
+test("co-located development writes the pair into its own certs dir", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const certsDir = join(root, "certs");
+    await writeUploadedInstanceCerts(
+      [uploadedRow("https://a.example")],
+      certsDir,
+      writeUploadedCertDirect(certsDir),
+    );
+    assertEquals(
+      await Deno.readTextFile(join(certsDir, `uploaded-${CERT_ID}.crt`)),
+      CERT_PEM,
+    );
+    assertEquals(
+      await Deno.readTextFile(join(certsDir, `uploaded-${CERT_ID}.key`)),
+      KEY_PEM,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("the staging folder is in the daemon's state tree, apart from the certs dir", () => {
+  const managed = { TURBOPANEL_MODE: "production" };
+  assertEquals(
+    instanceCertStageDir(managed),
+    "/var/lib/turbopanel/system/instance-certs",
+  );
+  assertEquals(
+    resolveInstanceCertsDir(managed),
+    "/var/lib/turbopanel/tls/certs",
+  );
+});
+
+// --- unused uploaded pairs ----------------------------------------------------
+
+const RETIRED_ID = "9f8e7d6c-5b4a-4321-8fed-cba987654321";
+
+async function certsDirWith(root: string, names: string[]): Promise<string> {
+  const certsDir = join(root, "certs");
+  await Deno.mkdir(certsDir, { recursive: true });
+  for (const name of names) {
+    await Deno.writeTextFile(join(certsDir, name), CERT_PEM);
+  }
+  return certsDir;
+}
+
+const listDir = (dir: string) =>
+  [...Deno.readDirSync(dir)].map((e) => e.name).sort();
+
+test("the ids in use are the uploaded hostnames' certificate ids, each once", () => {
+  assertEquals(
+    uploadedCertIdsInUse([
+      uploadedRow("https://a.example"),
+      uploadedRow("https://b.example"),
+      uploadedRow("https://c.example", RETIRED_ID),
+      { host: "https://d.example", source: "platform-ca" },
+      // Not an uploaded hostname: its stray id keeps nothing.
+      {
+        host: "https://e.example",
+        source: "lets-encrypt",
+        uploadedCertId: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+      },
+      { host: "https://f.example", source: "uploaded" },
+    ]),
+    [CERT_ID, RETIRED_ID],
+  );
+});
+
+test("stale uploaded files are exactly uploaded-<uuid>.{crt,key} of ids not kept", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const certsDir = await certsDirWith(root, [
+      `uploaded-${CERT_ID}.crt`,
+      `uploaded-${CERT_ID}.key`,
+      `uploaded-${RETIRED_ID}.crt`,
+      `uploaded-${RETIRED_ID}.key`,
+      `uploaded-${RETIRED_ID.toUpperCase()}.crt`,
+      `uploaded-${RETIRED_ID}.pem`,
+      "uploaded.crt",
+      "platform-ca.key",
+      "letsencrypt-panel.example.key",
+    ]);
+    await Deno.mkdir(
+      join(
+        certsDir,
+        `uploaded-${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}.crt`,
+      ),
+    );
+    assertEquals(await staleUploadedCertFiles(certsDir, [CERT_ID]), [
+      `uploaded-${RETIRED_ID}.crt`,
+      `uploaded-${RETIRED_ID}.key`,
+    ]);
+    assertEquals(
+      await staleUploadedCertFiles(join(root, "missing"), []),
+      [],
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("co-located development removes the unused pairs from its own certs dir", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const certsDir = await certsDirWith(root, [
+      `uploaded-${CERT_ID}.crt`,
+      `uploaded-${CERT_ID}.key`,
+      `uploaded-${RETIRED_ID}.crt`,
+      `uploaded-${RETIRED_ID}.key`,
+      "uploaded.crt",
+    ]);
+    await pruneUploadedInstanceCerts(
+      [uploadedRow("https://a.example")],
+      certsDir,
+      pruneUploadedCertsDirect(certsDir),
+    );
+    assertEquals(listDir(certsDir), [
+      `uploaded-${CERT_ID}.crt`,
+      `uploaded-${CERT_ID}.key`,
+      "uploaded.crt",
+    ]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a managed host asks tp-host to prune only when a stale pair is there, naming the ids in use", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const calls: string[][] = [];
+    const prune = pruneUploadedCertsViaHost({
+      run: (command, args) => {
+        assertEquals(command, "sudo");
+        calls.push(args);
+        return Promise.resolve({ success: true, stdout: "", stderr: "" });
+      },
+    });
+    const certsDir = await certsDirWith(root, [
+      `uploaded-${CERT_ID}.crt`,
+      `uploaded-${CERT_ID}.key`,
+    ]);
+    const hostnames = [uploadedRow("https://a.example")];
+    // Nothing stale: no root call at all.
+    await pruneUploadedInstanceCerts(hostnames, certsDir, prune);
+    assertEquals(calls, []);
+    await Deno.writeTextFile(
+      join(certsDir, `uploaded-${RETIRED_ID}.key`),
+      KEY_PEM,
+    );
+    await pruneUploadedInstanceCerts(hostnames, certsDir, prune);
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0]![0], "-n");
+    assertEquals(calls[0]!.slice(-2), ["instance-cert-prune", CERT_ID]);
+    // The daemon removed nothing itself.
+    assertEquals(listDir(certsDir).length, 3);
+    // No uploaded hostname left: tp-host is given no id at all.
+    await pruneUploadedInstanceCerts([], certsDir, prune);
+    assertEquals(calls[1]!.at(-1), "instance-cert-prune");
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a failed prune is logged and does not fail the apply; too many ids are refused", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-instance-cert-" });
+  try {
+    const certsDir = await certsDirWith(root, [`uploaded-${RETIRED_ID}.crt`]);
+    const refusing = pruneUploadedCertsViaHost({
+      run: () =>
+        Promise.resolve({ success: false, stdout: "", stderr: "refused\n" }),
+    });
+    await pruneUploadedInstanceCerts([], certsDir, refusing);
+    await assertRejects(
+      () => refusing([]),
+      Error,
+      "removing unused uploaded certificates failed: refused",
+    );
+    await assertRejects(
+      () =>
+        pruneUploadedCertsViaHost({
+          run: () => Promise.reject(new Error("must not run")),
+        })(Array.from({ length: INSTANCE_CERT_KEEP_MAX + 1 }, () => CERT_ID)),
+      Error,
+      `more than ${INSTANCE_CERT_KEEP_MAX}`,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("applyPublicUrls prunes after the certs apply, with the hostnames and certs dir", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-apply-urls-" });
+  const saved = {
+    config: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    instance: Deno.env.get("TURBOPANEL_INSTANCE_DIR"),
+  };
+  Deno.env.set("TURBOPANEL_INSTANCE_DIR", join(root, "instance-src"));
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", root);
+  try {
+    await Deno.mkdir(join(root, "instance"), { recursive: true });
+    const order: string[] = [];
+    const hostnames = [{
+      host: "https://apply.example",
+      source: "platform-ca" as const,
+    }];
+    await applyPublicUrls(hostnames, {
+      writeUploadedCerts: () => {
+        order.push("write");
+        return Promise.resolve();
+      },
+      runCertsApply: () => {
+        order.push("apply");
+        return Promise.resolve();
+      },
+      pruneUploadedCerts: (seen, certsDir) => {
+        order.push("prune");
+        assertEquals(seen, hostnames);
+        assertEquals(certsDir, resolveInstanceCertsDir());
+        return Promise.resolve();
+      },
+    });
+    assertEquals(order, ["write", "apply", "prune"]);
+    // A failed certs apply never prunes: the old config may still name them.
+    order.length = 0;
+    await assertRejects(() =>
+      applyPublicUrls(hostnames, {
+        writeUploadedCerts: () => Promise.resolve(),
+        runCertsApply: () => Promise.reject(new Error("caddy refused")),
+        pruneUploadedCerts: () => {
+          order.push("prune");
+          return Promise.resolve();
+        },
+      })
+    );
+    assertEquals(order, []);
+  } finally {
+    for (
+      const [name, value] of [
+        ["TURBOPANEL_CONFIG_DIR", saved.config],
+        ["TURBOPANEL_INSTANCE_DIR", saved.instance],
+      ] as const
+    ) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("overlapping applies run one after the other, so the last prune is the last apply's", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-apply-urls-" });
+  const saved = {
+    config: Deno.env.get("TURBOPANEL_CONFIG_DIR"),
+    instance: Deno.env.get("TURBOPANEL_INSTANCE_DIR"),
+  };
+  Deno.env.set("TURBOPANEL_INSTANCE_DIR", join(root, "instance-src"));
+  Deno.env.set("TURBOPANEL_CONFIG_DIR", root);
+  try {
+    await Deno.mkdir(join(root, "instance"), { recursive: true });
+    const order: string[] = [];
+    const pruned: string[][] = [];
+    const firstPlaybook = Promise.withResolvers<void>();
+    const firstStarted = Promise.withResolvers<void>();
+    const deps = (name: string, playbook: () => Promise<void>) => ({
+      writeUploadedCerts: () => {
+        order.push(`${name} write`);
+        return Promise.resolve();
+      },
+      runCertsApply: async () => {
+        order.push(`${name} apply`);
+        await playbook();
+      },
+      pruneUploadedCerts: (seen: readonly { uploadedCertId?: string }[]) => {
+        order.push(`${name} prune`);
+        pruned.push(seen.map((entry) => entry.uploadedCertId ?? ""));
+        return Promise.resolve();
+      },
+    });
+    // A carries the old certificate, B the renewed one; A's playbook is
+    // still running when B arrives.
+    const first = applyPublicUrls(
+      [uploadedRow("https://a.example", RETIRED_ID)],
+      deps("A", () => {
+        firstStarted.resolve();
+        return firstPlaybook.promise;
+      }),
+    );
+    await firstStarted.promise;
+    const second = applyPublicUrls(
+      [uploadedRow("https://a.example", CERT_ID)],
+      deps("B", () => Promise.resolve()),
+    );
+    // B waits: nothing of it has started while A's playbook runs.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assertEquals(order, ["A write", "A apply"]);
+    firstPlaybook.resolve();
+    await Promise.all([first, second]);
+    assertEquals(order, [
+      "A write",
+      "A apply",
+      "A prune",
+      "B write",
+      "B apply",
+      "B prune",
+    ]);
+    assertEquals(pruned.at(-1), [CERT_ID]);
+    // A failed apply does not block the next one.
+    order.length = 0;
+    await assertRejects(() =>
+      applyPublicUrls(
+        [uploadedRow("https://a.example", CERT_ID)],
+        deps("C", () => Promise.reject(new Error("caddy refused"))),
+      )
+    );
+    await applyPublicUrls(
+      [uploadedRow("https://a.example", CERT_ID)],
+      deps("D", () => Promise.resolve()),
+    );
+    assertEquals(order, [
+      "C write",
+      "C apply",
+      "D write",
+      "D apply",
+      "D prune",
+    ]);
+  } finally {
+    for (
+      const [name, value] of [
+        ["TURBOPANEL_CONFIG_DIR", saved.config],
+        ["TURBOPANEL_INSTANCE_DIR", saved.instance],
+      ] as const
+    ) {
+      if (value === undefined) Deno.env.delete(name);
+      else Deno.env.set(name, value);
+    }
     await Deno.remove(root, { recursive: true });
   }
 });

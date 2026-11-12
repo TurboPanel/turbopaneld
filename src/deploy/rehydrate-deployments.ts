@@ -19,8 +19,13 @@ import {
   materializeSecretFiles,
   plannedSecretsMissing,
 } from "./secret-runtime.ts";
+import {
+  materializeConfigFiles,
+  plannedConfigFilesMissing,
+} from "./config-files.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import type {
+  EnvironmentDeployConfigFile,
   EnvironmentDeploySecretPlanEntry,
   EnvironmentDeployVariableMaterial,
 } from "../contracts/commands-contracts.ts";
@@ -42,20 +47,33 @@ export type RehydrateDeploymentResult = {
   variableMaterial: EnvironmentDeployVariableMaterial[];
 };
 
+/**
+ * What the control plane answers for a rehydrate request. `gone` names the
+ * requested deployments whose environment no longer exists there (a deleted
+ * project or environment); absent from older control planes.
+ */
+export type RehydrateDeploymentList = RehydrateDeploymentResult[] & {
+  gone?: ReadonlyArray<{ projectId: string; environmentId: string }>;
+};
+
 export type RehydrateDeploymentSecretsFn = (
   deployments: readonly RehydrateDeploymentRef[],
-) => Promise<RehydrateDeploymentResult[]>;
+) => Promise<RehydrateDeploymentList>;
 
 export function parseRehydrateDeploymentResults(
-  rows: ReadonlyArray<{
-    projectId: string;
-    environmentId: string;
-    generation: number;
-    secretPlan: unknown;
-    variableMaterial: unknown;
-  }>,
-): RehydrateDeploymentResult[] {
-  const out: RehydrateDeploymentResult[] = [];
+  rows:
+    & ReadonlyArray<{
+      projectId: string;
+      environmentId: string;
+      generation: number;
+      secretPlan: unknown;
+      variableMaterial: unknown;
+    }>
+    & { gone?: unknown },
+): RehydrateDeploymentList {
+  const out: RehydrateDeploymentList = [];
+  const gone = parseGoneDeployments(rows.gone);
+  if (gone.length > 0) out.gone = gone;
   for (const row of rows) {
     try {
       const parsed = parseEnvironmentDeployPayload({
@@ -86,6 +104,21 @@ export function parseRehydrateDeploymentResults(
   return out;
 }
 
+function parseGoneDeployments(
+  value: unknown,
+): Array<{ projectId: string; environmentId: string }> {
+  if (!Array.isArray(value)) return [];
+  const out: Array<{ projectId: string; environmentId: string }> = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { projectId, environmentId } = entry as Record<string, unknown>;
+    if (typeof projectId === "string" && typeof environmentId === "string") {
+      out.push({ projectId, environmentId });
+    }
+  }
+  return out;
+}
+
 type RunDockerFn = (
   args: string[],
   options?: RunDockerOptions,
@@ -93,6 +126,10 @@ type RunDockerFn = (
 
 function deploymentKey(projectId: string, environmentId: string): string {
   return `${projectId}/${environmentId}`;
+}
+
+function localKey(local: LocalDeploymentManifest): string {
+  return deploymentKey(local.manifest.projectId, local.manifest.environmentId);
 }
 
 function remoteMatchesLocalGeneration(
@@ -106,6 +143,44 @@ function manifestSecretPlan(
   local: LocalDeploymentManifest,
 ): readonly DeploymentManifestSecret[] {
   return local.manifest.secrets ?? [];
+}
+
+function manifestConfigFiles(
+  local: LocalDeploymentManifest,
+): readonly EnvironmentDeployConfigFile[] {
+  return local.manifest.configFiles ?? [];
+}
+
+/** Whether a generated file needs a secret value from the control plane. */
+function configFilesNeedSecrets(
+  files: readonly EnvironmentDeployConfigFile[],
+): boolean {
+  return files.some((file) => file.parts.some((part) => "secretKey" in part));
+}
+
+/** Whether the deployment's files need material from the control plane. */
+function needsRemoteMaterial(local: LocalDeploymentManifest): boolean {
+  return manifestSecretPlan(local).length > 0 ||
+    configFilesNeedSecrets(manifestConfigFiles(local));
+}
+
+/** Any planned secret file or generated config file absent on the host. */
+async function planFilesMissing(
+  layout: LayoutPaths,
+  projectId: string,
+  environmentId: string,
+  secrets: readonly { relativePath: string }[],
+  configs: readonly { relativePath: string }[],
+): Promise<boolean> {
+  return (secrets.length > 0 &&
+    await plannedSecretsMissing(layout, projectId, environmentId, secrets)) ||
+    (configs.length > 0 &&
+      await plannedConfigFilesMissing(
+        layout,
+        projectId,
+        environmentId,
+        configs,
+      ));
 }
 
 function planFromManifest(
@@ -172,16 +247,31 @@ export async function ensureDeploymentSecretFiles(params: {
   decryptSecrets?: DecryptSecretsFn;
   rehydrate?: RehydrateDeploymentSecretsFn;
   plan?: readonly { relativePath: string }[];
+  configFiles?: readonly EnvironmentDeployConfigFile[];
 }): Promise<void> {
   const plan = params.plan ?? [];
-  if (plan.length === 0) return;
-  const missing = await plannedSecretsMissing(
+  const configFiles = params.configFiles ?? [];
+  if (plan.length === 0 && configFiles.length === 0) return;
+  const missingNow = () =>
+    planFilesMissing(
+      params.layout,
+      params.projectId,
+      params.environmentId,
+      plan,
+      configFiles,
+    );
+  if (!await missingNow()) return;
+  // Text-only generated files need nothing from the control plane.
+  await materializeConfigFiles(
     params.layout,
     params.projectId,
     params.environmentId,
-    plan,
+    configFiles,
+    [],
+    undefined,
+    { requireAll: false },
   );
-  if (!missing) return;
+  if (!await missingNow()) return;
   if (!params.rehydrate || !params.decryptSecrets) {
     throw new Error(
       "secret files missing; cannot start until TurboPanel rehydrates secrets",
@@ -215,12 +305,22 @@ export async function ensureDeploymentSecretFiles(params: {
     params.decryptSecrets,
     { requireAll: false },
   );
+  await materializeConfigFiles(
+    params.layout,
+    params.projectId,
+    params.environmentId,
+    configFiles,
+    row.variableMaterial,
+    params.decryptSecrets,
+    { requireAll: false },
+  );
   if (
-    await plannedSecretsMissing(
+    await planFilesMissing(
       params.layout,
       params.projectId,
       params.environmentId,
       row.secretPlan,
+      configFiles,
     )
   ) {
     throw new Error("secret files missing after rehydrate");
@@ -232,16 +332,15 @@ async function listDeploymentsNeedingSecretFiles(
   locals: readonly LocalDeploymentManifest[],
 ): Promise<LocalDeploymentManifest[]> {
   // Independent read-only stats per deployment; order of `locals` is kept.
-  const missing = await Promise.all(locals.map((local) => {
-    const plan = manifestSecretPlan(local);
-    if (plan.length === 0) return Promise.resolve(false);
-    return plannedSecretsMissing(
+  const missing = await Promise.all(locals.map((local) =>
+    planFilesMissing(
       layout,
       local.manifest.projectId,
       local.manifest.environmentId,
-      plan,
-    );
-  }));
+      manifestSecretPlan(local),
+      manifestConfigFiles(local),
+    )
+  ));
   return locals.filter((_, i) => missing[i]);
 }
 
@@ -249,7 +348,6 @@ function rehydrateRefsFor(
   targets: readonly LocalDeploymentManifest[],
 ): RehydrateDeploymentRef[] {
   return targets
-    .filter((local) => manifestSecretPlan(local).length > 0)
     .map((local) => ({
       projectId: local.manifest.projectId,
       environmentId: local.manifest.environmentId,
@@ -257,25 +355,44 @@ function rehydrateRefsFor(
     }));
 }
 
-async function fetchRehydrateByKey(
+type RehydrateLookup = {
+  byKey: Map<string, RehydrateDeploymentResult>;
+  /** Keys of deployments the control plane no longer has an environment for. */
+  gone: Set<string>;
+};
+
+/**
+ * Every local deployment is asked about (a plain stack has no secrets but can
+ * still belong to a deleted project); only those with a secret plan take
+ * material from the answer. A failed request leaves both empty, so stacks start
+ * exactly as they did before the lookup existed.
+ */
+async function fetchRehydrate(
   refs: readonly RehydrateDeploymentRef[],
+  withSecrets: ReadonlySet<string>,
   rehydrate: RehydrateDeploymentSecretsFn,
-): Promise<Map<string, RehydrateDeploymentResult>> {
-  if (refs.length === 0) return new Map();
+): Promise<RehydrateLookup> {
+  const empty: RehydrateLookup = { byKey: new Map(), gone: new Set() };
+  if (refs.length === 0) return empty;
   try {
     const results = await rehydrate(refs);
-    return new Map(
-      results.map((row) => [
-        deploymentKey(row.projectId, row.environmentId),
-        row,
-      ]),
+    const byKey = new Map<string, RehydrateDeploymentResult>();
+    for (const row of results) {
+      const key = deploymentKey(row.projectId, row.environmentId);
+      if (withSecrets.has(key)) byKey.set(key, row);
+    }
+    const gone = new Set(
+      (results.gone ?? []).map((row) =>
+        deploymentKey(row.projectId, row.environmentId)
+      ),
     );
+    return { byKey, gone };
   } catch (err) {
     logWarn(
       "deploy",
       `deployment secret rehydrate request failed: ${sanitizeForLog(err)}`,
     );
-    return new Map();
+    return empty;
   }
 }
 
@@ -299,16 +416,29 @@ async function materializeRemoteSecrets(
     decryptSecrets: DecryptSecretsFn;
   },
   local: LocalDeploymentManifest,
-  remote: RehydrateDeploymentResult,
+  remote: RehydrateDeploymentResult | undefined,
   plan: readonly EnvironmentDeploySecretPlanEntry[],
 ): Promise<boolean> {
   try {
-    await materializeSecretFiles(
+    if (plan.length > 0 && remote) {
+      await materializeSecretFiles(
+        params.layout,
+        local.manifest.projectId,
+        local.manifest.environmentId,
+        plan,
+        remote.variableMaterial,
+        params.decryptSecrets,
+        { requireAll: false },
+      );
+    }
+    // Generated files are rebuilt from the manifest's parts; one with no
+    // secret part needs no answer from the control plane at all.
+    await materializeConfigFiles(
       params.layout,
       local.manifest.projectId,
       local.manifest.environmentId,
-      plan,
-      remote.variableMaterial,
+      manifestConfigFiles(local),
+      remote?.variableMaterial ?? [],
       params.decryptSecrets,
       { requireAll: false },
     );
@@ -321,6 +451,30 @@ async function materializeRemoteSecrets(
       }`,
     );
     return false;
+  }
+}
+
+async function rebuildTextOnlyConfigFiles(
+  layout: LayoutPaths,
+  local: LocalDeploymentManifest,
+): Promise<void> {
+  try {
+    await materializeConfigFiles(
+      layout,
+      local.manifest.projectId,
+      local.manifest.environmentId,
+      manifestConfigFiles(local),
+      [],
+      undefined,
+      { requireAll: false },
+    );
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `generated file write failed env=${local.manifest.environmentId}: ${
+        sanitizeForLog(err)
+      }`,
+    );
   }
 }
 
@@ -341,27 +495,27 @@ async function rehydrateOneLocalDeployment(
   local: LocalDeploymentManifest,
   remote: RehydrateDeploymentResult | undefined,
 ): Promise<void> {
-  const plannedSecrets = manifestSecretPlan(local).length > 0;
   if (
-    plannedSecrets &&
+    needsRemoteMaterial(local) &&
     !remoteMatchesLocalGeneration(local.manifest.generation, remote)
   ) {
     warnGenerationMismatch(local, remote);
+    // Generated files with no secret part come from the manifest alone, so
+    // they are rebuilt even when the control plane did not answer.
+    await rebuildTextOnlyConfigFiles(params.layout, local);
     return;
   }
   const plan = remote?.secretPlan ?? planFromManifest(local.manifest.secrets);
-  if (plan.length > 0 && remote) {
-    const wrote = await materializeRemoteSecrets(params, local, remote, plan);
-    if (!wrote) return;
-  }
+  const wrote = await materializeRemoteSecrets(params, local, remote, plan);
+  if (!wrote) return;
 
-  const missing = plan.length > 0 &&
-    await plannedSecretsMissing(
-      params.layout,
-      local.manifest.projectId,
-      local.manifest.environmentId,
-      plan,
-    );
+  const missing = await planFilesMissing(
+    params.layout,
+    local.manifest.projectId,
+    local.manifest.environmentId,
+    plan,
+    manifestConfigFiles(local),
+  );
   if (!shouldComposeUpAfterRehydrate(params.composeUp, missing)) return;
   logInfo(
     "deploy",
@@ -389,20 +543,29 @@ export async function rehydrateLocalDeployments(params: {
   }
 
   const targets = params.composeUp === "if-missing" ? needingFiles : locals;
-  const byKey = await fetchRehydrateByKey(
+  const withSecrets = new Set(
+    targets.filter(needsRemoteMaterial).map((local) => localKey(local)),
+  );
+  const { byKey, gone } = await fetchRehydrate(
     rehydrateRefsFor(targets),
+    withSecrets,
     params.rehydrate,
   );
   // Secret writes and `compose up` per deployment stay ordered.
-  await forEachSequential(targets, (local) =>
-    rehydrateOneLocalDeployment(
+  await forEachSequential(targets, (local) => {
+    if (gone.has(localKey(local))) {
+      // The project or environment was deleted. Nothing is removed on this
+      // signal (the folder and its data stay); the stack is just not started.
+      logWarn(
+        "deploy",
+        `rehydrate skipped env=${local.manifest.environmentId}: the control plane no longer has this environment`,
+      );
+      return Promise.resolve();
+    }
+    return rehydrateOneLocalDeployment(
       params,
       local,
-      byKey.get(
-        deploymentKey(
-          local.manifest.projectId,
-          local.manifest.environmentId,
-        ),
-      ),
-    ));
+      byKey.get(localKey(local)),
+    );
+  });
 }

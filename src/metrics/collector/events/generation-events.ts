@@ -3,8 +3,11 @@
  * fields `linux-collector.ts` already has every tick
  * (`snapshot.generation`/`snapshot.bootGeneration`). First tick establishes
  * the baseline (no fabricated "changed" event just because there was no
- * prior value to compare against).
+ * prior value to compare against). The topology event is not sent once the
+ * control plane lists `topology-generation-optional-v1`; the baseline is
+ * still kept so a later switch back cannot fabricate one.
  */
+import { topologyGenerationOptional } from "../../topology/generation.ts";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
 import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
@@ -18,6 +21,7 @@ export class GenerationEventCollector implements EventCollector {
     const { generation, bootGeneration } = ctx.snapshot;
 
     if (
+      !topologyGenerationOptional() &&
       this.#lastTopologyGeneration !== undefined &&
       this.#lastTopologyGeneration !== generation
     ) {

@@ -168,6 +168,10 @@ export class BootHoldReporter {
       sourceMemberId: current.memberId,
       detector: BOOT_HOLD_DETECTOR,
       evidence: {
+        // Also sent for a primary held because it was found stopped when the
+        // daemon restarted on the same boot (`engine-exit-guard.ts`): the
+        // control plane answers both alike, so the value is unchanged and the
+        // contract stays as it is.
         reason: "unclean-boot",
         heldAt: current.heldAt,
         engineStopped: current.engineStopped,

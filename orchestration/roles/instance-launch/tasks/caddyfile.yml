@@ -47,3 +47,18 @@
     mode: "0640"
   notify:
     - Reload turbopanel caddy
+
+# Co-located development keeps the static dev overlay Caddyfile and renders
+# only the named hostname sites into the directory that file imports.
+- name: Render the development hostname sites
+  ansible.builtin.import_tasks: caddyfile-dev-sites.yml
+
+- name: Reload development Caddy when the hostname sites changed
+  when:
+    - turbopanel_dev_user | default('') | length > 0
+    - turbopanel_dev_sites_install is changed
+  ansible.builtin.debug:
+    msg: "Development hostname sites changed; reloading control-plane Caddy."
+  changed_when: true
+  notify:
+    - Reload turbopanel caddy

@@ -200,7 +200,24 @@ export function log(
   const out = level === "INFO" || level === "DEBUG" ? Deno.stdout : Deno.stderr;
 
   for (const line of splitMessageLines(message)) {
-    out.writeSync(encoder.encode(formatStructuredLine(level, component, line)));
+    writeLogLineOrDrop(out, formatStructuredLine(level, component, line));
+  }
+}
+
+/**
+ * Write one log line, dropping it when the write fails. The daemon's output is
+ * a file on the host's own disk: on a full disk the write throws, and a log
+ * call inside a `catch` that threw again ended the process (exit status 1)
+ * minutes into a full disk. Losing a line is better than losing the daemon.
+ */
+export function writeLogLineOrDrop(
+  out: { writeSync(data: Uint8Array): number },
+  line: string,
+): void {
+  try {
+    out.writeSync(encoder.encode(line));
+  } catch {
+    // Nowhere left to report it: the line is dropped.
   }
 }
 

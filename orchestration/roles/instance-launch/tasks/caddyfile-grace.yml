@@ -39,7 +39,7 @@
   when:
     - _grace_inserted is not skipped
     - _grace_inserted.msg is defined
-    - _grace_inserted.msg is search('validation')
+    - _grace_inserted.msg is search('failed to validate')
   ansible.builtin.debug:
     msg: >-
       WARNING: could not add grace_period to {{ turbopanel_caddyfile }}; the

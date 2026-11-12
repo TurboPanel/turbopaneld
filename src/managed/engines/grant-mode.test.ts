@@ -24,14 +24,17 @@ const test = Deno.test.bind(Deno);
 /**
  * Captured from trunk before the grant-mode branches existed; the MySQL and
  * MariaDB hashes were recaptured when read/write became data-only (the
- * level SQL changed on purpose; the Postgres hash is unchanged).
+ * level SQL changed on purpose). The MySQL and Postgres hashes were recaptured
+ * when an apply began reading grant rows to revoke (MySQL: queries without
+ * stdin are no longer recorded) and ending sessions that lost CONNECT
+ * (Postgres: one added statement); the SQL before that is byte-identical.
  */
 const GOLDEN: Record<string, string> = {
   __MARIADB__:
     "cc3abf515ab524bb436c03240f82c83ddc6424f99c349dc63ce76efd5fb86692",
-  __MYSQL__: "6e4ed315e394aec22937f755339b8ab3c1b36f354a97c0ec9602ce52891314ef",
+  __MYSQL__: "20778d26f78e11c6d70929d12c14273916ce803b6d4bcc06b2039f515bd4ec13",
   __POSTGRES__:
-    "b658c9e3b7fc725904d83d75bdf417f30ec288fc34d7bcfa12a3edadca932d38",
+    "e83c555b70160a33acc4f877e8f74de5cedfe2f05ed36d18c855c66940b772cb",
 };
 
 const engines: Array<[string, ManagedEngineRuntime, string]> = [
@@ -46,7 +49,8 @@ async function sqlFor(
 ): Promise<string[]> {
   const inputs: string[] = [];
   const exec: ManagedEngineExec = (_argv, input) => {
-    inputs.push(input ?? "");
+    // Read-only queries (`-e`, no stdin) are not part of the pinned output.
+    if (input !== undefined) inputs.push(input);
     return Promise.resolve({ success: true, stdout: "", stderr: "" });
   };
   const ctx: ManagedEngineContext = {

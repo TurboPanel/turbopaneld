@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   compareSemver,
+  MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
   resolveDaemonCapabilities,
   resolveInstanceSupport,
@@ -59,9 +60,15 @@ test("semver orders the real labels the way they were built", () => {
 });
 
 test("no real control-plane label is flagged unsupported or refused as an update target", () => {
+  // The labels are older than today's floor, so each spelling is moved onto
+  // the floor's own base: a canary, rc, release or tag of that base must pass.
   for (const { version } of LABELS) {
-    assertEquals(resolveInstanceSupport(version).status, "supported", version);
-    assertControlPlaneUpdateAllowed(version);
+    const lowest = version.replace(
+      /^v?\d+\.\d+\.\d+/,
+      MIN_SUPPORTED_INSTANCE_VERSION,
+    );
+    assertEquals(resolveInstanceSupport(version, "0.1.0").status, "supported");
+    assertControlPlaneUpdateAllowed(lowest);
   }
 });
 

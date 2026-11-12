@@ -1,12 +1,19 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import {
+  COMPOSE_ENV_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
   composeFileArgs,
+  DAEMON_COMPOSE_FILENAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
   readDeploymentManifest,
   resolveDeployedComposePaths,
   resolveEnvironmentDeploymentDir,
+  RUNTIME_COMPOSE_FILENAME,
 } from "../deploy/compose-files.ts";
 import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { removeConfigTree } from "../deploy/config-files.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
   createStreamedRunner,
@@ -25,6 +32,9 @@ import {
   removeEnvironmentTcpUdpServiceIngress,
   removeHostingCaddySite,
 } from "../deploy/ingress.ts";
+import { removeCronJobs } from "../deploy/cron/apply.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
+import { removeEnvironmentSiteLifecycle } from "../deploy/site/lifecycle-deploy.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
 import { environmentLockKey, withKeyedLock } from "../util/keyed-lock.ts";
@@ -46,6 +56,7 @@ import {
   actOnEarlierContainers,
   earlierRecordedProjects,
 } from "../deploy/retire-previous-projects.ts";
+import { removeEnvironmentCachesAndReach } from "../deploy/cache/deploy-step.ts";
 import { retirePrincipals } from "../deploy/retire-principals.ts";
 import type { SshApplyResult } from "../deploy/ssh/apply.ts";
 import {
@@ -56,9 +67,14 @@ import {
   type EnvironmentStopFolderState,
   type EnvironmentStopPayload,
   type EnvironmentStopResult,
+  type EnvironmentStopVolumeState,
   parseEnvironmentStopPayload,
   type StopSiteRelease,
 } from "../contracts/commands-contracts.ts";
+import {
+  removeStopVolumes,
+  volumeSummary,
+} from "./stop-environment-volumes.ts";
 
 const SAFE_PATH_ID_RE = /^[A-Za-z0-9_-]+$/;
 const COMPOSE_PROJECT_RE = /^[a-z0-9][a-z0-9_-]*$/;
@@ -81,6 +97,10 @@ export type EnvironmentStopHandlerDeps = {
   dockerInstalled?: () => Promise<boolean>;
   /** Test seam — the `sshd` drop-in re-render after principals are retired. */
   applySshAccess?: () => Promise<SshApplyResult>;
+  /** Test seam — removes the environment's worker and command units. */
+  removeSiteLifecycle?: (environmentId: string) => Promise<void>;
+  /** Test seam — defaults to {@link removeCronJobs}. */
+  removeCronJobs?: (environmentId: string) => Promise<number>;
 };
 
 /**
@@ -198,6 +218,54 @@ async function removeEnvironmentNativeApps(
 }
 
 /**
+ * Disable and remove the environment's scheduled-job units (timers and their
+ * services) before the sites go: once a site's root-side variables copy is
+ * deleted, a timer that still fires would fail on the missing file at every
+ * tick. Best effort, like the rest of the teardown.
+ */
+async function removeEnvironmentCronJobs(
+  environmentId: string,
+  remove: (environmentId: string) => Promise<number>,
+): Promise<void> {
+  try {
+    const removed = await remove(environmentId);
+    if (removed > 0) {
+      logInfo(
+        "commands",
+        `environment.stop removed ${removed} cron unit(s) env=${environmentId}`,
+      );
+    }
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.stop cron teardown failed env=${environmentId}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/**
+ * Remove this environment's worker and post-deploy command units. Best effort
+ * like the rest of the teardown.
+ */
+async function removeEnvironmentSiteUnits(
+  environmentId: string,
+  remove: (environmentId: string) => Promise<void>,
+): Promise<void> {
+  try {
+    await remove(environmentId);
+  } catch (err) {
+    logWarn(
+      "commands",
+      `environment.stop worker teardown failed env=${environmentId}: ${
+        err instanceof Error ? err.message : Deno.inspect(err)
+      }`,
+    );
+  }
+}
+
+/**
  * `deployments/<projectId>/<environmentId>` is gone by now; drop the
  * `<projectId>` parent too once no other environment lives in it. A plain
  * (non-recursive) remove, so a sibling environment's tree is never touched.
@@ -253,6 +321,58 @@ async function removeDeploymentDir(
       `deployment dir removal failed: ${result.stderr || "tp-host rm failed"}`,
     );
   }
+}
+
+/**
+ * What the daemon itself writes into a deployment dir. A stop that keeps the
+ * dir removes only these, so a reboot finds no manifest to start the stack
+ * again from, while everything a service wrote through a relative bind
+ * (`./data`) stays for the next deploy.
+ */
+const DAEMON_DEPLOYMENT_ENTRIES = [
+  RUNTIME_COMPOSE_FILENAME,
+  DAEMON_COMPOSE_FILENAME,
+  COMPOSE_ENV_FILENAME,
+  DEPLOYMENT_MANIFEST_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
+] as const;
+
+/**
+ * Remove the daemon's own compose files from `deploymentDir` and keep the rest.
+ * A deployment dir that is not a real directory (gone, or a symlink) is left
+ * alone, so nothing outside the state root is touched.
+ */
+async function removeDaemonDeploymentFiles(
+  deploymentDir: string,
+): Promise<void> {
+  const info = await Deno.lstat(deploymentDir).catch(() => null);
+  if (info === null || !info.isDirectory) return;
+  await forEachSequential(DAEMON_DEPLOYMENT_ENTRIES, async (name) => {
+    try {
+      await Deno.remove(join(deploymentDir, name), { recursive: true });
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    }
+  });
+}
+
+/**
+ * Only a delete removes the whole deployment dir, with whatever a relative bind
+ * wrote there. A Destroy or a drained server keeps that data for the next
+ * deploy and drops only the daemon's own files.
+ */
+async function reclaimDeploymentDir(
+  payload: EnvironmentStopPayload,
+  deploymentDir: string,
+  runFn: RunFn,
+): Promise<void> {
+  if (payload.removeDeploymentDir !== true) {
+    await removeDaemonDeploymentFiles(deploymentDir);
+    return;
+  }
+  await removeDeploymentDir(deploymentDir, runFn);
+  await removeEmptyProjectDeploymentDir(deploymentDir);
 }
 
 function retirementSummary(
@@ -354,8 +474,13 @@ async function removeEarlierNamedContainers(
 
 /**
  * Tear down a deployed environment stack (compose down + volumes + hosting site
- * + per-service release trees). Idempotent when the compose file is already
- * gone.
+ * + per-service release trees). `compose down --volumes` removes only volumes
+ * Compose created itself (anonymous ones, or ones whose compose entry sets its
+ * own `name:`); every registered volume is mounted `external: true` and stays
+ * unless the payload names it in `removeVolumes`. The deployment dir keeps
+ * everything a service wrote there unless the payload sets
+ * `removeDeploymentDir` (a delete).
+ * Idempotent when the compose file is already gone.
  */
 export async function handleEnvironmentStop(
   payload: EnvironmentStopPayload,
@@ -370,26 +495,22 @@ export async function handleEnvironmentStop(
   );
 }
 
-async function stopEnvironmentLocked(
+/**
+ * `compose down` every generation the deployment owns. Logs and does nothing
+ * when Docker is missing or the compose files are already gone.
+ */
+async function composeDownAll(
   parsedPayload: EnvironmentStopPayload,
-  daemonReceivedAt: string,
-  deps?: EnvironmentStopHandlerDeps,
-): Promise<EnvironmentStopResult> {
-  const dockerPresent = await dockerAvailableForStop(deps);
-  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
-  const runStreamed = createStreamedRunner(deps?.runDocker);
-  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
-  logSink.setPhase(COMMAND_LOG_PHASES.STOP);
-  const layout = resolveLayout(Deno.env.toObject());
-
-  const deploymentDir = resolveEnvironmentDeploymentDir(
-    layout,
-    parsedPayload.projectId,
-    parsedPayload.environmentId,
-  );
-  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  deploymentDir: string,
+  composePaths: string[] | null,
+  options: {
+    dockerPresent: boolean;
+    runStreamed: RunDockerStreamedFn;
+    logSink: CommandOutputSink;
+  },
+): Promise<void> {
+  const { dockerPresent, runStreamed, logSink } = options;
   const hasCompose = composePaths !== null;
-
   if (hasCompose && !dockerPresent) {
     logInfo(
       "commands",
@@ -414,10 +535,55 @@ async function stopEnvironmentLocked(
       `environment.stop compose missing project=${parsedPayload.projectName} env=${parsedPayload.environmentId}; no compose files to take down`,
     );
   }
+}
+
+async function stopEnvironmentLocked(
+  parsedPayload: EnvironmentStopPayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentStopHandlerDeps,
+): Promise<EnvironmentStopResult> {
+  const dockerPresent = await dockerAvailableForStop(deps);
+  const run = dockerPresent ? (deps?.runDocker ?? defaultRunDocker) : noDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(COMMAND_LOG_PHASES.STOP);
+  const layout = resolveLayout(Deno.env.toObject());
+
+  const deploymentDir = resolveEnvironmentDeploymentDir(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+  const hasCompose = composePaths !== null;
+
+  await composeDownAll(parsedPayload, deploymentDir, composePaths, {
+    dockerPresent,
+    runStreamed,
+    logSink,
+  });
 
   if (dockerPresent) {
     await removeEarlierNamedContainers(parsedPayload, deploymentDir, run);
   }
+
+  // The containers are down, so the manifest must go now: a later step that
+  // throws would otherwise leave a stopped stack that the next daemon start
+  // brings back. Only the daemon's own files go; `./data` stays.
+  await removeDaemonDeploymentFiles(deploymentDir);
+
+  // Only when the Destroy asked to delete data, and only once the manifest is
+  // gone: a restart part-way must never bring the stack back without its data.
+  // Runs on the "already stopped" path too, so data kept by an earlier Destroy
+  // can still be deleted.
+  const volumes = parsedPayload.removeVolumes === undefined
+    ? undefined
+    : await removeStopVolumes(parsedPayload.removeVolumes, {
+      environmentId: parsedPayload.environmentId,
+      dockerPresent,
+      run,
+      logSink,
+    });
 
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
   if (fabricNetworks.length > 0 && dockerPresent) {
@@ -440,6 +606,23 @@ async function stopEnvironmentLocked(
   }
 
   await removeHostingCaddySite(layout, parsedPayload.environmentId);
+  // Before the sites: removing a site also removes its root-side variables
+  // copy, which its cron units load.
+  await removeEnvironmentCronJobs(
+    parsedPayload.environmentId,
+    deps?.removeCronJobs ?? removeCronJobs,
+  );
+  // Workers and post-deploy command units load the same variables copy, so
+  // they go before the copy and before the sites.
+  await removeEnvironmentSiteUnits(
+    parsedPayload.environmentId,
+    deps?.removeSiteLifecycle ??
+      ((environmentId) =>
+        removeEnvironmentSiteLifecycle(
+          { run: runHostCommand, onLine: () => undefined },
+          environmentId,
+        )),
+  );
   await removeSites(layout, parsedPayload.environmentId);
   // Disable + remove the generated app units before the release trees they run
   // out of are reclaimed, so systemd never restarts a unit whose
@@ -447,6 +630,15 @@ async function stopEnvironmentLocked(
   // deliberately left behind — other environments of the same account still
   // reference it.
   await removeEnvironmentNativeApps(layout, parsedPayload.environmentId);
+  // The project caches of the environment and its helper ports, by the host's
+  // own index. Their units name the accounts, so they go before the accounts
+  // are retired; the data goes only when the Destroy asked for it.
+  await removeEnvironmentCachesAndReach({
+    layout,
+    environmentId: parsedPayload.environmentId,
+    run: deps?.runPrivileged ?? runPrivileged,
+    deleteData: parsedPayload.removeVolumes !== undefined,
+  });
   const folders = await removeEnvironmentSiteReleases(
     layout,
     parsedPayload.environmentId,
@@ -470,14 +662,18 @@ async function stopEnvironmentLocked(
     { runDocker: run },
   );
 
-  await removeDeploymentDir(
+  await reclaimDeploymentDir(
+    parsedPayload,
     deploymentDir,
     deps?.runPrivileged ?? runPrivileged,
   );
 
-  await removeEmptyProjectDeploymentDir(deploymentDir);
-
   await removeSecretTree(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  await removeConfigTree(
     layout,
     parsedPayload.projectId,
     parsedPayload.environmentId,
@@ -496,24 +692,32 @@ async function stopEnvironmentLocked(
   const stopped = hasCompose
     ? `Stopped environment ${parsedPayload.environmentId}`
     : `Environment ${parsedPayload.environmentId} already stopped`;
-  const summary = retirementSummary(stopped, retirement);
+  const volumesLine = volumes === undefined ? null : volumeSummary(volumes);
+  const summary = [retirementSummary(stopped, retirement), volumesLine]
+    .filter((part): part is string => part !== null)
+    .join("; ");
   logInfo(
     "commands",
     `environment.stop completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
-  return stopResult(parsedPayload.projectName, summary, folders);
+  return stopResult(parsedPayload.projectName, summary, folders, volumes);
 }
 
-/** The stop result; `folders` is present only when folders were named. */
+/**
+ * The stop result; `folders` is present only when folders were named, and
+ * `volumes` only when the payload named volumes to remove.
+ */
 function stopResult(
   projectName: string,
   summary: string,
   folders: EnvironmentStopFolderState[],
+  volumes: EnvironmentStopVolumeState[] | undefined,
 ): EnvironmentStopResult {
   return {
     projectName,
     summary,
     containers: [],
     ...(folders.length > 0 ? { folders } : {}),
+    ...(volumes === undefined ? {} : { volumes }),
   };
 }

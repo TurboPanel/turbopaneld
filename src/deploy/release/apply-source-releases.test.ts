@@ -10,6 +10,7 @@ import { resolveLayout } from "../../paths/layout.ts";
 import { createTempLayout } from "../../testing/temp-layout.ts";
 import {
   readReleaseManifest,
+  releaseManifestPath,
   writeReleaseManifest,
 } from "./deployment-json.ts";
 import {
@@ -422,6 +423,138 @@ test("applySourceReleases promotes native releases with injected checkout/build/
       await fixture.cleanup();
     }
   });
+});
+
+const HTACCESS_SERVICE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000a1";
+const HTACCESS_RELEASE_ID = "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000a2";
+const BAD_HTACCESS =
+  "RewriteEngine On\nAddHandler application/x-httpd-php .txt\n";
+
+/** One release of a site service whose checkout holds the given `public/.htaccess`. */
+async function releaseWithHtaccess(
+  engine: "apache" | "nginx+apache" | "nginx",
+  htaccess: "file" | "link" | "none",
+) {
+  const fixture = await createTempLayout();
+  try {
+    const layout = layoutFromFixture(fixture);
+    const paths = resolveReleasePaths(layout, {
+      username: "appuser",
+      serviceId: HTACCESS_SERVICE_ID,
+      folder: folderOf(HTACCESS_SERVICE_ID),
+      releaseId: HTACCESS_RELEASE_ID,
+    });
+    await mkdirReleaseTree(paths);
+    const log = fakeLogSink();
+    const applied = await applySourceReleases(
+      layout,
+      basePayload({
+        hostings: [{
+          hostingId: "host-site",
+          composeServiceName: "web",
+          serviceId: HTACCESS_SERVICE_ID,
+          hostnames: ["site.example.com"],
+        }],
+        sites: [{
+          composeServiceName: "web",
+          engine,
+          root: "public",
+          listenPort: 18080,
+          ...(engine === "nginx+apache" ? { backendPort: 18081 } : {}),
+        }],
+        sourceMaterial: [
+          baseSource({
+            composeServiceName: "web",
+            releaseId: HTACCESS_RELEASE_ID,
+            releaseServiceId: HTACCESS_SERVICE_ID,
+            principal: {
+              principalId: "pr-1",
+              username: "appuser",
+              uid: 2000,
+              gid: 2001,
+            },
+          }),
+        ],
+      }),
+      {
+        logSink: log.sink,
+        decryptSecrets: undefined,
+        now: () => "2026-01-01T00:00:00.000Z",
+        runFn: folderRun,
+        sandboxedBuilds: false,
+        checkoutReleaseFn: async (params) => {
+          const workingDir = join(params.scratchDir, "source");
+          const root = join(workingDir, "public");
+          await Deno.mkdir(root, { recursive: true });
+          if (htaccess === "file") {
+            await Deno.writeTextFile(join(root, ".htaccess"), BAD_HTACCESS);
+          } else if (htaccess === "link") {
+            await Deno.writeTextFile(join(workingDir, "real"), BAD_HTACCESS);
+            await Deno.symlink(
+              join(workingDir, "real"),
+              join(root, ".htaccess"),
+            );
+          }
+          return { workingDir, commitSha: "resolved-commit" };
+        },
+        runReleaseBuildFn: () => Promise.resolve(),
+        promoteReleaseFn: async (params) => {
+          await writeReleaseManifest(params.paths.releaseDir, {
+            version: 1,
+            serviceId: HTACCESS_SERVICE_ID,
+            composeServiceName: "web",
+            releaseId: HTACCESS_RELEASE_ID,
+            sourceId: "src-1",
+            commitSha: "resolved-commit",
+            ref: "main",
+            promotedAt: "2026-01-01T00:00:00.000Z",
+            standaloneOutput: false,
+            staticExport: false,
+          });
+          await swapCurrentSymlink(params.paths);
+          return params.paths.releaseDir;
+        },
+        pruneReleasesFn: () => Promise.resolve([]),
+      },
+    );
+    return { applied, log };
+  } finally {
+    await fixture.cleanup();
+  }
+}
+
+test("an Apache site whose .htaccess has a refused line gets a warning on the release and in the transcript, and the deploy goes on", async () => {
+  for (const engine of ["apache", "nginx+apache"] as const) {
+    const { applied, log } = await releaseWithHtaccess(engine, "file");
+    const expected =
+      "Site web: .htaccess line 2: AddHandler is not allowed on this server, so Apache answers 500 for that folder.";
+    assertEquals(applied.length, 1);
+    assertEquals(applied[0]?.htaccessWarnings, [expected]);
+    assertEquals(
+      log.lines.filter((line) => line.message === expected).map((line) =>
+        line.stream
+      ),
+      ["stderr"],
+    );
+  }
+});
+
+test("a .htaccess link, a missing file or an nginx site gives no warning", async () => {
+  for (
+    const [engine, htaccess] of [
+      ["apache", "link"],
+      ["apache", "none"],
+      ["nginx", "file"],
+    ] as const
+  ) {
+    const { applied, log } = await releaseWithHtaccess(engine, htaccess);
+    assertEquals(applied.length, 1, `${engine} ${htaccess}`);
+    assertEquals(applied[0]?.htaccessWarnings, undefined);
+    assertEquals(
+      log.lines.some((line) => line.message.includes(".htaccess")),
+      false,
+    );
+  }
 });
 
 test("applySourceReleases publishes a serving Node app's release without moving current", async () => {
@@ -1026,6 +1159,7 @@ test("applySourceReleases rolls back native releases without fetch or build", as
       const row = applied[0];
       if (!row) throw new TypeError("expected rollback row");
       assertEquals(row.releaseId, "019e0a1b-7c3d-7a52-9b4e-3f1a2c000007");
+      assertEquals(row.built, undefined);
       assertEquals(row.commitSha, "old-commit");
       assertEquals(row.staticExport, true);
       assertEquals(row.standaloneOutput, false);
@@ -1111,7 +1245,7 @@ test("applySourceReleases fails rollback when the target release is missing", as
   });
 });
 
-test("applySourceReleases rolls back railpack releases from daemon record manifests", async () => {
+test("applySourceReleases rolls back image-build releases from daemon record manifests", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -1133,8 +1267,8 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
         imageTag:
           "turbopanel-app/019e0a1b-7c3d-7a52-9b4e-3f1a2c00000c:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d",
         imageDigest: "sha256:abc",
-        railpackFrontendVersion: "0.2.0",
-        railpackPlanVersion: "0.1.0",
+        builderFrontendVersion: "0.2.0",
+        builderPlanVersion: "0.1.0",
       });
 
       let promoteExistingCalled = false;
@@ -1171,13 +1305,13 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
       assertEquals(promoteExistingCalled, false);
       assertEquals(applied.length, 1);
       const row = applied[0];
-      if (!row) throw new TypeError("expected railpack rollback row");
+      if (!row) throw new TypeError("expected image-build rollback row");
       assertEquals(
         row.imageTag,
         "turbopanel-app/019e0a1b-7c3d-7a52-9b4e-3f1a2c00000c:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d",
       );
       assertEquals(row.commitSha, "rail-commit");
-      assertEquals(row.railpackFrontendVersion, "0.2.0");
+      assertEquals(row.builderFrontendVersion, "0.2.0");
       assertEquals(
         log.lines.some((line) =>
           line.message.includes("(image turbopanel-app")
@@ -1190,7 +1324,84 @@ test("applySourceReleases rolls back railpack releases from daemon record manife
   });
 });
 
-test("applySourceReleases builds railpack releases without a project principal", async () => {
+for (
+  const [label, names] of [
+    ["old", ["railpackFrontendVersion", "railpackPlanVersion"]],
+    ["new", ["builderFrontendVersion", "builderPlanVersion"]],
+  ] as const
+) {
+  test(`applySourceReleases reports only the new version names from a manifest with the ${label} names`, async () => {
+    await createTempLayout().then(async (fixture) => {
+      try {
+        const layout = layoutFromFixture(fixture);
+        const serviceId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000c";
+        const releaseId = "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d";
+        const recordPaths = resolveDaemonReleasePaths(layout, {
+          serviceId,
+          releaseId,
+        });
+        await Deno.mkdir(
+          join(recordPaths.releaseDir, RELEASE_METADATA_DIRNAME),
+          {
+            recursive: true,
+          },
+        );
+        await Deno.writeTextFile(
+          releaseManifestPath(recordPaths.releaseDir),
+          JSON.stringify({
+            version: 1,
+            serviceId,
+            composeServiceName: "web",
+            releaseId,
+            sourceId: "src-1",
+            commitSha: "rail-commit",
+            ref: "main",
+            promotedAt: "2026-01-01T00:00:00.000Z",
+            imageTag: `turbopanel-app/${serviceId}:${releaseId}`,
+            [names[0]]: "0.2.0",
+            [names[1]]: "0.1.0",
+          }),
+        );
+        const applied = await applySourceReleases(
+          layout,
+          basePayload({
+            hostings: [{
+              hostingId: "host-rail",
+              composeServiceName: "web",
+              serviceId,
+              hostnames: ["rail.example.com"],
+            }],
+            sourceMaterial: [
+              baseSource({
+                composeServiceName: "web",
+                releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
+                rollbackToReleaseId: releaseId,
+                releaseServiceId: serviceId,
+                build: { kind: "image" },
+              }),
+            ],
+          }),
+          {
+            logSink: fakeLogSink().sink,
+            decryptSecrets: undefined,
+            promoteExistingReleaseFn: () =>
+              Promise.resolve(recordPaths.releaseDir),
+          },
+        );
+        const row = applied[0];
+        if (!row) throw new TypeError("expected image-build rollback row");
+        assertEquals(row.builderFrontendVersion, "0.2.0");
+        assertEquals(row.builderPlanVersion, "0.1.0");
+        assertEquals("railpackFrontendVersion" in row, false);
+        assertEquals("railpackPlanVersion" in row, false);
+      } finally {
+        await fixture.cleanup();
+      }
+    });
+  });
+}
+
+test("applySourceReleases builds image-build releases without a project principal", async () => {
   await createTempLayout().then(async (fixture) => {
     try {
       const layout = layoutFromFixture(fixture);
@@ -1210,7 +1421,7 @@ test("applySourceReleases builds railpack releases without a project principal",
               composeServiceName: "api",
               releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f",
               releaseServiceId: serviceId,
-              build: { kind: "railpack" },
+              build: { kind: "image" },
             }),
           ],
         }),
@@ -1226,9 +1437,9 @@ test("applySourceReleases builds railpack releases without a project principal",
             await Deno.mkdir(workingDir, { recursive: true });
             return { workingDir, commitSha: "pack-commit" };
           },
-          ensureBuildkitRailpackFn: () =>
+          ensureBuildkitImageBuildFn: () =>
             Promise.resolve({
-              railpack: "/tmp/railpack",
+              planner: "/tmp/railpack",
               buildctl: "/tmp/buildctl",
               buildkitd: "/tmp/buildkitd",
               frontendLayoutDir: "/tmp/frontend",
@@ -1236,15 +1447,15 @@ test("applySourceReleases builds railpack releases without a project principal",
             }),
           // A development host: the prepare step runs unsandboxed here.
           sandboxedBuilds: false,
-          runRailpackBuildFn: () =>
+          runImageBuildBuildFn: () =>
             Promise.resolve({
               imageTag:
                 "turbopanel-app/api:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f",
               imageDigest: "sha256:pack",
-              railpackFrontendVersion: "0.3.0",
-              railpackPlanVersion: "0.2.0",
+              builderFrontendVersion: "0.3.0",
+              builderPlanVersion: "0.2.0",
             }),
-          recordRailpackReleaseFn: async ({ paths: record, manifest }) => {
+          recordImageBuildReleaseFn: async ({ paths: record, manifest }) => {
             await Deno.mkdir(
               join(record.releaseDir, RELEASE_METADATA_DIRNAME),
               { recursive: true },
@@ -1261,7 +1472,7 @@ test("applySourceReleases builds railpack releases without a project principal",
 
       assertEquals(applied.length, 1);
       const row = applied[0];
-      if (!row) throw new TypeError("expected railpack row");
+      if (!row) throw new TypeError("expected image-build row");
       assertEquals(
         row.imageTag,
         "turbopanel-app/api:019e0a1b-7c3d-7a52-9b4e-3f1a2c00000f",

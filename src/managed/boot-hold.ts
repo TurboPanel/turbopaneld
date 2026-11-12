@@ -208,7 +208,7 @@ export async function applyBootHold(
   let holdFailed = false;
   await forEachSequential(toHold, async (member) => {
     try {
-      await holdOne(member, deps);
+      await holdOne(member, deps, UNCLEAN_BOOT_HOLD_NOTE);
     } catch (err) {
       holdFailed = true;
       unsettledHolds.add(member.managedId);
@@ -222,9 +222,35 @@ export async function applyBootHold(
   return !holdFailed;
 }
 
+const UNCLEAN_BOOT_HOLD_NOTE =
+  "host restarted without a clean shutdown: holding";
+
+/**
+ * Hold one primary whose engine was found stopped by a daemon that was not
+ * watching it when it stopped (`engine-exit-guard.ts`, first look after the
+ * daemon started). While this daemon was down the control plane may have
+ * promoted another member, so the engine is not started on the daemon's own
+ * say: the hold is reported like a boot hold and the control plane answers
+ * with a start (still the primary) or leaves it stopped (replaced).
+ *
+ * Throws when the marker or hold file could not be written; the engine is
+ * left stopped either way.
+ */
+export async function holdUnconfirmedPrimary(
+  member: ManagedHaMemberRecord,
+  deps: BootHoldDeps,
+): Promise<void> {
+  await holdOne(
+    member,
+    deps,
+    "primary found stopped when the daemon started: holding",
+  );
+}
+
 async function holdOne(
   member: ManagedHaMemberRecord,
   deps: BootHoldDeps,
+  note: string,
 ): Promise<BootHoldRecord> {
   const existing = await readHold(deps.layout, member.managedId);
   const record: BootHoldRecord = existing ?? {
@@ -251,7 +277,7 @@ async function holdOne(
       : "because it was demoted";
     logWarn(
       "managed",
-      `host restarted without a clean shutdown: holding managedId=${member.managedId} member=${member.memberId} ${why}`,
+      `${note} managedId=${member.managedId} member=${member.memberId} ${why}`,
     );
   } catch (err) {
     writeError = err;

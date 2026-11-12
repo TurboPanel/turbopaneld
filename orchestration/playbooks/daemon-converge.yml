@@ -30,6 +30,7 @@
   pre_tasks:
     - name: Refresh apt cache once per converge (Debian)
       ansible.builtin.apt:
+        lock_timeout: 300
         update_cache: true
         cache_valid_time: 3600
       when: ansible_os_family == 'Debian'
@@ -60,6 +61,8 @@
     - role: principal-access
     - role: rapl-access
     - role: time-sync
+    # Debian security updates on their own; never restarts the server.
+    - role: os-security-updates
     # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
     # (and the retired shared tpbuild account removed).
     - role: build-user

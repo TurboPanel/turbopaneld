@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import {
   parsePhpExtensionsFromModsAvailable,
   parsePhpSeriesFromBinaries,
+  phpPatchFields,
   readHostRuntimes,
 } from "./runtimes.ts";
 
@@ -263,4 +264,38 @@ test("readHostRuntimes reports a vendored Deno series once current resolves", as
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+test("php patch fields are present only when the cache holds them, and only for installed series", () => {
+  assertEquals(phpPatchFields(["8.4"], { versions: {}, sites: [] }), {});
+  const fields = phpPatchFields(["8.3", "8.4"], {
+    versions: { "8.3": "8.3.30", "8.4": "8.4.27", "7.4": "7.4.33" },
+    sites: [{
+      environmentId: "env1",
+      composeServiceName: "web",
+      series: "8.4",
+      version: "8.4.27",
+      outdated: true,
+    }],
+    restartError: {
+      series: "8.4",
+      message: "web did not answer",
+      at: "2026-11-10T12:00:00.000Z",
+    },
+  });
+  assertEquals(fields.versions, { "8.3": "8.3.30", "8.4": "8.4.27" });
+  assertEquals(fields.sites?.length, 1);
+  assertEquals(fields.restartError?.message, "web did not answer");
+});
+
+test("php patch sites are capped at 256", () => {
+  const sites = Array.from({ length: 300 }, (_, i) => ({
+    environmentId: "env1",
+    composeServiceName: `site-${i}`,
+    series: "8.4",
+  }));
+  assertEquals(
+    phpPatchFields(["8.4"], { versions: {}, sites }).sites?.length,
+    256,
+  );
 });

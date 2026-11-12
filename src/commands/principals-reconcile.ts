@@ -39,6 +39,7 @@ import {
 } from "../deploy/retire-principals.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import { listAssetFolders } from "../deploy/asset-folders.ts";
+import { openPrincipalPasswordEnvelopes } from "../deploy/principal-password-envelope.ts";
 import type {
   PrincipalIdReport,
   PrincipalsReconcilePayload,
@@ -59,6 +60,8 @@ export type PrincipalsReconcileDeps = {
     runFn?: RunFn,
     homeRoot?: string,
   ) => Promise<PrincipalIdReport[]>;
+  /** Opens `passwordHashEnvelope` through the control plane's `/secrets/decrypt`. */
+  decryptSecrets?: (ciphertexts: string[]) => Promise<(string | null)[]>;
   /** Every asset folder on the host, or `null` when it cannot be listed; test seam. */
   listAssetFolders?: (runFn: RunFn) => Promise<ReportedFolder[] | null>;
   ensureSystemPrincipals?: (
@@ -77,6 +80,12 @@ export async function handlePrincipalsReconcile(
   deps: PrincipalsReconcileDeps = {},
 ): Promise<PrincipalsReconcileResult> {
   const layout = (deps.resolveLayout ?? resolveLayout)();
+  // A sealed hash is opened before any account is touched; one that cannot be
+  // opened fails the whole command rather than lock the account.
+  const principals = await openPrincipalPasswordEnvelopes(
+    payload.principals,
+    deps.decryptSecrets,
+  );
 
   // Accounts, shells, and group membership first. `applySshAccess` writes files
   // keyed by username, so the account has to exist before its key file does —
@@ -85,7 +94,7 @@ export async function handlePrincipalsReconcile(
   const groupWarnings = await (deps.ensureSystemPrincipals ??
     ensureSystemPrincipals)(
       layout,
-      payload.principals.map((principal) => ({
+      principals.map((principal) => ({
         principalId: principal.principalId,
         username: principal.username,
         ...(principal.uid === undefined ? {} : { uid: principal.uid }),

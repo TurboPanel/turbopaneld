@@ -7,6 +7,7 @@ import {
 } from "../deploy/compose-files.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -18,6 +19,10 @@ const test = Deno.test.bind(Deno);
 
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
+  // The account wall reload after a container deploy must not reach real sudo.
+  runPrivileged: () =>
+    Promise.resolve({ success: true, stdout: "", stderr: "" }),
+  waitForHealth: instantlyHealthy,
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
 };

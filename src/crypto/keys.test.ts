@@ -1,11 +1,15 @@
+import { assertEquals } from "@std/assert";
 import {
   buildAuthPayload,
   buildEnrollmentPayload,
+  buildPinPasskeysSigningInput,
+  buildPinReportSigningInput,
   computePublicKeyFingerprint,
   generateDaemonKeypair,
   loadDaemonKeyFile,
   saveDaemonKeyFile,
   signChallenge,
+  signPinReport,
   verifyChallenge,
 } from "./keys.ts";
 
@@ -301,4 +305,95 @@ test("saveDaemonKeyFile and loadDaemonKeyFile round-trip", async () => {
   } finally {
     await Deno.remove(tempDir, { recursive: true });
   }
+});
+
+test("buildPinReportSigningInput produces the exact bytes the control plane checks", () => {
+  const fp = "a".repeat(43);
+  assertEquals(
+    buildPinReportSigningInput({
+      sessionId: "sess-1",
+      serverId: "srv-1",
+      keyId: "key-1",
+      pinnedBy: "upgrade",
+      current: fp,
+      keyset: 3,
+      iat: 1700000000,
+    }),
+    `tp-panel-pin\nsess-1\nsrv-1\nkey-1\nupgrade\n${fp}\n3\n1700000000`,
+  );
+});
+
+test("signPinReport signs those bytes with the daemon key", async () => {
+  const key = await generateDaemonKeypair();
+  const report = await signPinReport(
+    { keyId: "key-1", privateJwk: key.privateJwk },
+    {
+      sessionId: "sess-1",
+      serverId: "srv-1",
+      pinnedBy: "install",
+      current: "b".repeat(43),
+      keyset: 1,
+    },
+    1_700_000_000_000,
+  );
+  assertEquals(report.iat, 1_700_000_000);
+  assertEquals(
+    await verifyChallenge(
+      key.publicJwk,
+      buildPinReportSigningInput({
+        sessionId: "sess-1",
+        serverId: "srv-1",
+        keyId: "key-1",
+        pinnedBy: "install",
+        current: "b".repeat(43),
+        keyset: 1,
+        iat: 1_700_000_000,
+      }),
+      report.sig,
+    ),
+    true,
+  );
+});
+
+test("signPinReport adds the passkeys hash under its own signature", async () => {
+  const key = await generateDaemonKeypair();
+  const report = await signPinReport(
+    { keyId: "key-1", privateJwk: key.privateJwk },
+    {
+      sessionId: "sess-1",
+      serverId: "srv-1",
+      pinnedBy: "install",
+      current: "b".repeat(43),
+      keyset: 3,
+      passkeys: "h".repeat(43),
+    },
+    1_700_000_000_000,
+  );
+  assertEquals(
+    buildPinPasskeysSigningInput({
+      sessionId: "sess-1",
+      serverId: "srv-1",
+      keyId: "key-1",
+      passkeys: "h".repeat(43),
+      iat: 1_700_000_000,
+    }),
+    `tp-panel-pin-passkeys\nsess-1\nsrv-1\nkey-1\n${
+      "h".repeat(43)
+    }\n1700000000`,
+  );
+  assertEquals(report.passkeys, "h".repeat(43));
+  assertEquals(
+    await verifyChallenge(
+      key.publicJwk,
+      buildPinPasskeysSigningInput({
+        sessionId: "sess-1",
+        serverId: "srv-1",
+        keyId: "key-1",
+        passkeys: "h".repeat(43),
+        iat: report.iat,
+      }),
+      report.passkeysSig!,
+    ),
+    true,
+  );
 });

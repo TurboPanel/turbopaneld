@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "@std/assert";
-import { resolveUpdateChannelConfig } from "./config.ts";
+import { isUpdateChannel, resolveUpdateChannelConfig } from "./config.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -39,4 +39,13 @@ test("resolveUpdateChannelConfig trims and rejects invalid values", () => {
     Error,
     'Invalid TURBOPANEL_UPDATE_CHANNEL: "nightly"',
   );
+});
+
+test("isUpdateChannel accepts only the known channels", () => {
+  for (const channel of ["trunk", "edge", "canary", "rc", "release"]) {
+    assertEquals(isUpdateChannel(channel), true);
+  }
+  for (const value of ["", "stable", "Release", " canary"]) {
+    assertEquals(isUpdateChannel(value), false);
+  }
 });

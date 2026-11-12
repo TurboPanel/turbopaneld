@@ -90,6 +90,71 @@ export function buildAuthPayload(params: {
   return `turbopanel-daemon-auth-v1\n${params.challengeId}\n${params.nonce}\n${params.serverId}\n${params.keyId}\n${params.machineKey}\n${params.hostname}`;
 }
 
+/** First line of a v2 enroll proof; pinned to the control plane's copy by contract-drift. */
+export const ENROLL_PROOF_V2_TAG = "turbopanel-daemon-enroll-v2";
+/** First line of a v2 session proof; pinned like {@link ENROLL_PROOF_V2_TAG}. */
+export const AUTH_PROOF_V2_TAG = "turbopanel-daemon-auth-v2";
+
+/**
+ * A v2 proof also names the control plane by the fingerprint of the key this
+ * server pinned, plus the method, the path and `iat` (Unix seconds), so a
+ * proof made for one control plane is no use at another.
+ */
+export interface ProofV2Fields {
+  panelFingerprint: string;
+  iat: number;
+}
+
+export function buildEnrollmentPayloadV2(
+  params: {
+    challengeId: string;
+    nonce: string;
+    licenseId: string;
+    machineKey: string;
+    hostname: string;
+    publicKeyFingerprint: string;
+  } & ProofV2Fields,
+): string {
+  return [
+    ENROLL_PROOF_V2_TAG,
+    params.challengeId,
+    params.nonce,
+    params.licenseId,
+    params.machineKey,
+    params.hostname,
+    params.publicKeyFingerprint,
+    params.panelFingerprint,
+    "POST",
+    "/api/daemon/v1/enroll",
+    String(params.iat),
+  ].join("\n");
+}
+
+export function buildAuthPayloadV2(
+  params: {
+    challengeId: string;
+    nonce: string;
+    serverId: string;
+    keyId: string;
+    machineKey: string;
+    hostname: string;
+  } & ProofV2Fields,
+): string {
+  return [
+    AUTH_PROOF_V2_TAG,
+    params.challengeId,
+    params.nonce,
+    params.serverId,
+    params.keyId,
+    params.machineKey,
+    params.hostname,
+    params.panelFingerprint,
+    "POST",
+    "/api/daemon/v1/auth/session",
+    String(params.iat),
+  ].join("\n");
+}
+
 export async function signChallenge(
   privateJwk: JsonWebKey,
   payload: string,
@@ -107,6 +172,229 @@ export async function signChallenge(
     textEncoder.encode(payload),
   );
   return encodeBase64Url(new Uint8Array(signature));
+}
+
+/**
+ * Prefix of a daemon-signed request; pinned to the control plane's copy
+ * (`turbopanel/src/daemon/authn/request-signature.ts`) by contract-drift.
+ */
+export const REQUEST_PREFIX = "tp-request\n";
+/** Prefix of the attach proof on a signed session's hello; pinned like {@link REQUEST_PREFIX}. */
+export const ATTACH_PREFIX = "tp-attach\n";
+/** Prefix of the signed pin report on that hello; pinned like {@link REQUEST_PREFIX}. */
+export const PIN_REPORT_PREFIX = "tp-panel-pin\n";
+/** Second signature of the pin report: the pinned rotation passkeys hash. */
+export const PIN_PASSKEYS_REPORT_PREFIX = "tp-panel-pin-passkeys\n";
+/** Header that carries a request signature. */
+export const DAEMON_SIGNATURE_HEADER = "x-turbopanel-daemon-signature";
+
+/**
+ * The bytes a daemon-signed request covers:
+ * `"tp-request\n" + METHOD + "\n" + pathname + "\n" + panelFingerprint +
+ * "\n" + nonce + "\n" + base64url(SHA-256(body)) + "\n" + iat`.
+ */
+export function buildRequestSigningInput(params: {
+  method: string;
+  pathname: string;
+  panelFingerprint: string;
+  nonce: string;
+  bodySha256: string;
+  iat: number;
+}): string {
+  return [
+    `${REQUEST_PREFIX}${params.method.toUpperCase()}`,
+    params.pathname,
+    params.panelFingerprint,
+    params.nonce,
+    params.bodySha256,
+    String(params.iat),
+  ].join("\n");
+}
+
+/** base64url SHA-256 of the exact body bytes (empty for a GET). */
+export async function bodySha256B64u(body: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    textEncoder.encode(body),
+  );
+  return encodeBase64Url(new Uint8Array(digest));
+}
+
+/**
+ * The `X-TurboPanel-Daemon-Signature` value for one request:
+ * `<keyId>:<nonce>:<iat>:<sig>`, with a fresh 16-byte nonce. `pathname` has
+ * no query string.
+ */
+export async function signDaemonRequest(
+  key: { keyId: string; privateJwk: JsonWebKey },
+  request: {
+    method: string;
+    pathname: string;
+    body: string;
+    panelFingerprint: string;
+    nowMs?: number;
+  },
+): Promise<string> {
+  const nonce = encodeBase64Url(crypto.getRandomValues(new Uint8Array(16)));
+  const iat = Math.floor((request.nowMs ?? Date.now()) / 1000);
+  const input = buildRequestSigningInput({
+    method: request.method,
+    pathname: request.pathname,
+    panelFingerprint: request.panelFingerprint,
+    nonce,
+    bodySha256: await bodySha256B64u(request.body),
+    iat,
+  });
+  return `${key.keyId}:${nonce}:${iat}:${await signChallenge(
+    key.privateJwk,
+    input,
+  )}`;
+}
+
+/**
+ * The attach proof on the first hello of a signed session, bound to the
+ * control plane's session id and key: `"tp-attach\n" + sessionId + "\n" +
+ * panelFingerprint + "\n" + serverId + "\n" + keyId + "\n" + iat`.
+ */
+export function buildAttachSigningInput(params: {
+  sessionId: string;
+  panelFingerprint: string;
+  serverId: string;
+  keyId: string;
+  iat: number;
+}): string {
+  return [
+    `${ATTACH_PREFIX}${params.sessionId}`,
+    params.panelFingerprint,
+    params.serverId,
+    params.keyId,
+    String(params.iat),
+  ].join("\n");
+}
+
+export interface AttachProof {
+  keyId: string;
+  iat: number;
+  sig: string;
+}
+
+export async function signAttachProof(
+  key: { keyId: string; privateJwk: JsonWebKey },
+  session: { sessionId: string; panelFingerprint: string; serverId: string },
+  nowMs: number = Date.now(),
+): Promise<AttachProof> {
+  const iat = Math.floor(nowMs / 1000);
+  const input = buildAttachSigningInput({ ...session, keyId: key.keyId, iat });
+  return {
+    keyId: key.keyId,
+    iat,
+    sig: await signChallenge(key.privateJwk, input),
+  };
+}
+
+/**
+ * The signed pin report on the first hello of a signed session: what this
+ * server's pin file holds, signed with the daemon key and bound to the
+ * session: `"tp-panel-pin\n" + sessionId + "\n" + serverId + "\n" + keyId +
+ * "\n" + pinnedBy + "\n" + current + "\n" + keyset + "\n" + iat`. It does not
+ * name the control plane's key, so a control plane can tell that a server
+ * pinned another key and raise an alarm.
+ */
+export function buildPinReportSigningInput(params: {
+  sessionId: string;
+  serverId: string;
+  keyId: string;
+  pinnedBy: string;
+  current: string;
+  keyset: number;
+  iat: number;
+}): string {
+  return [
+    `${PIN_REPORT_PREFIX}${params.sessionId}`,
+    params.serverId,
+    params.keyId,
+    params.pinnedBy,
+    params.current,
+    String(params.keyset),
+    String(params.iat),
+  ].join("\n");
+}
+
+/**
+ * `"tp-panel-pin-passkeys\n" + sessionId + "\n" + serverId + "\n" + keyId +
+ * "\n" + passkeys + "\n" + iat`, where `passkeys` is base64url SHA-256 of the
+ * pin's `passkeys=` line ("" with none). A separate signature, so a control
+ * plane that does not know the field still verifies the first one.
+ */
+export function buildPinPasskeysSigningInput(params: {
+  sessionId: string;
+  serverId: string;
+  keyId: string;
+  passkeys: string;
+  iat: number;
+}): string {
+  return [
+    `${PIN_PASSKEYS_REPORT_PREFIX}${params.sessionId}`,
+    params.serverId,
+    params.keyId,
+    params.passkeys,
+    String(params.iat),
+  ].join("\n");
+}
+
+export interface SignedPinReport {
+  pinnedBy: string;
+  current: string;
+  keyset: number;
+  iat: number;
+  sig: string;
+  passkeys?: string;
+  passkeysSig?: string;
+}
+
+export async function signPinReport(
+  key: { keyId: string; privateJwk: JsonWebKey },
+  report: {
+    sessionId: string;
+    serverId: string;
+    pinnedBy: string;
+    current: string;
+    keyset: number;
+    /** Hash of the pinned rotation passkeys ("" with none); omitted, no second signature. */
+    passkeys?: string;
+  },
+  nowMs: number = Date.now(),
+): Promise<SignedPinReport> {
+  const iat = Math.floor(nowMs / 1000);
+  const input = buildPinReportSigningInput({
+    sessionId: report.sessionId,
+    serverId: report.serverId,
+    pinnedBy: report.pinnedBy,
+    current: report.current,
+    keyset: report.keyset,
+    keyId: key.keyId,
+    iat,
+  });
+  const signed: SignedPinReport = {
+    pinnedBy: report.pinnedBy,
+    current: report.current,
+    keyset: report.keyset,
+    iat,
+    sig: await signChallenge(key.privateJwk, input),
+  };
+  if (report.passkeys === undefined) return signed;
+  const passkeysInput = buildPinPasskeysSigningInput({
+    sessionId: report.sessionId,
+    serverId: report.serverId,
+    keyId: key.keyId,
+    passkeys: report.passkeys,
+    iat,
+  });
+  return {
+    ...signed,
+    passkeys: report.passkeys,
+    passkeysSig: await signChallenge(key.privateJwk, passkeysInput),
+  };
 }
 
 export async function verifyChallenge(

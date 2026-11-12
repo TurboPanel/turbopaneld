@@ -11,6 +11,8 @@ resolves the ref to a commit and mints the clone credential
 (`turbopanel/src/client/environments/deploy-sources.ts`); the daemon never talks
 to the control plane's Git provider itself.
 
+**Repositories must be on a public git host: reads and release checkouts take only https and ssh to a public host (`clone-url-guard.ts`).** `repo-read-request`, `repo-default-branch-request` (`read-remote-files.ts`) and `checkoutRelease` (`checkout.ts`) run `assertCloneUrlAllowed` before any scratch dir or credential file exists: `https://host/...` (no login in the URL), `ssh://[user@]host/...` (no password) or scp-like `user@host:path`; everything else (`file:`, `git:`, `http:`, `ext::`, a bare path, an empty host, a value starting with `-`, a backslash, a user, host or port that is not a plain name, address or number, such as a `%`, `#`, `?` or second `@` that git and the URL parser read differently) is refused. The host is held to `internalHostReason` from `compose-build-policy.ts`, the same static rule remote Compose build sources get (loopback, link-local, private and ULA literals, IPv6 addresses that deliver to one of those IPv4 addresses (IPv4-mapped, IPv4-compatible, NAT64, local-use NAT64, 6to4, Teredo, as the control plane's `ipAddressScope` reads them), `localhost`, single-label, reserved suffixes, numeric hosts, and the local network endings `.lan`, `.corp`, `.intranet`, `.private` and `.home`, owner decision 2026-11-05). There is no setting that lifts this (owner decision 2026-11-05; an opt-in for private git servers is later work), and the control plane refuses the same hosts when a repository is saved. DNS names are not resolved: the daemon does no lookup of its own before a read or a checkout (git resolves the name itself), and a pre-check could be answered differently when git looks the name up, so it would promise more than it holds. Every git spawn carries `GIT_ALLOW_PROTOCOL=https:ssh` (`gitProtocolEnv`; git reads it before any `protocol.*` setting), and reads also pass `-c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always`, so git refuses any other transport too. An https redirect to another host on the same scheme is not stopped. Tests fetch fixture repositories through a local `RepoGitTransport` (`protocols: ["file"]`); production never passes one.
+
 **`cloneUrl` is credential-free by contract** — both wire parsers reject a URL
 carrying inline `user:pass@`. The credential arrives as a `tpdaemon` envelope in
 `credential`, is decrypted through the same `decryptSecrets` seam everything else
@@ -113,7 +115,44 @@ WordPress `wp-content/uploads -> ../shared/uploads` (or any other link into
 `shared/`) fails the promote with "reach into shared/" (serve shared files
 through the app, not a link), and on nginx every link under the document root,
 even one that stays in the release (`public/build -> ../dist`, Laravel
-`public/storage`), answers 403 (`../site/AGENTS.md`).
+`public/storage`), answers 403 (`../site/AGENTS.md`). The one exception is
+the **platform's own layout links**, below.
+
+**Framework layouts** (`framework-layout.ts`). After the build, a site's release
+root is detected as Laravel or WordPress (regular files only) and the layout is
+recorded in the release manifest (`frameworkLayout`, daemon-only). tp-host
+`publish` / `publish-keep` take it as an optional seventh word,
+`layout=laravel|wordpress`, and in the sealed leaf, before the link check,
+replace one path with a link into `shared/`: Laravel `storage` ->
+`shared/storage`, WordPress `wp-content/uploads` -> `../shared/uploads`. Only
+that; Laravel's `bootstrap/cache` stays in the release (filled while it is
+built, by the PHP dependency install's package discovery) and, as the one folder
+of the sealed release the site account owns (`0750`, files `0640`), is what a
+post-deploy command may write the config and route caches into; WordPress's
+`wp-content/cache` stays in the release, read-only. A `bootstrap/cache` the
+build shipped as a link stays root's and read-only. After the release is placed,
+tp-host makes the layout's folders in `shared/` **as the owner**
+(`release-layout-folders` does the same for an existing release, which the
+daemon runs before a rollback swap). The link check exempts exactly the recipe
+path **with exactly its text** (tp-host `find ... ! ( -path -lname )`; the daemon's
+`isRecipeLink`), at publish, on rollback and in the boot scan, and only for a
+release whose own daemon record names the layout; every other link, including
+one that goes **through** a recipe link (`public/x -> ../storage/app`), is still
+refused. On rollback the recipe link's resolution is excused once, and only
+when it lands in the layout's folder in `shared/`. A daemon-owned (development)
+tree applies the same links in place (`applyFrameworkLayoutInPlace`).
+
+**PHP dependency install.** A PHP site build (`NativeBuildRuntime.php`) puts the
+vendored PHP package manager after the tenant Node on `PATH`, pins
+`TURBOPANEL_PHP` to the site's series and gives it a cache per account and
+project (`<build cache>/composer`) and a home outside the checkout. With a
+`composer.json` (a regular file) and no author command naming it, `composer
+install --no-dev --optimize-autoloader --no-interaction --no-progress
+--prefer-dist` runs first (never `--no-scripts`: package discovery writes the
+framework's caches into the release while it is writable). `COMPOSER_AUTH`,
+`COMPOSER_HOME`, `COMPOSER_CACHE_DIR` and `TURBOPANEL_PHP` are reserved build
+variables: a build variable is an `env(1)` argument and not secret, so private
+packages are not supported yet.
 
 **A rollback re-checks the target's links, lexically and resolved**
 (`assertSealedLinksStayInRelease`). A release sealed before the publish-time
@@ -193,7 +232,7 @@ A missing target directory **fails** rather than skipping: "the release you
 asked for was pruned on this host" is exactly what the operator needs told.
 
 **A rollback trusts only the daemon's own release record.** Every successful
-promote — native or Railpack — leaves a copy of its manifest under the
+promote — native or image-built — leaves a copy of its manifest under the
 daemon-owned `<daemonStateDir>/release-records/` root
 (`<serviceId>/<releaseId>/`, `resolveDaemonReleasePaths`); for the native lane it is written **before** the
 promote, under a `.pending` marker, so a write failure fails the deploy with
@@ -337,7 +376,7 @@ BuildKit, driven by `tp`, with no per-site-owner limits yet. There is no opt-out
 host. A development install runs the commands as the developer with `clearEnv` and an explicit
 allow-list, and no resource caps.
 
-**Site builds get the same Node.** A site built from a Git source has the default tenant Node (the newest series, as for an app with no pinned series) on its build `PATH`, vendored before the build by the same step as apps. A site that publishes an `outputDirectory` and kept the default `public` root serves the release root (`.`). The folder a site serves is checked before the release is promoted, so a missing folder fails the deploy with `current` untouched and no release directory left behind (`site-release.ts`).
+**Site builds get the same Node.** A site built from a Git source has the default tenant Node (the newest series, as for an app with no pinned series) on its build `PATH`, vendored before the build by the same step as apps. A site that publishes an `outputDirectory` and kept the default `public` root serves the release root (`.`). The folder a site serves is checked before the release is promoted, so a missing folder fails the deploy with `current` untouched and no release directory left behind (`site-release.ts`). An Apache or nginx+Apache site's document-root `.htaccess` is read from the same build tree (a regular file, 64 KiB at most) and refused lines come back as `htaccessWarnings` on the `AppliedRelease` and in the transcript (`htaccessWarningsForSite`; findings from `site/htaccess-check.ts`); it never fails the deploy. Managed directories, subfolders and files written later are not scanned.
 
 **Native-app builds run on the tenant runtime.** `ensureNativeAppRuntime`
 vendors `vendor/node-app/<series>/current` **before** `applySourceReleases`,
@@ -486,10 +525,23 @@ set plus that record. The recorded side stays current-only so it cannot grow
 without bound — once a redeploy has reclaimed a removed tree on the host, the
 record written by that same deploy no longer names it.
 
-## Railpack image releases (`build.kind: railpack`)
+## Image-Built Releases (`build.kind: image`)
 
-A source binding may set `x-turbopanel.source.buildKind: railpack`, which
-deploy-prepare passes straight through as `sourceMaterial[].build.kind`. That is
+A source binding may set `x-turbopanel.source.buildKind: image`, which
+deploy-prepare passes straight through as `sourceMaterial[].build.kind`.
+**Both spellings are accepted** while the rename rolls out: `image` is the new
+value and the old one still parses and behaves the same
+(`isImageBuildKind` in `commands-contracts.ts` is the one check). Likewise the
+two version fields are written as `builderFrontendVersion` /
+`builderPlanVersion`; `readReleaseManifest` still reads the old field names from
+manifests sealed earlier and maps them to the new ones, so a rollback to an old
+release keeps working. A daemon older than this change still reads a manifest
+written with the new names (it ignores unknown keys) and only loses the two
+version fields when it reports the release. Both fallbacks stay until wipe day:
+released control planes still send the old build kind value, and live hosts
+still hold manifests sealed with the old field names. On wipe day, when every
+database is wiped and every server reinstalled, the control plane switches to
+sending `image` and both fallbacks are removed in one step. That is
 the **fourth deploy pattern** on this host, alongside compose, site,
 and native app — and the four differ only in what a release *is*:
 
@@ -498,14 +550,14 @@ and native app — and the four differ only in what a release *is*:
 | compose | nothing (no source) | `docker compose up` on the authored image/build |
 | site | a promoted directory | a host engine vhost serves `current` |
 | native app | a promoted directory | a generated systemd unit runs out of `current` |
-| **Railpack** | **an OCI image tag** | `docker compose up` on that tag |
+| **Image build** | **an OCI image tag** | `docker compose up` on that tag |
 
-Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
+Concretely (`release/image-build.ts`, branch in `apply-source-releases.ts`):
 
 - Checkout is identical — `checkout.ts` unchanged, same scratch dir, same
   credential handling.
 - `railpack prepare` writes a build plan; `docker buildx build` hands that
-  plan to the pinned Railpack **BuildKit gateway frontend** on the **Docker
+  plan to the pinned build-tool **BuildKit gateway frontend** on the **Docker
   Engine's own BuildKit** (`--builder default`, `BUILDKIT_SYNTAX=<frontend>`,
   `-f <plan>`, `--load`), through the same `docker` CLI path and sudo ladder as
   compose builds (`runDockerStreamed`). A `docker buildx version` preflight
@@ -527,13 +579,13 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   OCI layout at `<runtimesDir>/railpack-frontend/<version>/image` (with a
   `current` symlink) plus its manifest digest, and its `docker pull` leaves the
   same image in Docker's store. The build names
-  `ghcr.io/railwayapp/railpack-frontend@<digest>`, so a repointed upstream tag
+  `<frontend image>@<digest>`, so a repointed upstream tag
   cannot change what two releases recorded with the same
-  `railpackFrontendVersion` were built by. If the store lost the image, the
+  `builderFrontendVersion` were built by. If the store lost the image, the
   vendored layout is `docker load`ed back first; if even that fails the Engine
   can only fetch exactly that digest.
 - Output goes straight into the image store (`--load`): no tarball handoff.
-- **Tenant isolation is `cache-key=<projectId>`**, which Railpack prefixes to
+- **Tenant isolation is `cache-key=<projectId>`**, which the build tool prefixes to
   every mount cache id (package-manager stores, `node_modules`). Mount caches
   are writable and shared by id, so without it one tenant could read or poison
   another's. The Engine's layer cache is per host, as it is for compose builds
@@ -544,7 +596,7 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   (follow-up), never values on argv.
 - Everything the native lane does *after* the build is skipped. Nothing is
   staged, sealed, or linked, and `current` never moves. There is no promoted
-  tree, so a Railpack release needs **no project principal** — the guard that
+  tree, so an image-built release needs **no project principal** — the guard that
   skips a principal-less entry is relaxed for this branch only, because there is
   no filesystem tree for a Unix account to own. The image runs as an ordinary
   container under whatever service-level limits already apply.
@@ -552,16 +604,16 @@ Concretely (`release/railpack-build.ts`, branch in `apply-source-releases.ts`):
   `releases/<releaseId>/.turbopanel/release.json` under the daemon-owned
   `<daemonStateDir>/release-records/` root (`resolveDaemonReleasePaths`), so both
   lanes keep release history in one place and one shape. It carries `imageTag`,
-  `imageDigest`, `railpackFrontendVersion`, and `railpackPlanVersion`.
+  `imageDigest`, `builderFrontendVersion`, and `builderPlanVersion`.
 
 **Feeding the image into compose.** `deploy-environment.ts` builds a
 `composeServiceName → imageTag` map from the returned `AppliedRelease[]` and
-`applyRailpackImagesToComposeYaml` sets `services.<name>.image` (dropping any
+`applyImageBuildImagesToComposeYaml` sets `services.<name>.image` (dropping any
 authored `build:`) on the compiled runtime document **before**
 `docker compose config` validates it. This is a pre-processing pass on the same
 compose document, deliberately not a second orchestration path: Traefik labels,
 hosting Caddy, storage mounts, and `docker compose ps` container reporting all
-go on treating the service as the ordinary container it is. A Railpack service
+go on treating the service as the ordinary container it is. An image-built service
 is **not** host-native and never appears in `hostNativeComposeServiceNames()` /
 `resolveHostNativeLanes` — it stays `serviceKind: container` and never enters
 `sites[]` / `nativeAppServices[]`.
@@ -574,18 +626,18 @@ what lets a service that switched build modes still roll back to a release built
 the old way.
 
 **Retention.** `pruneReleases` walks `releases/` by directory listing and is
-unchanged. A Railpack release directory contains only
+unchanged. An image-built release directory contains only
 `.turbopanel/release.json`, so pruning one removes **its manifest, not a running
 container** — the container keeps running under the still-tagged image until a
 later deploy supersedes it. Pruning it does mean that release id can no longer
 be rolled back to, which is the same guarantee the native lane gives.
 
-**Provisioning is on demand.** `ensureBuildkitRailpack` follows the
+**Provisioning is on demand.** `ensureBuildkitImageBuild` follows the
 `ensureDocker` / `ensureHostingCaddy` pattern exactly: check the vendor tree →
 `buildkit-setup.yml` (`runBuildkitSetup`) → direct download of railpack and the
-frontend → re-check → throw. It is called only when a `railpack` build is
+frontend → re-check → throw. It is called only when an `image` build is
 actually requested, never from `daemon-converge` or `instance-dev-install`.
-`RAILPACK_VERSION` in `railpack-build.ts` is pinned in step with
+`IMAGE_BUILD_VERSION` in `image-build.ts` is pinned in step with
 `orchestration/roles/buildkit/defaults/main.yml`; bumping one without the other
 leaves the daemon looking for a version directory that was never vendored. The
 role still vendors `buildctl` / `buildkitd`; the daemon no longer runs them.

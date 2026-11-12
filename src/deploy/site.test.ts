@@ -23,6 +23,8 @@ import {
   phpFpmPoolOverrides,
   phpFpmSocketPath,
   phpSeriesForDeploy,
+  planSiteFrameworkAliases,
+  releasePhpOpenBasedir,
   resolveSiteOwnership,
   resolveSitePhpSeries,
   setgidDirectoriesFindArgs,
@@ -32,6 +34,11 @@ import {
 } from "./site.ts";
 import { caddyHttpUpstream, siteSnippet } from "./ingress.ts";
 import { sitePhpRuntimeChildren } from "./site/php-runtime.ts";
+import { renderNativeAppEnvFile } from "./native/variables-runtime.ts";
+import {
+  APACHE_OVERRIDE_CLASSES,
+  apacheOverrideListLine,
+} from "./site/apache-overrides.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
@@ -205,13 +212,20 @@ test("site engines follow a symlink only when its owner matches the target's", (
   assertEquals(release.includes("if_not_owner"), false);
 
   const apache = apacheSiteConfig({ ...site, engine: "apache" }, docroot);
-  assertStringIncludes(apache, "Options Indexes SymLinksIfOwnerMatch\n");
+  // Listing is opt-in per folder: `Indexes` is not in the default.
+  assertStringIncludes(apache, "    Options SymLinksIfOwnerMatch\n");
+  assertEquals(apache.includes("Options Indexes"), false);
   assertEquals(apache.includes("FollowSymLinks"), false);
-  // `.htaccess` may not turn FollowSymLinks back on.
+  // `.htaccess` may not turn FollowSymLinks back on, and has no FileInfo.
   assertEquals(apache.includes("AllowOverride All"), false);
+  assertEquals(apache.includes("FileInfo"), false);
   assertStringIncludes(
     apache,
-    "Options=Indexes,MultiViews,SymLinksIfOwnerMatch\n",
+    `    AllowOverride ${APACHE_OVERRIDE_CLASSES}\n`,
+  );
+  assertStringIncludes(
+    apache,
+    `    AllowOverrideList ${apacheOverrideListLine()}\n`,
   );
 
   const ols = openlitespeedSiteFragment(
@@ -221,6 +235,110 @@ test("site engines follow a symlink only when its owner matches the target's", (
     docroot,
   );
   assertStringIncludes(ols, "allowSymbolLink           2\n");
+});
+
+/** A fixed 64-hex fixture, never a real key. */
+const TEST_SITE_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+const KEYED_PHP_SITE = {
+  composeServiceName: "phpapp",
+  engine: "apache",
+  root: "public",
+  listenPort: 18081,
+  php: { version: "8.4" },
+} as const;
+
+const WALL_STRIPS = [
+  '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
+  '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
+  '  ProxyFCGISetEnvIf "true" !PHPRC',
+  '  ProxyFCGISetEnvIf "true" !PHP_INI_SCAN_DIR',
+  '  ProxyFCGISetEnvIf "true" !TP_SITE_KEY',
+];
+
+test("an Apache PHP vhost clears the PHP parameters and any key at vhost level, then sets its own key, before the dotfile rule", () => {
+  const conf = apacheSiteConfig(KEYED_PHP_SITE, "/srv/www", {
+    phpFpmSocket: "/run/x.sock",
+    phpSiteKey: TEST_SITE_KEY,
+  });
+  // mod_proxy_fcgi applies the fixups in the order written: the unset of
+  // TP_SITE_KEY must come before the line that sets this site's own key, or
+  // the vhost would clear its own key and every page would answer 403.
+  const lines = [
+    ...WALL_STRIPS,
+    `  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${TEST_SITE_KEY}"`,
+  ].join("\n");
+  assertStringIncludes(conf, `${lines}\n`);
+  const at = conf.indexOf(lines);
+  assertEquals(at > conf.indexOf("RemoteIPInternalProxy"), true);
+  assertEquals(at < conf.indexOf("<LocationMatch"), true);
+  assertEquals(at < conf.indexOf("<Directory"), true);
+  assertEquals(conf.match(/TP_SITE_KEY/g)?.length, 2);
+});
+
+test("an Apache PHP vhost behind nginx carries the same key lines, before its dotfile rule", () => {
+  const conf = apacheSiteConfig(KEYED_PHP_SITE, "/srv/www", {
+    phpFpmSocket: "/run/x.sock",
+    phpSiteKey: TEST_SITE_KEY,
+    behindNginxPort: 18091,
+  });
+  assertStringIncludes(
+    conf,
+    `${
+      WALL_STRIPS.join("\n")
+    }\n  ProxyFCGISetEnvIf "true" TP_SITE_KEY "${TEST_SITE_KEY}"\n`,
+  );
+  assertEquals(
+    conf.indexOf(`TP_SITE_KEY "${TEST_SITE_KEY}"`) <
+      conf.indexOf("<LocationMatch"),
+    true,
+  );
+});
+
+test("a static Apache vhost clears the PHP parameters and any key, and sets none", () => {
+  const site = { ...KEYED_PHP_SITE, php: undefined };
+  for (
+    const opts of [
+      { phpSiteKey: TEST_SITE_KEY },
+      { phpSiteKey: TEST_SITE_KEY, behindNginxPort: 18091 },
+      {},
+    ]
+  ) {
+    const conf = apacheSiteConfig(site, "/srv/www", opts);
+    // A static site can still proxy to another site's socket, so it gets the
+    // same strip lines; it never sets a key of its own.
+    assertStringIncludes(conf, `${WALL_STRIPS.join("\n")}\n`);
+    assertEquals(conf.includes('TP_SITE_KEY "'), false);
+    assertEquals(
+      conf.indexOf(WALL_STRIPS[0]) < conf.indexOf("<LocationMatch"),
+      true,
+    );
+  }
+});
+
+test("an Apache PHP site without a valid site key is refused", () => {
+  for (
+    const phpSiteKey of [undefined, null, "abc", TEST_SITE_KEY.toUpperCase()]
+  ) {
+    assertThrows(
+      () =>
+        apacheSiteConfig(KEYED_PHP_SITE, "/srv/www", {
+          phpFpmSocket: "/run/x.sock",
+          phpSiteKey,
+        }),
+      Error,
+      "64 hex site key",
+    );
+  }
+});
+
+test("an Apache vhost names its own error log right after ServerName, only when given one", () => {
+  const log = "/var/log/turbopanel/apache/sites/phpapp-0123456789ab.error.log";
+  const site = { ...KEYED_PHP_SITE, php: undefined };
+  const conf = apacheSiteConfig(site, "/srv/www", { errorLogPath: log });
+  assertStringIncludes(conf, `  ServerName localhost\n  ErrorLog "${log}"\n`);
+  assertEquals(apacheSiteConfig(site, "/srv/www").includes("ErrorLog"), false);
 });
 
 test("apacheSiteConfig refuses a PHP site with no fpm socket", () => {
@@ -256,7 +374,7 @@ test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
       },
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
-    { phpFpmSocket: socket },
+    { phpFpmSocket: socket, phpSiteKey: TEST_SITE_KEY },
   );
   assertStringIncludes(conf, "Listen 127.0.0.1:18081");
   assertStringIncludes(
@@ -537,9 +655,36 @@ test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async (
   }
 });
 
-test("formatHostingEnvFile sorts keys and escapes quotes", () => {
-  const file = formatHostingEnvFile({ B: "two", A: 'say "hi"' });
-  assertEquals(file, 'A="say \\"hi\\""\nB="two"\n');
+test("formatHostingEnvFile sorts keys and renders what a shell and systemd read back", () => {
+  assertEquals(
+    formatHostingEnvFile({ B: "two", A: 'say "hi"' }),
+    "# Managed by TurboPanel — rewritten on every deploy; edits are overwritten.\n" +
+      `A='say "hi"'\nB='two'\n`,
+  );
+  const tricky = 'it\'s $HOME `x` \\ "q"';
+  assertEquals(
+    formatHostingEnvFile({ TRICKY: tricky, MULTI: "a\nb", PLAIN: "x" }),
+    renderNativeAppEnvFile([
+      { name: "MULTI", value: "a\nb" },
+      { name: "PLAIN", value: "x" },
+      { name: "TRICKY", value: tricky },
+    ]),
+  );
+});
+
+test("formatHostingEnvFile leaves out a name a shell would read as code", () => {
+  const file = formatHostingEnvFile({
+    OK: "1",
+    "X;cmd;Y": "2",
+    "A B": "3",
+    "1BAD": "4",
+    "$(id)": "5",
+    "dot.name": "6",
+  });
+  assertEquals(
+    file,
+    "# Managed by TurboPanel — rewritten on every deploy; edits are overwritten.\nOK='1'\n",
+  );
 });
 
 test("defaultIndexHtml includes the compose service name", () => {
@@ -1319,7 +1464,11 @@ test("plain Apache trusts only the loopback front server for address and HTTPS",
   const conf = apacheSiteConfig(
     { ...FORWARDED_PHP_SITE, engine: "apache" },
     "/srv/www",
-    { phpFpmSocket: "/run/x.sock", dockerBindAddress: "172.17.0.1" },
+    {
+      phpFpmSocket: "/run/x.sock",
+      phpSiteKey: TEST_SITE_KEY,
+      dockerBindAddress: "172.17.0.1",
+    },
   );
   assertStringIncludes(conf, "  RemoteIPHeader X-Forwarded-For\n");
   // One trusted proxy and no more: a docker bridge peer cannot name the client.
@@ -1395,4 +1544,151 @@ test("OpenLiteSpeed trusts only loopback for the address and reads HTTPS from th
   );
   // A site without PHP has nothing to tell.
   assertEquals(openlitespeedVhostConfig().includes("X-Forwarded-Proto"), false);
+});
+
+const SHARED_STORAGE = "/srv/users/alice/production/services/web/shared";
+const LARAVEL_ALIAS = [{
+  urlPrefix: "/storage/",
+  dir: `${SHARED_STORAGE}/storage/app/public`,
+}];
+const WP_ALIAS = [{
+  urlPrefix: "/wp-content/uploads/",
+  dir: `${SHARED_STORAGE}/uploads`,
+}];
+
+test("releasePhpOpenBasedir names the release, shared/ and tmp, and the CA file when the site has one", () => {
+  const layout = resolveLayout({}, { forceMode: "production" });
+  const release = {
+    serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+    username: "alice",
+    folder: { owner: "alice", scope: "production", slug: "web" },
+  };
+  const root = `${layout.principalHomeRoot}/alice/production/services/web`;
+  assertEquals(releasePhpOpenBasedir(layout, release), [
+    `${root}/current`,
+    `${root}/shared`,
+    "/tmp",
+  ]);
+  assertEquals(
+    releasePhpOpenBasedir(
+      layout,
+      release,
+      `${root}/.turbopanel-hosting/managed-ca.pem`,
+    ),
+    [
+      `${root}/current`,
+      `${root}/shared`,
+      "/tmp",
+      `${root}/.turbopanel-hosting/managed-ca.pem`,
+    ],
+  );
+});
+
+test("an Apache site with a framework layout serves its shared folder by URL and runs nothing from it", () => {
+  const site = {
+    composeServiceName: "web",
+    engine: "apache",
+    root: "public",
+    listenPort: 18081,
+  } as const;
+  const docroot = "/srv/users/alice/production/services/web/current/public";
+  const plain = apacheSiteConfig(site, docroot);
+  assertEquals(plain.includes("Alias "), false);
+  const conf = apacheSiteConfig(site, docroot, {
+    frameworkAliases: LARAVEL_ALIAS,
+  });
+  assertStringIncludes(
+    conf,
+    `  Alias "/storage/" "${SHARED_STORAGE}/storage/app/public/"
+  <Directory "${SHARED_STORAGE}/storage/app/public">
+    Options SymLinksIfOwnerMatch
+    AllowOverride None
+    Require all granted
+    <FilesMatch "\\.(?i:php[0-9]?|phtml|phar)$">
+      Require all denied
+    </FilesMatch>
+  </Directory>`,
+  );
+  // After the document root's own block, before the vhost closes.
+  assertEquals(
+    conf.indexOf(`<Directory "${docroot}">`) < conf.indexOf("Alias "),
+    true,
+  );
+  assertEquals(conf.trimEnd().endsWith("</VirtualHost>"), true);
+  const wp = apacheSiteConfig(site, docroot, { frameworkAliases: WP_ALIAS });
+  assertStringIncludes(
+    wp,
+    `Alias "/wp-content/uploads/" "${SHARED_STORAGE}/uploads/"`,
+  );
+});
+
+test("nginx serves the shared folder from an alias location and refuses PHP in it, alone or in front of Apache", () => {
+  const site = {
+    composeServiceName: "web",
+    engine: "nginx",
+    root: "public",
+    listenPort: 18080,
+    php: { version: "8.4" },
+  } as const;
+  const docroot = "/srv/users/alice/production/services/web/current/public";
+  const plain = nginxSiteConfig(site, docroot, null, {
+    phpFpmSocket: "/run/turbopanel/php/8.4/tp.sock",
+  });
+  assertEquals(plain.includes("alias "), false);
+  const conf = nginxSiteConfig(site, docroot, null, {
+    phpFpmSocket: "/run/turbopanel/php/8.4/tp.sock",
+    releaseBacked: true,
+    frameworkAliases: LARAVEL_ALIAS,
+  });
+  const location = `  location ^~ /storage/ {
+    alias ${SHARED_STORAGE}/storage/app/public/;
+    disable_symlinks if_not_owner;
+    location ~* \\.(php[0-9]?|phtml|phar)$ {
+      return 403;
+    }
+  }`;
+  assertStringIncludes(conf, location);
+  // Before the PHP location, so it wins for /storage/x.php.
+  assertEquals(
+    conf.indexOf("location ^~ /storage/") <
+      conf.indexOf(String.raw`location ~ \.php$`),
+    true,
+  );
+  const front = nginxSiteConfig(site, docroot, null, {
+    apacheBackendPort: 18500,
+    releaseBacked: true,
+    frameworkAliases: WP_ALIAS,
+  });
+  assertStringIncludes(front, "location ^~ /wp-content/uploads/ {");
+  assertEquals(
+    front.indexOf("location ^~ /wp-content/uploads/") <
+      front.indexOf("proxy_pass"),
+    true,
+  );
+});
+
+test("a layout is warned about on engines that cannot serve it by URL, and on none that can", () => {
+  const base = {
+    composeServiceName: "web",
+    root: "public",
+    listenPort: 18080,
+    frameworkLayout: "laravel",
+  } as const;
+  for (const engine of ["apache", "nginx"] as const) {
+    assertEquals(planSiteFrameworkAliases({ ...base, engine }), []);
+  }
+  for (const engine of ["openlitespeed", "caddy"] as const) {
+    assertEquals(planSiteFrameworkAliases({ ...base, engine }), [
+      "Site web: files under /storage/ are served only on Apache and nginx sites for now.",
+    ]);
+  }
+  assertEquals(
+    planSiteFrameworkAliases({
+      composeServiceName: "web",
+      engine: "caddy",
+      root: "public",
+      listenPort: 18080,
+    }),
+    [],
+  );
 });

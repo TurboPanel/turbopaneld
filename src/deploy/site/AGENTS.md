@@ -21,8 +21,82 @@ Docker Compose. The daemon:
    vendored — see the end of this section). Apache vhosts
    `SetHandler "proxy:unix:…|fcgi://localhost/"` (mod_proxy_fcgi — **never**
    mod_php).
+   `.htaccess` is honoured within a closed list (`site/apache-overrides.ts`, the
+   one source for the vhost, the deploy check and the tests): the classes
+   `AuthConfig Indexes Limit` and `Options=Indexes,MultiViews,SymLinksIfOwnerMatch`
+   (plus `ExecCGI`, `Includes`, `IncludesNOEXEC` so a file that switches them
+   off parses), and `AllowOverrideList` names (rewrite, redirect, headers,
+   types, filters, `SetHandler`, `SetEnv*`). Never `FileInfo`, `All` or
+   `FollowSymLinks`. Directory listing is opt-in per folder (`Options +Indexes`):
+   the vhost default is `Options SymLinksIfOwnerMatch`, and `IndexIgnore` hides
+   dotfiles. Each site has its own error log,
+   `/var/log/turbopanel/apache/sites/<site key>.error.log` (`<site key>` is
+   `sitePhpKey(environmentId, service)`, also the start of a runtime id; owned
+   by `tpapache`, never inside the site tree, where the owner could link it).
+   A refused `.htaccess` line makes Apache answer 500 for that folder and its
+   reason lands in that file.
 
-   Both engines share the pool layout: per-site FPM pools under
+   **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
+   socket path is no boundary. Every Apache PHP runtime therefore has a site
+   key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
+   daemon-only secret (`<daemonStateDir>/sites/php-site-key`, `0600`, created on
+   first use). **Every** Apache vhost, static ones too, clears `PHP_VALUE`,
+   `PHP_ADMIN_VALUE`, `PHPRC`, `PHP_INI_SCAN_DIR` and `TP_SITE_KEY` at vhost
+   level (`ProxyFCGISetEnvIf "true" !NAME`): a static site can still proxy to
+   another site's socket, and must not hand that runtime settings or a key
+   through `SetEnv`, `SetEnvIf` or `[E=]`. A PHP vhost then sets its own
+   `TP_SITE_KEY` after those lines (`mod_proxy_fcgi` applies the fixups in the
+   order written, so the unset must come first, or the vhost would clear its own
+   key); `ProxyFCGISetEnvIf` itself is not an allowed override. The runtime's own
+   `php.ini` holds the expected key (`turbopanel.site_key`), switches
+   `allow_url_include` off and names `site-guard.php` (`sitePhpGuardPhp`, pinned
+   byte for byte by tp-host) as `auto_prepend_file`, in `[PHP]` and again in
+   `[PATH=<home>]`; a php-fpm runtime pins the same two settings in its pool
+   (`php_admin_value[auto_prepend_file]`, `php_admin_flag[allow_url_include]`).
+   The guard answers 403 unless the key the vhost sent equals the one in the
+   runtime's own `php.ini`, then drops the key from `$_SERVER` and `$_ENV`. A
+   site's own PHP can still read its own site key (`getenv()` reads the FastCGI
+   request values first, and `get_cfg_var` shows the expected key). That is
+   safe: every PHP vhost forces its own key after the clears and
+   `ProxyFCGISetEnvIf` is not an allowed override, so a site's key never opens
+   another site's PHP runtime (canary-proven 403 or 500 across sites in
+   fastcgi and fpm, 2026-11-11). tp-host accepts the previous guard bytes (with
+   the useless `putenv` call) as well as the current ones, for hosts that have
+   not re-rendered yet. A
+   `RewriteRule [P]`, `[H=]` or `SetHandler` from site A to site B's socket
+   carries A's key (or none) and B refuses it. A hosting setting, or a site's own
+   `.user.ini`, that names an `auto_prepend_file` no longer takes effect: the
+   guard wins, which is intended. An Apache PHP site with no mode runs FastCGI
+   (warned once), so one with no Hosting Account is refused; nginx keeps its
+   shared master for now. A runtime with the guard behind a vhost without the key
+   answers 403 (fail closed). The first deploy of an existing site changes the
+   runtime and the vhost together, so its PHP pages can answer 403 for the few
+   seconds between the PHP restart and the Apache reload. A runtime has its guard
+   only after its own site is deployed; until then another site can still proxy
+   to it and run its existing scripts. The Apache role does tighten every vhost
+   already on disk at the host's first Apache deploy (`orchestration/AGENTS.md`):
+   no `FileInfo`, the closed list, the strip lines. Known limit: a `[P]` to a
+   FastCGI listener on loopback that is not a site runtime is not covered by the
+   key (none exists today). `AuthUserFile` may name any file `tpapache` can read;
+   Apache only checks passwords against it, so the worst case is a guessing
+   oracle against another site's password file.
+
+   **Refused `.htaccess` lines are named at deploy.** For a release-backed
+   Apache or nginx+Apache site, `htaccessWarningsForSite`
+   (`release/apply-source-releases.ts`) reads the document-root `.htaccess` from
+   the daemon-owned build tree before publish (a regular file only, 64 KiB at
+   most) and `site/htaccess-check.ts` returns one finding per refused or unknown
+   directive. Each becomes `Site <service>: .htaccess line <n>: <Directive> is
+   not allowed on this server, so Apache answers 500 for that folder.` (or "is
+   not a directive this server knows"), at most ten, in the command transcript
+   and on `warnings` of the deploy result; it never fails a deploy. Managed
+   directories, subfolders and files a CMS writes later are not scanned: their
+   500s show only in the site's error log. The front Caddy compresses Apache
+   sites (`encode zstd gzip`, `ingress.ts`), skipping a response that already
+   has a `Content-Encoding`.
+
+   Sites without a per-site mode share the pool layout (nginx keeps it; an Apache
+   PHP site always gets its own runtime, below): per-site FPM pools under
    `<configDir>/php/pools/tp-<environmentId>-<service>.conf` honoring
    validated `php.settings` via `php_admin_value[…]`. A pool is keyed
    by environment + compose service, so it belongs to exactly one site and
@@ -164,7 +238,7 @@ Docker Compose. The daemon:
    `.tpprev` config for one it changed in place (PHP config cannot use
    `.tpnew`: tp-host's PHP path class takes only the live names and
    `.tpprev`). A runtime changed in place with no vhost change is probed on
-   its own. A site's runtimes are matched by exact id
+   its own. Pools and engines are rolled out together: `reloadSiteEngines` keeps every php-fpm pool rollout and every engine rollout open until all engines have answered, then commits them in order, so a failed deploy puts the engines and the pools back as one and no committed vhost names a pool that was taken away. If a commit has already happened when a later step fails, the pools are kept (they are additive). A site's runtimes are matched by exact id
    (`isSitePhpRuntimeOf`: `<key>-(fcgi|fpm|lsd)<digits>`), never by prefix — one
    site's key can begin another's. A site moving onto a runtime gives up its
    pool on the shared master (any series) once its vhost serves the new
@@ -188,27 +262,87 @@ Docker Compose. The daemon:
    carries `IPAddressDeny=localhost link-local multicast 0.0.0.0/8 fc00::/7`
    with `IPAddressAllow=127.0.0.1 127.0.0.53` (the database proxy and
    systemd-resolved's stub). systemd filters by address, not port, so the port
-   filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`): for
-   every site owner's Linux user with a PHP unit it refuses all loopback
-   destinations except 127.0.0.1:13306 (ProxySQL's MySQL port) and the stub
-   on port 53, so ProxySQL admin/metrics, other sites and Apache's backend
-   stay closed. The rules match the uid, so they also bind that user's ssh and
-   cron. Each unit runs it as root in `ExecStartPre=+` (the one root hook
-   tp-host pins; if it fails the unit does not start: fail closed) and the
-   daemon runs `tp-host php-loopback-sync` after installing (before starting)
-   or removing a runtime and at boot reconcile; the set is rebuilt from the
-   unit files on disk, so start and sweep cannot disagree. Replies of the owner's own local servers (a native app on 127.0.0.1) pass
-   through `ct state established,related accept` first. The `nft` and `flock`
-   programs are installed by `turbopanel-user/root-helpers.yml`; if still
-   missing the helper exits non-zero naming the program (units do not start,
-   boot reconcile logs the error). OpenLiteSpeed's detached lsphp (`lsd`) runs
-   the same unit, so it carries the same filter, limits and guard. Not closed: an
-   `nft flush ruleset` while PHP runs leaves loopback open until the next
-   start, deploy or daemon boot. The ProxySQL MySQL port is fixed at 13306
-   in the script; a changed `listenerPorts` needs the script's `DB_PORT`
-   changed too. RFC 1918 stays open
-   (scope addresses, VPC services, operator-set Docker pools), so the host's
-   private addresses and other containers' bridge IPs are not closed by it.
+   filter is `lib/tp-php-loopback` (nftables table `inet turbopanel_php`, the
+   **account walls**). Every rule but the guard rule below binds the principal band (uids 15001-60000,
+   tp-host's `PRINCIPAL_ID_MIN`/`MAX`): every Hosting Account's PHP, cron,
+   ssh, sftp, `sudo -u` and native app processes, with or without a PHP site.
+   Replies come first (`ct state established,related accept`), so a native
+   app's answers to the hosting proxy and every reply on a connection the
+   account was allowed to open pass. **Loopback:** every new connection to
+   127.0.0.0/8 or ::1 is refused except 127.0.0.1:13306 and 15432 (the
+   database proxy), port 53 on 127.0.0.53 and on any loopback nameserver
+   `/etc/resolv.conf` names, and the account's **own ports**: `uid . port`
+   pairs (set `own_ports`) from `User=` and `Environment=PORT=` of every
+   `turbopanel-app-*.service` on disk, check copies included, of every
+   `turbopanel-cache-*.service` (a cache that listens on a port) and of the
+   root-written lists `<config>/reach-ports/<environment>.list` (lines of
+   `<user> <port>`, made by `tp-host reach-ports-install` from
+   `deploy/reach/reach-ports.ts`, which syncs the walls after and throws when
+   that fails). A cache's or a helper container's port is **guarded**: it
+   must sit in the listen band 18080-18999, is listed in the set `guarded`,
+   and the chain's first rule refuses a new connection to it from every uid
+   but root and the pair's own account, so other accounts, the web servers,
+   the daemon and builds are all refused. An app's port is never guarded. The
+   set and the rule exist only while a port is guarded, so a host without a
+   cache or helper container gets the same rules as before. So ProxySQL
+   admin/metrics, other accounts' apps and loopback publishes, other sites and
+   Apache's backend are closed, and a server an account starts by hand on
+   loopback is refused to it too (nothing says which account a listener
+   belongs to). **Container networks:** new connections
+   are refused that leave through a Docker bridge (`oifname` docker0 or
+   `br-*`, so a network created after the sync is covered; a `br-` interface
+   that is not Docker's `br-<12 hex>`, such as a LAN bridge, is left out by
+   name as found at the sync), to the addresses on those bridges now (their
+   gateways, which route over lo; from `ip -o addr`), and to Docker's
+   configured ranges (`default-address-pools` bases and `bip` in
+   `/etc/docker/daemon.json`). An IPv4 pool that overlaps any range the
+   host routes somewhere other than a Docker bridge (`ip route`: the host's
+   own networks, the private fabric on tp0, a LAN bridge) is dropped whole
+   with a warning, so even a 10.0.0.0/8 pool cannot close the private
+   network (IPv6 pools keep such routes open instead); with no routes (the
+   boot unit, before the network) or a failed route listing no pool is
+   refused. A pool address reached only through the default route is
+   refused, so a pool must not hold the private network's other subnets.
+   One account can therefore not reach another
+   account's containers by bridge address, in either direction. Docker's
+   built-in pools are not assumed when none is configured (they overlap
+   common private networks; Docker only hands out ranges that miss the host's
+   routes, so the live bridges are exact). The rest of RFC 1918 stays open
+   (scope addresses, VPC services), and the database proxy keeps working: the
+   hook runs before Docker's NAT, so 127.0.0.1:13306 and 15432 are judged as
+   loopback, not as the proxy's bridge address. Malformed or wider-than-/8
+   pools are dropped, never handed to nft, so a stray `daemon.json` value
+   cannot keep PHP down; a native app unit that does not fit is skipped.
+   **Who loads it:** `turbopanel-loopback-php.service` at boot, before the
+   network, logins and cron (fails open; it sees no routes yet, so no pool
+   is refused until the daemon's own sync); every PHP unit in `ExecStartPre=+`
+   (the one root hook tp-host pins; if it fails the unit does not start:
+   fail closed); and the daemon through `tp-host php-loopback-sync` at its
+   boot reconcile (after the private fabric is restored, also when it skips
+   the PHP sweep over an unreadable vhost; the daemon also syncs on
+   its own at the very start of the process (before any orchestration step),
+   again before that sweep, whenever Docker becomes reachable and on every
+   Docker network `create` event),
+   after every container deploy (`deploy/account-wall.ts`, throws: compose may
+   have created a network whose gateway only a sync learns), after installing (before
+   starting) or removing a PHP runtime, and after native app units are
+   installed (before any starts), a check copy is retired or apps are
+   removed, so a port the ledger hands on leaves its old account. Everything
+   is rebuilt from disk and the kernel each time. The `nft`, `flock` and `ip`
+   programs are installed by `turbopanel-user/root-helpers.yml`; if missing,
+   or if an `ip` listing fails, the helper exits non-zero naming it (PHP units
+   do not start, boot reconcile logs the error). OpenLiteSpeed's detached
+   lsphp (`lsd`) runs the same unit, so it carries the same filter, limits
+   and guard. The ProxySQL MySQL port is fixed at 13306 in the script; a
+   changed `listenerPorts` needs the script's `DB_PORT` changed too. Limits:
+   an `nft flush ruleset` leaves everything open until the next start, deploy
+   or daemon boot; a network with its own bridge name
+   (`com.docker.network.bridge.name`, host-level approval only) outside the
+   configured pools, or inside a dropped pool, is not covered (the
+   interface match still covers `br-<id>` names); another server's container
+   network this host routes over tp0 stays open (the far server's forwarding
+   rules decide it); a route added after the last sync does not drop a pool
+   until the next sync.
    Every installed PHP series may be run by every site owner's Linux user, so
    a PHP site needs no group for its runtime.
    No mode keeps the shared master on nginx and Apache; a mode without a
@@ -337,7 +471,13 @@ root-owned `0550` by design:
   as every other managed config file. Not group-readable: every web engine is a
   member of the site owner's group, so a group bit would let one owner's link
   reach another owner's values; the owner's own scripts and apps still read
-  their file. The daemon-owned lane keeps `<base>/.turbopanel/` at
+  their file. A deploy that leaves a site with no variables rewrites an
+  existing `hosting.env` with none in it (never removes it, so a shell that
+  sources it keeps working, and never creates one for a site that had none;
+  `hostingWebMetadataFiles`), on all three lanes. The release and
+  managed-directory lanes ask whether the file is there through
+  `releasePathExists` (the daemon cannot stat the owner's tree; tp-host
+  answers `test -e`). The daemon-owned lane keeps `<base>/.turbopanel/` at
   `0700`/`0600` (only the daemon account owns that tree).
 - **Caddy follows no link inside a site owner's tree.** Caddy's `file_server`
   always follows symlinks, and `tpcaddysite` sits in every owner's group, so the
@@ -369,10 +509,136 @@ root-owned `0550` by design:
   the raw request path and `file_server` cleans it afterwards, so a dot segment
   *inside* `/.well-known/` (`/.well-known/../.env`) has its own refusal.
 - **PHP is confined.** A release-backed nginx/Apache PHP pool gets
-  `php_admin_value[open_basedir] = <documentRoot>:<siteRoot>/shared:/tmp`, so
-  scripts read the release and write through `shared/` — reachable as
-  `current/shared` — and nothing else on the filesystem. Daemon-owned sites
-  (no release binding) stay unrestricted.
+  `php_admin_value[open_basedir] = <siteRoot>/current:<siteRoot>/shared:/tmp`
+  (`releasePhpOpenBasedir`, plus the managed database's CA file when the site
+  has one), so scripts read the **whole release** (`vendor/`, `config/`,
+  `bootstrap/`, not only the folder the web root serves, which stays
+  `current/<root>`) and write through `shared/` — reachable as `current/shared`
+  — and nothing else on the filesystem. Daemon-owned sites (no release binding)
+  stay unrestricted.
+- **Framework layout (Laravel, WordPress).** The built release is checked once
+  (`release/framework-layout.ts`); a Laravel app (`artisan`, `bootstrap/app.php`,
+  `public/index.php`) or WordPress (`wp-settings.php`, `wp-includes/`,
+  `wp-content/`) is recorded in the release manifest and carried on the apply
+  as `SiteApplySpec.frameworkLayout`. The files under `shared/` that the site
+  serves are reached by URL, never by a link: Apache gets an `Alias` and
+  nginx (alone, or in front of Apache) a `location ^~` with its own `alias`
+  for `/storage/` (`shared/storage/app/public`) or `/wp-content/uploads/`
+  (`shared/uploads`), links followed only when link and target share an owner,
+  and `.php`, `.phtml` and `.phar` refused there. The folders are served
+  folders, like the document root: whatever lets an engine read a document root
+  must cover them. OpenLiteSpeed and the site Caddy get no alias yet and a
+  deploy warning says so (`planSiteFrameworkAliases`). The alias paths go
+  through `safeConfigPath`.
+- **One environment file per site for everything that is not a web request.**
+  `deploy/site/site-env-file.ts` stages `<stateDir>/sites/.env-stage/<site
+  id>.env` (`0600` in a `0700` folder) and `tp-host site-env-install <user>
+  <site id>` copies it to `<config>/site-env/<user>/<site id>.env`
+  (`root:root 0600`); a site's cron unit loads it with `EnvironmentFile=`
+  (tp-host pins the path to the unit's own account). The file holds what the
+  web request gets (`webEnv` plus the decrypted secrets, with the CA file path
+  variables), minus the platform's own names (`HOME`, `TMPDIR`, `PATH`,
+  `TURBOPANEL_PHP`, `PHPRC`, `PHP_INI_SCAN_DIR`, `PHP_VALUE`,
+  `PHP_ADMIN_VALUE` in any case and `LD_*`, named in the transcript, never with
+  a value) and names a file cannot carry (not `[A-Za-z_][A-Za-z0-9_]*`). It is
+  made before anything runs a command or applies a site. `hosting.env` in the
+  owner's folder now uses the same quoting, so `set -a; . hosting.env; set +a`
+  loads it in a shell. The web request still gets its values from the vhost; the
+  per-site PHP unit does not load the file.
+  The daemon records which Linux user each site's file was installed for
+  (`<stateDir>/sites/.env-owners/<environment>/<service>.json`, `site-env-owners.ts`);
+  `removeNamedSites`, `removeSites` (and so `environment.stop`, which first removes
+  the environment's cron units, since their timers load the file) read it back and
+  call `site-env-remove`. A site that changes user has the old user's copy removed
+  at the next deploy. A site with no record (installed before it existed)
+  loses nothing and one line is logged; `principal-remove` still takes the whole
+  account folder. A refused removal keeps the record and is retried.
+- **Post-deploy commands** (`sites[].postDeploy`, `post-deploy.ts`,
+  `lifecycle-deploy.ts`, feature `site-php-lifecycle-v1`). One
+  `turbopanel-deploycmd-<env>-<service>.service` per site: `Type=oneshot`, the
+  site's account, group and slice, `WorkingDirectory=` the **new release's own
+  folder** (not `current`), `EnvironmentFile=` the site's variables copy,
+  `TURBOPANEL_PHP=<series>`, the cron sandbox (`principalHardeningLines`)
+  plus `PrivateDevices=yes`, `IPAddressDeny/Allow` taken from the PHP unit's
+  `SITE_PHP_IP_DENY` / `SITE_PHP_IP_ALLOW`, and the same
+  `ExecStartPre=+<lib>/tp-php-loopback sync` guard the PHP unit has, so a first
+  deploy (no PHP unit yet) is walled too. A Laravel release adds its own
+  `bootstrap/cache` as `ReadWritePaths=-…` (the one folder of a sealed release
+  the site account owns). No `[Install]`: only the daemon starts it. The first
+  `ExecStart` prints `turbopanel-post-deploy-begin <release id>` so the log
+  reader knows where this run starts.
+  **Success is what `systemctl start` says, never the journal**: the commands
+  write to the same journal and could print any marker or "Finished" line. The
+  journal is read only to show the output (after the last marker; read again,
+  at most ten times 300 ms apart, until systemd's own closing line is there).
+  *Timing* is per site: `before-traffic` (the default) holds `current` while
+  the release is published (`siteHeldForPostDeploy`: the site has such commands
+  and a release is serving), runs every such site's commands right after the
+  environment files and **before any site is applied**, and switches the held
+  sites only when all passed (one failure fails the deploy and switches none:
+  "was not switched in … keeps serving"); a first deploy is published at once and
+  its commands still run before any vhost serves it. `after-switch` publishes
+  normally, runs right after the site apply and before the workers restart; a
+  failure throws at that point (`PostDeployFailedAfterSwitchError`, code
+  `post_deploy_failed_after_switch`, both release ids in `details`), so no worker
+  restarts onto the failed release. Neither timing runs for a rollback
+  (`AppliedRelease.built` is set for a release built now and for a re-sent one,
+  which is held and switched like a new one; a re-sent release already
+  `current` is skipped only when the `post-deploy-passed` marker in its daemon
+  record folder says its commands passed). A failed read of `current` holds the
+  site, and a site with no owner or no PHP is never held. **The command
+  outcome carries only the sentence today** (a failed outcome sends no
+  `result`), so the control plane cannot yet read the code and ids. Commands
+  need a principal and a release-backed site; a site with no PHP is refused
+  before the build (`assertSiteLifecyclePhp`, which also refuses two workers that would share a unit name, such as `web` with `a-b` and `web-a` with `b`). Worker output on the patch-update path carries no journal text: that log is not redacted.
+- **Background workers** (`sites[].workers`, `workers.ts`). One template
+  `turbopanel-worker-<env>-<service>-<name>@.service` per worker, instances
+  `@1…@<processes>` (at most 8), `Restart=always`, `RestartSec=5` growing to 120 s
+  (`RestartSteps=10`, `RestartMaxDelaySec=120`), no start limit,
+  `TimeoutStopSec=<stop timeout>` (default 90) with the default kill mode and
+  SIGTERM: a queue worker finishes its job and systemd waits before it kills.
+  Same account, variables and walls as the command unit; `WorkingDirectory=`
+  is `current` (the document root for a managed-directory site). The template
+  names its environment, site and instance count in `X-TurboPanel-*` lines so
+  stop, lifecycle and the patch restarts find a site's workers from the unit
+  files. Every deploy that reaches the apply installs changed templates,
+  enables instances `@1…@N`, disables `@N+1…@8`, and restarts `@1…@N` in **one**
+  `systemctl restart --no-block` (systemd stops them in parallel and a long job
+  never holds the deploy), then checks `is-active` every 2 s for at most 30 s:
+  a worker still starting or stopping is a transcript line, one that did not
+  stay running is a result warning with its journal tail (never a failed
+  deploy). A worker the payload no longer names is disabled, stopped and
+  removed; `environment.stop` removes every worker and command unit before the
+  sites (and so before the variables copy); `environment.lifecycle` starts,
+  stops or restarts the instances. After installing or removing either unit
+  family the daemon runs `tp-host php-loopback-sync`; the loopback rules cover
+  the whole principal uid band, so no unit file is needed for a user to be
+  walled. tp-host pins the unit lines (`tp_site_lifecycle_ok`): exactly one
+  `ExecStartPre=+<lib>/tp-php-loopback sync`, the two address-filter strings and
+  `PrivateDevices=yes`, and reads `journalctl` for these two names only.
+- **PHP patch restarts** (`php-patch-restart.ts`, owner decision 2026-11-10:
+  daily and automatic). The PHP package archive joins the automatic update
+  origins (`os-security-updates`). When a package run replaces a series'
+  binaries, running runtimes keep the old build until restarted. The daemon
+  watches the binaries' `ctime` every ten minutes (no `systemctl` call when none
+  moved), after its boot reconcile and after each deploy that applied a PHP
+  site. A change is *settled* when it is 120 s old and `/var/lib/dpkg/updates`
+  is empty (both are daemon read grants). A pass takes the series' prune hold,
+  then per series restarts, in record order and each under its environment's
+  deploy lock: every stale runtime (`systemctl show` says active and started
+  before the change; an inactive FastCGI runtime needs nothing), with a probe
+  before and after; then the stale workers (gracefully); then the shared master
+  `turbopanel-php-fpm@<series>`. The first site that answered before and does
+  not after **stops the whole pass** (later runtimes keep the old build) and is
+  shown on the server page; the next pass skips it for that change and carries
+  on with the rest, and a deploy of the site or a newer change clears the mark.
+  A site that was not answering before is restarted and does not stop the pass.
+  Records (`<state>/sites/.php-runtimes/<id>.json`: series, mode, environment,
+  service, probe URL, patch version) are written when a runtime is committed and
+  removed with it; the patch versions and the sites' versions go out in the
+  presence snapshot's `runtimes.php` (`versions`, `sites`, `restartError`) from
+  a cache the pass fills (`host/php-patch-cache.ts`). `systemctl show` is run
+  without sudo; that is unproven on a managed host (tp-host has no `show` verb).
 - **nginx follows no link below a release-backed document root.** It serves
   one with `disable_symlinks on from=$document_root`, so **every** symlink under
   the root answers 403 — including links that stay inside the release, such as
@@ -483,7 +749,8 @@ environment variable name is still refused. `PHP_VALUE` and `PHP_ADMIN_VALUE`
 (any case) are reserved on every engine: PHP-FPM reads them from the FastCGI
 request as ini overrides, so `resolveSiteSecretEnv` drops them (plain or sealed,
 before decrypting) and names them in the log; the control plane drops them
-first.
+first. An Apache vhost also strips them (and `PHPRC`, `PHP_INI_SCAN_DIR`)
+at vhost level, so a `.htaccess` `SetEnv` cannot bring them back.
 
 **Managed database bindings (`site-db-bindings-v1`).** A site bound to a managed
 database carries `sites[].requiredEnv` (the connection variables it cannot run
@@ -497,8 +764,15 @@ bundle, certificate blocks only (checked at parse). It lands as
 `<siteRoot>/.turbopanel-hosting/managed-ca.pem` through the same `sudo -n
 install` call as `hosting.env` (owner's Linux user, `0400`, directory
 `root:root` `0711`), and every name in `dbCa.variables` is set to that path, so
-a multi-line certificate never enters the web server's environment. A site with
-`dbCa` and no owning Linux user is refused. Native apps are unchanged: their
+a multi-line certificate never enters the web server's environment. With
+feature `site-db-url-ca-v1`, `dbCa.urlVariables` (up to 16 names, like
+`variables`; an empty list means none, like leaving it out) lists variables holding a PostgreSQL URL: `withDbCaVariables`
+passes each one present in the site's environment through
+`withPostgresRootCert` (`db-url-ca.ts`), which appends `sslrootcert=<CA file>`
+(path percent-encoded outside `[A-Za-z0-9/._-]`) only for a `postgres://` or
+`postgresql://` URL whose `sslmode` is `verify-ca` or `verify-full` and that has
+no `sslrootcert`. Only listed names are touched, and the value is never logged.
+A site with `dbCa` and no owning Linux user is refused. Native apps are unchanged: their
 environment file carries a multi-line value as is.
 
 Future seams (not MVP): multi-version PHP side-by-side, swarm-style replicas,
@@ -581,8 +855,15 @@ uploaded folder for this lane) for the PHP unit, cron and `open_basedir`.
 `public/` is made here, `<owner>:<engine group> 0750` (the folder itself, its
 `releases/`, `shared/` and `logs/` come from `ensureAssetFolder`). The default
 root name `public` means `public/` itself in the folder tree (an uploaded
-folder is already the web root); any other `root` is a folder inside it. The
-site Caddy mounts `public/` and `releases/` `nosymfollow`
+folder is already the web root); any other `root` is a folder inside it, so
+`root` is relative to the uploaded `public/` folder, never to the service
+folder. A framework's own `public/` can be the root (Laravel uploaded to
+`public/app` takes `root: app/public`): PHP's `open_basedir` then covers the top
+folder of the root (`public/app`, so `vendor/` and `.env` read), plus `shared/`
+and `/tmp`, and never more than the uploaded folder (`managedCodeFolder`). A
+root of more than one name is refused when its parent folder was not uploaded
+(`install -d` would leave root-owned folders behind); the one-name and default
+roots are still made here. The site Caddy mounts `public/` and `releases/` `nosymfollow`
 (`tp-site-caddy-run roots` reads both shapes).
 
 A site's content comes from one of two lanes, named by `sourceKind` on the wire

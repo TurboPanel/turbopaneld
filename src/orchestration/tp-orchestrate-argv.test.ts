@@ -15,7 +15,7 @@ import {
   buildDockerSetupExtraArgs,
   buildSetHostnameExtraArgs,
   buildTimeSyncApplyExtraArgs,
-  devInstanceExtraArgs,
+  serverPlaybookExtraArgs,
 } from "./ansible.ts";
 import { runInstanceCertsApply } from "../instance/public-urls-apply.ts";
 import { rootHelperPlaybookInvocation } from "../instance/run-reconcile.ts";
@@ -99,7 +99,7 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
   ]);
   captured.push([
     "daemon-converge",
-    extraVarValues(await withManagedHostEnv(() => devInstanceExtraArgs())),
+    extraVarValues(await withManagedHostEnv(() => serverPlaybookExtraArgs())),
   ]);
   captured.push([
     "set-hostname",
@@ -137,6 +137,12 @@ async function daemonExtraVars(): Promise<Array<[string, string[]]>> {
         tosAccepted: true,
         directoryUrl: "https://acme-v02.api.letsencrypt.org/directory",
         useStaging: false,
+      },
+      edgeTrust: {
+        cidrs: ["198.51.100.0/24", "2001:db8::/32", "203.0.113.7/32"],
+        hash: "a".repeat(64),
+        cloudflare: ["198.51.100.0/24", "2001:db8::/32"],
+        bunny: ["203.0.113.7/32"],
       },
       env: {},
     },
@@ -211,6 +217,11 @@ test("tp-orchestrate accepts every extra-var the daemon passes on a managed host
     const all = await daemonExtraVars();
     const values = all.flatMap(([, v]) => v);
     assertEquals(values.length > 20, true, "builders produced too few values");
+    assertEquals(
+      all.find(([label]) => label === "daemon-converge")?.[1],
+      [],
+      "a managed host's converge passes no extra-vars",
+    );
     const verdicts = await checkExtraVars(values, { vendorDir });
     const refused = verdicts.filter((v) => !v.accepted).map((v) => {
       const builder = all.find(([, vs]) => vs.includes(v.value))?.[0];
@@ -259,6 +270,10 @@ test("tp-orchestrate refuses keys and values that would steer root Ansible", asy
       "turbopanel_public_urls=https://[2001:db8::1:8443",
       'turbopanel_hostnames_json=[{"host":"{{x}}"}]',
       'turbopanel_hostnames_json=[{"host":"a b"}]',
+      'turbopanel_edge_trust_json={"cloudflare":["1.2.3.0/24 }\\n"]}',
+      'turbopanel_edge_trust_json={"cloudflare":["{{x}}"]}',
+      'turbopanel_edge_trust_json={"cloudflare":["a b"]}',
+      'turbopanel_edge_trust_json=["198.51.100.0/24"]',
       "turbopanel_acme_email=no-at-sign",
       "turbopanel_acme_email=a@localhost",
       "turbopanel_acme_directory=http://acme.example.com/directory",
@@ -350,6 +365,21 @@ test("tp-orchestrate accepts the PHP series to remove as plain major.minor strin
       { vendorDir },
     );
     assertEquals(verdicts.map((v) => v.accepted), [true, true]);
+  } finally {
+    await Deno.remove(vendorDir, { recursive: true });
+  }
+});
+
+test("tp-orchestrate accepts a hostname row that carries its public port", async () => {
+  const vendorDir = await makeFakeVendorDir();
+  try {
+    const verdicts = await checkExtraVars(
+      [
+        'turbopanel_hostnames_json=[{"host":"https://panel.example.com:8443","source":"platform-ca","cert_id":"","public_port":443}]',
+      ],
+      { vendorDir },
+    );
+    assertEquals(verdicts.map((v) => v.accepted), [true]);
   } finally {
     await Deno.remove(vendorDir, { recursive: true });
   }

@@ -21,11 +21,13 @@ import {
   InstanceClient,
   normalizeReconnectDelayMs,
   PARKED_BACKOFF_MIN_MS,
+  PUBLIC_URLS_REMOTE_REFUSAL,
   readKeyId,
   RECONNECT_FIRST_WINDOW_MS,
   RECONNECT_FLOOR_MS,
   registerCommandPorts,
   STABLE_SESSION_MS,
+  TUNNEL_TOKEN_REMOTE_REFUSAL,
   writeKeyId,
 } from "./client.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
@@ -108,22 +110,18 @@ async function seedDaemonIdentity(
   await Deno.writeTextFile(`${tempDir}/server-key-id`, `${identity.keyId}\n`);
 }
 
-async function assertPathMissing(
-  path: string,
-  message?: string,
-): Promise<void> {
-  try {
-    await Deno.stat(path);
-  } catch (error) {
-    if (error instanceof Deno.errors.NotFound) return;
-    throw error;
-  }
-  throw new Error(message ?? `expected path to be missing: ${path}`);
-}
-
 function setOptionalEnv(key: string, value: string | undefined): void {
   if (value === undefined) Deno.env.delete(key);
   else Deno.env.set(key, value);
+}
+
+async function replaceFileAtomically(
+  path: string,
+  text: string,
+): Promise<void> {
+  const staged = `${path}.next`;
+  await Deno.writeTextFile(staged, text);
+  await Deno.rename(staged, path);
 }
 
 async function waitFor<T>(
@@ -1121,6 +1119,37 @@ it({
 });
 
 it({
+  name:
+    "an edge restart that drops 20 daemons at once spreads their reconnects",
+  fn: () => {
+    // Seeded generator (mulberry32) so the draw is the same on every run.
+    let state = 0x2f6e2b1;
+    const seeded = () => {
+      state = (state + 0x6d2b79f5) | 0;
+      let t = Math.imul(state ^ (state >>> 15), 1 | state);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const originalRandom = Math.random;
+    Math.random = seeded;
+    try {
+      const delays = Array.from(
+        { length: 20 },
+        () => fullJitterMs(RECONNECT_FLOOR_MS, RECONNECT_FIRST_WINDOW_MS),
+      );
+      const window = RECONNECT_FIRST_WINDOW_MS - RECONNECT_FLOOR_MS;
+      assertEquals(new Set(delays).size, 20, "no two daemons share a delay");
+      assert(
+        Math.max(...delays) - Math.min(...delays) >= window * 0.6,
+        "spread must cover at least 60% of the first window",
+      );
+    } finally {
+      Math.random = originalRandom;
+    }
+  },
+});
+
+it({
   name: "InstanceClient reconnect delay is jittered within backoff bounds",
   permissions: {
     env: true,
@@ -2062,7 +2091,8 @@ it({
 });
 
 it({
-  name: "DB-wipe → daemon parks without an enroll storm",
+  name:
+    "unknown-key answer → daemon keeps its key files and parks without enrolling",
   permissions: {
     env: true,
     read: true,
@@ -2174,34 +2204,23 @@ it({
             ? true
             : undefined,
       );
-      const enrollAtPark = enrollCount;
       await new Promise((resolve) => originalSetTimeout(resolve, 50));
       assertEquals(
-        enrollAtPark,
-        1,
-        `expected stale-identity recovery to enroll once before park, got ${enrollAtPark}`,
-      );
-      assertEquals(
         enrollCount,
-        1,
-        `expected no enroll storm after park, got ${enrollCount}`,
-      );
-      assert(
-        enrollCount <= 1,
-        `expected no enroll storm, got ${enrollCount} (was ${enrollAtPark} at park)`,
+        0,
+        `expected no enroll after an unknown-key answer, got ${enrollCount}`,
       );
       assertEquals(
         (await Deno.readTextFile(`${tempDir}/server.id`)).trim(),
         "srv-1",
       );
-      await assertPathMissing(
-        `${tempDir}/server-key.json`,
-        "expected server-key.json to be cleared before park",
+      assertEquals(
+        [...Deno.readDirSync(tempDir)].some((entry) =>
+          entry.name.startsWith("server-key") && entry.name.endsWith(".json")
+        ),
+        true,
       );
-      await assertPathMissing(
-        `${tempDir}/server-key-id`,
-        "expected server-key-id to be cleared before park",
-      );
+      assertEquals(await readKeyId(tempDir), "kid-1");
       assertEquals(sockets.length, 0);
     } finally {
       client.stop();
@@ -2397,329 +2416,8 @@ it({
 });
 
 it({
-  name: "valid license re-enroll after true stale identity",
-  permissions: {
-    env: true,
-    read: true,
-    write: true,
-    sys: ["hostname", "networkInterfaces"],
-  },
-  fn: async () => {
-    const tempDir = await Deno.makeTempDir();
-    const originalFetch = globalThis.fetch;
-    const originalWebSocket = globalThis.WebSocket;
-    const originalSetTimeout = globalThis.setTimeout;
-    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
-    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
-    const sockets: MockWebSocket[] = [];
-    const reconnectDelays: number[] = [];
-    let enrolled = false;
-    let capturedEnrollBody: { serverId?: string } | undefined;
-
-    class TrackingWebSocket extends MockWebSocket {
-      constructor(url: string, options?: unknown) {
-        super(url, options);
-        sockets.push(this);
-      }
-    }
-
-    globalThis.setTimeout = ((
-      handler: (...args: unknown[]) => void,
-      timeout?: number,
-      ...args: unknown[]
-    ) => {
-      if (
-        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
-      ) {
-        reconnectDelays.push(timeout);
-      }
-      return originalSetTimeout(handler, 0, ...args);
-    }) as typeof setTimeout;
-
-    Object.defineProperty(globalThis, "WebSocket", {
-      configurable: true,
-      writable: true,
-      value: TrackingWebSocket,
-    });
-
-    const { signing, authToken } = await prepareVerifiedAuth({
-      serverId: "srv-1",
-      keyId: "kid-new",
-    });
-    Object.defineProperty(globalThis, "fetch", {
-      configurable: true,
-      writable: true,
-      value: async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.endsWith("/api/health")) {
-          return new Response(JSON.stringify({ ok: true }), { status: 200 });
-        }
-        if (url.endsWith("/api/daemon/v1/jwks.json")) {
-          return jwksResponse(signing);
-        }
-        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
-          const raw = init?.body ? await new Response(init.body).text() : "{}";
-          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
-          if (body.serverId && body.keyId) {
-            return new Response(
-              JSON.stringify({
-                challengeId: "auth-challenge",
-                nonce: "auth-nonce",
-                at: new Date().toISOString(),
-                expiresAt: new Date(Date.now() + 60_000).toISOString(),
-              }),
-              { status: 200 },
-            );
-          }
-          return new Response(
-            JSON.stringify({
-              challengeId: "enroll-challenge",
-              nonce: "enroll-nonce",
-              at: new Date().toISOString(),
-              expiresAt: new Date(Date.now() + 60_000).toISOString(),
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.endsWith("/api/daemon/v1/enroll")) {
-          const raw = init?.body ? await new Response(init.body).text() : "{}";
-          capturedEnrollBody = JSON.parse(raw) as { serverId?: string };
-          enrolled = true;
-          return new Response(
-            JSON.stringify({ serverId: "srv-1", keyId: "kid-new" }),
-            { status: 200 },
-          );
-        }
-        if (url.endsWith("/api/daemon/v1/auth/session")) {
-          if (!enrolled) {
-            return new Response(
-              JSON.stringify({ error: "Server key not found" }),
-              { status: 404 },
-            );
-          }
-          return new Response(
-            JSON.stringify({
-              token: authToken,
-              expiresAt: new Date(Date.now() + 900_000).toISOString(),
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response(JSON.stringify({ error: "not found" }), {
-          status: 404,
-        });
-      },
-    });
-
-    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
-    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
-    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
-    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
-    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
-
-    const client = new InstanceClient({
-      config: {
-        kind: "url",
-        baseUrl: "https://instance.test",
-        wsBaseUrl: "wss://instance.test",
-      },
-    });
-
-    try {
-      client.start();
-      const socket = await waitFor(
-        "stale-identity re-enroll websocket",
-        () => sockets.at(0),
-      );
-      socket.open();
-      assertEquals(socket.readyState, MockWebSocket.OPEN);
-      assertEquals(capturedEnrollBody?.serverId, "srv-1");
-      socket.close(1000, "done");
-    } finally {
-      client.stop();
-      globalThis.setTimeout = originalSetTimeout;
-      Object.defineProperty(globalThis, "fetch", {
-        configurable: true,
-        writable: true,
-        value: originalFetch,
-      });
-      Object.defineProperty(globalThis, "WebSocket", {
-        configurable: true,
-        writable: true,
-        value: originalWebSocket,
-      });
-      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
-      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
-      await Deno.remove(tempDir, { recursive: true });
-    }
-  },
-});
-
-it({
-  name: "valid license re-enroll after 400 Server key mismatch",
-  permissions: {
-    env: true,
-    read: true,
-    write: true,
-    sys: ["hostname", "networkInterfaces"],
-  },
-  fn: async () => {
-    const tempDir = await Deno.makeTempDir();
-    const originalFetch = globalThis.fetch;
-    const originalWebSocket = globalThis.WebSocket;
-    const originalSetTimeout = globalThis.setTimeout;
-    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
-    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
-    const sockets: MockWebSocket[] = [];
-    const reconnectDelays: number[] = [];
-    let enrolled = false;
-    let capturedEnrollBody: { serverId?: string } | undefined;
-
-    class TrackingWebSocket extends MockWebSocket {
-      constructor(url: string, options?: unknown) {
-        super(url, options);
-        sockets.push(this);
-      }
-    }
-
-    globalThis.setTimeout = ((
-      handler: (...args: unknown[]) => void,
-      timeout?: number,
-      ...args: unknown[]
-    ) => {
-      if (
-        typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
-      ) {
-        reconnectDelays.push(timeout);
-      }
-      return originalSetTimeout(handler, 0, ...args);
-    }) as typeof setTimeout;
-
-    Object.defineProperty(globalThis, "WebSocket", {
-      configurable: true,
-      writable: true,
-      value: TrackingWebSocket,
-    });
-
-    const { signing, authToken } = await prepareVerifiedAuth({
-      serverId: "srv-1",
-      keyId: "kid-new",
-    });
-    Object.defineProperty(globalThis, "fetch", {
-      configurable: true,
-      writable: true,
-      value: async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.endsWith("/api/health")) {
-          return new Response(JSON.stringify({ ok: true }), { status: 200 });
-        }
-        if (url.endsWith("/api/daemon/v1/jwks.json")) {
-          return jwksResponse(signing);
-        }
-        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
-          const raw = init?.body ? await new Response(init.body).text() : "{}";
-          const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
-          if (body.serverId && body.keyId) {
-            return new Response(
-              JSON.stringify({
-                challengeId: "auth-challenge",
-                nonce: "auth-nonce",
-                at: new Date().toISOString(),
-                expiresAt: new Date(Date.now() + 60_000).toISOString(),
-              }),
-              { status: 200 },
-            );
-          }
-          return new Response(
-            JSON.stringify({
-              challengeId: "enroll-challenge",
-              nonce: "enroll-nonce",
-              at: new Date().toISOString(),
-              expiresAt: new Date(Date.now() + 60_000).toISOString(),
-            }),
-            { status: 200 },
-          );
-        }
-        if (url.endsWith("/api/daemon/v1/enroll")) {
-          const raw = init?.body ? await new Response(init.body).text() : "{}";
-          capturedEnrollBody = JSON.parse(raw) as { serverId?: string };
-          enrolled = true;
-          return new Response(
-            JSON.stringify({ serverId: "srv-1", keyId: "kid-new" }),
-            { status: 200 },
-          );
-        }
-        if (url.endsWith("/api/daemon/v1/auth/session")) {
-          if (!enrolled) {
-            return new Response(
-              JSON.stringify({ error: "Server key mismatch" }),
-              { status: 400 },
-            );
-          }
-          return new Response(
-            JSON.stringify({
-              token: authToken,
-              expiresAt: new Date(Date.now() + 900_000).toISOString(),
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response(JSON.stringify({ error: "not found" }), {
-          status: 404,
-        });
-      },
-    });
-
-    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
-    Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
-    await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
-    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
-    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
-
-    const client = new InstanceClient({
-      config: {
-        kind: "url",
-        baseUrl: "https://instance.test",
-        wsBaseUrl: "wss://instance.test",
-      },
-    });
-
-    try {
-      client.start();
-      const socket = await waitFor(
-        "server-key-mismatch re-enroll websocket",
-        () => sockets.at(0),
-      );
-      socket.open();
-      assertEquals(socket.readyState, MockWebSocket.OPEN);
-      assertEquals(capturedEnrollBody?.serverId, "srv-1");
-      assertEquals(
-        (await Deno.readTextFile(`${tempDir}/server.id`)).trim(),
-        "srv-1",
-      );
-      socket.close(1000, "done");
-    } finally {
-      client.stop();
-      globalThis.setTimeout = originalSetTimeout;
-      Object.defineProperty(globalThis, "fetch", {
-        configurable: true,
-        writable: true,
-        value: originalFetch,
-      });
-      Object.defineProperty(globalThis, "WebSocket", {
-        configurable: true,
-        writable: true,
-        value: originalWebSocket,
-      });
-      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
-      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
-      await Deno.remove(tempDir, { recursive: true });
-    }
-  },
-});
-
-it({
-  name: "parked daemon unparks and reconnects on license-file change",
+  name:
+    "unknown-key park retries with the same key and reconnects once the panel knows it",
   permissions: {
     env: true,
     read: true,
@@ -2735,6 +2433,7 @@ it({
     const originalSetTimeout = globalThis.setTimeout;
     const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
     const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
     const sockets: MockWebSocket[] = [];
     const reconnectDelays: number[] = [];
     let restored = false;
@@ -2767,7 +2466,7 @@ it({
 
     const { signing, authToken } = await prepareVerifiedAuth({
       serverId: "srv-1",
-      keyId: "kid-new",
+      keyId: "kid-1",
     });
     Object.defineProperty(globalThis, "fetch", {
       configurable: true,
@@ -2837,6 +2536,8 @@ it({
     });
 
     Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    // The installer reads the latest answer from the runtime folder.
+    Deno.env.set("TURBOPANEL_RUN_DIR", tempDir);
     Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
     await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
     await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
@@ -2859,15 +2560,23 @@ it({
             ? true
             : undefined,
       );
+      const parkedStatus = await Deno.readTextFile(
+        `${tempDir}/enroll-status`,
+      );
+      assertStringIncludes(parkedStatus, "state=parked\n");
+      assertStringIncludes(parkedStatus, "kind=awaiting-administrator\n");
       restored = true;
-      await Deno.writeTextFile(`${tempDir}/license.id`, "license-456\n");
-      await Deno.writeTextFile(`${tempDir}/license.token`, "token-xyz\n");
       const socket = await waitFor(
         "unpark websocket",
         () => sockets.at(0),
       );
       socket.open();
       assertEquals(socket.readyState, MockWebSocket.OPEN);
+      await waitFor("connected status", async () => {
+        const text = await Deno.readTextFile(`${tempDir}/enroll-status`)
+          .catch(() => "");
+        return text === "state=connected\n" ? true : undefined;
+      });
       socket.close(1000, "done");
     } finally {
       client.stop();
@@ -2884,9 +2593,252 @@ it({
       });
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
       await Deno.remove(tempDir, { recursive: true });
     }
   },
+});
+
+/**
+ * A server parked on "Server key not found" retries with its key; a new
+ * license written on the host makes it enroll afresh. `licenseChange` says
+ * when the installer writes that license: while the client waits parked, or
+ * in the middle of a parked retry (the attempt that answers 404 again).
+ */
+async function runUnknownKeyParkNewLicenseCase(
+  licenseChange: "while-parked" | "during-retry" | "empty-then-full",
+): Promise<void> {
+  const tempDir = await Deno.makeTempDir();
+  const originalFetch = globalThis.fetch;
+  const originalWebSocket = globalThis.WebSocket;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+  const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+  const sockets: MockWebSocket[] = [];
+  const reconnectDelays: number[] = [];
+  let enrolled = false;
+  let enrollCount = 0;
+  let enrollsAtPark = -1;
+  let keyedChallenges = 0;
+  let enrollsAtEmptyRead = -1;
+  const replaceLicense = async () => {
+    // The parked client re-reads these files on every re-check, so replace
+    // each one atomically: a plain write truncates first and a re-check
+    // landing in that window sees an empty file instead of the new license.
+    await replaceFileAtomically(`${tempDir}/license.id`, "license-456\n");
+    await replaceFileAtomically(`${tempDir}/license.token`, "token-xyz\n");
+  };
+
+  class TrackingWebSocket extends MockWebSocket {
+    constructor(url: string, options?: unknown) {
+      super(url, options);
+      sockets.push(this);
+    }
+  }
+
+  globalThis.setTimeout = ((
+    handler: (...args: unknown[]) => void,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    if (
+      typeof timeout === "number" && timeout >= DEFAULT_INITIAL_BACKOFF_MS
+    ) {
+      reconnectDelays.push(timeout);
+    }
+    return originalSetTimeout(handler, 0, ...args);
+  }) as typeof setTimeout;
+
+  Object.defineProperty(globalThis, "WebSocket", {
+    configurable: true,
+    writable: true,
+    value: TrackingWebSocket,
+  });
+
+  const { signing, authToken } = await prepareVerifiedAuth({
+    serverId: "srv-1",
+    keyId: "kid-new",
+  });
+  Object.defineProperty(globalThis, "fetch", {
+    configurable: true,
+    writable: true,
+    value: async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/api/health")) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.endsWith("/api/daemon/v1/jwks.json")) {
+        return jwksResponse(signing);
+      }
+      if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+        const raw = init?.body ? await new Response(init.body).text() : "{}";
+        const body = JSON.parse(raw) as { serverId?: string; keyId?: string };
+        if (body.serverId && body.keyId) {
+          keyedChallenges += 1;
+          if (
+            licenseChange === "during-retry" && keyedChallenges === 2
+          ) {
+            // The first parked retry with the same key: the installer writes
+            // the new license while that attempt is in flight.
+            await replaceLicense();
+          }
+          if (licenseChange === "empty-then-full") {
+            if (keyedChallenges === 2) {
+              // Interleaved write: the installer has truncated both files and
+              // not yet filled them when the next re-check reads them.
+              for (const half of ["id", "token"]) {
+                await Deno.writeTextFile(`${tempDir}/license.${half}`, "");
+              }
+            } else if (keyedChallenges === 3) {
+              // This retry ran after a re-check that read the empty files.
+              enrollsAtEmptyRead = enrollCount;
+              await replaceLicense();
+            }
+          }
+          if (enrolled) {
+            return new Response(
+              JSON.stringify({
+                challengeId: "auth-challenge",
+                nonce: "auth-nonce",
+                at: new Date().toISOString(),
+                expiresAt: new Date(Date.now() + 60_000).toISOString(),
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({ error: "Server key not found" }),
+            { status: 404 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            challengeId: "enroll-challenge",
+            nonce: "enroll-nonce",
+            at: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/api/daemon/v1/enroll")) {
+        enrollCount += 1;
+        enrolled = true;
+        return new Response(
+          JSON.stringify({ serverId: "srv-1", keyId: "kid-new" }),
+          { status: 200 },
+        );
+      }
+      if (url.endsWith("/api/daemon/v1/auth/session")) {
+        return new Response(
+          JSON.stringify({
+            token: authToken,
+            expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ error: "not found" }), {
+        status: 404,
+      });
+    },
+  });
+
+  Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+  Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+  await seedDaemonIdentity(tempDir, { serverId: "srv-1", keyId: "kid-1" });
+  await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+  await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+  const client = new InstanceClient({
+    config: {
+      kind: "url",
+      baseUrl: "https://instance.test",
+      wsBaseUrl: "wss://instance.test",
+    },
+  });
+
+  try {
+    client.start();
+    await waitFor(
+      "parked delay",
+      () =>
+        reconnectDelays.some((d) => d >= PARKED_BACKOFF_MIN_MS)
+          ? true
+          : undefined,
+      10_000,
+    );
+    await new Promise((resolve) => originalSetTimeout(resolve, 50));
+    enrollsAtPark = enrollCount;
+    if (licenseChange === "while-parked") await replaceLicense();
+    const socket = await waitFor(
+      "unpark websocket",
+      () => sockets.at(0),
+      10_000,
+    );
+    socket.open();
+    // Parked on the unknown key, the client never re-enrolls on its own.
+    if (licenseChange === "while-parked") assertEquals(enrollsAtPark, 0);
+    assertEquals(enrollCount, 1);
+    // An empty read is not a new license: no enroll until the full one lands.
+    if (licenseChange === "empty-then-full") {
+      assertEquals(enrollsAtEmptyRead, 0);
+    }
+    assertEquals(socket.readyState, MockWebSocket.OPEN);
+    socket.close(1000, "done");
+  } finally {
+    client.stop();
+    globalThis.setTimeout = originalSetTimeout;
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: originalFetch,
+    });
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: originalWebSocket,
+    });
+    setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+    setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    await Deno.remove(tempDir, { recursive: true });
+  }
+}
+
+const unknownKeyParkTestOptions: {
+  permissions: Deno.PermissionOptionsObject;
+  sanitizeOps: boolean;
+  sanitizeResources: boolean;
+} = {
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+};
+
+it({
+  name:
+    "unknown-key park retries with the same key, and a new license on the host enrolls afresh",
+  ...unknownKeyParkTestOptions,
+  fn: () => runUnknownKeyParkNewLicenseCase("while-parked"),
+});
+
+it({
+  name:
+    "a new license written while a parked same-key retry is in flight still enrolls afresh",
+  ...unknownKeyParkTestOptions,
+  fn: () => runUnknownKeyParkNewLicenseCase("during-retry"),
+});
+
+it({
+  name:
+    "an empty license read while parked is no change, and the full license then enrolls once",
+  ...unknownKeyParkTestOptions,
+  fn: () => runUnknownKeyParkNewLicenseCase("empty-then-full"),
 });
 
 it({
@@ -3126,8 +3078,8 @@ it({
               );
             }
             return new Response(
-              JSON.stringify({ error: "Server key not found" }),
-              { status: 404 },
+              JSON.stringify({ error: "Server key is inactive" }),
+              { status: 400 },
             );
           }
           return new Response(
@@ -5249,6 +5201,245 @@ it({
 });
 
 it({
+  name:
+    "an unsigned update or instance-update cannot change the host's channel",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "release");
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    let instanceCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("signed-aaa"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      executeInstanceUpdateReconcile: () => {
+        instanceCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-pinned",
+        channel: "canary",
+        at: new Date().toISOString(),
+      });
+      socket.receive({
+        type: "instance-update",
+        id: "iu-pinned",
+        channel: "trunk",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "pinned update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-pinned"
+          ) as { ok?: boolean; errorCode?: string; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "channel_pinned");
+      assertEquals(
+        String(result.error).includes("update channel is release"),
+        true,
+      );
+      const instanceResult = await waitFor(
+        "pinned instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((f) =>
+            (f as { id?: string }).id === "iu-pinned"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(instanceResult.ok, false);
+      assertEquals(instanceResult.errorCode, "channel_pinned");
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+      assertEquals(instanceCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "a lone unsigned instance-update naming another channel is refused before anything runs",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "release");
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    let instanceCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("signed-aaa"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      executeInstanceUpdateReconcile: () => {
+        instanceCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      // The control plane advertises progress frames, so a run that got as
+      // far as its first stage would show one.
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "instance-update",
+        id: "iu-alone",
+        channel: "canary",
+        upgradeId: "upg-alone",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "lone instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((f) =>
+            (f as { id?: string }).id === "iu-alone"
+          ) as
+            | { ok?: boolean; errorCode?: string; error?: string }
+            | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "channel_pinned");
+      assertEquals(
+        String(result.error).includes("update channel is release"),
+        true,
+      );
+      assertEquals(instanceCalls, 0);
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+      // Refused before the run was announced: the only progress frame for it
+      // is the failure itself, never a stage of work.
+      const stages = framesOfType(socket, "update-progress")
+        .filter((f) => (f as { id?: string }).id === "iu-alone")
+        .map((f) => (f as { stage?: string }).stage);
+      assertEquals(stages.filter((stage) => stage !== "failed"), []);
+      assertEquals(framesOfType(socket, "update-result").length, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "an update or instance-update naming an unknown channel is refused as channel_unknown",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "release");
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    let instanceCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("signed-aaa"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      executeInstanceUpdateReconcile: () => {
+        instanceCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-unknown",
+        channel: "nightly",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unknown-channel update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-unknown"
+          ) as
+            | { ok?: boolean; errorCode?: string; error?: string }
+            | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "channel_unknown");
+      assertEquals(String(result.error).includes('"nightly"'), true);
+      socket.receive({
+        type: "instance-update",
+        id: "iu-unknown",
+        channel: "nightly",
+        at: new Date().toISOString(),
+      });
+      const instanceResult = await waitFor(
+        "unknown-channel instance-update-result",
+        () =>
+          framesOfType(socket, "instance-update-result").find((f) =>
+            (f as { id?: string }).id === "iu-unknown"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(instanceResult.ok, false);
+      assertEquals(instanceResult.errorCode, "channel_unknown");
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+      assertEquals(instanceCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
   name: "update reconciles the verified manifest instead of a moving channel",
   permissions: {
     env: true,
@@ -5326,6 +5517,8 @@ it({
       "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
     const target =
       "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-193059-fc561fc.json";
+    const priorChannel = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
     const prior = Deno.env.get("TURBOPANEL_MANIFEST_URL");
     Deno.env.set("TURBOPANEL_MANIFEST_URL", stale);
     let resolvedFrom: string | undefined;
@@ -5340,6 +5533,8 @@ it({
         channel: "canary",
         sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/1ade037",
       }),
+      fetchChannelHeadVersion: () =>
+        Promise.resolve("0.1.1-canary.20260927-193059-fc561fc"),
       resolveUpdate: (_config, env) => {
         resolvedFrom = env?.TURBOPANEL_MANIFEST_URL;
         return Promise.resolve(
@@ -5378,6 +5573,7 @@ it({
       await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", priorChannel);
     }
   },
 });
@@ -5397,7 +5593,7 @@ it({
     const tagPin =
       "https://github.com/TurboPanel/turbopaneld/releases/download/v0.1.1/manifest.json";
     const pointer =
-      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+      "https://github.com/TurboPanel/turbopaneld/releases/latest/download/manifest.json";
     const prior = Deno.env.get("TURBOPANEL_MANIFEST_URL");
     Deno.env.set("TURBOPANEL_MANIFEST_URL", tagPin);
     let resolvedFrom: string | undefined;
@@ -5446,6 +5642,123 @@ it({
       await restore();
       restoreHooks();
       setOptionalEnv("TURBOPANEL_MANIFEST_URL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "an unsigned update naming another build than the channel head is refused as manifest_pinned",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
+    const other =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest-0.1.1-canary.20260927-192410-1ade037.json";
+    const head = "0.1.1-canary.20260927-193059-fc561fc";
+    let resolveCalls = 0;
+    let reconcileCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      assertUpdateDiskPreflight: () => Promise.resolve(),
+      fetchChannelHeadVersion: () => Promise.resolve(head),
+      resolveUpdate: () => {
+        resolveCalls += 1;
+        return Promise.resolve(sampleUpdateInfo("fc561fc"));
+      },
+      executeRunReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-other-build",
+        manifestUrl: other,
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "other-build update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-other-build"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "manifest_pinned");
+      assertEquals(resolveCalls, 0);
+      assertEquals(reconcileCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
+    }
+  },
+});
+
+it({
+  name:
+    "an unsigned update naming the channel's own head manifest is not held back",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const prior = Deno.env.get("TURBOPANEL_UPDATE_CHANNEL");
+    Deno.env.set("TURBOPANEL_UPDATE_CHANNEL", "canary");
+    const own =
+      "https://github.com/TurboPanel/turbopaneld/releases/download/canary/manifest.json";
+    let resolvedFrom: string | undefined;
+    let headFetches = 0;
+    const restoreHooks = installClientTestHooks({
+      updateResultHandoffDelayMs: 0,
+      restartDaemonService: () => Promise.resolve(true),
+      assertUpdateDiskPreflight: () => Promise.resolve(),
+      fetchChannelHeadVersion: () => {
+        headFetches += 1;
+        return Promise.resolve("unused");
+      },
+      resolveUpdate: (_config, env) => {
+        resolvedFrom = env?.TURBOPANEL_MANIFEST_URL;
+        return Promise.resolve(sampleUpdateInfo("fc561fc", resolvedFrom));
+      },
+      downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+      executeRunReconcile: () => Promise.resolve(),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-own-head",
+        manifestUrl: own,
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "own-head update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-own-head"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(headFetches, 0);
+      assertEquals(resolvedFrom, own);
+    } finally {
+      await restore();
+      restoreHooks();
+      setOptionalEnv("TURBOPANEL_UPDATE_CHANNEL", prior);
     }
   },
 });
@@ -6144,6 +6457,11 @@ async function startConnectedClient(
     decrypt?: (ciphertexts: string[]) => (string | null)[];
     /** Dial the co-located instance socket (a self-hosted control-plane host). */
     socketMode?: boolean;
+    /**
+     * What the root-owned control plane binary check answers (default: this
+     * is the control plane host).
+     */
+    controlPlaneHost?: boolean;
   } = {},
 ): Promise<{
   client: InstanceClient;
@@ -6214,6 +6532,7 @@ async function startConnectedClient(
 
   const restoreDisk = installClientTestHooks({
     assertUpdateDiskPreflight: () => Promise.resolve(),
+    isControlPlaneHost: () => Promise.resolve(options.controlPlaneHost ?? true),
   });
   const client = new InstanceClient(clientOpts);
   client.start();
@@ -6399,7 +6718,6 @@ it({
         socket.receive({
           type: "update",
           id: "upd-same",
-          channel: "trunk",
           at: new Date().toISOString(),
         });
         const same = await waitFor(
@@ -6487,11 +6805,9 @@ it({
             (f as { id?: string }).id === "tun-fail"
           ) as { ok?: boolean; error?: string } | undefined,
       );
+      // A remote server refuses before the write hook (which would throw) runs.
       assertEquals(tun.ok, false);
-      assertEquals(
-        String(tun.error ?? "").includes("tunnel write failed"),
-        true,
-      );
+      assertEquals(tun.error, TUNNEL_TOKEN_REMOTE_REFUSAL);
 
       socket.receive({
         type: "public-urls-update",
@@ -7317,6 +7633,94 @@ it({
 });
 
 it({
+  name:
+    "a used install key parks with a refusal the installer can read in the runtime folder",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const parkGate = new Promise<void>(() => {});
+    const restoreTime = installClientTimeSource({ delay: () => parkGate });
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
+    const { restore: restoreWebSocket } = installTrackingWebSocket();
+    let restoreFetch: (() => void) | undefined;
+    try {
+      const { signing } = await prepareVerifiedAuth();
+      const api = createFakeInstanceApi();
+      api.script(
+        "/api/health",
+        () => new Response(JSON.stringify({ ok: true }), { status: 200 }),
+      );
+      api.script(
+        "/api/daemon/v1/jwks.json",
+        () => scriptedJwksResponse(signing),
+      );
+      api.script("/api/daemon/v1/auth/challenge", () => challengeResponse());
+      api.script(
+        "/api/daemon/v1/enroll",
+        () =>
+          new Response(JSON.stringify({ error: "Invalid license" }), {
+            status: 401,
+          }),
+      );
+      restoreFetch = api.install();
+
+      await withTempLayout(async (fixture) => {
+        Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", fixture.dirs.stateDir);
+        Deno.env.delete("TURBOPANEL_FORCE_ENROLL");
+        Deno.env.set("TURBOPANEL_RUN_DIR", fixture.dirs.runDir);
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.id`,
+          "license-123\n",
+        );
+        await Deno.writeTextFile(
+          `${fixture.dirs.stateDir}/license.token`,
+          "token-abc\n",
+        );
+        const client = new InstanceClient({
+          config: {
+            kind: "url",
+            baseUrl: "https://instance.test",
+            wsBaseUrl: "wss://instance.test",
+          },
+        });
+        try {
+          client.start();
+          const status = await waitFor("refusal status", async () => {
+            const text = await Deno.readTextFile(
+              `${fixture.dirs.runDir}/enroll-status`,
+            ).catch(() => "");
+            return text.includes("kind=permanent") ? text : undefined;
+          });
+          assertStringIncludes(status, "state=parked\n");
+          assertStringIncludes(status, "reason=401 Invalid license");
+          assertStringIncludes(
+            status,
+            "advice=this install key was already used",
+          );
+        } finally {
+          client.stop();
+        }
+      });
+    } finally {
+      restoreFetch?.();
+      restoreWebSocket();
+      restoreTime();
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      setOptionalEnv("TURBOPANEL_RUN_DIR", originalRunDir);
+    }
+  },
+});
+
+it({
   name: "parked connect loop exits when stopped during parked wait",
   permissions: {
     env: true,
@@ -8033,8 +8437,10 @@ it({
         return Promise.resolve();
       },
     });
+    // The control plane's own tunnel token is taken only on its host.
     const { socket, restore } = await startConnectedClient({
       decrypt: openSealedFixtures,
+      socketMode: true,
     });
     const resultFor = (id: string) =>
       waitFor(
@@ -8182,6 +8588,78 @@ it({
       restoreClientTime();
       setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
       setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+    }
+  },
+});
+
+it({
+  name:
+    "a socket-mode daemon without the root-owned control plane binary refuses the tunnel token and public URLs",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const written: string[] = [];
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      writeInstanceTunnelToken: (token) => {
+        written.push(token);
+        return Promise.resolve();
+      },
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      decrypt: openSealedFixtures,
+      socketMode: true,
+      controlPlaneHost: false,
+    });
+    try {
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-not-host",
+        tokenEnvelope: SEALED_TUNNEL_ENVELOPE,
+        at: new Date().toISOString(),
+      });
+      const tunnel = await waitFor(
+        "refused tunnel-token-result",
+        () =>
+          framesOfType(socket, "tunnel-token-result").find((f) =>
+            (f as { id?: string }).id === "tun-not-host"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(tunnel.ok, false);
+      assertEquals(tunnel.error, TUNNEL_TOKEN_REMOTE_REFUSAL);
+
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-not-host",
+        urls: ["https://panel.example.test"],
+        hostnames: [{ host: "panel.example.test", source: "platform-ca" }],
+        at: new Date().toISOString(),
+      });
+      const urls = await waitFor(
+        "refused public-urls-update-result",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-not-host"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(urls.ok, false);
+      assertEquals(urls.error, PUBLIC_URLS_REMOTE_REFUSAL);
+
+      assertEquals(written, []);
+      assertEquals(applyCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
     }
   },
 });

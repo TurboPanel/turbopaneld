@@ -5,14 +5,16 @@
  * (P1-1): the daemon account can write inside its own folders (the leaves in
  * `src/paths/layout.ts`) but cannot create, rename or remove an entry in the
  * root itself. The few files that live at that level (`instance-ca.pem`,
- * `firewall*.v4|v6`, `server.id`, the server key, `update-guard-disarm.json`)
+ * `firewall*.v4|v6`, `server.id`, the server key, `sealing-key.json`, `trust-level`, `update-guard-disarm.json`)
  * are written here: first the way the daemon always did (stage next to the
  * file and rename it in, which works while the root is writable and in
  * development), and when the OS says no, through `tp-host install` / `rm`,
  * which creates the file as the daemon account's own and replaces it
- * atomically. The path never changes.
+ * atomically. The path never changes. In a `deno test` run both refuse a path
+ * outside a temp dir (`test-write-guard.ts`).
  */
 import { hostSudoArgs } from "./host-sudo.ts";
+import { assertTestRunMayWrite } from "./test-write-guard.ts";
 
 /** The daemon's own account and group (`tp:tp`), the owner `tp-host` hands the file to. */
 export const DAEMON_ACCOUNT = "tp";
@@ -53,6 +55,7 @@ export async function writeDaemonFile(
   mode: number,
   run: HostRun = runHost,
 ): Promise<void> {
+  assertTestRunMayWrite(path);
   const tmp = `${path}.tmp-${crypto.randomUUID().slice(0, 8)}`;
   try {
     await Deno.writeTextFile(tmp, text, { mode });
@@ -88,6 +91,7 @@ export async function removeDaemonFile(
   path: string,
   run: HostRun = runHost,
 ): Promise<void> {
+  assertTestRunMayWrite(path);
   try {
     await Deno.remove(path);
     return;

@@ -1,5 +1,10 @@
 import { forEachSequential } from "../../util/sequential.ts";
-import { hasGrantWildcard } from "./grant-pattern.ts";
+import {
+  hasGrantWildcard,
+  parseDatabaseGrantRows,
+  type StoredGrantRow,
+  unlistedGrantRows,
+} from "./grant-pattern.ts";
 import type { ManagedDatabasePrivilege } from "./mysql-sql.ts";
 
 function asPrivilege(value: string): ManagedDatabasePrivilege | null {
@@ -98,6 +103,118 @@ export function grantDatabasePrivileges(options: {
 }
 
 /**
+ * Whether the panel owns this login's database grants: every login but one the
+ * site owner manages by hand (the Database admin login is always the panel's).
+ */
+export function panelManagesGrants(credential: {
+  privileges?: readonly string[];
+  grantMode?: string;
+}): boolean {
+  return credential.grantMode !== "self" ||
+    (credential.privileges ?? []).includes("admin");
+}
+
+/** Connection ids from the batch output of the processlist query. */
+export function parseConnectionIds(stdout: string): string[] {
+  return stdout.split("\n").map((line) => line.trim()).filter((line) =>
+    /^\d+$/.test(line)
+  );
+}
+
+const FLUSH_SQL = "FLUSH PRIVILEGES;";
+
+function isUnknownThread(err: unknown): boolean {
+  return err instanceof Error &&
+    /unknown thread id|\b1094\b/i.test(err.message);
+}
+
+/**
+ * Take back what a login no longer lists, after the grants it keeps are in
+ * place. A `GRANT` only adds, so a database taken off the login, a switch from
+ * All Databases to picks, or a wildcard row would otherwise stay for good.
+ *
+ * Reads the login's grant rows and revokes every row on an unlisted schema,
+ * then reads them again and fails the apply if a planned row is still there.
+ * Only when rows really went (or a marker from an earlier failed apply is
+ * set) does it flush and end the login's open connections: a session keeps the
+ * rights of its current database until it runs `USE`, and the shared proxy's
+ * pooled backend connections are such sessions. A login whose access did not
+ * shrink loses no connection.
+ *
+ * The login is recorded in `sessionEnds` before the revoke and cleared only
+ * after its connections are gone, so a failure in between (the processlist
+ * read, a `KILL`) is finished by the next apply, which would find no row left
+ * to revoke. Returns how many rows went.
+ */
+export async function revokeUnlistedGrants(options: {
+  username: string;
+  listed: readonly string[];
+  listRowsSql: (username: string) => string;
+  revokeRowsSql: (username: string, rows: readonly StoredGrantRow[]) => string;
+  listConnectionsSql: (username: string) => string;
+  query: (sql: string) => Promise<string>;
+  run: (sql: string) => Promise<unknown>;
+  sessionEnds?: {
+    pending(): Promise<readonly string[]>;
+    add(username: string): Promise<void>;
+    done(username: string): Promise<void>;
+  };
+}): Promise<number> {
+  const { username, run, query, sessionEnds } = options;
+  const plan = async () =>
+    unlistedGrantRows(
+      parseDatabaseGrantRows(await query(options.listRowsSql(username))),
+      options.listed,
+    );
+  const rows = await plan();
+  const owed = sessionEnds
+    ? (await sessionEnds.pending()).includes(username)
+    : false;
+  if (rows.length === 0 && !owed) return 0;
+  let went = 0;
+  let remaining = 0;
+  if (rows.length > 0) {
+    await sessionEnds?.add(username);
+    await run(options.revokeRowsSql(username, rows));
+    remaining = (await plan()).length;
+    went = rows.length - remaining;
+  }
+  if (went > 0 || owed) {
+    await run(FLUSH_SQL);
+    await endConnections(options);
+  }
+  // Nothing went and nothing was owed: do not leave the record this apply
+  // made, or every later apply would end the login's connections for nothing.
+  // (Connections are gone after a kill, so a record ends there too.)
+  await sessionEnds?.done(username);
+  if (remaining > 0) {
+    throw new Error(
+      `${remaining} grant row(s) of ${username} could not be revoked`,
+    );
+  }
+  return went;
+}
+
+async function endConnections(options: {
+  username: string;
+  listConnectionsSql: (username: string) => string;
+  query: (sql: string) => Promise<string>;
+  run: (sql: string) => Promise<unknown>;
+}): Promise<void> {
+  const ids = parseConnectionIds(
+    await options.query(options.listConnectionsSql(options.username)),
+  );
+  await forEachSequential(ids, async (id) => {
+    try {
+      await options.run(`KILL CONNECTION ${id};`);
+    } catch (err) {
+      // The session ended by itself between the read and the kill.
+      if (!isUnknownThread(err)) throw err;
+    }
+  });
+}
+
+/**
  * Databases the panel writes grants for. A login the site owner manages by
  * hand gets none, except the Database admin login: its rights are what makes
  * it the admin, so the panel keeps them whatever the mode says.
@@ -111,4 +228,33 @@ export function grantableDatabases(credential: {
   return (credential.privileges ?? []).includes("admin")
     ? credential.databases
     : [];
+}
+
+/** The cluster's backup login: an ordinary `user` credential sent with `kind: "backup"`. */
+export function isBackupCredential(credential: {
+  role: string;
+  kind?: string;
+}): boolean {
+  return credential.role === "user" && credential.kind === "backup";
+}
+
+/**
+ * The backup login's rights on MySQL and MariaDB: the dialect's read and dump
+ * set at global level, for the wildcard account and every client source host,
+ * in one statement batch. Global, not per database, so a database made with
+ * plain SQL is covered too; the credential's `databases`, `privileges` and
+ * `grantMode` play no part. Database-level grants an older daemon wrote are a
+ * subset of it and stay.
+ */
+export function grantBackupPrivileges(options: {
+  username: string;
+  hosts: readonly string[];
+  grantSql: (username: string, host?: string) => string;
+  run: (sql: string) => Promise<unknown>;
+}): Promise<unknown> {
+  const { username, hosts, grantSql, run } = options;
+  return run(
+    [grantSql(username), ...hosts.map((host) => grantSql(username, host))]
+      .join("\n"),
+  );
 }

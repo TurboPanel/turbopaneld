@@ -61,6 +61,7 @@ import {
   ManagedDestroyedError,
 } from "./destroyed-marker.ts";
 import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { sessionEndsFor } from "./session-end-marker.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 import {
@@ -1057,6 +1058,7 @@ async function applyManagedEngine(
       ? { socketPassword: rootCredential.password }
       : {}),
     clientSourceHosts: resolveClientSourceHosts(payload),
+    sessionEnds: sessionEndsFor(layout, payload.managedId),
   };
 
   try {

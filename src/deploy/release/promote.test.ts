@@ -21,7 +21,7 @@ import {
   promoteExistingRelease,
   promoteRelease,
   readCurrentReleaseId,
-  recordRailpackRelease,
+  recordImageBuildRelease,
   resolveReleaseSourceDir,
   stageRelease,
   swapCurrentSymlink,
@@ -335,7 +335,7 @@ test("promoteExistingRelease rejects missing and unsealed trees", async () => {
   }
 });
 
-test("recordRailpackRelease writes the manifest without sealing", async () => {
+test("recordImageBuildRelease writes the manifest without sealing", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-railpack-record-" });
   try {
     const paths = resolveDaemonReleasePaths(
@@ -349,13 +349,13 @@ test("recordRailpackRelease writes the manifest without sealing", async () => {
       ...MANIFEST,
       imageTag: "tp-svc-1:019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
       imageDigest: "sha256:abc",
-      railpackFrontendVersion: "0.9.0",
-      railpackPlanVersion: "1",
+      builderFrontendVersion: "0.9.0",
+      builderPlanVersion: "1",
     };
-    const dir = await recordRailpackRelease({ paths, manifest });
+    const dir = await recordImageBuildRelease({ paths, manifest });
     assertEquals(dir, paths.releaseDir);
     assertEquals(await readReleaseManifest(paths.releaseDir), manifest);
-    // No current symlink is created — Railpack cutover is compose image: only.
+    // No current symlink is created — image-build cutover is compose image: only.
     assertEquals(await readCurrentReleaseId(paths), null);
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -572,6 +572,76 @@ test("promoteRelease and promoteExistingRelease keeping current leave it where i
       "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
     );
   } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a daemon-owned promote of a Laravel release links storage into shared/ and makes its folders", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-promote-layout-" });
+  try {
+    const paths = resolveReleasePaths(
+      { principalHomeRoot: root, daemonStateDir: join(root, "state") },
+      {
+        username: "appuser",
+        serviceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70",
+        releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e71",
+        folder: FOLDER,
+        publishId: PUBLISH_ID,
+      },
+    );
+    await Deno.mkdir(paths.sharedDir, { recursive: true });
+    const workingDir = join(root, "checkout");
+    // The build shipped its own storage folder: replaced, not merged.
+    await Deno.mkdir(join(workingDir, "storage", "app"), { recursive: true });
+    await Deno.writeTextFile(join(workingDir, "storage", "app", "old"), "x");
+    await Deno.mkdir(join(workingDir, "bootstrap", "cache"), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(join(workingDir, "artisan"), "<?php\n");
+    await promoteRelease({
+      paths,
+      workingDir,
+      username: "appuser",
+      manifest: { ...MANIFEST, frameworkLayout: "laravel" },
+      healthProbe: () => Promise.resolve(),
+      runFn: runOk,
+    });
+    assertEquals(
+      await Deno.readLink(join(paths.releaseDir, "storage")),
+      "shared/storage",
+    );
+    assertEquals(
+      await Deno.readLink(join(paths.releaseDir, "shared")),
+      "../../shared",
+    );
+    for (
+      const folder of [
+        "storage/app/public",
+        "storage/framework/cache/data",
+        "storage/framework/sessions",
+        "storage/framework/views",
+        "storage/logs",
+      ]
+    ) {
+      assertEquals(
+        (await Deno.stat(join(paths.sharedDir, folder))).isDirectory,
+        true,
+        folder,
+      );
+    }
+    // bootstrap/cache stays a real folder in the release.
+    assertEquals(
+      (await Deno.lstat(join(paths.releaseDir, "bootstrap", "cache")))
+        .isDirectory,
+      true,
+    );
+    // The manifest in the release records the layout for rollback.
+    assertEquals(
+      (await readReleaseManifest(paths.releaseDir))?.frameworkLayout,
+      "laravel",
+    );
+  } finally {
+    await new Deno.Command("chmod", { args: ["-R", "u+rwX", root] }).output();
     await Deno.remove(root, { recursive: true });
   }
 });

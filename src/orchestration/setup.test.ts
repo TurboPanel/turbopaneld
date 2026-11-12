@@ -168,6 +168,44 @@ test("opted-in Workers HTTPS is not pre-opt-in", () => {
   );
 });
 
+test("opted-in co-located Workers dev never runs the managed boot converge", () => {
+  // The dev host on the Workers runtime dials https://localhost:8443, so its
+  // instance config is a URL like a remote managed server. daemon-converge.yml
+  // would then set the vendored Deno to root:tp 0750 and lock the developer's
+  // own control plane unit out of it.
+  withEnv(
+    {
+      TURBOPANEL_DEV_INSTANCE: "1",
+      TURBOPANEL_INSTANCE_RUNTIME: "workers",
+      TURBOPANEL_INSTANCE_URL: "https://localhost:8443",
+    },
+    () => {
+      assertEquals(shouldRunDaemonConverge(), false);
+      assertEquals(shouldEnableDockerIntegration(), true);
+    },
+  );
+});
+
+test("opted-in co-located socket dev never runs the managed boot converge", () => {
+  withEnv({ TURBOPANEL_DEV_INSTANCE: "1" }, () => {
+    assertEquals(shouldRunDaemonConverge(), false);
+  });
+});
+
+test("a remote URL daemon still runs the managed boot converge", () => {
+  withInstallMode("production", () => {
+    withEnv({ TURBOPANEL_INSTANCE_URL: "https://panel.example.com" }, () => {
+      assertEquals(shouldRunDaemonConverge(), true);
+    });
+  });
+  // A source checkout pointed at a remote control plane is not co-located.
+  withInstallMode("development", () => {
+    withEnv({ TURBOPANEL_INSTANCE_URL: "https://panel.example.com" }, () => {
+      assertEquals(shouldRunDaemonConverge(), true);
+    });
+  });
+});
+
 test("shouldEnableDockerIntegration stays off for opted-in Workers without URL kind fallthrough", () => {
   // DEV_INSTANCE + workers + URL → install-dev true (docker on). Document the
   // remaining false path via skip + remote is already covered; this pins the
@@ -258,21 +296,37 @@ test("runBootConverge is skipped with orchestration and a no-op where no converg
 test("runBootConverge runs the converge for a remote daemon and reports a failure as false", async () => {
   const url = Deno.env.get("TURBOPANEL_INSTANCE_URL");
   const original = setupTestHooks.runDaemonConverge;
+  const originalRecord = setupTestHooks.recordBootConvergeDone;
   try {
     Deno.env.delete("TURBOPANEL_SKIP_ORCHESTRATION");
     Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://panel.example.com");
     let runs = 0;
+    let recorded = 0;
+    setupTestHooks.recordBootConvergeDone = () => {
+      recorded += 1;
+      return Promise.resolve();
+    };
     setupTestHooks.runDaemonConverge = () => {
       runs += 1;
       return Promise.resolve();
     };
     assertEquals(await runBootConverge(), true);
     assertEquals(runs, 1);
+    // The installer's restart waits for this marker.
+    assertEquals(recorded, 1);
     setupTestHooks.runDaemonConverge = () =>
       Promise.reject(new Error("playbook failed"));
     assertEquals(await runBootConverge(), false);
+    // A failed converge is retried and runs apt again: no marker.
+    assertEquals(recorded, 1);
+    // A marker that cannot be written never fails the converge.
+    setupTestHooks.runDaemonConverge = () => Promise.resolve();
+    setupTestHooks.recordBootConvergeDone = () =>
+      Promise.reject(new Error("read-only"));
+    assertEquals(await runBootConverge(), true);
   } finally {
     setupTestHooks.runDaemonConverge = original;
+    setupTestHooks.recordBootConvergeDone = originalRecord;
     if (url === undefined) Deno.env.delete("TURBOPANEL_INSTANCE_URL");
     else Deno.env.set("TURBOPANEL_INSTANCE_URL", url);
   }

@@ -314,7 +314,13 @@ jobs:
     # gh-canary.yml creates/updates the rolling `canary` release and its assets.
     permissions:
       contents: write
-    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@d9127ee03a6a3b42e9435ebec3542db5fab09bc0 # dev#49
+    uses: TurboPanel/dev/.github/workflows/gh-canary.yml@8a0bce4fa8c65c87f9bd937a8eae654f45adb96e # dev#119
+    # The Release App token moves the canary tag past commits that change
+    # .github/workflows (GITHUB_TOKEN cannot: HTTP 403). Without the secrets
+    # the tag move only warns; the assets and manifest still publish.
+    secrets:
+      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}
+      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
     with:
       version: ${{ needs.publish.outputs.canary-version }}
       commit: ${{ github.sha }}

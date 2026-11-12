@@ -41,6 +41,7 @@ import {
   principalSliceContent,
   principalSlicePath,
 } from "./unit.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test} — Sonar typescript:S2187 only
@@ -116,7 +117,8 @@ function createRunMock(layout?: LayoutPaths): RunMock {
   const calls: Array<{ command: string; args: string[] }> = [];
   const activeUnits = new Set<string>();
   const envCopies = new Map<string, string>();
-  const run: RunFn = async (command, args) => {
+  const run: RunFn = async (command, given) => {
+    const args = bareSudoArgs(given);
     calls.push({ command, args: [...args] });
     if (command !== "sudo") return ok();
 
@@ -354,6 +356,67 @@ test("applyNativeAppServices installs the unit, reloads, and enables it", async 
     assertEquals(mock.systemctl("enable"), [
       nativeAppUnitName("019e0a1b-7c3d-7a52-9b4e-3f1a2c5d6e70"),
     ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+/** A health step report that keeps what it was told. */
+function healthRecorder() {
+  const events: string[] = [];
+  return {
+    events,
+    health: {
+      waiting: (text: string) => events.push(`waiting: ${text}`),
+      done: (title: string, note: string) =>
+        events.push(`done: ${title} | ${note}`),
+      failed: (title: string, note: string) =>
+        events.push(`failed: ${title} | ${note}`),
+      ended: () => events.some((e) => !e.startsWith("waiting")),
+      active: () => true,
+    },
+  };
+}
+
+test("a native app that answers ends the health step as reachable, not healthy", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const { events, health } = healthRecorder();
+  try {
+    await applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+      ...applyOpts(host, mock),
+      health,
+    });
+    assertEquals(events.length, 1);
+    assertStringIncludes(
+      events[0] ?? "",
+      "done: Service Is Reachable | Answered HTTP on 127.0.0.1:18100 after ",
+    );
+    assertStringIncludes(events[0] ?? "", "any status code counts");
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a native app that never answers ends the health step with the address and the wait", async () => {
+  const host = await makeTestHost();
+  const mock = createRunMock();
+  const { events, health } = healthRecorder();
+  try {
+    await assertRejects(
+      () =>
+        applyNativeAppServices(host.layout, ENVIRONMENT_ID, [makeApp()], {
+          ...applyOpts(host, mock, false),
+          health,
+        }),
+      Error,
+    );
+    const ticks = events.filter((e) => e.startsWith("waiting: Attempt 1 of "));
+    assertEquals(ticks.length, 1);
+    assertEquals(
+      events.filter((e) => e.startsWith("failed:")),
+      ["failed: Service Did Not Answer | Did not answer HTTP on 127.0.0.1:18100 within 30 s"],
+    );
   } finally {
     await host.cleanup();
   }
@@ -3560,4 +3623,72 @@ test("the default port pick skips the control plane's band", () => {
   const offered = [18_080, 19_799, 18_500, 40_001];
   assertEquals(pickPortDefault(() => offered.shift() ?? 0), 40_001);
   assertThrows(() => pickPortDefault(() => 18_100), Error, "18080-19799");
+});
+
+test("the account walls are reloaded once the units are on disk, before any app starts, and after removal", async () => {
+  const host = await makeTestHost();
+  try {
+    const mock = createRunMock();
+    await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    const isSync = (args: string[]) => args.includes("php-loopback-sync");
+    const syncs = callIndexes(mock, isSync);
+    const reloads = callIndexes(
+      mock,
+      (args) => args.includes("systemctl") && args.includes("daemon-reload"),
+    );
+    const starts = callIndexes(
+      mock,
+      (args) => args.includes("systemctl") && args.includes("enable"),
+    );
+    // The app's own port opens for its account before it can call itself.
+    assertEquals(syncs.length, 1);
+    assertEquals(syncs[0]! > reloads[0]!, true);
+    assertEquals(starts[0]! > syncs[0]!, true);
+
+    // Removal: the port goes back to the ledger, so the walls are rebuilt
+    // once the units are gone.
+    const removal = createRunMock();
+    assertEquals(
+      await removeNativeAppServices(host.layout, ENVIRONMENT_ID, {
+        run: removal.run,
+        systemdUnitDir: host.unitDir,
+      }),
+      1,
+    );
+    const removeSyncs = callIndexes(removal, isSync);
+    const removeReloads = callIndexes(
+      removal,
+      (args) => args.includes("systemctl") && args.includes("daemon-reload"),
+    );
+    assertEquals(removeSyncs.length, 1);
+    assertEquals(removeSyncs[0]! > removeReloads.at(-1)!, true);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a refused reload of the account walls only warns: the deploy goes on", async () => {
+  const host = await makeTestHost();
+  try {
+    const mock = createRunMock();
+    const originalRun = mock.run;
+    mock.run = async (command, args) => {
+      if (args.includes("php-loopback-sync")) return fail("nft refused");
+      return await originalRun(command, args);
+    };
+    const result = await applyNativeAppServices(
+      host.layout,
+      ENVIRONMENT_ID,
+      [makeApp()],
+      applyOpts(host, mock),
+    );
+    assertEquals(result.applied, ["web"]);
+  } finally {
+    await host.cleanup();
+  }
 });

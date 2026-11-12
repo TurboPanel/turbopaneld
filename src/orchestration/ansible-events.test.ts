@@ -462,3 +462,50 @@ test("the failure message never repeats the argument list", async () => {
     await cleanup();
   }
 });
+
+test("formatPlaybookRecap reads the failure count ansible really sends", () => {
+  assertEquals(
+    formatPlaybookRecap({
+      localhost: { ok: 12, changed: 2, failures: 1, unreachable: 0 },
+    }),
+    "ok=12 changed=2 failed=1 unreachable=0",
+  );
+  assertEquals(
+    formatPlaybookRecap({
+      a: { ok: 1, failures: 1, unreachable: 0 },
+      b: { ok: 1, failures: 2, unreachable: 1 },
+    }),
+    "ok=2 changed=0 failed=3 unreachable=1",
+  );
+});
+
+test("formatPlaybookRecap shows rescued tasks only when there were some", () => {
+  assertEquals(
+    formatPlaybookRecap({ localhost: { ok: 5, failures: 1, rescued: 1 } }),
+    "ok=5 changed=0 failed=1 unreachable=0 rescued=1",
+  );
+});
+
+test("a failed run never prints a clean recap", () => {
+  const stats = {
+    _event: "v2_playbook_on_stats" as const,
+    _timestamp: "2026-01-01T00:00:02Z",
+    stats: { localhost: { ok: 4, changed: 0, failures: 0, unreachable: 0 } },
+    custom_stats: {},
+    global_custom_stats: {},
+  };
+  const failed = new AnsibleRunSummaryCollector();
+  failed.handleEvent(stats);
+  assertEquals(
+    failed.build({ runFailed: true }),
+    "ok=4 changed=0 failed=0 unreachable=0 (playbook exited with an error)",
+  );
+  const ok = new AnsibleRunSummaryCollector();
+  ok.handleEvent(stats);
+  assertEquals(ok.build(), "ok=4 changed=0 failed=0 unreachable=0");
+  const none = new AnsibleRunSummaryCollector();
+  assertEquals(
+    none.build({ runFailed: true }),
+    "playbook exited with an error before a recap",
+  );
+});

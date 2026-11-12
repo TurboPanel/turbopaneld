@@ -3,11 +3,14 @@
  * on, and which folder of the release the site serves.
  */
 
-import type {
-  EnvironmentDeployPayload,
-  EnvironmentDeploySite,
+import {
+  type EnvironmentDeployPayload,
+  type EnvironmentDeploySite,
+  isImageBuildKind,
 } from "../../contracts/commands-contracts.ts";
 import type { RuntimeChoice } from "../native/apply-native-apps.ts";
+import type { AppliedRelease } from "./apply-source-releases.ts";
+import type { FrameworkLayout } from "./framework-layout.ts";
 
 /** The root a site gets when its compose block names none. */
 export const DEFAULT_SITE_ROOT = "public";
@@ -57,6 +60,26 @@ export function sitesWithReleaseRoots(
 }
 
 /**
+ * Each site with the framework layout of the release now serving it (a fresh
+ * build, or on a rollback the layout its own record names). The vhost serves
+ * the layout's shared folders by URL; a site with no layout is returned as it is.
+ */
+export function sitesWithFrameworkLayouts(
+  sites: readonly EnvironmentDeploySite[],
+  applied: readonly Pick<
+    AppliedRelease,
+    "composeServiceName" | "frameworkLayout"
+  >[],
+): Array<EnvironmentDeploySite & { frameworkLayout?: FrameworkLayout }> {
+  return sites.map((site) => {
+    const frameworkLayout = applied.find((entry) =>
+      entry.composeServiceName === site.composeServiceName
+    )?.frameworkLayout;
+    return frameworkLayout === undefined ? site : { ...site, frameworkLayout };
+  });
+}
+
+/**
  * One default-Node choice for each site that builds from a Git source. Sites
  * name no Node series, so they follow the rule an app without a pinned series
  * follows: the newest series on offer.
@@ -66,7 +89,7 @@ export function siteBuildRuntimes(
 ): RuntimeChoice[] {
   return (payload.sourceMaterial ?? [])
     .filter((entry) => siteForSource(payload, entry.composeServiceName))
-    .filter((entry) => entry.build.kind !== "railpack")
+    .filter((entry) => !isImageBuildKind(entry.build.kind))
     .map(() => ({}));
 }
 

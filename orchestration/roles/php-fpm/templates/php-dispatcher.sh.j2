@@ -17,21 +17,28 @@ set -eu
 
 self=$(basename "$0")
 
-# Series this host installed, rendered from the playbook's series list. Order
-# here is irrelevant — `sort -V` below does the version ordering, so 8.10
-# comes after 8.4.
-tp_series='{% for series in php_fpm_versions | map('trim') | reject('equalto', '') | unique | list %}
-{{ series }}{% endfor %}'
-
 tp_die() {
   printf '%s: %s\n' "$self" "$1" >&2
   exit 127
 }
 
-# Installed series, version-ordered so the highest is last.
+# Installed series, found on disk each time so a series another deploy
+# installed is seen too (a list rendered by the last playbook run would only
+# name that run's series). Names that are not exactly `<major>.<minor>` (for
+# example php8.4-config) are skipped. Version-ordered, so the highest is last
+# and 8.10 comes after 8.4.
 tp_installed_series() {
-  for series in $tp_series; do
-    [ -x "/usr/bin/php${series}" ] && printf '%s\n' "$series"
+  for binary in /usr/bin/php[0-9]*.[0-9]*; do
+    series=${binary#/usr/bin/php}
+    case "$series" in
+      *[!0-9.]*) continue ;;
+      [0-9]*.[0-9]*) ;;
+      *) continue ;;
+    esac
+    case "$series" in
+      *.*.*) continue ;;
+    esac
+    [ -x "$binary" ] && printf '%s\n' "$series"
   done | sort -V
 }
 

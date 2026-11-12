@@ -161,7 +161,29 @@ export function devOwnershipPlaybookExtraArgs(
   // Ansible instance-certs defaults compute `<dev_root>/turbopanel` when
   // turbopanel_dev_user is set; pass the root so HOME/certs stay aligned.
   if (devRoot) args.push("-e", `turbopanel_dev_root=${devRoot}`);
+  // The dev user's real home (HOME for git, ssh and pnpm in the repo roles);
+  // it differs from the root when the repos sit in a sub-folder of the home.
+  const devHome = env.TURBOPANEL_DEV_HOME?.trim();
+  if (devHome) args.push("-e", `turbopanel_dev_home=${devHome}`);
   return args;
+}
+
+/**
+ * Extra-vars for the playbooks a server runs for itself: `daemon-converge`,
+ * `docker-setup`, `caddy-setup` and `buildkit-setup`. None of their roles
+ * applies the control plane or the web interface, so the run-mode trio
+ * (`turbopanel_ui_mode`, `turbopanel_instance_run_mode`,
+ * `turbopanel_instance_runtime`) is never passed here: a managed host gets no
+ * extra-vars at all, and a co-located development host gets only the
+ * ownership vars those roles read ({@link devOwnershipPlaybookExtraArgs}).
+ * Passing {@link devInstanceExtraArgs} instead put `turbopanel_ui_mode=dev`
+ * and `turbopanel_instance_run_mode=source` on every production server's
+ * converge command line: unread by these roles, but wrong to read in a log.
+ */
+export function serverPlaybookExtraArgs(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string[] {
+  return devOwnershipPlaybookExtraArgs(env);
 }
 
 /**
@@ -370,7 +392,7 @@ export async function runLocalhostTest(
 export async function runDaemonConverge(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  const args = devInstanceExtraArgs();
+  const args = serverPlaybookExtraArgs();
   logInfo("orchestration", "running daemon-converge playbook");
   await runLocalPlaybook(DAEMON_CONVERGE_PLAYBOOK, args, onEvent);
   logInfo("orchestration", "daemon-converge complete");
@@ -413,7 +435,7 @@ export async function runSetHostname(
   try {
     await runLocalPlaybook(SET_HOSTNAME_PLAYBOOK, extraArgs, eventHandler);
   } catch {
-    const summary = collector.build();
+    const summary = collector.build({ runFailed: true });
     throw new Error(
       summary.length > 0
         ? `set-hostname playbook failed: ${summary}`
@@ -504,7 +526,7 @@ export async function runTimeSyncApply(
   try {
     await runLocalPlaybook(TIME_SYNC_APPLY_PLAYBOOK, args, eventHandler);
   } catch {
-    const summary = collector.build();
+    const summary = collector.build({ runFailed: true });
     throw new Error(
       summary.length > 0
         ? `time-sync-apply playbook failed: ${summary}`
@@ -715,7 +737,7 @@ export async function runDockerSetup(
   logInfo("orchestration", "running docker-setup playbook");
   await runLocalPlaybook(
     DOCKER_PLAYBOOK,
-    [...devInstanceExtraArgs(), ...buildDockerSetupExtraArgs(resolved)],
+    [...serverPlaybookExtraArgs(), ...buildDockerSetupExtraArgs(resolved)],
     onEvent,
   );
   logInfo("orchestration", "docker-setup complete");
@@ -726,15 +748,15 @@ export async function runCaddySetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   logInfo("orchestration", "running caddy-setup playbook");
-  await runLocalPlaybook(CADDY_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  await runLocalPlaybook(CADDY_PLAYBOOK, serverPlaybookExtraArgs(), onEvent);
   logInfo("orchestration", "caddy-setup complete");
 }
 
 /**
- * Vendor Railpack and its BuildKit frontend for the Railpack build lane.
+ * Vendor the image builder and its BuildKit frontend for the image build lane.
  *
- * Called on demand from `ensureBuildkitRailpack` when a deploy asks for
- * `build.kind: railpack`, never from `daemon-converge` or
+ * Called on demand from `ensureBuildkitImageBuild` when a deploy asks for
+ * `build.kind: image`, never from `daemon-converge` or
  * `instance-dev-install`. The build runs on the Docker Engine's own BuildKit
  * and lands in its image store, so the playbook installs the container runtime
  * first (the `docker` role).
@@ -743,7 +765,7 @@ export async function runBuildkitSetup(
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
   logInfo("orchestration", "running buildkit-setup playbook");
-  await runLocalPlaybook(BUILDKIT_PLAYBOOK, devInstanceExtraArgs(), onEvent);
+  await runLocalPlaybook(BUILDKIT_PLAYBOOK, serverPlaybookExtraArgs(), onEvent);
   logInfo("orchestration", "buildkit-setup complete");
 }
 

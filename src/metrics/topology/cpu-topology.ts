@@ -4,11 +4,18 @@
  * logical core (`processor`). `collector/cpu.ts` only turns `/proc/stat`
  * aggregate jiffie deltas into percentages, so this is the only per-core
  * `/proc/cpuinfo` parsing in the daemon.
+ *
+ * Arm hosts differ: only blocks with a `processor` key are CPUs (a Raspberry
+ * Pi ends the file with a board block: `Revision`, `Serial`, `Model`), there
+ * is no `core id` (each processor is its own core, these cores have no SMT
+ * siblings), and no `model name` (the model comes from `CPU implementer` /
+ * `CPU part`, see `host/arm-cpu-model.ts`).
  */
 import type {
   CpuCoreTopology,
   CpuTopology,
 } from "../../contracts/topology-types.ts";
+import { armCpuModelFromCpuinfo } from "../../host/arm-cpu-model.ts";
 
 export type CpuTopologyDeps = {
   readProcFile: (
@@ -64,7 +71,10 @@ export async function collectCpuTopology(
   const text = await deps.readProcFile("/proc/cpuinfo");
   if (!text) return EMPTY_CPU_TOPOLOGY;
 
-  const blocks = parseCpuInfoBlocks(text);
+  // Only processor blocks are CPUs; a trailing board block is not one.
+  const blocks = parseCpuInfoBlocks(text).filter((block) =>
+    block["processor"] !== undefined
+  );
   if (blocks.length === 0) return EMPTY_CPU_TOPOLOGY;
 
   const physicalIds = new Set<string>();
@@ -82,14 +92,16 @@ export async function collectCpuTopology(
       physicalId,
       (threadsByPhysicalId.get(physicalId) ?? 0) + 1,
     );
-    const coreId = block["core id"];
+    const logicalIndex = Number(block["processor"]);
+    // No `core id` (Arm): each processor is its own core.
+    const coreId = block["core id"] ??
+      (Number.isFinite(logicalIndex) ? String(logicalIndex) : undefined);
     if (coreId !== undefined) {
       const coreIds = coreIdsByPhysicalId.get(physicalId) ?? new Set<string>();
       coreIds.add(coreId);
       coreIdsByPhysicalId.set(physicalId, coreIds);
     }
 
-    const logicalIndex = Number(block["processor"]);
     if (Number.isFinite(logicalIndex)) {
       const physicalCoreKey = `${physicalId}:${coreId ?? "0"}`;
       const threadIndex = threadIndexByPhysicalCore.get(physicalCoreKey) ?? 0;
@@ -110,6 +122,8 @@ export async function collectCpuTopology(
   const coresPerSocket = coreCounts.length > 0
     ? Math.max(...coreCounts)
     : threadsPerSocket;
+
+  model ??= armCpuModelFromCpuinfo(text) ?? null;
 
   return { sockets, coresPerSocket, threadsPerSocket, model, cores };
 }

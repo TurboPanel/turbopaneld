@@ -8,6 +8,7 @@ import {
   logWarn,
   sanitizeForLog,
   stripLogInjection,
+  writeLogLineOrDrop,
 } from "./logger.ts";
 
 /**
@@ -69,4 +70,22 @@ test("log routes orchestration components through the active installer presenter
     presenter.dispose();
     setActiveInstallPresenter(null);
   }
+});
+
+test("writeLogLineOrDrop: a full disk drops the line instead of throwing", () => {
+  const written: string[] = [];
+  writeLogLineOrDrop({
+    writeSync: (data) => {
+      written.push(new TextDecoder().decode(data));
+      return data.length;
+    },
+  }, "kept\n");
+  assertEquals(written, ["kept\n"]);
+  writeLogLineOrDrop({
+    writeSync: () => {
+      throw Object.assign(new Error("no space left on device"), {
+        code: "ENOSPC",
+      });
+    },
+  }, "dropped\n");
 });

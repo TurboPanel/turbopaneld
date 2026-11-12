@@ -20,11 +20,13 @@ import {
 } from "../deploy/instance-acme-http01.ts";
 import type {
   InstanceAcmeWireSettings,
+  InstanceEdgeTrustWire,
   InstanceHostnameWireEntry,
 } from "../contracts/cell-messages.ts";
 import {
   isValidHostname,
   isValidNtpServer,
+  parseCidrLiteral,
 } from "../contracts/commands-contracts.ts";
 import {
   instanceAcmeCooldownError,
@@ -34,11 +36,25 @@ import {
 } from "../deploy/instance-acme-failure.ts";
 import { instanceAcmeIssuerKey } from "../deploy/instance-acme-issuer.ts";
 import { upsertPublicUrlsInEnv } from "./public-urls-env.ts";
+import { logWarn } from "../util/logger.ts";
+import type { RunFn } from "../deploy/ensure-principal.ts";
+import { runHostCommand } from "../deploy/systemd-unit-set.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { writePrivateFileAtomic } from "../permissions/host-unit-files.ts";
 
 /** Wire hostname, including the one-hop decrypted upload pair. */
 export type InstanceHostnameApplyEntry = InstanceHostnameWireEntry;
 
-const UPLOADED_CERT_ID = /^[0-9a-f-]{36}$/i;
+/**
+ * The control plane's certificate id: a lower-case UUID, the form Postgres
+ * prints and tp-host's `tp_instance_cert_id_ok` takes.
+ */
+const UPLOADED_CERT_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** `uploaded-<id>.crt` or `.key`, the names an uploaded pair is installed as. */
+const UPLOADED_CERT_FILE = /^uploaded-(.{36})\.(?:crt|key)$/;
+/** Most ids `tp-host instance-cert-prune` takes (its TP_INSTANCE_CERT_KEEP_MAX). */
+export const INSTANCE_CERT_KEEP_MAX = 64;
 /** `https://<host>[:port][/]`, the install origin the control plane stores. */
 const INSTALL_ORIGIN =
   /^https:\/\/(?:\[([0-9A-Fa-f:.]+)\]|([^/:[\]]+))(?::(\d{1,5}))?\/?$/;
@@ -107,6 +123,82 @@ export function assertInstanceCertsApplyInputs(
       );
     }
   }
+}
+
+/** Shortest prefix an edge range may have; anything wider is refused. */
+const MIN_EDGE_PREFIX = { 4: 8, 6: 16 } as const;
+
+/**
+ * Loopback, private, link-local, CGNAT, ULA, multicast and reserved space, as
+ * [a, b, c, d, prefix] (IPv4) and [first hextet, prefix] (IPv6) so no address
+ * literal sits in the source.
+ */
+const NEVER_EDGE_V4: ReadonlyArray<readonly number[]> = [
+  [0, 0, 0, 0, 8],
+  [10, 0, 0, 0, 8],
+  [100, 64, 0, 0, 10],
+  [127, 0, 0, 0, 8],
+  [169, 254, 0, 0, 16],
+  [172, 16, 0, 0, 12],
+  [192, 168, 0, 0, 16],
+  [224, 0, 0, 0, 3],
+];
+const NEVER_EDGE_V6: ReadonlyArray<readonly [string, number]> = [
+  ["0", 8],
+  ["fc00", 7],
+  ["fe80", 10],
+  ["ff00", 8],
+];
+const NEVER_EDGE_RANGES = [
+  ...NEVER_EDGE_V4.map(([a, b, c, d, bits]) => `${a}.${b}.${c}.${d}/${bits}`),
+  ...NEVER_EDGE_V6.map(([hextet, bits]) => `${hextet}::/${bits}`),
+].flatMap((cidr) => {
+  const parsed = parseCidrLiteral(cidr);
+  return parsed ? [parsed] : [];
+});
+
+/**
+ * A range Caddy may trust as an edge, checked again on the daemon so the
+ * root-side boundary stands alone: a CIDR literal, not wider than the prefix
+ * floor, and clear of every local, private or reserved block.
+ */
+export function isSafeEdgeRange(value: string): boolean {
+  const parsed = parseCidrLiteral(value);
+  if (parsed === null || parsed.prefix < MIN_EDGE_PREFIX[parsed.version]) {
+    return false;
+  }
+  return !NEVER_EDGE_RANGES.some((blocked) =>
+    blocked.version === parsed.version && blocked.base <= parsed.last &&
+    parsed.base <= blocked.last
+  );
+}
+
+/**
+ * The ranges reach a root-run template, so every entry must be a CIDR literal
+ * and the per-provider lists must sit inside the union. Returns the compact
+ * JSON that travels as `turbopanel_edge_trust_json`.
+ */
+export function edgeTrustExtraVar(edgeTrust: InstanceEdgeTrustWire): string {
+  const lists = [edgeTrust.cidrs, edgeTrust.cloudflare, edgeTrust.bunny];
+  for (const entry of lists.flat()) {
+    if (!isSafeEdgeRange(entry)) {
+      throw new Error(`refusing edge range ${JSON.stringify(entry)}`);
+    }
+  }
+  if (!/^[0-9a-f]{64}$/.test(edgeTrust.hash)) {
+    throw new Error("refusing edge range set with a malformed hash");
+  }
+  const union = new Set(edgeTrust.cidrs);
+  if (
+    [...edgeTrust.cloudflare, ...edgeTrust.bunny].some((c) => !union.has(c))
+  ) {
+    throw new Error("refusing edge range set whose lists are not in the union");
+  }
+  return JSON.stringify({
+    hash: edgeTrust.hash,
+    cloudflare: edgeTrust.cloudflare,
+    bunny: edgeTrust.bunny,
+  });
 }
 
 function stripTrailingSlashes(path: string): string {
@@ -179,24 +271,355 @@ export function platformCaHosts(
     .map((entry) => entry.host);
 }
 
-function ansibleHostname(entry: InstanceHostnameApplyEntry): {
+/** A TCP port the panel's Caddy may redirect to, else undefined. */
+function validPublicPort(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) &&
+      value >= 1 && value <= 65535
+    ? value
+    : undefined;
+}
+
+/**
+ * One `turbopanel_hostnames_json` row. `public_port` is present only when the
+ * control plane sent a valid `publicPort`; without it the Caddyfile adds no
+ * edge port redirect for the name.
+ */
+export function ansibleHostname(entry: InstanceHostnameApplyEntry): {
   host: string;
   source: InstanceHostnameApplyEntry["source"];
   cert_id: string;
+  public_port?: number;
 } {
+  const publicPort = validPublicPort(entry.publicPort);
   return {
     host: entry.host,
     source: entry.source,
     cert_id: entry.uploadedCertId ?? "",
+    ...(publicPort === undefined ? {} : { public_port: publicPort }),
   };
+}
+
+/** Largest certificate chain tp-host installs (`TP_INSTANCE_CERT_MAX`). */
+export const INSTANCE_CERT_CHAIN_MAX_BYTES = 65_536;
+/** Largest private key tp-host installs (`TP_INSTANCE_KEY_MAX`). */
+export const INSTANCE_CERT_KEY_MAX_BYTES = 16_384;
+/** Most certificates in one chain (`TP_INSTANCE_CERT_BLOCKS_MAX`). */
+export const INSTANCE_CERT_CHAIN_MAX_BLOCKS = 10;
+
+const KEY_LABELS = new Set([
+  "PRIVATE KEY",
+  "RSA PRIVATE KEY",
+  "EC PRIVATE KEY",
+]);
+const PEM_BEGIN = /^-----BEGIN ([A-Z ]+)-----$/;
+const PEM_BASE64_LINE = /^[A-Za-z0-9+/=]{1,128}$/;
+
+/**
+ * Labels of the PEM blocks in `text`, or null unless it is PEM blocks and
+ * nothing else (blank lines between blocks only). Mirrors tp-host's
+ * `tp_instance_pem_ok`, so a pair the daemon accepts is not refused root-side.
+ */
+function pemBlockLabels(text: string): string[] | null {
+  const scan: PemScan = { labels: [], open: null, lines: 0 };
+  for (const line of text.split("\n")) {
+    if (!scanPemLine(scan, line)) return null;
+  }
+  return scan.open === null ? scan.labels : null;
+}
+
+type PemScan = { labels: string[]; open: string | null; lines: number };
+
+/** Feeds one line to the scan; false when the text is not PEM blocks only. */
+function scanPemLine(scan: PemScan, line: string): boolean {
+  if (scan.open === null) return openPemBlock(scan, line);
+  if (line === `-----END ${scan.open}-----`) {
+    if (scan.lines === 0) return false;
+    scan.open = null;
+    return true;
+  }
+  if (!PEM_BASE64_LINE.test(line)) return false;
+  scan.lines += 1;
+  return true;
+}
+
+/** Outside a block only blank lines and a BEGIN line may appear. */
+function openPemBlock(scan: PemScan, line: string): boolean {
+  if (line === "") return true;
+  const begin = PEM_BEGIN.exec(line);
+  if (!begin) return false;
+  scan.open = begin[1]!;
+  scan.labels.push(scan.open);
+  scan.lines = 0;
+  return true;
+}
+
+/** LF line endings and one final newline, the bytes tp-host checks. */
+function normalizePem(text: string): string {
+  return `${text.replaceAll("\r\n", "\n").trimEnd()}\n`;
+}
+
+/**
+ * The pair as staged, or an error naming what is wrong with it. The same
+ * shapes and caps tp-host enforces: 1 to 10 CERTIFICATE blocks, exactly one
+ * unencrypted private key block.
+ */
+export function uploadedCertPair(
+  id: string,
+  certPem: string,
+  keyPem: string,
+): { cert: string; key: string } {
+  const cert = normalizePem(certPem);
+  const key = normalizePem(keyPem);
+  const encoder = new TextEncoder();
+  if (encoder.encode(cert).byteLength > INSTANCE_CERT_CHAIN_MAX_BYTES) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the chain is over ${INSTANCE_CERT_CHAIN_MAX_BYTES} bytes`,
+    );
+  }
+  if (encoder.encode(key).byteLength > INSTANCE_CERT_KEY_MAX_BYTES) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the private key is over ${INSTANCE_CERT_KEY_MAX_BYTES} bytes`,
+    );
+  }
+  const chain = pemBlockLabels(cert);
+  if (
+    !chain || chain.length === 0 ||
+    chain.length > INSTANCE_CERT_CHAIN_MAX_BLOCKS ||
+    chain.some((label) => label !== "CERTIFICATE")
+  ) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the certificate is not a PEM chain of 1 to ${INSTANCE_CERT_CHAIN_MAX_BLOCKS} certificates`,
+    );
+  }
+  const keys = pemBlockLabels(key);
+  if (keys?.length !== 1 || !KEY_LABELS.has(keys[0]!)) {
+    throw new Error(
+      `refusing uploaded certificate ${id}: the private key is not one unencrypted PEM private key`,
+    );
+  }
+  return { cert, key };
+}
+
+/** Installs one checked pair as `uploaded-<id>.{crt,key}` in the certs dir. */
+export type UploadedCertInstaller = (
+  id: string,
+  pair: { cert: string; key: string },
+) => Promise<void>;
+
+/**
+ * Where the daemon stages a pair for `tp-host instance-cert-install`
+ * (`<state>/system/instance-certs`, tp-host's `R_INSTANCE_CERT_STAGE`).
+ */
+export function instanceCertStageDir(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string {
+  return join(resolveLayout(env).stateDir, "system", "instance-certs");
+}
+
+/**
+ * Co-located development: the certs dir is the developer's own (beside the
+ * checkout), so the daemon writes the pair itself.
+ */
+export function writeUploadedCertDirect(
+  certsDir: string,
+): UploadedCertInstaller {
+  let made = false;
+  return async (id, pair) => {
+    if (!made) {
+      await Deno.mkdir(certsDir, { recursive: true, mode: 0o750 });
+      made = true;
+    }
+    await Deno.writeTextFile(join(certsDir, `uploaded-${id}.crt`), pair.cert, {
+      mode: 0o640,
+    });
+    await Deno.writeTextFile(join(certsDir, `uploaded-${id}.key`), pair.key, {
+      mode: 0o640,
+    });
+  };
+}
+
+/**
+ * A managed host: the certs dir belongs to the instance-certs role and the
+ * daemon account cannot write it. Stage the pair in a 0700 folder the daemon
+ * owns and let `tp-host instance-cert-install <id>` check it and place it
+ * (root:tp 0640). The staged copies are removed whatever the outcome.
+ */
+export function installUploadedCertViaHost(
+  deps: { stageDir: string; run?: RunFn },
+): UploadedCertInstaller {
+  const run = deps.run ?? runHostCommand;
+  return async (id, pair) => {
+    await Deno.mkdir(deps.stageDir, { recursive: true, mode: 0o700 });
+    await Deno.chmod(deps.stageDir, 0o700);
+    const staged = [
+      join(deps.stageDir, `${id}.crt`),
+      join(deps.stageDir, `${id}.key`),
+    ];
+    try {
+      await writePrivateFileAtomic(deps.stageDir, `${id}.crt`, pair.cert);
+      await writePrivateFileAtomic(deps.stageDir, `${id}.key`, pair.key);
+      const result = await run(
+        "sudo",
+        hostSudoArgs(["-n", "instance-cert-install", id]),
+      );
+      if (!result.success) {
+        throw new Error(
+          `installing uploaded certificate ${id} failed: ${
+            result.stderr.trim() || "tp-host refused it"
+          }`,
+        );
+      }
+    } finally {
+      await Promise.all(
+        staged.map((path) => Deno.remove(path).catch(() => undefined)),
+      );
+    }
+  };
+}
+
+/** The installer for this host's layout. */
+export function uploadedCertInstaller(
+  certsDir: string,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): UploadedCertInstaller {
+  return isCoLocatedDev(env)
+    ? writeUploadedCertDirect(certsDir)
+    : installUploadedCertViaHost({ stageDir: instanceCertStageDir(env) });
+}
+
+/**
+ * Removes the installed `uploaded-<id>.{crt,key}` files whose id is not in
+ * `keep` (the ids the hostnames still use).
+ */
+export type UploadedCertPruner = (keep: readonly string[]) => Promise<void>;
+
+/** Co-located development: the certs dir is the developer's own. */
+export function pruneUploadedCertsDirect(
+  certsDir: string,
+): UploadedCertPruner {
+  return async (keep) => {
+    const stale = await staleUploadedCertFiles(certsDir, keep);
+    await forEachSequential(stale, async (name) => {
+      await Deno.remove(join(certsDir, name)).catch((err) => {
+        if (!(err instanceof Deno.errors.NotFound)) throw err;
+      });
+    });
+  };
+}
+
+/** A managed host: `tp-host instance-cert-prune <keep-id>...` removes them. */
+export function pruneUploadedCertsViaHost(
+  deps: { run?: RunFn } = {},
+): UploadedCertPruner {
+  const run = deps.run ?? runHostCommand;
+  return async (keep) => {
+    if (keep.length > INSTANCE_CERT_KEEP_MAX) {
+      throw new Error(
+        `more than ${INSTANCE_CERT_KEEP_MAX} uploaded certificates in use`,
+      );
+    }
+    const result = await run(
+      "sudo",
+      hostSudoArgs(["-n", "instance-cert-prune", ...keep]),
+    );
+    if (!result.success) {
+      throw new Error(
+        `removing unused uploaded certificates failed: ${
+          result.stderr.trim() || "tp-host refused it"
+        }`,
+      );
+    }
+  };
+}
+
+/** The pruner for this host's layout. */
+export function uploadedCertPruner(
+  certsDir: string,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): UploadedCertPruner {
+  return isCoLocatedDev(env)
+    ? pruneUploadedCertsDirect(certsDir)
+    : pruneUploadedCertsViaHost();
+}
+
+/**
+ * Names in `certsDir` of installed uploaded pairs whose id is not in `keep`:
+ * plain files or links named exactly `uploaded-<uuid>.{crt,key}`. A missing
+ * or unreadable folder has none.
+ */
+export async function staleUploadedCertFiles(
+  certsDir: string,
+  keep: readonly string[],
+): Promise<string[]> {
+  const kept = new Set(keep);
+  const stale: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(certsDir)) {
+      if (entry.isDirectory) continue;
+      const id = UPLOADED_CERT_FILE.exec(entry.name)?.[1];
+      if (id && UPLOADED_CERT_ID.test(id) && !kept.has(id)) {
+        stale.push(entry.name);
+      }
+    }
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    if (err instanceof Deno.errors.PermissionDenied) {
+      logWarn(
+        "public-urls",
+        `cannot list ${certsDir} to find unused uploaded certificates:`,
+        err.message,
+      );
+      return [];
+    }
+    throw err;
+  }
+  return stale.sort((a, b) => a.localeCompare(b));
+}
+
+/** The certificate ids the uploaded hostnames use, each once. */
+export function uploadedCertIdsInUse(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+): string[] {
+  const ids = new Set<string>();
+  for (const entry of hostnames) {
+    const id = entry.uploadedCertId;
+    if (entry.source === "uploaded" && id && UPLOADED_CERT_ID.test(id)) {
+      ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Every DNS-01 renewal brings a new certificate id, so after the control-plane
+ * Caddy has taken a config that names only the current ids, the pairs of the
+ * ids no hostname uses are removed. A failure is logged, not thrown: the
+ * apply itself has already succeeded, and the next one tries again.
+ */
+export async function pruneUploadedInstanceCerts(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  certsDir: string,
+  prune: UploadedCertPruner = uploadedCertPruner(certsDir),
+): Promise<void> {
+  const keep = uploadedCertIdsInUse(hostnames);
+  try {
+    if ((await staleUploadedCertFiles(certsDir, keep)).length === 0) return;
+    await prune(keep);
+  } catch (err) {
+    logWarn(
+      "public-urls",
+      "removing unused uploaded certificates failed:",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
 }
 
 export async function writeUploadedInstanceCerts(
   hostnames: readonly InstanceHostnameApplyEntry[],
   certsDir: string,
+  install: UploadedCertInstaller = uploadedCertInstaller(certsDir),
 ): Promise<void> {
   const seen = new Set<string>();
-  let wrote = false;
   await forEachSequential(hostnames, async (entry) => {
     if (entry.source !== "uploaded") return;
     const id = entry.uploadedCertId;
@@ -206,24 +629,7 @@ export async function writeUploadedInstanceCerts(
     }
     if (seen.has(id)) return;
     seen.add(id);
-    if (!wrote) {
-      await Deno.mkdir(certsDir, { recursive: true, mode: 0o750 });
-      wrote = true;
-    }
-    await Deno.writeTextFile(
-      join(certsDir, `uploaded-${id}.crt`),
-      entry.certPem,
-      {
-        mode: 0o640,
-      },
-    );
-    await Deno.writeTextFile(
-      join(certsDir, `uploaded-${id}.key`),
-      entry.keyPem,
-      {
-        mode: 0o640,
-      },
-    );
+    await install(id, uploadedCertPair(id, entry.certPem, entry.keyPem));
   });
 }
 
@@ -247,6 +653,7 @@ export async function runInstanceCertsApply(
   deps: {
     runPlaybook?: typeof runLocalPlaybook;
     instanceAcme?: InstanceAcmeWireSettings;
+    edgeTrust?: InstanceEdgeTrustWire;
     readForwardHosts?: () => string;
     env?: Record<string, string | undefined>;
   } = {},
@@ -277,6 +684,14 @@ export async function runInstanceCertsApply(
     deps.readForwardHosts ?? readDevForwardHostsFile,
   );
   if (publicUrls) args.push("-e", `turbopanel_public_urls=${publicUrls}`);
+  // Absent means "keep the persisted set" (resolve-edge-trust.yml reads the
+  // sidecar), so a hostname-only apply never drops the ranges.
+  if (deps.edgeTrust) {
+    args.push(
+      "-e",
+      `turbopanel_edge_trust_json=${edgeTrustExtraVar(deps.edgeTrust)}`,
+    );
+  }
   const email = deps.instanceAcme?.contactEmail.trim();
   if (email) args.push("-e", `turbopanel_acme_email=${email}`);
   const directory = deps.instanceAcme?.directoryUrl.trim();
@@ -286,20 +701,47 @@ export async function runInstanceCertsApply(
   await runPlaybook(INSTANCE_CERTS_APPLY_PLAYBOOK, args);
 }
 
+/** Seams for {@link applyPublicUrls}; each defaults to the real step. */
+export type ApplyPublicUrlsDeps = {
+  runCertsApply?: typeof runInstanceCertsApply;
+  runPlaybook?: typeof runLocalPlaybook;
+  readForwardHosts?: () => string;
+  instanceAcme?: InstanceAcmeWireSettings;
+  edgeTrust?: InstanceEdgeTrustWire;
+  writeUploadedCerts?: typeof writeUploadedInstanceCerts;
+  pruneUploadedCerts?: typeof pruneUploadedInstanceCerts;
+  openWindow?: typeof openInstanceAcmeWindow;
+  preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
+  issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
+  closeWindow?: typeof closeInstanceAcmeWindow;
+  withLock?: typeof withInstanceAcmeWindowLock;
+};
+
 export async function applyPublicUrls(
   hostnames: readonly InstanceHostnameApplyEntry[],
-  deps: {
-    runCertsApply?: typeof runInstanceCertsApply;
-    runPlaybook?: typeof runLocalPlaybook;
-    readForwardHosts?: () => string;
-    instanceAcme?: InstanceAcmeWireSettings;
-    writeUploadedCerts?: typeof writeUploadedInstanceCerts;
-    openWindow?: typeof openInstanceAcmeWindow;
-    preflightLetsEncrypt?: typeof preflightInstanceLetsEncryptHttp01;
-    issueLetsEncrypt?: typeof issueInstanceLetsEncryptCertificates;
-    closeWindow?: typeof closeInstanceAcmeWindow;
-    withLock?: typeof withInstanceAcmeWindowLock;
-  } = {},
+  deps: ApplyPublicUrlsDeps = {},
+): Promise<void> {
+  return await serialPublicUrlsApply(() => applyPublicUrlsNow(hostnames, deps));
+}
+
+/**
+ * The tail of the apply queue. Every `public-urls-update` starts its own
+ * handler, so two applies could otherwise overlap: one rendering a config that
+ * names a certificate while the other's prune removes it. Each apply (install,
+ * playbook, prune) runs only after the one before it has finished, so the
+ * prune that runs last is the one of the apply that finished last.
+ */
+let publicUrlsApplyTail: Promise<unknown> = Promise.resolve();
+
+function serialPublicUrlsApply<T>(fn: () => Promise<T>): Promise<T> {
+  const run = publicUrlsApplyTail.then(fn, fn);
+  publicUrlsApplyTail = run.catch(() => undefined);
+  return run;
+}
+
+async function applyPublicUrlsNow(
+  hostnames: readonly InstanceHostnameApplyEntry[],
+  deps: ApplyPublicUrlsDeps,
 ): Promise<void> {
   const instanceDir = resolveInstanceDir();
   const layout = resolveLayout(Deno.env.toObject());
@@ -311,9 +753,12 @@ export async function applyPublicUrls(
   const runCerts = deps.runCertsApply ?? runInstanceCertsApply;
   await runCerts(instanceDir, hostnames, {
     instanceAcme: deps.instanceAcme,
+    edgeTrust: deps.edgeTrust,
     readForwardHosts: deps.readForwardHosts,
     runPlaybook: deps.runPlaybook,
   });
+  const prune = deps.pruneUploadedCerts ?? pruneUploadedInstanceCerts;
+  await prune(hostnames, certsDir);
 }
 
 async function issueLetsEncryptHosts(

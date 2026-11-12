@@ -1,4 +1,5 @@
 import { type BuildInfo, getBuildInfo } from "../build-info.ts";
+import type { AttachProof, SignedPinReport } from "../crypto/keys.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
   resolveUpdateChannelConfig,
@@ -26,6 +27,10 @@ import {
 } from "./version-wire.ts";
 import type { CommandRecoveryReport } from "../contracts/cell-messages.ts";
 import {
+  panelPinReport,
+  readPanelIdentityPinSync,
+} from "./panel-identity-pin.ts";
+import {
   collectServerIps,
   readDefaultRouteInterfaces,
   readHostInterfaceLinkStates,
@@ -42,6 +47,35 @@ import {
 } from "../host/service-run-state.ts";
 
 export const IDLE_PRESENCE_MS = 60_000;
+
+/** Bounds for a control-plane advised heartbeat (the `version` frame is unsigned). */
+export const HEARTBEAT_MIN_S = 15;
+export const HEARTBEAT_MAX_S = 120;
+
+/**
+ * Validates an advised heartbeat in seconds. Returns whole seconds, or null
+ * when the value is not a finite number inside [HEARTBEAT_MIN_S, HEARTBEAT_MAX_S].
+ */
+export function clampHeartbeatSeconds(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const seconds = Math.round(value);
+  if (seconds < HEARTBEAT_MIN_S || seconds > HEARTBEAT_MAX_S) return null;
+  return seconds;
+}
+
+/**
+ * Heartbeat to apply in ms for an advised value, or null to keep the default.
+ * A verified signed hello wins, so the unsigned advice is ignored once
+ * `pinnedHelloApplied` is true.
+ */
+export function advisedHeartbeatMs(
+  advised: unknown,
+  pinnedHelloApplied: boolean,
+): number | null {
+  if (pinnedHelloApplied) return null;
+  const seconds = clampHeartbeatSeconds(advised);
+  return seconds === null ? null : seconds * 1000;
+}
 
 /**
  * Floor cadence for the app-level `heartbeat`, independent of change detection.
@@ -229,6 +263,12 @@ function readLinkScanForPresence(): ReleaseLinkScanReport | undefined {
   }
 }
 
+/** The hello's `panelPin` (how this server pinned the panel key), when it has a pin. */
+function panelPinField(): { panelPin?: ReturnType<typeof panelPinReport> } {
+  const panelPin = panelPinReport(readPanelIdentityPinSync());
+  return panelPin ? { panelPin } : {};
+}
+
 function defaultPresenceSnapshot(): PresenceSnapshot {
   const docker = readDocker();
   const runtimes = readHostRuntimes();
@@ -331,11 +371,11 @@ export function installIdlePresenceProviders(source: {
  * detected independent of how many pings we've successfully sent.
  */
 export class IdlePresence {
-  readonly #idleCheckIntervalMs: number;
-  readonly #idleThresholdMs: number;
-  readonly #minPresenceIntervalMs: number;
+  #idleCheckIntervalMs: number;
+  #idleThresholdMs: number;
+  #minPresenceIntervalMs: number;
   readonly #presenceRefreshIntervalMs: number;
-  readonly #staleConnectionMs: number;
+  #staleConnectionMs: number;
   readonly #onStaleConnection: (() => void) | undefined;
   readonly #baseMaxConnectionAgeMs: number;
   readonly #jitterMaxAge: boolean;
@@ -359,6 +399,8 @@ export class IdlePresence {
   #staleReported = false;
   #connectedAtMs = Date.now();
   #maxAgeReported = false;
+  #attachProof: AttachProof | undefined;
+  #signedPanelPin: SignedPinReport | undefined;
 
   constructor(options: IdlePresenceOptions) {
     this.#idleCheckIntervalMs = options.idleCheckIntervalMs ?? IDLE_PRESENCE_MS;
@@ -397,9 +439,19 @@ export class IdlePresence {
     this.#staleReported = false;
   }
 
-  attach(ws: WebSocket): void {
+  /**
+   * Start presence on a new socket. `attachProof` (signed sessions only) rides
+   * on this socket's hello, binding it to the control plane's session, and
+   * `panelPin`, when given, replaces the unsigned pin report with the signed one.
+   */
+  attach(
+    ws: WebSocket,
+    options: { attachProof?: AttachProof; panelPin?: SignedPinReport } = {},
+  ): void {
     this.detach();
     this.#ws = ws;
+    this.#attachProof = options.attachProof;
+    this.#signedPanelPin = options.panelPin;
     this.#lastActivityAt = Date.now();
     this.#lastInboundAt = Date.now();
     this.#staleReported = false;
@@ -410,11 +462,31 @@ export class IdlePresence {
     this.#maxAgeReported = false;
     this.#lastPresenceFrameAt = 0;
     this.#sendHello();
+    this.#armIdleTimer();
+  }
+
+  #armIdleTimer(): void {
     this.#idleTimer = setInterval(() => {
       if (this.#checkMaxConnectionAge()) return;
       this.#checkStaleConnection();
       this.#maybeSendPresence();
     }, this.#idleCheckIntervalMs);
+  }
+
+  /**
+   * Applies an advised heartbeat: the ping cadence, its spacing and the
+   * stale-socket threshold (3x) all follow `ms`. The timer is re-armed when
+   * the socket is already attached, which is the normal order because the
+   * control plane's `version` frame arrives after `attach()`.
+   */
+  setIdleThresholdMs(ms: number): void {
+    this.#idleCheckIntervalMs = ms;
+    this.#idleThresholdMs = ms;
+    this.#minPresenceIntervalMs = ms;
+    this.#staleConnectionMs = ms * 3;
+    if (this.#idleTimer === undefined) return;
+    clearInterval(this.#idleTimer);
+    this.#armIdleTimer();
   }
 
   detach(): void {
@@ -509,6 +581,10 @@ export class IdlePresence {
           ? { releaseLinkScan: presence.releaseLinkScan }
           : {}),
         features: [...DAEMON_WIRE_FEATURES],
+        ...(this.#signedPanelPin
+          ? { panelPin: this.#signedPanelPin }
+          : panelPinField()),
+        ...(this.#attachProof ? { attach: this.#attachProof } : {}),
         ...this.#commandsField(false),
       }));
       this.#lastActivityAt = Date.now();

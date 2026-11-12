@@ -1284,3 +1284,38 @@ test("confinement: nothing to check passes, findings of every scan are joined", 
       "compose deploy refused — host paths outside this deployment: one",
     );
   }));
+
+test("an exempt generated config file passes and the same path not exempt is host-level", () => {
+  const document = {
+    configs: {
+      web_conf: { file: "/run/turbopanel/deployments/p/e/configs/x" },
+    },
+  };
+  assertEquals(
+    collectResolvedHostPaths(document, new Set(), new Set(["web_conf"]))
+      .entries,
+    [],
+  );
+  assertEquals(collectResolvedHostPaths(document).entries.length, 1);
+});
+
+test("an exempt config is let through only at the exact path the daemon wrote", () => {
+  const written = "/run/turbopanel/deployments/p/e/configs/web--conf";
+  const exempt = new Map([["web_conf", written]]);
+  assertEquals(
+    collectResolvedHostPaths(
+      { configs: { web_conf: { file: written } } },
+      new Set(),
+      exempt,
+    ).entries,
+    [],
+  );
+  assertEquals(
+    collectResolvedHostPaths(
+      { configs: { web_conf: { file: "/etc/shadow" } } },
+      new Set(),
+      exempt,
+    ).entries.length,
+    1,
+  );
+});

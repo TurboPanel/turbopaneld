@@ -1,0 +1,19 @@
+// Managed by TurboPanel (os-security-updates role); do not edit by hand.
+// Installs updates from the Debian security repository and from the PHP
+// package archive the PHP runtimes come from, and never restarts the server.
+// A kernel or library update that needs a restart leaves
+// /var/run/reboot-required, and the server page shows Restart Needed.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+// Replace the package's default list (which also takes stable point
+// releases) with the security repository and the PHP package archive. A new
+// PHP patch version reaches a site only after the daemon restarts that site's
+// PHP runtime, one at a time, with a health check.
+#clear Unattended-Upgrade::Origins-Pattern;
+#clear Unattended-Upgrade::Allowed-Origins;
+Unattended-Upgrade::Origins-Pattern {
+        "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";
+        "origin=Debian,codename=${distro_codename},label=Debian-Security";
+        "origin=deb.sury.org,codename=${distro_codename}";
+};
+Unattended-Upgrade::Automatic-Reboot "false";

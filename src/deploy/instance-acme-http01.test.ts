@@ -789,6 +789,11 @@ test("issue copies the leaf and stops the issuer in finally", async () => {
   };
   const log =
     `{"level":"info","msg":"certificate obtained successfully","identifier":"${HOST}"}`;
+  // A preflight socket the daemon left behind: the issuer could not replace
+  // it in the sticky run folder, so it is removed before the issuer starts.
+  const leftover = join(layout.runDir, "instance-acme.sock");
+  await Deno.mkdir(layout.runDir, { recursive: true });
+  await Deno.writeTextFile(leftover, "");
   try {
     await issueInstanceLetsEncryptCertificates(
       layout,
@@ -814,6 +819,7 @@ test("issue copies the leaf and stops the issuer in finally", async () => {
       await Deno.readTextFile(join(root, "certs", `letsencrypt-${HOST}.crt`)),
       leaf,
     );
+    await assertRejects(() => Deno.lstat(leftover), Deno.errors.NotFound);
     assertEquals(
       (await Deno.stat(join(root, "certs", `letsencrypt-${HOST}.key`))).mode! &
         0o777,

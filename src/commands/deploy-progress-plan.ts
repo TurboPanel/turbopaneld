@@ -11,7 +11,10 @@
  * never name a vendor platform.
  */
 import { join } from "@std/path";
-import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
+import {
+  type EnvironmentDeployPayload,
+  isImageBuildKind,
+} from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { dockerReady } from "../deploy/ensure-docker.ts";
 import { hostingCaddyReady } from "../deploy/ensure-hosting-caddy.ts";
@@ -20,7 +23,7 @@ import {
   nativeAppDenoVersions,
   nativeAppNodeVersions,
 } from "../deploy/native/apply-native-apps.ts";
-import { buildToolPresent } from "../deploy/release/railpack-build.ts";
+import { buildToolPresent } from "../deploy/release/image-build.ts";
 import type { SiteEngineId } from "../deploy/site/engine-driver.ts";
 import { phpSeriesForDeploy, resolveSiteEngineNeeds } from "../deploy/site.ts";
 import {
@@ -55,7 +58,10 @@ export type DeployStepNeeds = {
   sourceBuilds: boolean;
   /** `docker compose build` runs (cacheless rebuild or sequential strategy). */
   composeBuild: boolean;
-  /** Certificates are written for hostnames in this deploy. */
+  /**
+   * Certificates are written for hostnames in this deploy, or the web server
+   * is asked to get one by itself (`tlsMode: "acme"`).
+   */
   certificates: boolean;
   /**
    * Native apps run in this deploy: a new release starts beside the one
@@ -127,11 +133,12 @@ export function deployStepNeeds(
     phpSeries: phpSeriesForDeploy(sites),
     phpFpm: engineNeeds.phpFpm,
     lsphp: engineNeeds.openlitespeedLsphp,
-    buildTool: builds.some((entry) => entry.build.kind === "railpack"),
+    buildTool: builds.some((entry) => isImageBuildKind(entry.build.kind)),
     sourceBuilds: builds.length > 0,
     composeBuild: edge.hasContainers &&
       (payload.noCache === true || payload.deployStrategy === "sequential"),
-    certificates: (payload.tlsMaterial ?? []).length > 0,
+    certificates: (payload.tlsMaterial ?? []).length > 0 ||
+      automaticCertificateHostnames(payload).length > 0,
     nativeApps: apps.length > 0,
   };
 }
@@ -216,6 +223,50 @@ export async function probeDeployPresence(
   return { docker, sharedIngress, publicEdge, runtimes, webServers, buildTool };
 }
 
+/** The hostnames whose certificate the web server gets by itself, sorted, once each. */
+export function automaticCertificateHostnames(
+  payload: Pick<EnvironmentDeployPayload, "hostings">,
+): string[] {
+  const names = (payload.hostings ?? [])
+    .filter((hosting) => hosting.tlsMode === "acme")
+    .flatMap((hosting) => hosting.hostnames);
+  return [...new Set(names)].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * The line under the certificates step for names the web server gets a
+ * certificate for by itself: that happens in the background after the deploy,
+ * so the step says where to watch it. Undefined when there are none.
+ */
+export function automaticCertificateDetail(
+  payload: Pick<EnvironmentDeployPayload, "hostings">,
+): string | undefined {
+  const names = automaticCertificateHostnames(payload);
+  if (names.length === 0) return undefined;
+  // The wire caps a detail at 200 characters: the advice comes first so a
+  // long list of names is what gets clipped.
+  return `Requested in the background; the Certificate panel shows progress: ${
+    names.join(", ")
+  }`;
+}
+
+/** The certificates step on its own, for a run that only rewrites the web server settings. */
+export function certificatesStep(): PlannedDeployStep {
+  return step(CERTIFICATES_STEP_ID, CERTIFICATES_STEP_LABEL, false);
+}
+
+/**
+ * The health step. Its title says what is being waited on; when it ends the
+ * reporter renames it to the result (see {@link HEALTH_RESULT_TITLES}), so a
+ * finished step never claims more than was checked.
+ */
+export { HEALTH_RESULT_TITLES } from "../logs/contracts.ts";
+export const HEALTH_STEP_ID = "health";
+export const HEALTH_STEP_LABEL = "Check Service Health";
+
+const CERTIFICATES_STEP_ID = "certificates";
+const CERTIFICATES_STEP_LABEL = "Set Up Certificates";
+
 function step(id: string, label: string, ready: boolean): PlannedDeployStep {
   return { id, label, state: ready ? "ready" : "pending" };
 }
@@ -250,7 +301,7 @@ export function planDeploySteps(
   if (needs.sharedIngress || needs.publicEdge) {
     const ready = (!needs.sharedIngress || presence.sharedIngress) &&
       (!needs.publicEdge || presence.publicEdge);
-    steps.push(step("install-gateway", "Set up the web gateway", ready));
+    steps.push(step("install-gateway", "Set Up the Web Gateway", ready));
   }
   for (const series of needs.nodeSeries) {
     steps.push(step(
@@ -282,25 +333,27 @@ export function planDeploySteps(
   }
   if (needs.buildTool) {
     steps.push(
-      step("install-build-tool", "Install the build tool", presence.buildTool),
+      step("install-build-tool", "Install the Build Tool", presence.buildTool),
     );
   }
-  if (needs.sourceBuilds) steps.push(step("fetch", "Fetch the code", false));
+  if (needs.sourceBuilds) {
+    steps.push(step("fetch", "Fetch the Source Code", false));
+  }
   if (needs.sourceBuilds || needs.composeBuild) {
     steps.push(step("build", "Build", false));
   }
   const startLabel = needs.nativeApps
-    ? "Start the new release"
-    : "Start the app";
+    ? "Start the New Release"
+    : "Start the App";
   steps.push(step("start", startLabel, false));
   if (needs.certificates) {
-    steps.push(step("certificates", "Set up certificates", false));
+    steps.push(certificatesStep());
   }
-  steps.push(step("health", "Check it answers", false));
+  steps.push(step(HEALTH_STEP_ID, HEALTH_STEP_LABEL, false));
   if (needs.nativeApps) {
     steps.push(
-      step("switch", "Switch traffic", false),
-      step("stop-old", "Stop the old release", false),
+      step("switch", "Switch Traffic", false),
+      step("stop-old", "Stop the Old Release", false),
     );
   }
   return steps;

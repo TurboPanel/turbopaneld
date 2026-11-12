@@ -106,6 +106,9 @@ jobs:
       - name: Check vocabulary (no daemon-as-agent phrasing)
         run: deno task check:vocabulary
 
+      - name: Check contributor guide references
+        run: deno task check:guide-references
+
       - name: Shellcheck the uninstall script and the root helpers
         run: shellcheck -s sh --severity=warning scripts/purge.sh orchestration/scripts/tp-host orchestration/scripts/tp-php-loopback orchestration/scripts/tp-build-runner orchestration/scripts/tp-update-guard orchestration/scripts/tp-firewall-guard
 
@@ -146,7 +149,7 @@ jobs:
       # Install from the hash lock (githubactions:S8544 / S8541), not the
       # range-pinned constraints file.
       - name: Set up Python for Ansible
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           # Matches the vendored daemon pin (PYTHON_VERSION in
           # src/orchestration/assets.ts) and orchestration/requirements.txt.
@@ -162,50 +165,60 @@ jobs:
         run: deno task check:orchestration
 
       # assets.test.ts requires scripts/download-caddy.mjs and fails when it is
-      # missing. A single-repo checkout does not include that file. Prefer the
-      # same-named branch on TurboPanel/turbopanel so a paired PR is compared
-      # with its own pin; otherwise use trunk. PRs into staging/live use trunk
-      # (see contract-drift below).
-      - name: Resolve instance checkout ref
-        id: instance-ref
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          REF="$HEAD_REF"
-          # Never staging/live: not as the head (a staging → trunk PR), not as
-          # the base (the promotion PRs), not as the pushed branch.
-          case "$REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          case "$BASE_REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
-            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=trunk" >> "$GITHUB_OUTPUT"
-          fi
-
+      # missing. A single-repo checkout does not include that file, so it is
+      # read from TurboPanel/turbopanel trunk (never another pull request's
+      # branch).
       - name: Check out instance Caddy downloader
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: TurboPanel/turbopanel
-          ref: ${{ steps.instance-ref.outputs.ref }}
+          ref: trunk
           fetch-depth: 1
           path: .ci-instance-caddy-pin
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: scripts/download-caddy.mjs
 
+      - name: Seed the daemon state sentinel
+        # The default daemon state dir, writable by the runner and filled with
+        # fixed stand-in files, so a test that wrote it would land and the
+        # check after the tests would fail.
+        run: |
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
+          deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
+
+      # The tests that serve the real control plane template with the pinned
+      # Caddy (headers, error pages, redirects, grace period, in-place edits)
+      # skip without it. Same version and SHA-256 as the caddy role; a missing
+      # or wrong binary fails here instead of the tests skipping quietly.
+      - name: Download the pinned Caddy for the template tests
+        run: |
+          set -eu
+          defaults=orchestration/roles/caddy/defaults/main.yml
+          version="$(sed -n 's/^caddy_version: "\(.*\)"$/\1/p' "$defaults")"
+          sha="$(awk -v v="\"${version}\":" '$1 == v { found = 1; next } found && $1 == "x86_64:" { gsub(/"/, "", $2); print $2; exit }' "$defaults")"
+          if [ -z "$version" ] || [ -z "$sha" ]; then
+            echo "::error::no Caddy pin or x86_64 digest in $defaults"
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/pinned-caddy"
+          mkdir -p "$dir"
+          curl -fsSL --retry 3 -o "$dir/caddy.tar.gz" \
+            "https://github.com/caddyserver/caddy/releases/download/v${version}/caddy_${version}_linux_amd64.tar.gz"
+          echo "${sha}  $dir/caddy.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/caddy.tar.gz" -C "$dir" caddy
+          "$dir/caddy" version | grep -q "^v${version} "
+          echo "TURBOPANEL_TEST_CADDY=$dir/caddy" >> "$GITHUB_ENV"
+
       - name: Test with coverage
         env:
           # The real-Postgres suites must run here, never skip on a Docker hiccup.
           TURBOPANEL_REQUIRE_REAL_POSTGRES: "1"
         run: deno task test:coverage
+
+      - name: Check no test wrote the daemon state dir
+        if: ${{ !cancelled() }}
+        run: deno run --allow-read scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel
 
       # `deno task test:coverage` already normalizes; re-running here is
       # idempotent and keeps the assertions (nothing absolute, at least one
@@ -242,12 +255,22 @@ jobs:
           && github.event_name == 'pull_request'
           && github.base_ref != 'staging'
           && github.base_ref != 'live'
-        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: >
             -Dsonar.qualitygate.wait=true
+
+      # A pull request from a fork (or from Dependabot) gets no repository
+      # secrets, so the code scan above is skipped. Say so in the run rather
+      # than staying silent; every other check in this run still gates ci-ok.
+      - name: Note a skipped code scan
+        if: github.event_name == 'pull_request' && env.SONAR_TOKEN == ''
+        run: |
+          msg="The code scanner did not run: pull requests from forks get no repository secrets, so the scan is skipped. Formatting, the vocabulary check, the secret scan and the tests run as usual. If a scan is needed, a maintainer will push this branch to the TurboPanel repository, where the scan runs."
+          echo "::notice title=Code scan skipped::${msg}"
+          printf '### Code scan skipped\n\n%s\n' "$msg" >> "$GITHUB_STEP_SUMMARY"
 
       # The Sonar way gate fails only on ratings, so one new code smell passes
       # it; this fails the PR on any new issue (owner rule, 2026-09-30). Runs
@@ -257,16 +280,14 @@ jobs:
         uses: TurboPanel/dev/.github/actions/sonar-new-issues@2db1bbfa3cff89a52fac3ee4a53bd495dc1c79b1 # dev#47
 
   # The contract twins (commands, cell messages, version-wire, the field
-  # snapshot) are compared against the turbopanel checkout of the same-named
-  # branch (else trunk; never turbopanel's staging or live), so a daemon-only change that drifts fails here rather
-  # than turning turbopanel red after it merges. Mirrors turbopanel's
-  # contract-twin job.
-  #
-  # PRs into staging/live (the automatic promotion PRs) have `staging` or
-  # `trunk` as their head, carrying commits that were checked against
-  # turbopanel trunk. Pairing them with turbopanel's staging/live would
-  # compare the new daemon with the older control plane (the daemon ships
-  # first by design), so those PRs compare against turbopanel trunk too.
+  # snapshot) are checked against TurboPanel/turbopanel trunk, always (never
+  # another pull request's branch, never staging or live). Wire changes merge
+  # daemon first, then control plane, so the rule is one-way: this daemon may
+  # be ahead of the control plane (extra features, optional fields), and it
+  # is red only when the control plane relies on something this daemon does
+  # not have. Byte mirrors only give a notice here; the control plane's
+  # contract-twin job holds its own copy to daemon trunk's
+  # (scripts/check-contract-drift.ts).
   contract-drift:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -278,39 +299,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: turbopaneld
-          persist-credentials: false
-
-      - name: Resolve turbopanel checkout ref
-        id: instance-ref
-        env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_REF: ${{ github.head_ref || github.ref_name }}
-          BASE_REF: ${{ github.base_ref }}
-        run: |
-          REF="$HEAD_REF"
-          # Never staging/live: not as the head (a staging → trunk PR), not as
-          # the base (the promotion PRs), not as the pushed branch.
-          case "$REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          case "$BASE_REF" in
-            staging | live) REF=trunk ;;
-            *) ;;
-          esac
-          if gh api "repos/TurboPanel/turbopanel/branches/${REF}" --silent; then
-            echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          else
-            echo "ref=trunk" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check out turbopanel (contract twins)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: TurboPanel/turbopanel
-          ref: ${{ steps.instance-ref.outputs.ref }}
-          path: turbopanel
-          fetch-depth: 1
           persist-credentials: false
 
       # Three attempts, 15 s then 45 s apart: setup-deno has no retry input and
@@ -340,7 +328,45 @@ jobs:
         with:
           deno-version: "2.9.8"
 
-      - name: Check contract drift against turbopanel
+      # Which control plane trunk commit to compare with. A pull request into
+      # trunk is compared with the current trunk. A trunk push, a manual run
+      # and the Release Candidate PR test a commit that may have waited in the
+      # queue while both trunks moved on, so they are compared with TurboPanel/turbopanel
+      # trunk as it was when this commit landed (the newest trunk commit no
+      # later than it); comparing an older commit with a newer trunk would be
+      # red for features its successors already have. If that cannot be read,
+      # the current trunk is used.
+      - name: Pick the control plane trunk commit to compare with
+        id: sibling
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIBLING_REPO: TurboPanel/turbopanel
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          AS_OF: ${{ github.event_name != 'pull_request' || (github.head_ref == 'trunk' && github.base_ref == 'staging' && github.event.pull_request.head.repo.full_name == github.repository) }}
+        run: |
+          ref=trunk
+          if [ "$AS_OF" = "true" ]; then
+            if at="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}" --jq .commit.committer.date)" &&
+              pick="$(gh api "repos/${SIBLING_REPO}/commits?sha=trunk&until=${at}&per_page=1" --jq '.[0].sha // empty')" &&
+              [ -n "$pick" ]; then
+              ref="$pick"
+              echo "Comparing with ${SIBLING_REPO} trunk as of ${at}: ${pick}"
+            else
+              echo "::warning::could not find ${SIBLING_REPO} trunk as of this commit; comparing with the current trunk"
+            fi
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out turbopanel trunk (contract twins)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: TurboPanel/turbopanel
+          ref: ${{ steps.sibling.outputs.ref }}
+          path: turbopanel
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Check the contract against turbopanel trunk (daemon first)
         working-directory: turbopaneld
         env:
           TURBOPANEL_REQUIRE_SIBLING: "1"
@@ -385,6 +411,13 @@ jobs:
           deno-version: "2.9.8"
           cache: true
 
+      # The same stand-in state dir as in `verify`: these runs (one as root)
+      # are checked for writes to it too.
+      - name: Seed the daemon state sentinel
+        run: |
+          sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /var/lib/turbopanel
+          deno run --allow-read --allow-write=/var/lib/turbopanel --allow-env=GITHUB_ACTIONS scripts/daemon-state-sentinel.ts seed /var/lib/turbopanel
+
       - name: Sealed-release copy as root (hard link to a root-owned file)
         run: >-
           sudo env "PATH=$PATH" DENO_DIR=/tmp/deno-root-cache
@@ -395,6 +428,10 @@ jobs:
         env:
           DOCKER_GATE_GO_DIFF: "1"
         run: deno test -A --no-check src/docker-gate/parser-differential.test.ts
+
+      - name: Check no test wrote the daemon state dir
+        if: ${{ !cancelled() }}
+        run: deno run --allow-read scripts/daemon-state-sentinel.ts verify /var/lib/turbopanel
 
   ci-ok:
     name: ci-ok

@@ -13,6 +13,11 @@ const VALID_CHANNELS: ReadonlySet<UpdateChannel> = new Set<UpdateChannel>([
   "release",
 ]);
 
+/** True when `value` names one of the update channels. */
+export function isUpdateChannel(value: string): value is UpdateChannel {
+  return VALID_CHANNELS.has(value as UpdateChannel);
+}
+
 /**
  * Resolve which update channel the daemon should follow.
  *
@@ -26,12 +31,12 @@ export function resolveUpdateChannelConfig(
   const raw = env.TURBOPANEL_UPDATE_CHANNEL?.trim();
   const value = raw || "release";
 
-  if (!VALID_CHANNELS.has(value as UpdateChannel)) {
+  if (!isUpdateChannel(value)) {
     const valid = [...VALID_CHANNELS].join(", ");
     throw new Error(
       `Invalid TURBOPANEL_UPDATE_CHANNEL: "${value}". Valid values: ${valid}`,
     );
   }
 
-  return { app: "daemon", channel: value as UpdateChannel };
+  return { app: "daemon", channel: value };
 }

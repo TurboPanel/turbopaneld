@@ -392,6 +392,21 @@ export function grantDatabaseSql(
 }
 
 /**
+ * The backup login's attributes and role: reads every table, view and
+ * sequence in every database (`pg_read_all_data`, which also gives USAGE on
+ * every schema) and sees every row past row-level security (`BYPASSRLS`, which
+ * a dump needs: it turns row security off). Nothing that writes, creates or
+ * administers. `CONNECT` on each database is granted per database.
+ */
+export function backupLoginAttributesSql(username: string): string {
+  const role = quoteIdentifier(username);
+  return [
+    `ALTER ROLE ${role} NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;`,
+    `GRANT pg_read_all_data TO ${role};`,
+  ].join("\n");
+}
+
+/**
  * The only database-level right the panel keeps for a login the site owner
  * manages by hand: the right to connect. It adds that one right and never
  * revokes anything, so grants made by hand stay as they are.
@@ -502,6 +517,26 @@ export function revokeUnlistedDatabasesSql(
     `  END LOOP;`,
     `END`,
     `$turbopanel$;`,
+  ].join("\n");
+}
+
+/**
+ * End the open sessions that no longer hold `CONNECT` on the database they sit
+ * in, which is what a revoke leaves behind: `CONNECT` is checked only when a
+ * session starts, so a session already open (the shared proxy keeps backend
+ * sessions in a pool for many minutes) would keep reading. A login that kept
+ * its access loses no session, and superusers always hold the right. The
+ * proxy opens a fresh backend session on the next query, which the revoke
+ * then refuses. Run after every revoke of an apply.
+ */
+export function terminateSessionsWithoutConnectSql(): string {
+  return [
+    `SELECT pg_catalog.pg_terminate_backend(a.pid)`,
+    `FROM pg_catalog.pg_stat_activity a`,
+    `WHERE a.backend_type = 'client backend'`,
+    `  AND a.usename IS NOT NULL AND a.datname IS NOT NULL`,
+    `  AND a.pid <> pg_catalog.pg_backend_pid()`,
+    `  AND NOT pg_catalog.has_database_privilege(a.usesysid, a.datid, 'CONNECT');`,
   ].join("\n");
 }
 

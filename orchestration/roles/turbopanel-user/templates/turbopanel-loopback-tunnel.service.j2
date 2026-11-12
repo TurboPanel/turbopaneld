@@ -1,0 +1,21 @@
+[Unit]
+Description=TurboPanel tunnel connector metrics ports (root and the daemon only)
+Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/src/tunnels/AGENTS.md
+DefaultDependencies=no
+After=local-fs.target systemd-modules-load.service
+Wants=network-pre.target
+# Before the network, so no connector and no local account dials a metrics
+# port before the table is in place after a reboot.
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+# Replaces the nftables table inet turbopanel_tunnel whole (one transaction).
+# Nothing Requires= this unit: when it fails, the ports are open to local
+# accounts again, but no connector is stopped or kept from starting.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={{ turbopanel_install_root }}/lib/tp-tunnel-loopback sync
+
+[Install]
+WantedBy=multi-user.target

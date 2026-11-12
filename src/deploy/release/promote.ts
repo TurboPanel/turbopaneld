@@ -39,7 +39,14 @@ import {
   relative as relativePath,
 } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
-import { runFolderPublishVerb } from "./folder-publish.ts";
+import {
+  runFolderPublishVerb,
+  runReleaseLayoutFolders,
+} from "./folder-publish.ts";
+import {
+  type FrameworkLayout,
+  platformLayoutLinks,
+} from "./framework-layout.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { logWarn } from "../../util/logger.ts";
@@ -102,6 +109,8 @@ async function runPublishVerb(
   verb: "publish-open" | "publish" | "publish-keep",
   paths: Pick<ReleasePaths, "publish">,
   runFn: RunFn,
+  /** `publish` and `publish-keep` only: link the layout's shared folders in. */
+  layout?: FrameworkLayout,
 ): Promise<void> {
   // A release names its folder by components and ids (six words,
   // `./folder-publish.ts`).
@@ -117,6 +126,7 @@ async function runPublishVerb(
       publishId: paths.publish.publishId,
     },
     runFn,
+    layout,
   );
 }
 
@@ -607,6 +617,12 @@ export async function promoteExistingRelease(
     runFn?: RunFn;
     /** Check the release but leave `current` where it is (see {@link PromoteReleaseParams.keepCurrent}). */
     keepCurrent?: boolean;
+    /**
+     * The framework layout the release's own record names: its recipe links
+     * are the platform's and pass the link check, and its shared folders are
+     * made again before the swap (one the owner deleted comes back).
+     */
+    frameworkLayout?: FrameworkLayout;
   },
 ): Promise<string> {
   const runFn = params.runFn ?? runPrivileged;
@@ -623,7 +639,23 @@ export async function promoteExistingRelease(
   // A release sealed before the publish-time link checks can still carry a
   // link through `shared/`; never put one back in service. Checked both ways:
   // each link's text followed lexically, and each link resolved as it stands.
-  await assertSealedLinksStayInRelease(releaseDir, runFn, stat === "present");
+  await assertSealedLinksStayInRelease(
+    releaseDir,
+    runFn,
+    stat === "present",
+    params.frameworkLayout,
+  );
+  if (params.frameworkLayout !== undefined && params.paths.publish) {
+    await runReleaseLayoutFolders(
+      params.paths.publish.folder,
+      {
+        serviceId: params.paths.publish.serviceId,
+        releaseId: params.releaseId,
+      },
+      params.frameworkLayout,
+      runFn,
+    );
+  }
 
   if (params.healthProbe) await params.healthProbe(releaseDir);
   if (params.keepCurrent !== true) {
@@ -633,9 +665,9 @@ export async function promoteExistingRelease(
 }
 
 /**
- * Record a Railpack release without publishing a tree.
+ * Record an image-build release without publishing a tree.
  *
- * The Railpack lane produces an OCI image, not a directory: there is nothing to
+ * The image-build lane produces an OCI image, not a directory: there is nothing to
  * stage, nothing to seal, and no `current` symlink to swap — the "cutover" is
  * `docker compose up` picking up the new `image:` tag. What it still needs is a
  * durable, per-release record, so the manifest is written into
@@ -647,7 +679,7 @@ export async function promoteExistingRelease(
  * it, so the "runtime user must not be able to rewrite what it runs" rule that
  * governs {@link sealPublishedRelease} has nothing to protect here.
  */
-export async function recordRailpackRelease(
+export async function recordImageBuildRelease(
   params: { paths: ReleasePaths; manifest: ReleaseManifestV1 },
 ): Promise<string> {
   const releaseDir = params.paths.releaseDir;
@@ -704,10 +736,11 @@ async function publishStagedRelease(
   await removeReleaseSharedEntry(stagingDir, runFn);
   await assertStagedLinksStayInRelease(stagingDir, runFn);
   await prepareStagedTree(params, stagingDir, runFn);
+  const layout = params.manifest?.frameworkLayout;
   if (params.keepCurrent === true) {
-    await publishKeepingCurrent(params.paths, runFn);
+    await publishKeepingCurrent(params.paths, runFn, layout);
   } else {
-    await runPublishVerb("publish", params.paths, runFn);
+    await runPublishVerb("publish", params.paths, runFn, layout);
   }
 }
 
@@ -719,9 +752,10 @@ async function publishStagedRelease(
 async function publishKeepingCurrent(
   paths: Pick<ReleasePaths, "publish">,
   runFn: RunFn,
+  layout?: FrameworkLayout,
 ): Promise<void> {
   try {
-    await runPublishVerb("publish-keep", paths, runFn);
+    await runPublishVerb("publish-keep", paths, runFn, layout);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!message.includes("refusing verb publish-keep")) throw err;
@@ -729,8 +763,37 @@ async function publishKeepingCurrent(
       "deploy",
       "the host helper is older than this daemon and cannot publish without moving current; published with publish instead (finish the update on this host)",
     );
-    await runPublishVerb("publish", paths, runFn);
+    await runPublishVerb("publish", paths, runFn, layout);
   }
+}
+
+/**
+ * The daemon-owned layout, framework part: the recipe's links in place of what
+ * the build shipped there, and the shared folders they point into. Run before
+ * the build's links are checked (the check then excuses only the recipe's own
+ * links, so a link that goes through one is refused, as on the host path) and
+ * before `shared` is linked.
+ */
+async function applyFrameworkLayoutInPlace(
+  paths: ReleasePaths,
+  layout: FrameworkLayout,
+): Promise<void> {
+  await forEachSequential(platformLayoutLinks(layout), async (recipe) => {
+    const linkPath = join(paths.releaseDir, recipe.path);
+    await Deno.remove(linkPath, { recursive: true }).catch((err) => {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    });
+    await Deno.mkdir(join(linkPath, ".."), { recursive: true });
+    await createSymlink(recipe.text, linkPath);
+    await forEachSequential(
+      recipe.sharedFolders,
+      (folder) =>
+        Deno.mkdir(join(paths.sharedDir, folder), {
+          recursive: true,
+          mode: 0o750,
+        }),
+    );
+  });
 }
 
 /** The daemon-owned layout: the same steps, run on the release in place. */
@@ -739,10 +802,18 @@ async function sealReleaseInPlace(
   runFn: RunFn,
 ): Promise<void> {
   const releaseDir = params.paths.releaseDir;
+  const layout = params.manifest?.frameworkLayout;
   // Before the `shared` link exists, so `../shared/…` cannot be resolved
   // through what the tenant keeps in `shared/` (release-links.ts).
   await removeReleaseSharedEntry(releaseDir, runFn);
-  await assertStagedLinksStayInRelease(releaseDir, runFn);
+  // The layout's recipe links go in first and the check runs with them in
+  // place, exactly as tp-host orders it: a build's `public/x -> ../storage/app`
+  // then resolves through the recipe link into `shared/` and is refused, and
+  // only the recipe's own link is excused.
+  if (layout !== undefined) {
+    await applyFrameworkLayoutInPlace(params.paths, layout);
+  }
+  await assertStagedLinksStayInRelease(releaseDir, runFn, layout);
   await linkReleaseSharedDir(releaseDir, runFn);
   await prepareStagedTree(params, releaseDir, runFn);
   await sealPublishedRelease(releaseDir, params.username, runFn);

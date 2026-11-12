@@ -41,9 +41,14 @@
  */
 
 import { join } from "@std/path";
-import { COMMAND_LOG_PHASES } from "../../logs/contracts.ts";
+import {
+  COMMAND_LOG_PHASES,
+  HEALTH_RESULT_TITLES,
+  type HealthStepReport,
+} from "../../logs/contracts.ts";
 import { unsupportedSeriesMessage } from "../../runtime/registry.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { installUnitFile as installUnitFileShared } from "../../permissions/host-unit-files.ts";
 import { logInfo, logWarn } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { FolderRefParts } from "../../contracts/directory-names.ts";
@@ -176,6 +181,8 @@ export type ApplyNativeAppsOpts = {
    * deploy transcript. Ignored by a custom `runPlaybook`.
    */
   onEvent?: AnsibleEventHandler;
+  /** The deploy's health step: told how the wait for each new release ended. */
+  health?: HealthStepReport;
   /** Test seam: loopback health probe. */
   probe?: NativeAppProbeFn;
   /** Test seam: sleep between probe attempts. */
@@ -334,6 +341,8 @@ type NativeAppIo = {
   pickPort: NativeAppPortPickFn;
   setPhase: NativeAppPhaseFn;
   onOutput?: ReleaseOutputHandler;
+  /** The deploy's health step, when it has one. */
+  health?: HealthStepReport;
 };
 
 function resolveIo(
@@ -347,6 +356,7 @@ function resolveIo(
     pickPort: opts?.pickPort ?? (() => pickPortDefault()),
     setPhase: opts?.setPhase ?? (() => {}),
     ...(opts?.onOutput === undefined ? {} : { onOutput: opts.onOutput }),
+    ...(opts?.health === undefined ? {} : { health: opts.health }),
   };
 }
 
@@ -366,67 +376,17 @@ async function removeStagedFile(path: string): Promise<void> {
 }
 
 /**
- * True when `installedPath` already holds exactly the staged bytes.
- *
- * Compared through the privileged runner rather than `Deno.readTextFile` for
- * the same reason the site path does it: `/etc/systemd/system` is
- * root-owned and the daemon is not root, so a direct read would fail and report
- * "changed" on every single deploy — the churn this exists to prevent. A `cmp`
- * that cannot answer reports **changed**, so the worst case is a redundant
- * install.
- */
-async function installedFileMatches(
-  io: NativeAppIo,
-  stagedPath: string,
-  installedPath: string,
-): Promise<boolean> {
-  const cmp = await io.run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "cmp",
-      "-s",
-      "--",
-      stagedPath,
-      installedPath,
-    ]),
-  );
-  return cmp.success;
-}
-
-/**
  * Stage `contents`, diff it against the installed unit, and install only on a
- * real difference. Returns whether the installed file **changed**.
+ * real difference (see `permissions/host-unit-files.ts`). Compared through the
+ * privileged runner rather than `Deno.readTextFile`: `/etc/systemd/system` is
+ * root-owned and the daemon is not root, so a direct read would report
+ * "changed" on every single deploy, the churn this exists to prevent.
  */
-async function installUnitFile(
+function installUnitFile(
   io: NativeAppIo,
   params: { stagedPath: string; installedPath: string; contents: string },
 ): Promise<boolean> {
-  await Deno.writeTextFile(params.stagedPath, params.contents, { mode: 0o640 });
-  if (await installedFileMatches(io, params.stagedPath, params.installedPath)) {
-    return false;
-  }
-  const install = await io.run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "install",
-      "-m",
-      "0644",
-      "-o",
-      "root",
-      "-g",
-      "root",
-      params.stagedPath,
-      params.installedPath,
-    ]),
-  );
-  if (!install.success) {
-    throw new Error(
-      install.stderr || `Failed to install unit ${params.installedPath}`,
-    );
-  }
-  return true;
+  return installUnitFileShared(io.run, params);
 }
 
 async function systemctl(
@@ -442,6 +402,30 @@ async function removeUnitFile(
   path: string,
 ): Promise<RunResult> {
   return await io.run("sudo", hostSudoArgs(["-n", "rm", "-f", "--", path]));
+}
+
+/**
+ * Rebuild the account walls (`tp-host php-loopback-sync`, `lib/tp-php-loopback`):
+ * each account may reach its own native apps' loopback ports, read from the
+ * unit files on disk, and no one else's. Run once the units are on disk and
+ * before any is started (an app that calls its own port at start must find it
+ * open), and again once a unit is gone, so a port the ledger hands to another
+ * account no longer opens for the old one. A failure only warns: the rules
+ * then stay as they were, which never opens a port to the wrong account
+ * unless one was just removed; the next sync (every PHP start, every deploy,
+ * every daemon start) repairs it.
+ */
+async function syncAccountWalls(io: NativeAppIo): Promise<void> {
+  const result = await io.run(
+    "sudo",
+    hostSudoArgs(["-n", "php-loopback-sync"]),
+  );
+  if (!result.success) {
+    logWarn(
+      "deploy",
+      `account loopback rules not reloaded: ${result.stderr}`,
+    );
+  }
 }
 
 /** True when the unit is currently active (a redeploy restarts, not enables). */
@@ -474,19 +458,51 @@ async function waitForNativeApp(
   port: number,
   unit: string,
   timeoutMs = NATIVE_APP_HEALTH_TIMEOUT_MS,
+  report = false,
 ): Promise<boolean> {
   const attempts = Math.max(
     1,
     Math.ceil(timeoutMs / NATIVE_APP_HEALTH_INTERVAL_MS),
   );
+  const address = `127.0.0.1:${port}`;
+  const startedAt = Date.now();
+  const elapsed = () => `${Math.round((Date.now() - startedAt) / 1000)} s`;
+  const health = report ? io.health : undefined;
+  if (health) {
+    io.onOutput?.(
+      "stdout",
+      `no health check is configured for a native app; waiting for ${address} to answer an HTTP request (any status code counts)`,
+    );
+  }
   const pollFrom = async (attempt: number): Promise<boolean> => {
     if (attempt >= attempts) return false;
     if (await io.probe(port)) return true;
     if (await unitIsFailed(io, unit)) return false;
+    health?.waiting(
+      `Attempt ${
+        attempt + 1
+      } of ${attempts}, ${elapsed()}: ${address} has not answered yet`,
+    );
     if (attempt < attempts - 1) await io.sleep(NATIVE_APP_HEALTH_INTERVAL_MS);
     return await pollFrom(attempt + 1);
   };
-  return await pollFrom(0);
+  const answered = await pollFrom(0);
+  if (health) {
+    if (answered) {
+      health.done(
+        HEALTH_RESULT_TITLES.reachable,
+        `Answered HTTP on ${address} after ${elapsed()} (no health check is configured; any status code counts)`,
+      );
+    } else {
+      health.failed(
+        HEALTH_RESULT_TITLES.silent,
+        `Did not answer HTTP on ${address} within ${
+          Math.round(timeoutMs / 1000)
+        } s`,
+      );
+    }
+  }
+  return answered;
 }
 
 /**
@@ -928,7 +944,15 @@ async function startNativeApp(
   }
 
   io.setPhase(options.probePhase);
-  if (await waitForNativeApp(io, app.listenPort, unit)) {
+  if (
+    await waitForNativeApp(
+      io,
+      app.listenPort,
+      unit,
+      NATIVE_APP_HEALTH_TIMEOUT_MS,
+      true,
+    )
+  ) {
     io.onOutput?.(
       "stdout",
       `${app.composeServiceName} answered on 127.0.0.1:${app.listenPort}`,
@@ -1207,6 +1231,8 @@ async function retireCheckCopy(
       `systemctl daemon-reload after removing ${unit} failed: ${reload.stderr}`,
     );
   }
+  // The copy's spare port goes back to the ledger.
+  await syncAccountWalls(io);
 }
 
 /** {@link retireCheckCopy} for a prepared app's own check copy. */
@@ -1299,6 +1325,8 @@ async function switchTraffic(
     if (!reload.success) {
       throw new Error(reload.stderr || "systemctl daemon-reload failed");
     }
+    // The app's own unit was rewritten (its port may have moved).
+    await syncAccountWalls(io);
   }
   // The copy shares the account's ceilings with the release serving; it has
   // answered, so it goes before the app's own unit starts the same release.
@@ -1348,7 +1376,14 @@ async function deployBesideServing(
       started.stderr || "systemd refused it",
     );
   }
-  if (!(await waitForNativeApp(io, check.app.listenPort, check.unit))) {
+  const answered = await waitForNativeApp(
+    io,
+    check.app.listenPort,
+    check.unit,
+    NATIVE_APP_HEALTH_TIMEOUT_MS,
+    true,
+  );
+  if (!answered) {
     await failCheckCopy(io, layout, prepared, check, null);
   }
   io.onOutput?.(
@@ -1664,6 +1699,9 @@ export async function applyNativeAppServices(
     if (!result.success) {
       throw new Error(result.stderr || "systemctl daemon-reload failed");
     }
+    // Each account's own app ports (check copies included) open before any
+    // app starts.
+    await syncAccountWalls(io);
   }
 
   // Phase 3 — start and health-probe each app (beside the release serving,
@@ -1856,6 +1894,8 @@ export async function removeNativeAppServices(
         `systemctl daemon-reload after native app removal failed: ${reload.stderr}`,
       );
     }
+    // The removed apps' ports go back to the ledger.
+    await syncAccountWalls(io);
   }
   return removed;
 }

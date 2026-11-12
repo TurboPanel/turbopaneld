@@ -57,7 +57,7 @@
   when:
     - _ui_cache_inserted is not skipped
     - _ui_cache_inserted.msg is defined
-    - _ui_cache_inserted.msg is search('validation')
+    - _ui_cache_inserted.msg is search('failed to validate')
   ansible.builtin.debug:
     msg: >-
       WARNING: could not add the UI cache rules to {{ turbopanel_caddyfile }};

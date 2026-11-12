@@ -247,6 +247,23 @@ test("a site without dbCa is untouched and a site without an owner is refused", 
   );
 });
 
+test("dbCa urlVariables add the CA file to listed verify-mode Postgres URLs only", () => {
+  const verify = "postgresql://127.0.0.1:5432/app?sslmode=verify-full";
+  const other = "postgresql://127.0.0.1:5432/app?sslmode=verify-ca";
+  const spec = site("apache", { DB_URL: verify, OTHER_URL: other }, {
+    dbCa: {
+      variables: ["DATABASE_CA_FILE"],
+      urlVariables: ["DB_URL", "MISSING_URL"],
+      pem: CERT,
+    },
+  });
+  const env = withDbCaVariables(layout, spec, owner).webEnv ?? {};
+  const path = env.DATABASE_CA_FILE ?? "";
+  assertEquals(env.DB_URL, `${verify}&sslrootcert=${path}`);
+  assertEquals(env.OTHER_URL, other);
+  assertEquals("MISSING_URL" in env, false);
+});
+
 const PAYLOAD_BASE = {
   environmentId: "env-1",
   projectId: "proj-1",
@@ -295,6 +312,39 @@ test("dbCa and requiredEnv parse; private keys, bad names and empty sets do not"
   }
   assertThrows(() => parseSite({ requiredEnv: ["a b"] }), Error);
   assertThrows(() => parseSite({ requiredEnv: [] }), Error);
+});
+
+test("dbCa urlVariables parse up to 16 names and refuse 17", () => {
+  const names = (count: number) =>
+    Array.from({ length: count }, (_, index) => `URL_${index}`);
+  const parsed = parseSite({
+    dbCa: { variables: names(16), urlVariables: names(16), pem: CERT },
+  });
+  assertEquals(parsed?.dbCa?.urlVariables?.length, 16);
+  assertThrows(
+    () => parseSite({ dbCa: { variables: names(17), pem: CERT } }),
+    Error,
+  );
+  assertThrows(() =>
+    parseSite({
+      dbCa: { variables: ["X"], urlVariables: names(17), pem: CERT },
+    }), Error);
+  assertThrows(
+    () =>
+      parseSite({
+        dbCa: { variables: ["X"], urlVariables: "DB_URL", pem: CERT },
+      }),
+    Error,
+  );
+});
+
+test("dbCa urlVariables as an empty list means none", () => {
+  const parsed = parseSite({
+    dbCa: { variables: ["X"], urlVariables: [], pem: CERT },
+  });
+  assertEquals(parsed?.dbCa?.variables, ["X"]);
+  assertEquals(parsed?.dbCa?.urlVariables, undefined);
+  assertEquals("urlVariables" in (parsed?.dbCa ?? {}), false);
 });
 
 test("an older control plane's site (no dbCa, no requiredEnv) parses unchanged", () => {

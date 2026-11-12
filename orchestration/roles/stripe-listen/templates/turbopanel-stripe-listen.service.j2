@@ -2,12 +2,17 @@
 Description=TurboPanel Stripe CLI (dev webhook forwarder)
 After=network-online.target turbopanel-caddy.service
 Wants=network-online.target turbopanel-caddy.service
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 ExecStart={{ stripe_listen_config_dir }}/wrapper-start.sh
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=120
 # 78 = EX_CONFIG: no key in stripe.env yet — show as failed (the journal names
 # the file) and do not loop; any other failure restarts.
 RestartPreventExitStatus=78

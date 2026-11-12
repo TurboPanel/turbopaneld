@@ -2,6 +2,7 @@ import {
   buildStorageVolumesFragment,
   declaredVolumeUsers,
 } from "../deploy/apply-storage-volumes.ts";
+import { openPrincipalPasswordEnvelopes } from "../deploy/principal-password-envelope.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import {
   deploymentBindWarnings,
@@ -9,6 +10,10 @@ import {
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
+import {
+  applyDeployCachesAndReach,
+  type DeployCacheStepInput,
+} from "../deploy/cache/deploy-step.ts";
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
@@ -49,7 +54,7 @@ import {
   retirePreviousProjects,
 } from "../deploy/retire-previous-projects.ts";
 import {
-  applyRailpackImagesToComposeYaml,
+  applyImageBuildImagesToComposeYaml,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
 } from "../deploy/compose-overlay.ts";
@@ -71,13 +76,26 @@ import {
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
+import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
+import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
+import { siteRunContext } from "../deploy/site/lifecycle-context.ts";
+import {
+  applyDeployWorkers,
+  assertSiteLifecyclePhp,
+  hasPostDeployWork,
+  runAfterSwitchPostDeploy,
+  runBeforeTrafficPostDeploy,
+  siteHeldForPostDeploy,
+  type SiteLifecycleDeploy,
+  type SiteLifecycleIo,
+} from "../deploy/site/lifecycle-deploy.ts";
 import {
   COMMAND_LOG_PHASES,
   type CommandOutputSink,
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
-import { ensureBuildkitRailpack } from "../deploy/release/railpack-build.ts";
+import { ensureBuildkitImageBuild } from "../deploy/release/image-build.ts";
 import { observeBuildSlot } from "../deploy/release/build-sandbox.ts";
 import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
 import {
@@ -87,8 +105,12 @@ import {
   type PlannedDeployStep,
 } from "./deploy-progress.ts";
 import {
+  automaticCertificateDetail,
+  certificatesStep,
   type DeployPresenceProbes,
   deployStepNeeds,
+  HEALTH_RESULT_TITLES,
+  HEALTH_STEP_ID,
   installStepIds,
   planDeploySteps,
   probeDeployPresence,
@@ -129,6 +151,8 @@ import {
   composePsForGate,
   HEALTH_GATE_DEFAULT_POLL_MS,
   HEALTH_GATE_DEFAULT_STABLE_MS,
+  type HealthGateResult,
+  type HealthGateTick,
   waitForHealthGate,
 } from "../deploy/health-gate.ts";
 import {
@@ -139,10 +163,11 @@ import {
 import {
   applySites,
   ensureSiteEngines,
+  planSiteFrameworkAliases,
   planSiteWebEnv,
   pruneHoldKeysForDeploy,
   removeNamedSites,
-  resolveSiteDocumentRoot,
+  resolveSitePhpSeries,
   type SiteManagedDirectory,
   type SiteRelease,
   siteWritableDirs,
@@ -185,12 +210,17 @@ import {
 } from "../deploy/native/apply-native-apps.ts";
 import {
   siteBuildRuntimes,
+  sitesWithFrameworkLayouts,
   sitesWithReleaseRoots,
 } from "../deploy/release/site-release.ts";
 import {
   keptServiceFolders,
   type ReleaseTreeRef,
 } from "../deploy/release/retention.ts";
+import {
+  syncAccountWallOrThrow,
+  syncAccountWallQuietly,
+} from "../deploy/account-wall.ts";
 import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import {
@@ -220,12 +250,20 @@ import {
   priorWritableMounts,
 } from "../deploy/compose-host-paths.ts";
 import {
+  configHostDirectory,
+  materializeConfigFiles,
+  pruneStaleConfigFiles,
+  removeConfigTree,
+  rewriteComposeConfigFilePaths,
+} from "../deploy/config-files.ts";
+import {
   materializeSecretFiles,
   pruneStaleSecretFiles,
   removeSecretTree,
   rewriteComposeSecretFilePaths,
 } from "../deploy/secret-runtime.ts";
 import {
+  type CacheApplyResult,
   type EnvironmentDeployComposeFile,
   type EnvironmentDeployContainer,
   type EnvironmentDeployFabricNetwork,
@@ -396,6 +434,8 @@ export type EnvironmentDeployDeps = {
    * Ansible install on hermetic suite paths that still exercise compose.
    */
   ensureDocker?: () => Promise<void>;
+  /** Test seam — defaults to {@link waitForHealthGate} (real polling and sleeps). */
+  waitForHealth?: typeof waitForHealthGate;
   /**
    * Test seam — defaults to {@link defaultEnsureExternalDockerNetworks}.
    * When omitted, the default uses `runDocker` from these deps. Receives one
@@ -428,6 +468,8 @@ export type EnvironmentDeployDeps = {
    * or a real `ansible-playbook` run.
    */
   nativeAppIo?: Omit<ApplyNativeAppsOpts, "bindings">;
+  /** Test seam — the machine-touching parts of the project cache apply (runtime install, account probe, sleep). */
+  cacheIo?: DeployCacheStepInput["io"];
   /** Test seam: how the host is asked whether a skipped deploy is still running. */
   hostProbe?: HostProbe;
   /** Test seam — the Ansible runner for the early site engine install. */
@@ -965,16 +1007,16 @@ function releasesForManifest(
 }
 
 /**
- * Compose service name → the image a Railpack release built for it.
+ * Compose service name → the image an image-build release built for it.
  *
  * Only entries that actually produced an image are in the map, so a deploy with
- * no Railpack services yields an empty map and
- * {@link applyRailpackImagesToComposeYaml} is a no-op. Rollbacks are included:
+ * no image-build services yields an empty map and
+ * {@link applyImageBuildImagesToComposeYaml} is a no-op. Rollbacks are included:
  * `applySourceReleases` reads the tag back off the target release's manifest,
- * so restoring a Railpack release is the same "write this tag into compose"
+ * so restoring an image-build release is the same "write this tag into compose"
  * operation a fresh build is.
  */
-function railpackImagesByService(
+function imageBuildImagesByService(
   applied: readonly AppliedRelease[],
 ): Map<string, string> {
   const images = new Map<string, string>();
@@ -990,9 +1032,9 @@ function railpackImagesByService(
  *
  * The control plane's release-history and rollback surface reads this instead
  * of asking the host again. It is deliberately generic across both lanes: a
- * native release reports its commit, a Railpack release additionally reports
+ * native release reports its commit, an image-build release additionally reports
  * the image tag and the pinned frontend / plan versions that produced it,
- * because "which directory" is not an identity a Railpack release has.
+ * because "which directory" is not an identity an image-build release has.
  */
 function deployResultReleases(
   applied: readonly AppliedRelease[],
@@ -1003,12 +1045,12 @@ function deployResultReleases(
     releaseId: release.releaseId,
     commitSha: release.commitSha,
     ...(release.imageTag === undefined ? {} : { imageTag: release.imageTag }),
-    ...(release.railpackFrontendVersion === undefined
+    ...(release.builderFrontendVersion === undefined
       ? {}
-      : { railpackFrontendVersion: release.railpackFrontendVersion }),
-    ...(release.railpackPlanVersion === undefined
+      : { builderFrontendVersion: release.builderFrontendVersion }),
+    ...(release.builderPlanVersion === undefined
       ? {}
-      : { railpackPlanVersion: release.railpackPlanVersion }),
+      : { builderPlanVersion: release.builderPlanVersion }),
   }));
 }
 
@@ -1302,6 +1344,7 @@ async function buildDeploymentManifest(
   appliedReleases: readonly AppliedRelease[] = [],
 ): Promise<DeploymentManifest> {
   const secrets = secretPlanToManifest(payload.secretPlan ?? []);
+  const configFiles = payload.configFiles ?? [];
   const serviceIds = serviceIdsForManifest(payload);
   const releases = releasesForManifest(payload, appliedReleases);
   return {
@@ -1317,6 +1360,7 @@ async function buildDeploymentManifest(
       singleGeneration(payload.projectName, payload.generation ?? 0),
     ],
     ...(secrets.length > 0 ? { secrets } : {}),
+    ...(configFiles.length > 0 ? { configFiles } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
     ...(releases.length > 0 ? { releases } : {}),
   };
@@ -1362,21 +1406,7 @@ async function persistComposeEnvFile(
  * `applyCronJobs` call would treat the first lane's timers as stale and remove
  * the ones it had just installed.
  */
-/**
- * What a site's cron job may write besides the principal's `home/` and `tmp/`:
- * `shared/` and `logs/` in the release lane, `public/` too in the managed lane
- * (`webroot/` and `shared/` in the older tree), nothing for a tree outside the
- * principal's home.
- */
-export function siteCronWritableDirs(
-  layout: Pick<LayoutPaths, "principalHomeRoot">,
-  release: SiteRelease | undefined,
-  managed: SiteManagedDirectory | undefined,
-): string[] {
-  if (release) return siteWritableDirs(layout, release, false);
-  if (managed) return siteWritableDirs(layout, managed, true);
-  return [];
-}
+export { siteCronWritableDirs } from "../deploy/site/lifecycle-context.ts";
 
 /** A native app's tree reference: its service id and owner, plus its folder. */
 function nativeRef(
@@ -1387,6 +1417,41 @@ function nativeRef(
     serviceId: app.serviceId,
     username: binding.username,
     folder: binding.folder,
+  };
+}
+
+/**
+ * One site's scheduled jobs, with the account, folder and variables they run
+ * with, or `undefined` when it has none. A release-backed site's jobs run in
+ * the release root (`current`), so a framework's `php artisan` works as typed;
+ * a managed-directory site's in its document root. Both load the site's
+ * environment file (installed by `materializeSiteEnvFiles` earlier in the
+ * deploy) and, for a PHP site, a bare `php` is the site's own series.
+ */
+export function siteCronSpec(
+  layout: LayoutPaths,
+  environmentId: string,
+  site: EnvironmentDeploySite,
+  release: SiteRelease | undefined,
+  managed: SiteManagedDirectory | undefined,
+): CronApplySpec | undefined {
+  // The wire contract already refuses jobs without a principal; this keeps the
+  // type honest rather than re-reporting it.
+  if (!site.cron || site.cron.length === 0) return undefined;
+  const context = siteRunContext(layout, environmentId, site, release, managed);
+  if (!context) return undefined;
+  return {
+    composeServiceName: site.composeServiceName,
+    username: context.username,
+    workingDirectory: context.workingDirectory,
+    siteWritableDirs: context.siteWritableDirs,
+    ...(context.environmentFile === undefined
+      ? {}
+      : { environmentFile: context.environmentFile }),
+    ...(context.phpSeries === undefined
+      ? {}
+      : { phpSeries: context.phpSeries }),
+    jobs: site.cron,
   };
 }
 
@@ -1401,27 +1466,14 @@ async function applyDeployCronJobs(
 ): Promise<void> {
   const specs: CronApplySpec[] = [];
   for (const site of sites) {
-    const principal = site.principal;
-    // The wire contract already refuses jobs without a principal; this keeps
-    // the type honest rather than re-reporting it.
-    if (!site.cron || site.cron.length === 0 || !principal) continue;
-    specs.push({
-      composeServiceName: site.composeServiceName,
-      username: principal.username,
-      workingDirectory: resolveSiteDocumentRoot(
-        layout,
-        parsedPayload.environmentId,
-        site,
-        releaseBindings.get(site.composeServiceName),
-        managedBindings.get(site.composeServiceName),
-      ),
-      siteWritableDirs: siteCronWritableDirs(
-        layout,
-        releaseBindings.get(site.composeServiceName),
-        managedBindings.get(site.composeServiceName),
-      ),
-      jobs: site.cron,
-    });
+    const spec = siteCronSpec(
+      layout,
+      parsedPayload.environmentId,
+      site,
+      releaseBindings.get(site.composeServiceName),
+      managedBindings.get(site.composeServiceName),
+    );
+    if (spec) specs.push(spec);
   }
   for (const app of nativeAppServices) {
     if (!app.cron || app.cron.length === 0) continue;
@@ -1573,6 +1625,7 @@ async function applyDeployNativeApps(
       ...io,
       onOutput: io?.onOutput ??
         ((stream, line) => logSink.onLine(stream, line)),
+      ...(logSink.health === undefined ? {} : { health: logSink.health }),
       bindings: nativeAppBindingsFromPayload(
         parsedPayload,
         previousReleaseByService,
@@ -1662,6 +1715,7 @@ function buildDaemonOverlayFragment(
 }
 
 type DeployContainerServicesInput = {
+  waitForHealth?: typeof waitForHealthGate;
   layout: LayoutPaths;
   parsedPayload: EnvironmentDeployPayload;
   /** What the release engine actually promoted, for `deployment.json`. */
@@ -1760,17 +1814,52 @@ async function pruneDeploySecrets(
   }
 }
 
+/** Same rule for generated config files, which never carry secret plan entries. */
+async function pruneDeployConfigFiles(
+  layout: LayoutPaths,
+  payload: EnvironmentDeployPayload,
+): Promise<void> {
+  const files = payload.configFiles ?? [];
+  try {
+    if (files.length === 0) {
+      await removeConfigTree(layout, payload.projectId, payload.environmentId);
+      return;
+    }
+    await pruneStaleConfigFiles(
+      layout,
+      payload.projectId,
+      payload.environmentId,
+      files,
+    );
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `could not remove generated config files that left the plan: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
+/** Point both secret and generated config sources at the daemon's files. */
 function applySecretFilePaths(
   yaml: string,
   layout: LayoutPaths,
   payload: EnvironmentDeployPayload,
 ): string {
-  return rewriteComposeSecretFilePaths(
+  const withSecrets = rewriteComposeSecretFilePaths(
     yaml,
     layout,
     payload.projectId,
     payload.environmentId,
     payload.secretPlan ?? [],
+  );
+  return rewriteComposeConfigFilePaths(
+    withSecrets,
+    layout,
+    payload.projectId,
+    payload.environmentId,
+    payload.configFiles ?? [],
   );
 }
 
@@ -1858,8 +1947,6 @@ async function deploySequentially(
   if (serviceHooks.length > 0) {
     assertHooksConfined(serviceHooks, labeledServices);
   }
-  const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
-    DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
   const projectName = parsedPayload.projectName;
   const steps: SequentialDeploySteps = {
     prepare: () => prepareSequentialDeploy(input, chain, onLine),
@@ -1874,14 +1961,7 @@ async function deploySequentially(
         onOutput: (stream, line) => logSink.onLine(stream, line),
         redactSummary: (text) => logSink.redactSummary(text),
       }),
-    gate: (paths) =>
-      waitForHealthGate({
-        ps: composePsForGate(run, projectName, paths),
-        timeoutMs,
-        stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
-        pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
-        onProgress: (message) => logSink.onLine("stdout", message),
-      }),
+    gate: (paths) => gateComposeHealth(input, paths),
     restorePrevious: () => restorePreviousDeployment(deploymentDir),
     commit: () => input.cancel?.commit("before the old version was stopped"),
     composeArgs: (paths) => composeFileArgs(projectName, paths),
@@ -1909,6 +1989,133 @@ async function deploySequentially(
     });
   }
   return { serviceNames: labeledServices, composePaths: chain };
+}
+
+/**
+ * Wait for the project's containers to be healthy, writing the live line and
+ * the result to the health step. Shared by the sequential strategy (which
+ * rolls back on a failure) and the in-place one (which fails the deploy).
+ */
+async function gateComposeHealth(
+  input: DeployContainerServicesInput,
+  paths: readonly string[],
+): Promise<HealthGateResult> {
+  const { parsedPayload, run, logSink } = input;
+  const timeoutMs = (parsedPayload.healthTimeoutSeconds ??
+    DEFAULT_HEALTH_TIMEOUT_SECONDS) * 1000;
+  // The services this deploy runs. A stack whose services are all behind
+  // compose profiles has none, and waiting the whole timeout for containers
+  // that will never exist would only delay the same answer.
+  const listed = await run([
+    ...composeFileArgs(parsedPayload.projectName, paths),
+    "config",
+    "--services",
+  ]);
+  const services = listed.success
+    ? listed.stdout.split("\n").map((name) => name.trim()).filter(Boolean)
+    : undefined;
+  if (services?.length === 0) {
+    const none: HealthGateResult = {
+      ok: true,
+      services: [],
+      elapsedMs: 0,
+      unchecked: [],
+      reported: [],
+    };
+    reportHealthGate(logSink, none);
+    return none;
+  }
+  const result = await (input.waitForHealth ?? waitForHealthGate)({
+    ...(services === undefined ? {} : { services }),
+    ps: composePsForGate(run, parsedPayload.projectName, paths),
+    timeoutMs,
+    stableMs: Math.min(HEALTH_GATE_DEFAULT_STABLE_MS, timeoutMs),
+    pollMs: HEALTH_GATE_DEFAULT_POLL_MS,
+    onProgress: (message) => logSink.onLine("stdout", message),
+    onTick: (tick) => logSink.health?.waiting(waitingLine(tick, timeoutMs)),
+  });
+  reportHealthGate(logSink, result);
+  return result;
+}
+
+/**
+ * In place there is no previous version to go back to: a service that does not
+ * become healthy fails the deploy, and the new containers stay up for
+ * inspection (the sequential strategy rolls back instead).
+ */
+async function assertInPlaceHealthy(
+  input: DeployContainerServicesInput,
+  paths: readonly string[],
+): Promise<void> {
+  input.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+  const gate = await gateComposeHealth(input, paths);
+  if (!gate.ok) {
+    throw new Error(
+      input.logSink.redactSummary(
+        `The containers started but ${gate.detail}. Nothing was stopped or rolled back; the hostings and certificates were not updated.`,
+      ),
+    );
+  }
+}
+
+/** Whole seconds, with the unit: "12 s". */
+function seconds(ms: number): string {
+  return `${Math.round(ms / 1000)} s`;
+}
+
+/** The one live line of the health step while the gate waits. */
+export function waitingLine(tick: HealthGateTick, timeoutMs: number): string {
+  const head = `Attempt ${tick.attempt}, ${seconds(tick.elapsedMs)} of up to ${
+    seconds(timeoutMs)
+  }`;
+  return `${head}: ${tick.pending[0] ?? "waiting"}`;
+}
+
+/**
+ * Write the gate's verdict to the transcript and to the health step, so the
+ * step ends with a result instead of just stopping. "Healthy" is only said
+ * when Docker reported `healthy`; a container with no health check passed by
+ * staying up, and the step says exactly that.
+ */
+export function reportHealthGate(
+  logSink: CommandOutputSink,
+  result: HealthGateResult,
+): void {
+  // A rollback runs the gate again for the previous version, after the step
+  // already ended: its lines say so instead of passing for the new version.
+  const prior = logSink.health?.active() === false ? "Previous version: " : "";
+  const line = (stream: "stdout" | "stderr", text: string) =>
+    logSink.onLine(stream, `${prior}${text}`);
+  if (!result.ok) {
+    const note = result.reason === "timeout"
+      ? `${result.detail.charAt(0).toUpperCase()}${result.detail.slice(1)}`
+      : `Stopped waiting: ${result.detail}`;
+    line("stderr", note);
+    logSink.health?.failed(HEALTH_RESULT_TITLES.unhealthy, note);
+    return;
+  }
+  const after = seconds(result.elapsedMs);
+  if (result.unchecked.length === 0 && result.reported.length === 0) {
+    const note =
+      "Nothing in this deploy reports its own health: no service is running, or every one is a job that finished with exit code 0";
+    line("stdout", note);
+    logSink.health?.done(HEALTH_RESULT_TITLES.notChecked, note);
+    return;
+  }
+  if (result.unchecked.length === 0) {
+    const note = `Healthy after ${after}`;
+    line("stdout", `${result.reported.join(", ")}: ${note}`);
+    logSink.health?.done(HEALTH_RESULT_TITLES.healthy, note);
+    return;
+  }
+  const note = `${result.unchecked.join(", ")} stayed running for ${after}; ` +
+    `no health check is configured, so that is all that was checked`;
+  line("stdout", note);
+  const mixed = result.reported.length > 0;
+  logSink.health?.done(
+    HEALTH_RESULT_TITLES.running,
+    mixed ? `Other services healthy. ${note}` : note,
+  );
 }
 
 const SEQUENTIAL_PHASES = {
@@ -2022,13 +2229,13 @@ async function deployContainerServices(
   try {
     const stagedPath = join(stageDir, RUNTIME_COMPOSE_FILENAME);
     let yaml = applySecretFilePaths(
-      // Railpack-built services get their `image` here, before anything reads
+      // image-built services get their `image` here, before anything reads
       // the document: `docker compose config` below would otherwise validate a
       // service whose image does not exist yet (or act on an authored `build:`
-      // that the Railpack lane has already superseded).
-      applyRailpackImagesToComposeYaml(
+      // that the image-build lane has already superseded).
+      applyImageBuildImagesToComposeYaml(
         resolveRuntimeComposeYaml(files),
-        railpackImagesByService(appliedReleases),
+        imageBuildImagesByService(appliedReleases),
       ),
       layout,
       parsedPayload,
@@ -2036,6 +2243,14 @@ async function deployContainerServices(
     await writeComposeFileSecure(stagedPath, yaml);
     await persistComposeEnvFile(stageDir, parsedPayload.envFile);
     await materializeDeploySecrets(layout, parsedPayload, decryptSecrets);
+    await materializeConfigFiles(
+      layout,
+      parsedPayload.projectId,
+      parsedPayload.environmentId,
+      parsedPayload.configFiles ?? [],
+      parsedPayload.variableMaterial ?? [],
+      decryptSecrets,
+    );
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
@@ -2054,6 +2269,7 @@ async function deployContainerServices(
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
       ].filter((n): n is string => typeof n === "string"),
+      helperReach: parsedPayload.helperReach,
     });
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
@@ -2061,6 +2277,17 @@ async function deployContainerServices(
     // allowed (`remoteBuildSourcesApproved`). Build paths are confined just below.
     const daemonSecretNames = new Set(
       (parsedPayload.secretPlan ?? []).map((e) => e.source),
+    );
+    // Config sources are exempt only at the exact path the daemon wrote.
+    const configsDir = configHostDirectory(
+      layout,
+      parsedPayload.projectId,
+      parsedPayload.environmentId,
+    );
+    const daemonConfigFiles = new Map(
+      (parsedPayload.configFiles ?? []).map((
+        e,
+      ) => [e.source, join(configsDir, e.relativePath)]),
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
@@ -2074,7 +2301,11 @@ async function deployContainerServices(
     // excuses a symlink escape, a nested writable bind, or the staging dir.
     await assertComposeHostPathsConfined(
       [
-        collectResolvedHostPaths(resolved.document ?? {}, daemonSecretNames),
+        collectResolvedHostPaths(
+          resolved.document ?? {},
+          daemonSecretNames,
+          daemonConfigFiles,
+        ),
         collectAuthoredHostPaths(yaml),
       ],
       {
@@ -2249,6 +2480,7 @@ async function deployContainerServices(
         onLine,
       });
       await pruneDeploySecrets(layout, parsedPayload);
+      await pruneDeployConfigFiles(layout, parsedPayload);
       return sequential;
     }
     if (serviceHooks.length > 0) {
@@ -2288,6 +2520,8 @@ async function deployContainerServices(
       );
     }
 
+    await assertInPlaceHealthy(input, chain);
+
     if (serviceHooks.length > 0) {
       logSink.setPhase(COMMAND_LOG_PHASES.POST_DEPLOY);
       await runPostDeployHooks(serviceHooks, {
@@ -2302,6 +2536,7 @@ async function deployContainerServices(
     // The new release is up and its hooks passed: only now may the files the
     // previous one needed (and this plan no longer lists) be removed.
     await pruneDeploySecrets(layout, parsedPayload);
+    await pruneDeployConfigFiles(layout, parsedPayload);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
@@ -2408,6 +2643,8 @@ export function shapeEnvironmentDeployResult(input: {
   principals?: readonly PrincipalIdReport[];
   /** Service folders left in place because their service left the compose file. */
   keptFolders?: readonly KeptFolder[];
+  /** What happened to each cache the deploy was sent; omitted when none was. */
+  caches?: readonly CacheApplyResult[];
 }): EnvironmentDeployResult {
   const summary = buildDeploySummary(
     input.environmentId,
@@ -2442,6 +2679,9 @@ export function shapeEnvironmentDeployResult(input: {
     ...(input.keptFolders && input.keptFolders.length > 0
       ? { keptFolders: [...input.keptFolders] }
       : {}),
+    ...(input.caches && input.caches.length > 0
+      ? { caches: [...input.caches] }
+      : {}),
   };
 }
 
@@ -2455,9 +2695,15 @@ function progressFollowingSink(
   progress: DeployStepReporter,
 ): { logSink: CommandOutputSink; currentPhase: () => string } {
   let phase: string = COMMAND_LOG_PHASES.PREPARE;
+  let healthEnded = false;
+  const healthRunning = () =>
+    progress.snapshot().steps.some((s) =>
+      s.id === HEALTH_STEP_ID && s.state === "running"
+    );
   const logSink: CommandOutputSink = {
     onLine: (stream, message) => inner.onLine(stream, message),
     setPhase: (next) => {
+      if (next === COMMAND_LOG_PHASES.HEALTH) healthEnded = false;
       phase = next;
       inner.setPhase(next);
       progress.phase(next);
@@ -2465,6 +2711,23 @@ function progressFollowingSink(
     addSecrets: (values) => inner.addSecrets(values),
     redactSummary: (text) => inner.redactSummary(text),
     finalize: () => inner.finalize(),
+    health: {
+      waiting: (text) => {
+        // A rollback's gate runs after the step already failed: its ticks
+        // must not land on whatever step is running then.
+        if (healthRunning()) progress.detail(HEALTH_STEP_ID, text);
+      },
+      done: (title, note) => {
+        healthEnded = true;
+        progress.done(HEALTH_STEP_ID, { label: title, note });
+      },
+      failed: (title, note) => {
+        healthEnded = true;
+        progress.fail(HEALTH_STEP_ID, { label: title, note });
+      },
+      ended: () => healthEnded,
+      active: healthRunning,
+    },
   };
   return { logSink, currentPhase: () => phase };
 }
@@ -2484,6 +2747,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     EnvironmentDeployDeps["ensureFabricDockerNetworks"]
   >;
   runPrivileged: RunFn;
+  waitForHealth: typeof waitForHealthGate | undefined;
 } {
   const run = deps?.runDocker ?? defaultRunDocker;
   const progress = deps?.progress ?? createNoopDeployStepReporter();
@@ -2519,6 +2783,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     ensureFabricDockerNetworks: deps?.ensureFabricDockerNetworks ??
       defaultEnsureFabricDockerNetworks,
     runPrivileged: deps?.runPrivileged ?? defaultRunPrivileged,
+    waitForHealth: deps?.waitForHealth,
   };
 }
 
@@ -2542,7 +2807,22 @@ async function publishDeployedCompose(
     );
     return { labeledServices, composePaths: [] };
   }
-  const deployed = await deployContainerServices(input);
+  // Compose may create a container network: its gateway is a host address the
+  // account wall only learns by syncing, so site accounts would keep reaching
+  // it until some later sync. The wall is reloaded whether the deploy goes on
+  // or fails (a failed one may already have created the network); only a
+  // successful one fails on a reload that did not work.
+  let deployed: Awaited<ReturnType<typeof deployContainerServices>>;
+  try {
+    deployed = await deployContainerServices(input);
+  } catch (err) {
+    await syncAccountWallQuietly(
+      input.runPrivileged ?? defaultRunPrivileged,
+      (message) => logWarn("deploy", message),
+    );
+    throw err;
+  }
+  await syncAccountWallOrThrow(input.runPrivileged ?? defaultRunPrivileged);
   return {
     labeledServices: deployed.serviceNames,
     composePaths: deployed.composePaths,
@@ -2692,12 +2972,16 @@ export async function applyHostingsOnly(
   }
   const runtime = resolveEnvironmentDeployRuntime(deps);
   await assertHostingNamesFree(layout, parsedPayload);
+  // One step, so the run shows the certificate line like a full deploy does.
+  runtime.progress.plan([certificatesStep()]);
+  runtime.progress.start("certificates");
   const hostnameTls = await materializeDeployTls(
     layout,
     parsedPayload,
     runtime.decryptSecrets,
   );
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
+  finishCertificatesStep(runtime.progress, parsedPayload);
   logInfo(
     "commands",
     `environment.deploy hostings only env=${parsedPayload.environmentId}`,
@@ -2708,6 +2992,19 @@ export async function applyHostingsOnly(
       `Web server settings applied for environment ${parsedPayload.environmentId}: no build, no restart`,
     unchanged: true,
   };
+}
+
+/**
+ * Finish the certificates step. For names the web server gets a certificate
+ * for by itself, the step keeps a line saying so, which stays readable after
+ * the step is done.
+ */
+function finishCertificatesStep(
+  progress: DeployStepReporter,
+  parsedPayload: EnvironmentDeployPayload,
+): void {
+  const note = automaticCertificateDetail(parsedPayload);
+  progress.done("certificates", note === undefined ? {} : { note });
 }
 
 /**
@@ -2850,6 +3147,75 @@ function currentLinksOf(
   );
 }
 
+/**
+ * Which services keep `current` until their new release has passed: a serving
+ * Node app, or a site with before-traffic commands.
+ */
+function holdCurrentFor(
+  layout: LayoutPaths,
+  parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
+  deps?: EnvironmentDeployDeps,
+): (
+  service: { composeServiceName: string; serviceId: string },
+) => Promise<boolean> {
+  // A Node app that is serving keeps `current` until its new release has
+  // answered beside it, so a crash, a cancel or a failure anywhere before
+  // the switch leaves the serving release live (and the one a restart or a
+  // reboot starts).
+  // A site with before-traffic commands holds `current` the same way until
+  // its commands have passed.
+  return async (service) =>
+    await nativeAppIsServing(
+      parsedPayload.nativeAppServices ?? [],
+      service,
+      deps?.nativeAppIo,
+    ) ||
+    await siteHeldForPostDeploy(
+      layout,
+      parsedPayload.sites ?? [],
+      deployReleaseBindings(parsedPayload),
+      service.composeServiceName,
+      undefined,
+      (parsedPayload.sourceMaterial ?? []).some((entry) =>
+        entry.composeServiceName === service.composeServiceName &&
+        entry.rollbackToReleaseId !== undefined
+      ),
+    );
+}
+
+/** Runs one group of a site's post-deploy commands inside the release-promote phase. */
+async function runPostDeployPhase(
+  runtime: ReturnType<typeof resolveEnvironmentDeployRuntime>,
+  siteLifecycle: Parameters<typeof hasPostDeployWork>[0],
+  siteLifecycleIo: Parameters<typeof runBeforeTrafficPostDeploy>[1],
+  when: "before-traffic" | "after-switch",
+): Promise<void> {
+  if (!hasPostDeployWork(siteLifecycle, when)) return;
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.RELEASE_PROMOTE);
+  if (when === "before-traffic") {
+    await runBeforeTrafficPostDeploy(siteLifecycle, siteLifecycleIo);
+  } else {
+    await runAfterSwitchPostDeploy(siteLifecycle, siteLifecycleIo);
+  }
+  runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
+}
+
+/** Marks the deploy applied and asks for a PHP patch pass when a PHP site went live. */
+async function recordAppliedDeploy(
+  deploymentDir: string,
+  desiredHash: string | undefined,
+  sites: Parameters<typeof sitesWithFrameworkLayouts>[0],
+): Promise<void> {
+  if (desiredHash !== undefined) {
+    await writeAppliedDeployHash(deploymentDir, desiredHash);
+  }
+  // A PHP site was applied: look for a PHP build older than the installed one,
+  // in the background (it waits behind this deploy's environment lock).
+  if (sites.some((site) => resolveSitePhpSeries(site) !== undefined)) {
+    requestPhpPatchPassAfterDeploy();
+  }
+}
+
 async function deployEnvironmentHolding(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -2897,6 +3263,11 @@ async function deployEnvironmentHolding(
     publicEdge: hostingsNeedPublicHttpEdge(parsedPayload.hostings),
   }, deps?.presenceProbes);
   cancel?.throwIfCancelled("before the deploy started");
+  // Commands and workers run with the site's PHP: refuse before anything builds.
+  assertSiteLifecyclePhp(
+    parsedPayload.sites ?? [],
+    parsedPayload.environmentId,
+  );
   runtime.logSink.setPhase(COMMAND_LOG_PHASES.PREPARE);
   await ensureDeployIngress({
     layout,
@@ -2952,11 +3323,22 @@ async function deployEnvironmentHolding(
       }),
   );
 
-  const principalMaterial = parsedPayload.principalMaterial ?? [];
+  const principalMaterial = await openPrincipalPasswordEnvelopes(
+    parsedPayload.principalMaterial ?? [],
+    runtime.decryptSecrets,
+  );
   const principalIdReports = await ensureDeployPrincipals(
     layout,
     deployPrincipalSpecs(parsedPayload, principalMaterial),
   );
+  // Project caches and helper ports, right after the accounts they belong to
+  // exist (and before the sites that read their variables start).
+  const cacheStep = await applyDeployCachesAndReach({
+    layout,
+    payload: parsedPayload,
+    run: runtime.runPrivileged,
+    io: deps?.cacheIo,
+  });
 
   // Git-backed releases run before the compose / site apply steps,
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
@@ -2965,23 +3347,14 @@ async function deployEnvironmentHolding(
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
-    // A Node app that is serving keeps `current` until its new release has
-    // answered beside it, so a crash, a cancel or a failure anywhere before
-    // the switch leaves the serving release live (and the one a restart or a
-    // reboot starts).
-    holdCurrent: (service) =>
-      nativeAppIsServing(
-        parsedPayload.nativeAppServices ?? [],
-        service,
-        deps?.nativeAppIo,
-      ),
-    ensureBuildkitRailpackFn: (releaseLayout) =>
+    holdCurrent: holdCurrentFor(layout, parsedPayload, deps),
+    ensureBuildkitImageBuildFn: (releaseLayout) =>
       runInstallStep(
         runtime,
         ["install-build-tool"],
         COMMAND_LOG_PHASES.INSTALL_BUILD_TOOL,
         () =>
-          ensureBuildkitRailpack(releaseLayout, {
+          ensureBuildkitImageBuild(releaseLayout, {
             onEvent: installEvents(
               runtime,
               ["install-build-tool"],
@@ -2996,7 +3369,10 @@ async function deployEnvironmentHolding(
   // static export is served as files, not supervised as a process.
   const lanes = resolveHostNativeLanes(parsedPayload, appliedReleases);
   // A site that publishes an output folder serves that folder, not `public`.
-  lanes.sites = sitesWithReleaseRoots(parsedPayload, lanes.sites);
+  lanes.sites = sitesWithFrameworkLayouts(
+    sitesWithReleaseRoots(parsedPayload, lanes.sites),
+    appliedReleases,
+  );
   const { nativeAppServices } = lanes;
   // Everything from here on (release trees reclaimed, sites and native apps
   // applied, cron timers swept) changes what is serving. A deploy with none of
@@ -3037,7 +3413,10 @@ async function deployEnvironmentHolding(
   // Before anything is written: a variable a site's web server cannot carry is
   // named in the command log and the result, a required database setting stops
   // the deploy here.
-  const siteWarnings = sites.flatMap(planSiteWebEnv);
+  const siteWarnings = sites.flatMap((site) => [
+    ...planSiteWebEnv(site),
+    ...planSiteFrameworkAliases(site),
+  ]);
   for (const warning of siteWarnings) {
     runtime.logSink.onLine("stderr", warning);
   }
@@ -3046,6 +3425,37 @@ async function deployEnvironmentHolding(
   const siteManagedBindings = deployManagedDirectoryBindings(
     parsedPayload,
     siteReleaseBindings,
+  );
+  // Each site's environment file (cron jobs load it), before anything runs a
+  // command or applies a site.
+  const siteEnvLines = await materializeSiteEnvFiles(
+    layout,
+    parsedPayload.environmentId,
+    sites,
+    siteReleaseBindings,
+    siteManagedBindings,
+    runtime.runPrivileged,
+  );
+  for (const line of siteEnvLines) runtime.logSink.onLine("stderr", line);
+  const siteLifecycle: SiteLifecycleDeploy = {
+    layout,
+    environmentId: parsedPayload.environmentId,
+    sites,
+    releaseBindings: siteReleaseBindings,
+    managedBindings: siteManagedBindings,
+    applied: appliedReleases,
+  };
+  const siteLifecycleIo: SiteLifecycleIo = {
+    run: runtime.runPrivileged,
+    onLine: (stream, line) => runtime.logSink.onLine(stream, line),
+  };
+  // Commands that must pass before the new release takes traffic: every
+  // site's run first, then the held sites switch; one failure switches none.
+  await runPostDeployPhase(
+    runtime,
+    siteLifecycle,
+    siteLifecycleIo,
+    "before-traffic",
   );
   const nativeAppServicesForHost = nativeAppsWithAppliedServiceIds(
     nativeAppServices,
@@ -3067,6 +3477,14 @@ async function deployEnvironmentHolding(
     siteManagedBindings,
     parsedPayload.hideWebServerNames === true,
   );
+  // Commands that run right after the switch: a failure stops the deploy here,
+  // so no worker restarts onto the release that just failed.
+  await runPostDeployPhase(
+    runtime,
+    siteLifecycle,
+    siteLifecycleIo,
+    "after-switch",
+  );
 
   // Read-only: what each site's document root runs (WordPress today), reported
   // so the control plane can warn about an unusable database pairing.
@@ -3084,9 +3502,9 @@ async function deployEnvironmentHolding(
   // Native apps come last of the host-native lanes: the release is published
   // and the vhost tree is settled, so a new release that does not answer fails
   // only its own app. The apply walks the transcript through "start the new
-  // release", "check it answers", "switch traffic" and "stop the old release"
-  // itself. A deploy without native apps keeps `prepare`, so the step rail
-  // does not show "Check it answers" before anything started.
+  // release", "check service health", "switch traffic" and "stop the old
+  // release" itself. A deploy without native apps keeps `prepare`, so the step
+  // rail does not show "Check Service Health" before anything started.
   if (nativeAppServicesForHost.length > 0) {
     runtime.logSink.setPhase(COMMAND_LOG_PHASES.START_RELEASE);
     await applyDeployNativeApps(
@@ -3119,6 +3537,12 @@ async function deployEnvironmentHolding(
     nativeAppServicesForHost,
     nativeAppBindingsFromPayload(parsedPayload),
   );
+  // Workers last of the site pieces: the new release is live and its variables
+  // are in place, so each restarts straight onto it.
+  const workerWarnings = sites.length > 0 ||
+      (parsedPayload.removedSites ?? []).length > 0
+    ? await applyDeployWorkers(siteLifecycle, siteLifecycleIo)
+    : [];
 
   // Before any container carries a routing label for a name another
   // environment already serves here.
@@ -3140,11 +3564,15 @@ async function deployEnvironmentHolding(
     decryptSecrets: runtime.decryptSecrets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
+    ...(runtime.waitForHealth === undefined
+      ? {}
+      : { waitForHealth: runtime.waitForHealth }),
     runPrivileged: runtime.runPrivileged,
     ...(cancel === undefined ? {} : { cancel }),
   });
 
-  // Planned only when the payload carries certificate material.
+  // Planned when the payload carries certificate files or names the web
+  // server gets a certificate for by itself; otherwise these calls do nothing.
   runtime.progress.start("certificates");
   const hostnameTls = await materializeDeployTls(
     layout,
@@ -3153,9 +3581,13 @@ async function deployEnvironmentHolding(
   );
 
   await rewriteHostingCaddySites(layout, parsedPayload, hostnameTls);
-  runtime.progress.done("certificates");
+  finishCertificatesStep(runtime.progress, parsedPayload);
 
-  runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
+  // The container gate (sequential and in place) and the native apps already
+  // ended the health step with their own result; only a deploy that checked
+  // nothing says so here.
+  const healthEnded = runtime.logSink.health?.ended() === true;
+  if (!healthEnded) runtime.logSink.setPhase(COMMAND_LOG_PHASES.HEALTH);
   const containers = await collectEnvironmentDeployContainers({
     hasContainers,
     projectName: parsedPayload.projectName,
@@ -3165,6 +3597,12 @@ async function deployEnvironmentHolding(
     layout,
     run: runtime.run,
   });
+  if (!healthEnded) {
+    runtime.logSink.health?.done(
+      HEALTH_RESULT_TITLES.notChecked,
+      "Nothing in this deploy reports its own health",
+    );
+  }
 
   // Last of the changes to the host, after the health phase: the containers
   // are up, the health gates have passed (they run inside the publish above;
@@ -3179,9 +3617,16 @@ async function deployEnvironmentHolding(
     `environment.deploy completed project=${parsedPayload.projectName} received=${daemonReceivedAt}`,
   );
 
-  if (parsedPayload.desiredHash !== undefined) {
-    await writeAppliedDeployHash(earlyDeploymentDir, parsedPayload.desiredHash);
-  }
+  // A cache that is not running leaves the deploy unrecorded, so the next
+  // identical deploy runs in full and tries it again instead of being skipped.
+  const cachesRunning = (cacheStep.caches ?? []).every((c) =>
+    c.state === "ready"
+  );
+  await recordAppliedDeploy(
+    earlyDeploymentDir,
+    cachesRunning ? parsedPayload.desiredHash : undefined,
+    sites,
+  );
 
   return shapeEnvironmentDeployResult({
     projectName: parsedPayload.projectName,
@@ -3191,8 +3636,15 @@ async function deployEnvironmentHolding(
     containers,
     releases: deployResultReleases(appliedReleases),
     siteApps,
-    warnings: siteWarnings,
+    // The `.htaccess` ones were already written to the transcript at build.
+    warnings: [
+      ...siteWarnings,
+      ...workerWarnings,
+      ...appliedReleases.flatMap((release) => release.htaccessWarnings ?? []),
+      ...cacheStep.warnings,
+    ],
     principals: principalIdReports,
     keptFolders,
+    caches: cacheStep.caches,
   });
 }

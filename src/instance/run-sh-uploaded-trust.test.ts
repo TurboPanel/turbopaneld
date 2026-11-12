@@ -73,6 +73,13 @@ test("tp_uploaded_trust_verifies accepts the private issuer and rejects a leaf p
   const helper = [
     "tp_ca_fingerprint",
     "tp_ca_parses",
+    "tp_fingerprint_hex",
+    "tp_cert_fingerprint_hex",
+    "tp_split_pem_bundle",
+    "tp_pem_files_pin",
+    "tp_pem_matches_ca_pin",
+    "tp_check_fetched_trust",
+    "tp_bootstrap_leg",
     "tp_trust_has_distinct_issuer",
     "tp_trust_issuers_only",
     "tp_uploaded_trust_verifies",
@@ -200,10 +207,16 @@ test("tp_uploaded_trust_verifies accepts the private issuer and rejects a leaf p
       `cat "$leaf" "$other" > "${dir}/leaf-plus-other.pem"`,
       `if tp_uploaded_trust_verifies "${dir}/leaf-plus-other.pem" "$leaf" private.example.com; then exit 1; fi`,
       'if tp_uploaded_trust_verifies "$ca" "$mismatch" private.example.com; then exit 1; fi',
+      "TP_NO_SYSTEM_CAPATH=/nonexistent",
+      "tp_system_roots_validate_leaf() { return 1; }",
       "INSECURE_TLS=true",
       "CA_PATH=/no/such-ca",
       "UPLOADED_TRUST_PATH=/no/such-trust",
       "if tp_bootstrap_trust_anchored; then exit 1; fi",
+      // A control plane behind a public edge is anchored by the public roots.
+      "tp_system_roots_validate_leaf() { return 0; }",
+      "if ! tp_bootstrap_trust_anchored; then exit 1; fi",
+      "tp_system_roots_validate_leaf() { return 1; }",
       "INSECURE_TLS=false",
       "if ! tp_bootstrap_trust_anchored; then exit 1; fi",
       "INSECURE_TLS=true",
@@ -229,6 +242,13 @@ test("stale uploaded issuer and a failed trust fetch do not anchor insecure boot
   const helper = [
     "tp_ca_fingerprint",
     "tp_ca_parses",
+    "tp_fingerprint_hex",
+    "tp_cert_fingerprint_hex",
+    "tp_split_pem_bundle",
+    "tp_pem_files_pin",
+    "tp_pem_matches_ca_pin",
+    "tp_check_fetched_trust",
+    "tp_bootstrap_leg",
     "tp_trust_has_distinct_issuer",
     "tp_trust_issuers_only",
     "tp_uploaded_trust_verifies",
@@ -326,6 +346,8 @@ test("stale uploaded issuer and a failed trust fetch do not anchor insecure boot
       `other="${otherCert}"`,
       'tp_capture_presented_leaf() { cp "$leaf" "$1"; }',
       "tp_ca_validates_leaf() { return 1; }",
+      "tp_system_roots_validate_leaf() { return 1; }",
+      "TP_NO_SYSTEM_CAPATH=/nonexistent",
       "HOST_URL=https://private.example.com",
       "INSECURE_TLS=true",
       "unset CA_PATH",
@@ -342,4 +364,99 @@ test("stale uploaded issuer and a failed trust fetch do not anchor insecure boot
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+/**
+ * `tp_fetch_uploaded_trust` with a stub `tp_curl_http_code`: a fetch that
+ * carries --cacert (the stored issuer alone) answers 000, any other the code
+ * in SYSTEM_CODE. The issuer check itself is stubbed and reports its leg.
+ */
+async function fetchUploadedTrust(vars: string[]) {
+  const source = await Deno.readTextFile(runShPath);
+  const helpers = [
+    "tp_bootstrap_leg",
+    "tp_instance_bootstrap_curl",
+    "tp_fetch_uploaded_trust",
+  ].map((name) => extractShellFunction(source, name)).join("\n");
+  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-trust-leg-" });
+  try {
+    const stored = `${dir}/instance-uploaded-trust.pem`;
+    await Deno.writeTextFile(stored, "stored issuer\n");
+    const out = await new Deno.Command("sh", {
+      args: [
+        "-eu",
+        "-c",
+        [
+          "TP_NO_SYSTEM_CAPATH=/nonexistent",
+          "INSECURE_TLS=false",
+          "HOST_URL=https://panel.example.test",
+          "CA_PATH=/no/such-ca",
+          `UPLOADED_TRUST_PATH=${stored}`,
+          "tp_ca_fingerprint() { printf 'AB:CD'; }",
+          "tp_print_step() { printf 'STEP %s\\n' \"$2\"; }",
+          "tp_print_error() { printf 'ERR %s\\n' \"$1\" >&2; }",
+          'tp_install_verified_uploaded_trust() { echo "install leg=$2"; }',
+          "tp_curl_http_code() {",
+          "  echo FETCH >&2",
+          '  case " $* " in *" --cacert "*) printf 000 ;; *) printf "%s" "$SYSTEM_CODE" ;; esac',
+          "}",
+          ...vars,
+          helpers,
+          "tp_fetch_uploaded_trust",
+          'if [ -f "$UPLOADED_TRUST_PATH" ]; then echo kept; else echo removed; fi',
+        ].join("\n"),
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    return {
+      status: out.code,
+      stdout: new TextDecoder().decode(out.stdout),
+      stderr: new TextDecoder().decode(out.stderr),
+    };
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+test("a stored issuer that no longer verifies the panel is asked again over the public roots", async () => {
+  const out = await fetchUploadedTrust(["SYSTEM_CODE=200"]);
+  assertEquals(out.status, 0, out.stderr);
+  // The answer is then checked as a system-leg download (pin and issuer).
+  assertStringIncludes(out.stdout, "install leg=system");
+});
+
+test("over the public roots, a missing issuer does not delete one the host pins", async () => {
+  const pinned = await fetchUploadedTrust([
+    "SYSTEM_CODE=404",
+    `CA_PIN=${"ab".repeat(32)}`,
+    "CA_PIN_SOURCE=host",
+  ]);
+  assertEquals(pinned.status, 0, pinned.stderr);
+  assertStringIncludes(pinned.stdout, "kept");
+  assertStringIncludes(pinned.stdout, "keeping the stored one");
+
+  const unpinned = await fetchUploadedTrust(["SYSTEM_CODE=404"]);
+  assertEquals(unpinned.status, 0, unpinned.stderr);
+  assertStringIncludes(unpinned.stdout, "removed");
+});
+
+test("a stored issuer that verifies nothing over either leg is kept and stops the install", async () => {
+  const out = await fetchUploadedTrust(["SYSTEM_CODE=000"]);
+  assertEquals(out.status === 0, false);
+  assertStringIncludes(out.stderr, "keeping it");
+});
+
+test("a fresh install behind a public edge, with only the new CA stored, makes no second issuer request", async () => {
+  // The CA came in over the public roots a moment ago; the issuer fetch
+  // then uses it alone, gets no answer, and there is no issuer to keep.
+  const out = await fetchUploadedTrust([
+    "SYSTEM_CODE=200",
+    'CA_PATH="$UPLOADED_TRUST_PATH.ca"',
+    'mv "$UPLOADED_TRUST_PATH" "$CA_PATH"',
+  ]);
+  assertEquals(out.status, 0, out.stderr);
+  assertEquals(out.stderr.split("FETCH").length - 1, 1);
+  assertEquals(out.stdout.includes("install leg="), false);
+  assertStringIncludes(out.stdout, "removed");
 });

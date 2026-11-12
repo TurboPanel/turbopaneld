@@ -1,0 +1,16 @@
+---
+# Runtimes always live under the FHS vendor tree (dev shares it with prod).
+turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"
+turbopanel_install_root: /opt/turbopanel  # noqa: var-naming[no-role-prefix]
+
+# Valkey for project caches, one native process per cache run as a Hosting
+# Account. Pinned to one patch release of the 8.1 series (the daemon's
+# CACHE_RUNTIMES maps the series on the wire to it; a test keeps the two
+# equal). The upstream "jammy" build needs glibc 2.34 or newer plus libssl 3 and
+# libsystemd, so it runs on Debian 12 and 13 and Ubuntu 22.04 and 24.04.
+valkey_runtime_version: "8.1.11"
+# SHA-256 of the upstream tarball, per CPU architecture (the names upstream uses).
+valkey_runtime_sha256:
+  x86_64: "e61780835a35fee3a9718dad1424701796414ff247ed5cffdd7d7e2dd79c2efa"
+  arm64: "638950c50a7dc65077e76b333916c6170e8eee74528d92c33c317a6e9d6986a5"
+valkey_runtime_root: "{{ turbopanel_vendor_dir }}/valkey"

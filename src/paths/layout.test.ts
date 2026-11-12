@@ -121,14 +121,14 @@ test("isCompiledStubRoot detects deno-compile and non-checkout /tmp roots", asyn
   });
 });
 
-test("resolveDevRoot prefers TURBOPANEL_DEV_ROOT then HOME", () => {
+test("resolveDevRoot prefers TURBOPANEL_DEV_ROOT then HOME/turbopanel", () => {
   assertEquals(
     resolveDevRoot({ TURBOPANEL_DEV_ROOT: "/custom/dev/" }),
     "/custom/dev",
   );
   assertEquals(
     resolveDevRoot({ HOME: "/home/operator/" }),
-    "/home/operator",
+    "/home/operator/turbopanel",
   );
   assertEquals(
     resolveDevRoot({ TURBOPANEL_DEV_ROOT: "  ", HOME: "  " }),

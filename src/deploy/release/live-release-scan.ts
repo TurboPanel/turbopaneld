@@ -36,8 +36,15 @@ import {
 } from "../../paths/layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import { readReleaseManifest } from "./deployment-json.ts";
+import type { FrameworkLayout } from "./framework-layout.ts";
 import { readCurrentReleaseId } from "./promote.ts";
-import { assertSafeReleaseId, runPrivileged } from "./release-layout.ts";
+import { PENDING_RECORD_MARKER } from "./release-health.ts";
+import {
+  assertSafeReleaseId,
+  RELEASE_RECORDS_DIRNAME,
+  runPrivileged,
+} from "./release-layout.ts";
 import {
   linksLeavingReleaseLexically,
   listReleaseLinks,
@@ -86,6 +93,43 @@ async function listDirNames(dir: string, runFn: RunFn): Promise<string[]> {
   return listing.stdout.split("\n").filter((name) => name.length > 0);
 }
 
+/**
+ * The framework layout the daemon's own record of a release names, found by the
+ * release id (a UUID, so one record at most): the scan walks the principals'
+ * folders and does not know the service id. A pending or unreadable record
+ * names none, so the release is checked with no exemption, which is the strict
+ * answer. Never read from the principal's tree.
+ */
+export async function recordedFrameworkLayout(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  releaseId: string,
+): Promise<FrameworkLayout | undefined> {
+  const recordsHome = join(layout.daemonStateDir, RELEASE_RECORDS_DIRNAME);
+  let services: Deno.DirEntry[];
+  try {
+    services = await Array.fromAsync(Deno.readDir(recordsHome));
+  } catch {
+    return undefined;
+  }
+  for (const service of services) {
+    if (!service.isDirectory) continue;
+    const dir = join(recordsHome, service.name, assertSafeReleaseId(releaseId));
+    try {
+      await Deno.stat(join(dir, PENDING_RECORD_MARKER));
+      continue;
+    } catch (err) {
+      if (!(err instanceof Deno.errors.NotFound)) continue;
+    }
+    try {
+      const manifest = await readReleaseManifest(dir);
+      if (manifest?.releaseId === releaseId) return manifest.frameworkLayout;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
 /** The live release of one site, checked; `null` when it passes or is unpublished. */
 async function scanSite(
   layout: ScanLayout,
@@ -110,6 +154,8 @@ async function scanSite(
     const releaseDir = join(tree.releasesDir, assertSafeReleaseId(releaseId));
     const links = linksLeavingReleaseLexically(
       await listReleaseLinks(releaseDir, runFn),
+      undefined,
+      await recordedFrameworkLayout(layout, releaseId),
     );
     return links.length === 0
       ? null
@@ -121,7 +167,7 @@ async function scanSite(
 
 /**
  * Check the release every site's `current` serves. Sites with nothing
- * published (Railpack services, daemon-owned web roots) are skipped. Never
+ * published (image-build services, daemon-owned web roots) are skipped. Never
  * throws for one site: a site that cannot be checked is a finding too.
  */
 export async function scanLiveReleaseLinks(

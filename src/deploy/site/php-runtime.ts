@@ -177,9 +177,15 @@ type SitePhpModeSite = Pick<
 
 /**
  * The per-site mode a site's PHP runs in, or `null` for a site that keeps the
- * shared php-fpm master: a site without PHP, an nginx or Apache site that
- * names no mode (the control plane always sends one once it has resolved it),
- * or a Caddy site (Caddy serves no PHP in the new layout).
+ * shared php-fpm master: a site without PHP, an nginx site that names no mode
+ * (the control plane always sends one once it has resolved it), or a Caddy site
+ * (Caddy serves no PHP in the new layout).
+ *
+ * An Apache PHP site (alone or behind nginx) never keeps the shared master: its
+ * runtime is walled off from other sites by a per-runtime site key, so one that
+ * names no mode runs FastCGI, the control plane's default, with a warning
+ * (logged once). The existing rule that a mode needs a principal then refuses
+ * Apache PHP without a Hosting Account.
  *
  * nginx, Apache and nginx in front of Apache cannot run lsphp; asking for it
  * is refused rather than quietly served some other way. OpenLiteSpeed has no
@@ -196,13 +202,18 @@ export function sitePhpRuntimeMode(
     return openlitespeedPhpMode(site, environmentId);
   }
   const mode = site.php?.mode;
-  if (mode === undefined) return null;
-  if (
-    site.engine !== "nginx" && site.engine !== "apache" &&
-    site.engine !== "nginx+apache"
-  ) {
-    return null;
+  const apache = site.engine === "apache" || site.engine === "nginx+apache";
+  if (mode === undefined) {
+    if (!apache || !siteHasPhp(site)) return null;
+    warnModeOnce(
+      site,
+      environmentId,
+      "nomode",
+      `Apache PHP site names no mode; running it as ${OLS_DEFAULT_PHP_MODE}`,
+    );
+    return OLS_DEFAULT_PHP_MODE;
   }
+  if (site.engine !== "nginx" && !apache) return null;
   if (mode === "fastcgi" || mode === "fpm") return mode;
   throw new Error(
     `site ${site.composeServiceName}: PHP mode ${mode} needs OpenLiteSpeed, not ${site.engine}`,
@@ -211,6 +222,11 @@ export function sitePhpRuntimeMode(
 
 /** The control plane's default mode for a new PHP site. */
 const OLS_DEFAULT_PHP_MODE: SitePhpRuntimeMode = "fastcgi";
+
+/** A site that names any PHP hint has PHP (same test as `siteNeedsPhp`). */
+function siteHasPhp(site: SitePhpModeSite): boolean {
+  return site.php !== undefined && Object.keys(site.php).length > 0;
+}
 
 const warnedModes = new Set<string>();
 
@@ -389,26 +405,30 @@ function phpFpmExec(spec: SitePhpRuntimeSpec): string {
  *   (6070) listeners, every site's vhost and Apache backend port (which would
  *   bypass the edge and spoof `X-Forwarded-For`), Traefik's PROXY-protocol
  *   entrypoints and the HA orchestrator API. The port filter is
- *   `tp-php-loopback`: an nftables table that refuses, per site owner's Linux
- *   user, every loopback destination but 127.0.0.1:13306 and the resolver
- *   stub. The unit runs it as root in `ExecStartPre=+` and does not start when
- *   it fails (fail closed); the daemon re-runs it after installing or
- *   removing a runtime, so the user set follows the units on disk. It cannot
- *   close the gap if someone flushes the nftables ruleset while PHP runs: the
- *   next unit start, deploy or daemon boot restores it.
+ *   `tp-php-loopback`: an nftables table that refuses, for every Hosting
+ *   Account uid, every loopback destination but the database proxy
+ *   (127.0.0.1:13306, 15432), the resolver and the account's own native app
+ *   ports. The unit runs it as root in `ExecStartPre=+` and does not start
+ *   when it fails (fail closed); a boot unit and the daemon re-run it, so the
+ *   rules follow the units on disk. It cannot close the gap if someone
+ *   flushes the nftables ruleset: the next unit start, deploy or daemon boot
+ *   restores it.
  * - `link-local` (169.254/16, fe80::/10) and `fc00::/7` (ULA, which holds
  *   AWS's IPv6 metadata `fd00:ec2::254`): cloud metadata.
  * - `multicast` and `0.0.0.0/8` (which Linux routes to the host itself).
  * - `127.0.0.53`, allowed: systemd-resolved's stub, the resolver
  *   `/etc/resolv.conf` names on Ubuntu; without it a site resolves nothing.
  *
- * Not closed: RFC 1918 and CGNAT. A `datacenter`/`fabric` scope database
- * (tp0 is in 10/8) and a VPC's own services live there, and Docker's bridge
- * pools are operator-configured, so the host's private addresses and other
- * containers' bridge IPs stay reachable. The systemd filter covers these
- * units only and, without cgroup BPF, systemd only warns and does not filter;
- * the nftables rules match the owner's uid, so they also bind that Linux
- * user's ssh, cron and CLI processes on loopback.
+ * Not closed here: RFC 1918 and CGNAT. A `datacenter`/`fabric` scope database
+ * (tp0 is in 10/8) and a VPC's own services live there, so the host's private
+ * addresses stay reachable. Container networks are closed by the same
+ * `tp-php-loopback` table instead, for every Hosting Account uid (PHP unit or
+ * not): it refuses traffic leaving through a Docker bridge and to the
+ * bridges' and Docker's configured pools' ranges, which it reads on the host
+ * at each sync, so this static list does not have to name them. The systemd
+ * filter covers these units only and, without cgroup BPF, systemd only warns
+ * and does not filter; the nftables rules match the uid, so they also bind
+ * that Linux user's ssh, cron and CLI processes.
  *
  * tp-host pins both strings (`tp_php_service_pinned_ok`).
  */
@@ -494,6 +514,7 @@ export function sitePhpServiceUnit(
     ...(sitePhpSocketActivated(spec.mode)
       ? [`Requires=${socket}`, `After=${socket}`]
       : []),
+    "StartLimitIntervalSec=0",
     "",
     "[Service]",
     // Root (`+`), before PHP starts: loads the per-user loopback rules. When it
@@ -526,6 +547,9 @@ export function sitePhpServiceUnit(
     "StandardOutput=journal",
     "StandardError=journal",
     "Restart=on-failure",
+    "RestartSec=5",
+    "RestartSteps=10",
+    "RestartMaxDelaySec=120",
     ...(spec.mode === "fpm"
       ? ["", "[Install]", "WantedBy=multi-user.target"]
       : []),
@@ -557,6 +581,43 @@ export function sitePhpSocketUnit(spec: SitePhpRuntimeSpec): string {
     "",
   ].join("\n");
 }
+
+/** File name of the guard script inside a runtime's config folder. */
+export const SITE_PHP_GUARD_FILE = "site-guard.php";
+
+/** `<configDir>/php/sites/<id>/site-guard.php` (root-owned, like php.ini). */
+export function sitePhpGuardPath(configDir: string, id: string): string {
+  return join(sitePhpConfigDir(configDir, id), SITE_PHP_GUARD_FILE);
+}
+
+/**
+ * The guard `auto_prepend_file` runs before every script of an Apache PHP
+ * runtime: 403 unless the `TP_SITE_KEY` the vhost sent equals the key in this
+ * runtime's own `php.ini`. `get_cfg_var` reads the loaded ini file itself, so
+ * `.user.ini`, `ini_set` and a `PHP_VALUE` parameter cannot change it. tp-host
+ * pins these exact bytes (`tp_php_guard_ok`); change both together.
+ */
+export function sitePhpGuardPhp(): string {
+  return [
+    "<?php",
+    "// Managed by TurboPanel: this site's PHP serves only requests its own web server sent.",
+    "if (PHP_SAPI !== 'cli') {",
+    "    $tp_site_key = get_cfg_var('turbopanel.site_key');",
+    "    $tp_sent_key = $_SERVER['TP_SITE_KEY'] ?? null;",
+    "    if (!is_string($tp_site_key) || strlen($tp_site_key) !== 64 || !is_string($tp_sent_key) || !hash_equals($tp_site_key, $tp_sent_key)) {",
+    "        http_response_code(403);",
+    "        exit;",
+    "    }",
+    "    unset($tp_site_key, $tp_sent_key, $_SERVER['TP_SITE_KEY'], $_ENV['TP_SITE_KEY']);",
+    "}",
+    "",
+  ].join("\n");
+}
+
+/** What `sitePhpIni` needs to wire the guard into a runtime. */
+export type SitePhpGuard = Readonly<{ key: string; path: string }>;
+
+const SITE_KEY_RE = /^[0-9a-f]{64}$/;
 
 /** One ini directive, already validated by the caller. */
 export type SitePhpIniValue = Readonly<{ key: string; value: string }>;
@@ -665,10 +726,15 @@ export const SITE_PHP_LOCKED_INI_KEYS: readonly string[] = Object.freeze([
 function lockedIniSection(
   merged: ReadonlyMap<string, string>,
   root: string,
+  guardPath?: string,
 ): string[] {
   const lines = SITE_PHP_LOCKED_INI_KEYS
     .filter((key) => merged.has(key))
     .map((key) => `${key} = ${merged.get(key)}`);
+  // Again here, so a `.user.ini` cannot change it for scripts under the home.
+  if (guardPath !== undefined) {
+    lines.push(`auto_prepend_file = ${guardPath}`, "allow_url_include = Off");
+  }
   return [`[PATH=${root}]`, ...lines];
 }
 
@@ -684,11 +750,29 @@ export function sitePhpIni(
   values: readonly SitePhpIniValue[],
   lockRoot: string,
   lsphp?: Pick<SitePhpRuntimeSpec, "mode" | "runtimesDir" | "series">,
+  guard?: SitePhpGuard,
 ): string {
   if (!LOCK_ROOT_RE.test(lockRoot) || /\/\.\.?(\/|$)/.test(lockRoot)) {
     throw new Error(`per-site PHP cannot lock its limits under ${lockRoot}`);
   }
+  if (guard !== undefined && !SITE_KEY_RE.test(guard.key)) {
+    throw new Error(
+      "per-site PHP site key must be 64 lowercase hex characters",
+    );
+  }
   const merged = mergedIni(values);
+  // The guard is the isolation itself: a site's own `auto_prepend_file` loses
+  // to it, and its path is allowed through `open_basedir`.
+  if (guard !== undefined) {
+    merged.set("turbopanel.site_key", guard.key);
+    merged.set("auto_prepend_file", guard.path);
+    // A request must not be able to turn URL includes on and run its own body.
+    merged.set("allow_url_include", "Off");
+    const basedir = merged.get("open_basedir");
+    if (basedir !== undefined && basedir !== "") {
+      merged.set("open_basedir", `${basedir}:${guard.path}`);
+    }
+  }
   const lines = [
     // A detached lsphp runtime also gets its module lines first.
     ...(lsphp?.mode === "lsphp-detached" ? lsphpModuleLines(lsphp) : []),
@@ -698,7 +782,7 @@ export function sitePhpIni(
     "; TurboPanel per-site PHP",
     "[PHP]",
     ...lines,
-    ...lockedIniSection(merged, lockRoot),
+    ...lockedIniSection(merged, lockRoot, guard?.path),
     "",
   ].join("\n");
 }
@@ -744,6 +828,8 @@ export function sitePhpFpmConf(
     chdir?: string;
     /** Limits scripts must not raise, as `php_admin_value[...]`. */
     admin?: readonly SitePhpIniValue[];
+    /** Apache runtimes: pin the guard and switch URL includes off. */
+    guard?: SitePhpGuard;
   }>,
 ): string {
   const tuning = new Map<string, string>([
@@ -769,6 +855,12 @@ export function sitePhpFpmConf(
     ...(opts.admin ?? []).map(({ key, value }) =>
       `php_admin_value[${key}] = ${value}`
     ),
+    ...(opts.guard
+      ? [
+        `php_admin_value[auto_prepend_file] = ${opts.guard.path}`,
+        "php_admin_flag[allow_url_include] = off",
+      ]
+      : []),
     "catch_workers_output = yes",
     "decorate_workers_output = no",
     "clear_env = no",

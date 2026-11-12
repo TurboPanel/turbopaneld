@@ -6,7 +6,12 @@
  * "chore: start <next patch>" PR, and starting a minor or major is the
  * "Start Next Version" workflow (which opens the same kind of PR).
  */
-import { assert, assertEquals, assertMatch } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertMatch,
+  assertStringIncludes,
+} from "@std/assert";
 import { fromFileUrl, join } from "@std/path";
 
 /**
@@ -196,13 +201,26 @@ const RELEASE_WORKFLOWS = [
 ];
 
 /**
- * The jobs that call gh-promote-ok.yml. The Promote OK check pins its own dev
- * commit, so its fixes can ship without moving the rest of the promotion chain.
+ * The jobs that call gh-promote-ok.yml or gh-promote-ok-recheck.yml. The
+ * Promote OK check and its recheck pin their own dev commit, so their fixes
+ * ship together without moving the rest of the promotion chain.
  */
-const PROMOTE_OK_JOBS: Record<string, string> = {
-  "promote-ok.yml": "evaluate",
-  "promote-ok-recheck.yml": "dry-run",
-};
+const PROMOTE_OK_JOBS: [file: string, job: string][] = [
+  ["promote-ok.yml", "evaluate"],
+  ["promote-ok-recheck.yml", "dry-run"],
+  ["promote-ok-recheck.yml", "recheck"],
+];
+const PROMOTE_OK_CALL = /gh-promote-ok(?:-recheck)?\.yml@/;
+
+/**
+ * The job that calls gh-canary.yml. It pins its own dev commit too: the
+ * canary publish needed a newer gh-canary.yml (the Release App token for the
+ * tag move) without moving the rc and release chain with it.
+ */
+const CANARY_JOB: [file: string, job: string] = [
+  "publish-daemon-trunk.yml",
+  "canary",
+];
 
 /**
  * The TurboPanel/dev shas pinned across the release workflows, split in two:
@@ -210,18 +228,21 @@ const PROMOTE_OK_JOBS: Record<string, string> = {
  * `dev-ref:` they are handed), and the scripts (the composite actions and the
  * checkouts of `scripts/promote`). Each group must be one sha; the groups may
  * differ because a reusable workflow's inputs and secrets can change between
- * dev commits, while the scripts only add steps. The Promote OK jobs are left
- * out: they are their own group (checked below).
+ * dev commits, while the scripts only add steps. The Promote OK jobs and the
+ * canary job are left out: they pin their own commits (checked below).
  */
 function devPins(): { workflows: Set<string>; scripts: Set<string> } {
   const workflows = new Set<string>();
   const scripts = new Set<string>();
   for (const file of RELEASE_WORKFLOWS) {
     let text = read(file);
-    if (PROMOTE_OK_JOBS[file]) text = withoutJob(text, PROMOTE_OK_JOBS[file]);
+    for (const [okFile, name] of PROMOTE_OK_JOBS) {
+      if (okFile === file) text = withoutJob(text, name);
+    }
+    if (CANARY_JOB[0] === file) text = withoutJob(text, CANARY_JOB[1]);
     assert(
-      !text.includes("gh-promote-ok.yml@"),
-      `${file} calls gh-promote-ok.yml outside its job`,
+      !PROMOTE_OK_CALL.test(text),
+      `${file} calls a Promote OK workflow outside its jobs`,
     );
     for (
       const m of text.matchAll(
@@ -253,20 +274,89 @@ test("the release workflows pin one TurboPanel/dev commit per kind", () => {
   assertEquals(scripts.size, 1, `script pins: ${[...scripts].join(", ")}`);
 });
 
+test("the canary job calls gh-canary.yml once and hands it the Release App secrets", () => {
+  const job = jobText(read(CANARY_JOB[0]), CANARY_JOB[1]);
+  const calls = [
+    ...job.matchAll(
+      /uses: TurboPanel\/dev\/\.github\/workflows\/gh-canary\.yml@[0-9a-f]{40} # dev#\d+$/gm,
+    ),
+  ];
+  assertEquals(calls.length, 1, "one gh-canary.yml call");
+  // Without the App token the tag move cannot pass a commit that changes
+  // .github/workflows (GitHub answers 403 to GITHUB_TOKEN).
+  assertStringIncludes(
+    job,
+    [
+      "    secrets:",
+      "      RELEASE_APP_ID: ${{ secrets.RELEASE_APP_ID }}",
+      "      RELEASE_APP_PRIVATE_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}",
+      "",
+    ].join("\n"),
+  );
+});
+
 test("the Promote OK jobs pin one TurboPanel/dev commit, and hand it on as dev-ref", () => {
   const pins = new Set<string>();
-  for (const [file, name] of Object.entries(PROMOTE_OK_JOBS)) {
+  for (const [file, name] of PROMOTE_OK_JOBS) {
     const job = jobText(read(file), name);
     const uses = [
-      ...job.matchAll(/gh-promote-ok\.yml@([0-9a-f]{40}) # dev#\d+$/gm),
+      ...job.matchAll(
+        /gh-promote-ok(?:-recheck)?\.yml@([0-9a-f]{40}) # dev#\d+$/gm,
+      ),
     ];
     const refs = [...job.matchAll(/^ +dev-ref: ([0-9a-f]{40})(?: #.*)?$/gm)];
-    assertEquals(uses.length, 1, `${file} ${name}: one gh-promote-ok.yml call`);
+    assertEquals(
+      uses.length,
+      1,
+      `${file} ${name}: one Promote OK workflow call`,
+    );
     assertEquals(refs.length, 1, `${file} ${name}: one dev-ref`);
     pins.add(uses[0][1]);
     pins.add(refs[0][1]);
   }
   assertEquals(pins.size, 1, `Promote OK pins: ${[...pins].join(", ")}`);
+});
+
+test("Promote OK has no job named promote-ok, and every call grants checks: write", () => {
+  // promote-ok is the check run the evaluation writes; a job with that name
+  // could end skipped, which passes a required check.
+  for (const file of ["promote-ok.yml", "promote-ok-recheck.yml"]) {
+    const text = read(file);
+    assert(!/^ {2}promote-ok:$/m.test(text), `${file} has a promote-ok job`);
+    assert(
+      !/^ {4}name: promote-ok$/m.test(text),
+      `${file} names a job promote-ok`,
+    );
+  }
+  for (const [file, name] of PROMOTE_OK_JOBS) {
+    assertStringIncludes(
+      jobText(read(file), name),
+      "      checks: write\n",
+      `${file} ${name}`,
+    );
+  }
+});
+
+test("Promote OK runs one evaluation per PR head and one queued recheck at a time", () => {
+  assertStringIncludes(
+    read("promote-ok.yml"),
+    [
+      "concurrency:",
+      "  group: promote-ok-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}",
+      "  cancel-in-progress: true",
+      "",
+    ].join("\n"),
+  );
+  assertStringIncludes(
+    read("promote-ok-recheck.yml"),
+    [
+      "concurrency:",
+      "  group: promote-ok-recheck",
+      "  cancel-in-progress: false",
+      "  queue: max",
+      "",
+    ].join("\n"),
+  );
 });
 
 test("a release opens the next patch's version PR after it is finalized", () => {

@@ -42,7 +42,10 @@
 
     - name: Skip the gate when the vendored Deno is missing
       ansible.builtin.debug:
-        msg: "Docker gate not installed: {{ docker_gate_deno_bin }} is missing"
+        msg: >-
+          WARNING: Docker gate NOT installed, so this host has no gate service
+          and no read-only Docker socket: {{ docker_gate_deno_bin }} is
+          missing. Run the deno-runtime role before the docker role.
       when: not _docker_gate_deno.stat.exists
 
     - name: Install the gate service and files

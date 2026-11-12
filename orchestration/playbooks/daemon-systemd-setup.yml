@@ -29,6 +29,9 @@
     turbopanel_orchestration_dir: "{{ turbopanel_daemon_dir }}/orchestration"
     turbopanel_daemon_workdir: "{{ turbopanel_daemon_dir }}"
     turbopanel_config_dir: /etc/turbopanel
+    # daemon-launch depends on daemon-seal, which stats this root; only the
+    # daemon-config role (not run here) has it as a default.
+    turbopanel_daemon_state_dir: /var/lib/turbopanel
     # Co-located source mode consumes the FHS daemon env file via EnvironmentFile=
     # on the unit (no more checkout-local --env-file=.env). The dev console writes
     # the real dev-identity/connectivity content; the tasks below guarantee the

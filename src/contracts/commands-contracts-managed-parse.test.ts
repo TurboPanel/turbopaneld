@@ -1639,6 +1639,20 @@ test("parseManagedApplyPayload: credential grantMode is optional (version skew) 
   );
 });
 
+test("parseManagedApplyPayload: credential kind is optional and an unknown kind is ignored", () => {
+  const withKind = (extra: Record<string, unknown>) =>
+    parseManagedApplyPayload({
+      ...VALID_MANAGED_APPLY,
+      credentials: [{ ...VALID_MANAGED_APPLY.credentials[0], ...extra }],
+    }).credentials[0]!;
+  // An older control plane sends no field: parses exactly as before.
+  assertEquals("kind" in withKind({}), false);
+  assertEquals(withKind({ kind: "backup" }).kind, "backup");
+  // A newer control plane's kind this daemon does not know: an ordinary login.
+  assertEquals("kind" in withKind({ kind: "archive" }), false);
+  assertEquals("kind" in withKind({ kind: 7 }), false);
+});
+
 test("parseManagedApplyPayload: databases[].ownerRole is optional (version skew) and a boolean", () => {
   const withOp = (extra: Record<string, unknown>) =>
     parseManagedApplyPayload({

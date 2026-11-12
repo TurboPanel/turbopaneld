@@ -386,6 +386,34 @@ test("parsePrincipalsReconcilePayload round-trips a password hash", () => {
   assertEquals(payload.principals[0].passwordHash, passwordHash);
 });
 
+test("parsePrincipalsReconcilePayload accepts a sealed password hash envelope, never beside the plain hash", () => {
+  const passwordHashEnvelope = "tpdaemon.v1.srv.key.payload";
+  const parse = (extra: Record<string, unknown>) =>
+    parsePrincipalsReconcilePayload({
+      principals: [{
+        principalId: PRINCIPAL_ID,
+        username: "deploy_user",
+        ...extra,
+      }],
+    });
+  assertEquals(
+    parse({ passwordHashEnvelope }).principals[0].passwordHashEnvelope,
+    passwordHashEnvelope,
+  );
+  for (
+    const bad of [
+      { passwordHashEnvelope: "plain-text" },
+      { passwordHashEnvelope: 7 },
+      {
+        passwordHashEnvelope,
+        passwordHash: `$6$saltstring$${"a".repeat(86)}`,
+      },
+    ]
+  ) {
+    assertThrows(() => parse(bad));
+  }
+});
+
 test("parseEnvironmentDeployPayload trims a site document root", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
@@ -907,6 +935,7 @@ test("parseEnvironmentDeployPayload rejects optional array/boolean/network field
     { hideWebServerNames: "yes" },
     "hideWebServerNames must be a boolean",
   );
+  rejectDeploy({ sendViaHeader: "yes" }, "sendViaHeader must be a boolean");
   rejectDeploy(
     { dockerExternalNetworks: "org-net" },
     "dockerExternalNetworks must be an array",
@@ -1074,6 +1103,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
     noCache: true,
     hostingsOnly: true,
     hideWebServerNames: true,
+    sendViaHeader: false,
     dockerExternalNetworks: ["org_net_b", "org_net_a"],
     fabricNetworks: [{
       name: "tpn_mesh01",
@@ -1092,6 +1122,7 @@ test("parseEnvironmentDeployPayload round-trips optional flags and networks", ()
   assertEquals(payload.noCache, true);
   assertEquals(payload.hostingsOnly, true);
   assertEquals(payload.hideWebServerNames, true);
+  assertEquals(payload.sendViaHeader, false);
   assertEquals(payload.dockerExternalNetworks, ["org_net_a", "org_net_b"]);
   assertEquals(payload.fabricNetworks?.[0]?.gateway, "203.0.113.1");
   assertEquals(payload.hostingIngress?.composeServiceName, "traefik");
@@ -1710,4 +1741,225 @@ test("parseEnvironmentDeployPayload accepts IPv6 dockerNetworkAddressing inside 
     ipRange: "fd00:77::/80",
     gateway: "fd00:77::1",
   }]);
+});
+
+function configFile(overrides: Record<string, unknown> = {}) {
+  return {
+    composeServiceName: "web",
+    source: "web_conf",
+    relativePath: "web--conf",
+    parts: [{ text: "a=" }, { secretKey: "KEY" }],
+    ...overrides,
+  };
+}
+
+test("parseEnvironmentDeployPayload accepts absent and valid configFiles", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({ ...DEPLOY_BASE }).configFiles,
+    undefined,
+  );
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      configFiles: [configFile()],
+    }).configFiles,
+    [configFile()],
+  );
+});
+
+test("parseEnvironmentDeployPayload rejects bad configFiles", () => {
+  rejectDeploy({ configFiles: "x" }, "configFiles must be an array");
+  rejectDeploy({ configFiles: [1] }, "Invalid environment deploy configFiles");
+  rejectDeploy(
+    { configFiles: [configFile({ relativePath: "a/b" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ source: "bad name" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ text: "a", secretKey: "K" }] })] },
+    "Invalid environment deploy configFiles part",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ other: 1 }] })] },
+    "Invalid environment deploy configFiles part",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ secretKey: "" }] })] },
+    "Invalid environment deploy configFiles part",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ text: "a\u0000b" }] })] },
+    "must not contain NUL",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ parts: [{ text: "x".repeat(65_537) }] })] },
+    "configFiles text exceeds maximum size",
+  );
+  rejectDeploy(
+    {
+      configFiles: [configFile({
+        parts: [{ text: "x".repeat(40_000) }, { text: "x".repeat(40_000) }],
+      })],
+    },
+    "configFiles file exceeds maximum size",
+  );
+  rejectDeploy(
+    { configFiles: [configFile(), configFile({ source: "other" })] },
+    "configFiles names must be unique",
+  );
+});
+
+test("parseEnvironmentDeployPayload enforces configFiles per service and total limits", () => {
+  const many = Array.from(
+    { length: 17 },
+    (_, i) => configFile({ source: `s${i}`, relativePath: `web--s${i}` }),
+  );
+  rejectDeploy({ configFiles: many }, "too many configFiles for one service");
+  const big = Array.from({ length: 5 }, (_, i) =>
+    configFile({
+      composeServiceName: `svc${i}`,
+      source: `b${i}`,
+      relativePath: `svc${i}--b`,
+      parts: [{ text: "x".repeat(60_000) }],
+    }));
+  rejectDeploy({ configFiles: big }, "exceed the maximum total size");
+});
+
+const LIFECYCLE_SITE = {
+  composeServiceName: "web",
+  engine: "apache" as const,
+  root: "public",
+  listenPort: 18080,
+  principal: {
+    principalId: PRINCIPAL_ID,
+    username: "alice",
+    uid: 15001,
+    gid: 15001,
+  },
+};
+
+function parseLifecycleSite(extra: Record<string, unknown>) {
+  return parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sites: [{ ...LIFECYCLE_SITE, ...extra }],
+  }).sites?.[0];
+}
+
+test("a site's post-deploy commands and workers parse with their defaults left out", () => {
+  const site = parseLifecycleSite({
+    postDeploy: {
+      commands: [["/usr/local/bin/php", "artisan", "migrate", "--force"]],
+    },
+    workers: [{
+      name: "queue",
+      command: ["/usr/local/bin/php", "artisan", "queue:work"],
+    }],
+  });
+  assertEquals(site?.postDeploy, {
+    commands: [["/usr/local/bin/php", "artisan", "migrate", "--force"]],
+  });
+  assertEquals(site?.workers, [{
+    name: "queue",
+    command: ["/usr/local/bin/php", "artisan", "queue:work"],
+  }]);
+  const full = parseLifecycleSite({
+    postDeploy: {
+      commands: [["/bin/true"]],
+      timeoutSeconds: 30,
+      timing: "after-switch",
+    },
+    workers: [{
+      name: "horizon",
+      command: ["/bin/true"],
+      processes: 8,
+      stopTimeoutSeconds: 3600,
+      memoryMaxBytes: 64 * 1024 * 1024,
+    }],
+  });
+  assertEquals(full?.postDeploy?.timing, "after-switch");
+  assertEquals(full?.workers?.[0]?.processes, 8);
+});
+
+test("a site's post-deploy commands refuse what the limits and argv rules refuse", () => {
+  const refuse = (postDeploy: unknown) =>
+    assertThrows(() => parseLifecycleSite({ postDeploy }), TypeError);
+  refuse({ commands: [] });
+  refuse({ commands: Array.from({ length: 11 }, () => ["/bin/true"]) });
+  refuse({ commands: [["php", "artisan"]] });
+  refuse({ commands: [[]] });
+  refuse({ commands: [["/bin/true", ""]] });
+  refuse({ commands: [["/bin/true", "a\nb"]] });
+  refuse({ commands: [["/bin/true", "a".repeat(513)]] });
+  refuse({ commands: [["/bin/true"]], timeoutSeconds: 29 });
+  refuse({ commands: [["/bin/true"]], timeoutSeconds: 1801 });
+  refuse({ commands: [["/bin/true"]], timeoutSeconds: 60.5 });
+  refuse({ commands: [["/bin/true"]], timing: "later" });
+});
+
+test("a site's workers refuse bad names, duplicates, counts and limits", () => {
+  const worker = { name: "queue", command: ["/bin/true"] };
+  const refuse = (workers: unknown) =>
+    assertThrows(() => parseLifecycleSite({ workers }), TypeError);
+  refuse([{ ...worker, name: "Queue" }]);
+  refuse([{ ...worker, name: "-q" }]);
+  refuse([worker, worker]);
+  refuse(Array.from({ length: 11 }, (_, i) => ({ ...worker, name: `w${i}` })));
+  refuse([{ ...worker, command: ["queue:work"] }]);
+  refuse([{ ...worker, processes: 0 }]);
+  refuse([{ ...worker, processes: 9 }]);
+  refuse([{ ...worker, stopTimeoutSeconds: 9 }]);
+  refuse([{ ...worker, stopTimeoutSeconds: 3601 }]);
+  refuse([{ ...worker, memoryMaxBytes: 1024 }]);
+  refuse([{ ...worker, memoryMaxBytes: 65 * 1024 * 1024 * 1024 }]);
+});
+
+test("post-deploy commands and workers need a principal, and commands need a release", () => {
+  const { principal: _principal, ...unowned } = LIFECYCLE_SITE;
+  for (
+    const extra of [
+      { postDeploy: { commands: [["/bin/true"]] } },
+      { workers: [{ name: "queue", command: ["/bin/true"] }] },
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          sites: [{ ...unowned, ...extra }],
+        }),
+      TypeError,
+      "require a principal",
+    );
+  }
+  assertThrows(
+    () =>
+      parseLifecycleSite({
+        sourceKind: "managed-directory",
+        postDeploy: { commands: [["/bin/true"]] },
+      }),
+    TypeError,
+    "no release",
+  );
+  // A worker is fine in a managed directory.
+  assertEquals(
+    parseLifecycleSite({
+      sourceKind: "managed-directory",
+      workers: [{ name: "queue", command: ["/bin/true"] }],
+    })?.workers?.length,
+    1,
+  );
+});
+
+test("parseEnvironmentDeployPayload refuses config names ending in .tmp", () => {
+  rejectDeploy(
+    { configFiles: [configFile({ relativePath: "web--conf.tmp" })] },
+    "Invalid environment deploy configFiles name",
+  );
+  rejectDeploy(
+    { configFiles: [configFile({ source: "web_conf.tmp" })] },
+    "Invalid environment deploy configFiles name",
+  );
 });

@@ -1,0 +1,17 @@
+{#
+  Per-hostname :8443 sites for co-located development.
+
+  The dev overlay Caddyfile (<dev root>/dev/orchestration/Caddyfile) is a
+  static file and stays the loaded config. It defines the (turbopanel_app)
+  snippet, serves :8443 with the Platform CA leaf, and ends with
+  `import {$TURBOPANEL_DEV_SITES_DIR}/*.caddy`. This file is what that glob
+  picks up: the same named sites a managed install renders into its own
+  Caddyfile, so an uploaded or DNS-01 certificate for the dev panel's
+  hostname is served by name (SNI) while :8443 keeps the Platform CA leaf.
+#}
+{% set _certs_dir = turbopanel_instance_certs_dir %}
+# Named :8443 sites for the development panel. Rendered by turbopaneld
+# (instance-launch, templates/Caddyfile-dev-sites.j2) from the applied
+# hostname list on every hostname apply and converge. Do not edit: the next
+# apply rewrites it. Loaded by the dev overlay Caddyfile's sites import.
+{% include 'Caddyfile-hostname-sites.j2' %}
