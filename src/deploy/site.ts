@@ -42,7 +42,7 @@
  * {@link RELEASE_SYMLINK_SWAP_PHP_DIRECTIVES}.
  */
 
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -93,7 +93,6 @@ import {
   ownedConfigFileMatches as ownedConfigFileMatchesVia,
   phpFpmDriver,
   removeStagedFile,
-  rolloutSiteConfigs,
   SITE_ENGINE_DRIVERS,
   SITE_ENGINE_ORDER,
   siteCaddyConfigDir,
@@ -1254,6 +1253,44 @@ export function releasePhpOpenBasedir(
     tree.sharedDir,
     PHP_OPEN_BASEDIR_TMP,
     ...(caFile === undefined ? [] : [caFile]),
+  ];
+}
+
+/**
+ * The folder of a managed directory that holds the application, as far as
+ * `open_basedir` is concerned.
+ *
+ * A framework keeps its code one level above its own `public/` folder
+ * (`vendor/`, `.env`, `bootstrap/`), so a root of `app/public` must let PHP
+ * read `app/`, not only `app/public`. The allowance is the top folder of the
+ * root inside the uploaded folder: the document root itself for a root of one
+ * name (and for the default `public`), the first folder for a longer one.
+ * It never leaves the uploaded folder, so another account's tree and the rest
+ * of the site directory stay out of reach.
+ */
+export function managedCodeFolder(
+  publicDir: string,
+  root: string,
+  documentRoot: string,
+): string {
+  if (root === DEFAULT_SITE_ROOT) return documentRoot;
+  const top = root.split("/").find((part) => part !== "");
+  if (top === undefined || top === "." || top === "..") return documentRoot;
+  return join(publicDir, top);
+}
+
+/** `open_basedir` allow-list for a managed-directory PHP site. */
+export function managedPhpOpenBasedir(
+  layout: LayoutPaths,
+  managed: SiteRelease,
+  root: string,
+  documentRoot: string,
+): string[] {
+  const tree = serviceTree(layout, managed);
+  return [
+    managedCodeFolder(tree.publicDir, root, documentRoot),
+    tree.sharedDir,
+    PHP_OPEN_BASEDIR_TMP,
   ];
 }
 
@@ -3246,26 +3283,56 @@ async function reloadSiteEngines(
 ): Promise<string[]> {
   const touched: string[] = [];
   // Roll php-fpm out first so its sockets exist before nginx/Apache config-test
-  // the `fastcgi_pass` / `proxy:unix:` lines that point at them.
-  await forEachSequential(
-    [...plan.staged.phpFpm.keys()].sort((a, b) =>
-      a.localeCompare(b, undefined, { numeric: true })
-    ),
-    async (series) => {
-      const staged = plan.staged.phpFpm.get(series) ?? [];
-      if (staged.length === 0) return;
-      await rolloutSiteConfigs({
-        run,
-        layout,
-        target: phpFpmDriver(series),
-        restart: false,
-        staged,
-      });
-      touched.push(`php-fpm ${series}`);
-    },
-  );
-  // nginx in front of Apache: Apache rolls out first but stays revertible, and
-  // its runtimes unsettled, until nginx has answered through it as well.
+  // the `fastcgi_pass` / `proxy:unix:` lines that point at them. Pools and
+  // engines all stay revertible until every engine has answered, and then
+  // commit together: a failure puts back the engines and the pools as one, so
+  // no committed vhost ever names a pool that was taken away. If a commit has
+  // already happened when a later step fails, the pools are kept: they are
+  // additive, and a committed vhost may name them.
+  const pools: PendingSiteRollout[] = [];
+  const state = { committed: false };
+  try {
+    await forEachSequential(
+      [...plan.staged.phpFpm.keys()].sort((a, b) =>
+        a.localeCompare(b, undefined, { numeric: true })
+      ),
+      async (series) => {
+        const staged = plan.staged.phpFpm.get(series) ?? [];
+        if (staged.length === 0) return;
+        pools.push(
+          await openSiteRollout({
+            run,
+            layout,
+            target: phpFpmDriver(series),
+            restart: false,
+            staged,
+          }),
+        );
+        touched.push(`php-fpm ${series}`);
+      },
+    );
+    await rolloutEngines(layout, plan, touched, state);
+  } catch (err) {
+    if (!state.committed) {
+      await forEachSequential(pools.toReversed(), (pool) => pool.rollback());
+    }
+    throw err;
+  }
+  await forEachSequential(pools, (pool) => pool.commit());
+  return touched;
+}
+
+/**
+ * Open every engine's rollout, then commit and settle them in order. A failure
+ * before the first commit reverts every engine still held; one after it leaves
+ * the committed engines as they are and reverts the rest.
+ */
+async function rolloutEngines(
+  layout: LayoutPaths,
+  plan: SiteReloadPlan,
+  touched: string[],
+  state: { committed: boolean },
+): Promise<void> {
   const held: EngineRolloutStep[] = [];
   try {
     await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
@@ -3274,22 +3341,20 @@ async function reloadSiteEngines(
         ? await openEngineRollout(layout, plan, engine)
         : null;
       if (reload) touched.push(engine);
-      const step = { engine, reload, rollout };
-      if (engine === "apache" && plan.paired) {
-        held.push(step);
-        return;
-      }
+      held.push({ engine, reload, rollout });
+    });
+    await forEachSequential(held.slice(), async (step) => {
+      state.committed ||= step.rollout !== null;
       await settleEngineRollout(plan, step);
-      await forEachSequential(
-        held.splice(0),
-        (heldStep) => settleEngineRollout(plan, heldStep),
-      );
+      held.splice(held.indexOf(step), 1);
     });
   } catch (err) {
-    await forEachSequential(held, (step) => step.rollout?.rollback());
+    await forEachSequential(
+      held.toReversed(),
+      (step) => step.rollout?.rollback(),
+    );
     throw err;
   }
-  return touched;
 }
 
 /** One engine's rollout, awaiting its commit and its runtimes' settling. */
@@ -3385,7 +3450,7 @@ type ApplySiteResult = {
 function sitePhpAdminOpts(
   layout: LayoutPaths,
   paths: SitePaths,
-  site: Pick<SiteApplySpec, "dbCa">,
+  site: Pick<SiteApplySpec, "dbCa" | "root">,
 ): PhpFpmPoolAdminOpts | undefined {
   if (paths.release) {
     const caFile = site.dbCa === undefined
@@ -3402,11 +3467,12 @@ function sitePhpAdminOpts(
   }
   if (paths.managed) {
     return {
-      openBasedir: [
+      openBasedir: managedPhpOpenBasedir(
+        layout,
+        paths.managed,
+        site.root,
         paths.documentRoot,
-        serviceTree(layout, paths.managed).sharedDir,
-        PHP_OPEN_BASEDIR_TMP,
-      ],
+      ),
     };
   }
   return undefined;
@@ -3922,20 +3988,50 @@ async function ensureManagedDirectory(
     ...managed.folder,
     kind: "service",
   }, run);
-  // Parent before child: the directories are created in this order.
-  await forEachSequential(
-    [...new Set([tree.publicDir, tree.sharedDir, documentRoot])],
-    (dir) =>
-      ensureDirectoryWithOwner(
-        dir,
-        "0750",
-        dir === tree.sharedDir
-          ? `${managed.username}:${principalUnixGroupName(managed.username)}`
-          : owner,
-        run,
-      ),
-  );
+  const ensure = (dir: string) =>
+    ensureDirectoryWithOwner(
+      dir,
+      "0750",
+      dir === tree.sharedDir
+        ? `${managed.username}:${principalUnixGroupName(managed.username)}`
+        : owner,
+      run,
+    );
+  // The uploaded folder and `shared/` first: the tenant cannot make them, and
+  // a refused document root below must still leave a folder to upload into.
+  await forEachSequential([tree.publicDir, tree.sharedDir], ensure);
+  await assertManagedDocumentRoot(site, tree.publicDir, documentRoot);
+  if (documentRoot !== tree.publicDir) await ensure(documentRoot);
   await seedManagedIndexHtml(site, documentRoot, owner);
+}
+
+/**
+ * Refuse a document root whose parent folder the tenant has not uploaded.
+ *
+ * The default root (the uploaded folder itself) and a one-name root are made
+ * here: their parent is the uploaded folder, which exists. Creating a longer
+ * path would leave root-owned folders behind (`install -d` sets the owner of
+ * the last folder only) and publish a placeholder for what is usually a
+ * mistyped root, so the deploy says what is missing instead.
+ */
+async function assertManagedDocumentRoot(
+  site: SiteApplySpec,
+  publicDir: string,
+  documentRoot: string,
+): Promise<void> {
+  const parent = dirname(documentRoot);
+  if (documentRoot === publicDir || parent === publicDir) return;
+  const present = await run("sudo", hostSudoArgs(["-n", "test", "-d", parent]));
+  if (present.success) return;
+  const refusal = present.stderr.trim();
+  if (refusal !== "") {
+    throw new Error(
+      `Could not check the document root "${site.root}" of ${site.composeServiceName}: ${refusal}`,
+    );
+  }
+  throw new Error(
+    `The document root "${site.root}" of ${site.composeServiceName} is not inside the uploaded folder: ${parent} does not exist. The root is relative to the uploaded folder (${publicDir}), not to the site folder. Upload the files first or fix the root.`,
+  );
 }
 
 /** Write the placeholder only into a genuinely empty document root. */

@@ -1783,6 +1783,10 @@ const SITES: CallSite[] = [
       ],
     },
   ),
+  tpHost('src/deploy/site.ts|["-n","test","-d",parent]', {
+    argv: ["test", "-d", `${SITE}/public/app`],
+    setup: { dirs: [`${SITE}/public/app`] },
+  }),
   tpHost('src/deploy/unchanged-deploy.ts|["-n","test","-e",path]', {
     argv: ["test", "-e", `${SITE}/current`],
     setup: {
