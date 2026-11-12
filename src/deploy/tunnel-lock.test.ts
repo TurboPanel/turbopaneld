@@ -275,3 +275,32 @@ test("a peer that is not an exact address is refused when adding a lock", () => 
     )
   );
 });
+
+test("a redirect block (no reverse_proxy) is never locked, and its neighbours are", () => {
+  const redirect = siteSnippet({
+    hostname: NAME,
+    tlsDir: TLS_DIR,
+    redirectTo: "example.com",
+  });
+  assertEquals(redirect.includes("reverse_proxy"), false);
+  assertEquals(addLock(redirect), redirect);
+  const www = `www.${NAME}`;
+  const pair = `${render({}, false)}\n${
+    siteSnippet({
+      hostname: www,
+      tlsDir: TLS_DIR,
+      redirectTo: NAME,
+    })
+  }`;
+  const after = relockSiteText(
+    pair,
+    new Map([[NAME, PEERS], [www, PEERS]]),
+    LISTEN,
+    inboundLockNames([
+      { hostname: NAME, peers: PEERS, lock: true },
+      { hostname: www, peers: PEERS, lock: true },
+    ]),
+  );
+  assertEquals(after.includes(`${www} {`), true);
+  assertEquals(after.split("@tp_outside not remote_ip").length, 2);
+});

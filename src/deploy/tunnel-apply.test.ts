@@ -535,6 +535,34 @@ test("a table naming an unlocked site with lock: true locks it without a deploy,
   });
 });
 
+test("a deploy never adds a lock from the stored table, so a name removed from its tunnel stays public", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    const peers = ["10.0.0.5"];
+    // The stored table still lists the name with lock: true (the removal's table has not arrived).
+    await applyTunnelRoutes(
+      layout,
+      table({
+        hash: HASH_1,
+        routes: [],
+        peerAddresses: peers,
+        inbound: [{ hostname: "site.example.com", peers, lock: true }],
+      }),
+      deps,
+    );
+    // The site is deployed again as an ordinary public site.
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "site.example.com"),
+      undefined,
+      noGrant,
+    );
+    const site = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    assertEquals(site.includes("@tp_outside"), false);
+    assertStringIncludes(site, "http://site.example.com");
+  });
+});
+
 test("a removed carrier is shut out, and a table naming only the site's own names is kept", async () => {
   await withHost(async ({ layout, sitesDir, hostingDir }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };

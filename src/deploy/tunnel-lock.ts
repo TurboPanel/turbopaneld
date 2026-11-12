@@ -132,7 +132,8 @@ function withLoopbackBind(line: string): string {
 /**
  * A block with no lock made into the locked block a deploy renders, or null
  * when its shape is not one the deploy writes (no `tls` line: an automatic
- * certificate block is left to the next deploy).
+ * certificate block is left to the next deploy; no `reverse_proxy`: a redirect
+ * block, which is never locked).
  */
 function lockedBlock(
   lines: readonly string[],
@@ -143,6 +144,14 @@ function lockedBlock(
     index > 0 && TLS_LINE_RE.test(line)
   );
   if (tls < 0) return null;
+  // A block that proxies nothing (a `www` redirect) is never locked.
+  if (
+    !lines.some((line) =>
+      REVERSE_PROXY_RE.test(line) || REVERSE_PROXY_BLOCK_RE.test(line)
+    )
+  ) {
+    return null;
+  }
   const ranges = tunnelTrustedRanges(peers).join(" ");
   const lock = tunnelLockLines(peers).trimEnd().split("\n");
   const withLock = [

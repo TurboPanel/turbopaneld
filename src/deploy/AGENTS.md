@@ -1289,7 +1289,10 @@ by the control plane for a local-only name): `tunnel-lock.ts` then turns the
 block into what a deploy with a lock renders, byte for byte (the lock lines
 after the `tls` line, `trusted_proxies` on every `reverse_proxy`, loopback in a
 `bind`, the plain-HTTP redirect block of that name removed). A block with no
-`tls` line (an automatic certificate) is left to the next deploy. An entry
+`tls` line (an automatic certificate) or no `reverse_proxy` (a `www` redirect
+name) is left alone. Only a table apply adds a lock: the deploy's relock
+(`relockForDeploy`) never does, so a name removed from its tunnel that is still
+in the stored table stays public when its site is deployed again. An entry
 without `lock: true` never adds a lock, and nothing is ever opened: an absent
 or empty `inbound` leaves the deployed lock as it is. The deploy-render test in
 `tunnel-lock.test.ts` fails if the deploy's block shape changes without this
