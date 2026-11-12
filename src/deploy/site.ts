@@ -2042,9 +2042,29 @@ export function withDbCaVariables(
   return { ...site, webEnv };
 }
 
-/** `hosting.env` / `php.json` contents, or `null` when the site declares neither. */
+/**
+ * Whether `path` is already there. A file the previous deploy left behind has
+ * to be rewritten when this deploy declares nothing for it; a site that never
+ * had one must not gain an empty file.
+ */
+async function hostingFileExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch (err) {
+    return !(err instanceof Deno.errors.NotFound);
+  }
+}
+
+/**
+ * `hosting.env` / `php.json` contents (and the database CA file). With
+ * `hadHostingEnv`, a site that now has no variables still gets a
+ * `hosting.env` with none in it, so a shell that loads the file does not read
+ * the names, values and passwords of an earlier deploy.
+ */
 export function hostingWebMetadataFiles(
   site: SiteApplySpec,
+  hadHostingEnv = false,
 ): Array<{ name: string; contents: string }> {
   const files: Array<{ name: string; contents: string }> = [];
   if (site.dbCa !== undefined) {
@@ -2055,10 +2075,11 @@ export function hostingWebMetadataFiles(
         : `${site.dbCa.pem}\n`,
     });
   }
-  if (site.webEnv !== undefined && Object.keys(site.webEnv).length > 0) {
+  const webEnv = site.webEnv ?? {};
+  if (Object.keys(webEnv).length > 0 || hadHostingEnv) {
     files.push({
       name: "hosting.env",
-      contents: formatHostingEnvFile(site.webEnv),
+      contents: formatHostingEnvFile(webEnv),
     });
   }
   if (site.php !== undefined && Object.keys(site.php).length > 0) {
@@ -2075,10 +2096,13 @@ async function writeHostingWebMetadata(
   siteBase: string,
   site: SiteApplySpec,
 ): Promise<void> {
-  const files = hostingWebMetadataFiles(site);
+  const metaDir = join(siteBase, ".turbopanel");
+  const files = hostingWebMetadataFiles(
+    site,
+    await hostingFileExists(join(metaDir, "hosting.env")),
+  );
   if (files.length === 0) return;
 
-  const metaDir = join(siteBase, ".turbopanel");
   // Private to the daemon account: the web engines share its group, and a
   // document root of `.` would otherwise serve these files.
   await Deno.mkdir(metaDir, { recursive: true, mode: 0o700 });
@@ -2113,10 +2137,13 @@ export async function writeReleaseHostingWebMetadata(
   site: SiteApplySpec,
   release: SiteRelease,
 ): Promise<void> {
-  const files = hostingWebMetadataFiles(site);
+  const metaDir = siteMetadataDir(layout, release);
+  const files = hostingWebMetadataFiles(
+    site,
+    await hostingFileExists(join(metaDir, "hosting.env")),
+  );
   if (files.length === 0) return;
 
-  const metaDir = siteMetadataDir(layout, release);
   const mkdir = await run(
     "sudo",
     hostSudoArgs([
