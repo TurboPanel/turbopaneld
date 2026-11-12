@@ -121,6 +121,8 @@ export function parseConnectionIds(stdout: string): string[] {
   );
 }
 
+const FLUSH_SQL = "FLUSH PRIVILEGES;";
+
 function isUnknownThread(err: unknown): boolean {
   return err instanceof Error &&
     /unknown thread id|\b1094\b/i.test(err.message);
@@ -153,7 +155,7 @@ export async function revokeUnlistedGrants(options: {
   );
   if (rows.length === 0) return 0;
   await run(options.revokeRowsSql(username, rows));
-  await run("FLUSH PRIVILEGES;");
+  await run(FLUSH_SQL);
   const ids = parseConnectionIds(
     await query(options.listConnectionsSql(username)),
   );
