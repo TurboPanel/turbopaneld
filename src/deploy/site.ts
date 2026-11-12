@@ -3283,11 +3283,14 @@ async function reloadSiteEngines(
 ): Promise<string[]> {
   const touched: string[] = [];
   // Roll php-fpm out first so its sockets exist before nginx/Apache config-test
-  // the `fastcgi_pass` / `proxy:unix:` lines that point at them. Each pool
-  // rollout stays revertible until every engine has answered: a later failure
-  // puts the previous pool config back too, so the host never keeps a new pool
-  // behind an engine that went back to its old config.
+  // the `fastcgi_pass` / `proxy:unix:` lines that point at them. Pools and
+  // engines all stay revertible until every engine has answered, and then
+  // commit together: a failure puts back the engines and the pools as one, so
+  // no committed vhost ever names a pool that was taken away. If a commit has
+  // already happened when a later step fails, the pools are kept: they are
+  // additive, and a committed vhost may name them.
   const pools: PendingSiteRollout[] = [];
+  const state = { committed: false };
   try {
     await forEachSequential(
       [...plan.staged.phpFpm.keys()].sort((a, b) =>
@@ -3308,23 +3311,28 @@ async function reloadSiteEngines(
         touched.push(`php-fpm ${series}`);
       },
     );
-    await rolloutEngines(layout, plan, touched);
+    await rolloutEngines(layout, plan, touched, state);
   } catch (err) {
-    await forEachSequential(pools.toReversed(), (pool) => pool.rollback());
+    if (!state.committed) {
+      await forEachSequential(pools.toReversed(), (pool) => pool.rollback());
+    }
     throw err;
   }
   await forEachSequential(pools, (pool) => pool.commit());
   return touched;
 }
 
-/** Roll the engines out in order; a failure reverts the ones still held. */
+/**
+ * Open every engine's rollout, then commit and settle them in order. A failure
+ * before the first commit reverts every engine still held; one after it leaves
+ * the committed engines as they are and reverts the rest.
+ */
 async function rolloutEngines(
   layout: LayoutPaths,
   plan: SiteReloadPlan,
   touched: string[],
+  state: { committed: boolean },
 ): Promise<void> {
-  // nginx in front of Apache: Apache rolls out first but stays revertible, and
-  // its runtimes unsettled, until nginx has answered through it as well.
   const held: EngineRolloutStep[] = [];
   try {
     await forEachSequential(SITE_ENGINE_ORDER, async (engine) => {
@@ -3333,19 +3341,18 @@ async function rolloutEngines(
         ? await openEngineRollout(layout, plan, engine)
         : null;
       if (reload) touched.push(engine);
-      const step = { engine, reload, rollout };
-      if (engine === "apache" && plan.paired) {
-        held.push(step);
-        return;
-      }
+      held.push({ engine, reload, rollout });
+    });
+    await forEachSequential(held.slice(), async (step) => {
+      state.committed ||= step.rollout !== null;
       await settleEngineRollout(plan, step);
-      await forEachSequential(
-        held.splice(0),
-        (heldStep) => settleEngineRollout(plan, heldStep),
-      );
+      held.splice(held.indexOf(step), 1);
     });
   } catch (err) {
-    await forEachSequential(held, (step) => step.rollout?.rollback());
+    await forEachSequential(
+      held.toReversed(),
+      (step) => step.rollout?.rollback(),
+    );
     throw err;
   }
 }
@@ -4016,6 +4023,12 @@ async function assertManagedDocumentRoot(
   if (documentRoot === publicDir || parent === publicDir) return;
   const present = await run("sudo", hostSudoArgs(["-n", "test", "-d", parent]));
   if (present.success) return;
+  const refusal = present.stderr.trim();
+  if (refusal !== "") {
+    throw new Error(
+      `Could not check the document root "${site.root}" of ${site.composeServiceName}: ${refusal}`,
+    );
+  }
   throw new Error(
     `The document root "${site.root}" of ${site.composeServiceName} is not inside the uploaded folder: ${parent} does not exist. The root is relative to the uploaded folder (${publicDir}), not to the site folder. Upload the files first or fix the root.`,
   );

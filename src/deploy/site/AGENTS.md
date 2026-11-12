@@ -238,7 +238,7 @@ Docker Compose. The daemon:
    `.tpprev` config for one it changed in place (PHP config cannot use
    `.tpnew`: tp-host's PHP path class takes only the live names and
    `.tpprev`). A runtime changed in place with no vhost change is probed on
-   its own. A shared php-fpm pool is reverted by the same failure: `reloadSiteEngines` keeps each series' pool rollout open until every engine has answered, so a failed deploy never leaves the new pool behind the old vhost. A site's runtimes are matched by exact id
+   its own. Pools and engines are rolled out together: `reloadSiteEngines` keeps every php-fpm pool rollout and every engine rollout open until all engines have answered, then commits them in order, so a failed deploy puts the engines and the pools back as one and no committed vhost names a pool that was taken away. If a commit has already happened when a later step fails, the pools are kept (they are additive). A site's runtimes are matched by exact id
    (`isSitePhpRuntimeOf`: `<key>-(fcgi|fpm|lsd)<digits>`), never by prefix — one
    site's key can begin another's. A site moving onto a runtime gives up its
    pool on the shared master (any series) once its vhost serves the new

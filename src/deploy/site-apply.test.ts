@@ -5790,3 +5790,67 @@ test("a first deploy that fails its probe leaves no pool file behind", async () 
     await cleanup();
   }
 });
+
+test("a Caddy site and an nginx site in one apply: nginx failing takes both vhosts and both pools back together", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const publicDir = join(serviceFolderRoot(layout), "public");
+  const mock = createSiteRunMock({
+    before: [publicDir],
+    afterRestart: [publicDir],
+  });
+  const run = withGroupMembership(async (command, args) => {
+    if (
+      args.includes("-t") && args.some((arg) => arg.endsWith("/nginx"))
+    ) {
+      return fail("nginx: config test failed");
+    }
+    return await mock.run(command, args);
+  }, {
+    tpcaddysite: ["tpcaddysite"],
+    tpapache: ["tpapache"],
+    tpnginx: ["tpnginx"],
+  });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await Deno.mkdir(join(publicDir, "app", "public"), { recursive: true });
+    const caddyPhp: SiteApplySpec = {
+      ...frameworkRootSite,
+      composeServiceName: "caddyphp",
+      engine: "caddy",
+      listenPort: 18091,
+    };
+    const nginxPhp: SiteApplySpec = {
+      ...frameworkRootSite,
+      composeServiceName: "nginxphp",
+      listenPort: 18092,
+    };
+    await assertRejects(
+      () =>
+        applySites(layout, "envmd", [caddyPhp, nginxPhp], {
+          run,
+          runPlaybook,
+          managedDirectoryBindings: new Map([
+            ["caddyphp", folderBinding],
+            ["nginxphp", folderBinding],
+          ]),
+        }),
+      Error,
+      "config test failed",
+    );
+    // Whatever a vhost names must still exist: here, nothing is left of either.
+    const pools = join(layout.configDir, "php", "8.4", "pools");
+    for (const name of ["caddyphp", "nginxphp"]) {
+      assertEquals(await exists(join(pools, `tp-envmd-${name}.conf`)), false);
+    }
+    assertEquals(
+      await listConfigDirEntries(join(layout.configDir, "site-caddy", "sites")),
+      [],
+    );
+    assertEquals(
+      await listConfigDirEntries(join(layout.configDir, "nginx", "sites")),
+      [],
+    );
+  } finally {
+    await cleanup();
+  }
+});
