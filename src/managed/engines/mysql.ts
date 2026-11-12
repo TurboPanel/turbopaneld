@@ -23,6 +23,8 @@ import {
   grantBackupPrivileges,
   grantDatabasePrivileges,
   isBackupCredential,
+  panelManagesGrants,
+  revokeUnlistedGrants,
 } from "./grant-databases.ts";
 import { parseMysqlFreshness } from "./replica-freshness.ts";
 import {
@@ -58,6 +60,8 @@ import {
   grantRootSql,
   installAuthSocketPluginSql,
   isWritableSql,
+  listConnectionsSql,
+  listGrantRowsSql,
   MANAGED_DOCKER_NETWORK_HOST,
   primaryFinalGtidSetSql,
   promoteSql,
@@ -66,6 +70,7 @@ import {
   replicaFreshnessSql,
   resetReplicaGtidStateSql,
   revokePlainDatabaseGrantSql,
+  revokeRowsSql,
   seedWindowReadOnlySql,
   showReplicaStatusSql,
   startReplicaSql,
@@ -436,6 +441,18 @@ async function applyOneCredential(
     revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMysql(ctx, sql),
   });
+  if (panelManagesGrants(credential)) {
+    await revokeUnlistedGrants({
+      username: credential.username,
+      listed: grantableDatabases(credential),
+      listRowsSql: listGrantRowsSql,
+      revokeRowsSql,
+      listConnectionsSql,
+      sessionEnds: ctx.sessionEnds,
+      query: (sql) => runMysqlQuery(ctx, sql),
+      run: (sql) => runMysql(ctx, sql),
+    });
+  }
   await runMysql(ctx, "FLUSH PRIVILEGES;");
 }
 

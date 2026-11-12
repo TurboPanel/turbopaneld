@@ -22,6 +22,8 @@ import {
   grantBackupPrivileges,
   grantDatabasePrivileges,
   isBackupCredential,
+  panelManagesGrants,
+  revokeUnlistedGrants,
 } from "./grant-databases.ts";
 import { parseMariadbFreshness } from "./replica-freshness.ts";
 import {
@@ -54,6 +56,8 @@ import {
   grantDatabaseSql,
   grantRootSql,
   isWritableSql,
+  listConnectionsSql,
+  listGrantRowsSql,
   listNonLocalAccountsSql,
   MANAGED_DOCKER_NETWORK_HOST,
   masterGtidWaitSql,
@@ -65,6 +69,7 @@ import {
   reassertReplicaPrivilegeGuardSql,
   resetReplicaGtidStateSql,
   revokePlainDatabaseGrantSql,
+  revokeRowsSql,
   showReplicaStatusSql,
   startReplicaSql,
   versionSql,
@@ -480,6 +485,18 @@ async function applyOneCredential(
     revokePlainSql: revokePlainDatabaseGrantSql,
     run: (sql) => runMariadb(ctx, sql),
   });
+  if (panelManagesGrants(credential)) {
+    await revokeUnlistedGrants({
+      username: credential.username,
+      listed: grantableDatabases(credential),
+      listRowsSql: listGrantRowsSql,
+      revokeRowsSql,
+      listConnectionsSql,
+      sessionEnds: ctx.sessionEnds,
+      query: (sql) => runMariadbQuery(ctx, sql),
+      run: (sql) => runMariadb(ctx, sql),
+    });
+  }
   await runMariadb(ctx, "FLUSH PRIVILEGES;");
 }
 

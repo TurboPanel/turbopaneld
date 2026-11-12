@@ -57,6 +57,7 @@ import {
   rewritePrimaryConninfo,
   standbyReplicationStatusSql,
   strongestPrivilege,
+  terminateSessionsWithoutConnectSql,
 } from "./postgres-sql.ts";
 import {
   countObjectsToReassignSql,
@@ -636,6 +637,11 @@ async function reconcileDatabaseAccess(
       await runPsql(ctx, parts.join("\n"), database);
     },
   );
+
+  // Last, after every revoke including the owner-role memberships a Database
+  // admin login holds CONNECT through: sessions opened before them (the
+  // proxy's pooled ones too) end now.
+  await runPsql(ctx, terminateSessionsWithoutConnectSql());
 }
 
 /**

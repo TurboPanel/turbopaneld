@@ -133,11 +133,15 @@ export const {
   grantDatabaseSql,
   revokePlainDatabaseGrantSql,
   grantBackupSql,
+  listGrantRowsSql,
+  revokeRowsSql,
+  listConnectionsSql,
 } = grantSqlFor(
   {
     quoteIdentifier,
     quoteLiteral,
     accountAt,
+    processlistTable: "performance_schema.processlist",
     // SHOW_ROUTINE and FLUSH_TABLES are dynamic privileges and exist only at
     // global level. SHOW_ROUTINE reads every stored routine's definition.
     // FLUSH_TABLES: on a server with GTIDs on (every managed MySQL server)

@@ -521,6 +521,26 @@ export function revokeUnlistedDatabasesSql(
 }
 
 /**
+ * End the open sessions that no longer hold `CONNECT` on the database they sit
+ * in, which is what a revoke leaves behind: `CONNECT` is checked only when a
+ * session starts, so a session already open (the shared proxy keeps backend
+ * sessions in a pool for many minutes) would keep reading. A login that kept
+ * its access loses no session, and superusers always hold the right. The
+ * proxy opens a fresh backend session on the next query, which the revoke
+ * then refuses. Run after every revoke of an apply.
+ */
+export function terminateSessionsWithoutConnectSql(): string {
+  return [
+    `SELECT pg_catalog.pg_terminate_backend(a.pid)`,
+    `FROM pg_catalog.pg_stat_activity a`,
+    `WHERE a.backend_type = 'client backend'`,
+    `  AND a.usename IS NOT NULL AND a.datname IS NOT NULL`,
+    `  AND a.pid <> pg_catalog.pg_backend_pid()`,
+    `  AND NOT pg_catalog.has_database_privilege(a.usesysid, a.datid, 'CONNECT');`,
+  ].join("\n");
+}
+
+/**
  * ProxySQL's health checks dial the maintenance database as a login that is a
  * member of `pg_monitor`. With the public default gone, give that predefined
  * role the connect right: every such login (one per fronting server) inherits

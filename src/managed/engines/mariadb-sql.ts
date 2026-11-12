@@ -122,11 +122,15 @@ export const {
   grantDatabaseSql,
   revokePlainDatabaseGrantSql,
   grantBackupSql,
+  listGrantRowsSql,
+  revokeRowsSql,
+  listConnectionsSql,
 } = grantSqlFor(
   {
     quoteIdentifier,
     quoteLiteral,
     accountAt,
+    processlistTable: "information_schema.PROCESSLIST",
     extraPrivileges: [
       ["DELETE HISTORY", "Delete_history_priv"],
       ["SHOW CREATE ROUTINE", "Show_create_routine_priv"],
