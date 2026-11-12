@@ -7754,10 +7754,15 @@ export type TunnelPeerMaterial = {
  * other servers that carry it (empty when only this server does). The lock on
  * that name's site block follows these peers without a deploy (feature
  * `tunnel-lock-follow-v1`).
+ *
+ * `lock: true` (feature `tunnel-lock-add-v1`) says the name is local-only: when
+ * its block has no lock yet the daemon adds one. Absent or false never adds a
+ * lock and never opens a name.
  */
 export type TunnelInbound = {
   hostname: string;
   peers: string[];
+  lock?: boolean;
 };
 
 /** Must stay in sync with the instance `server.tunnel.routes` shape. */
@@ -7893,7 +7898,14 @@ function parseTunnelInbound(value: unknown): TunnelInbound {
     0,
     MAX_TUNNEL_ADDRESSES,
   );
-  return { hostname: value.hostname as string, peers };
+  if (value.lock !== undefined && typeof value.lock !== "boolean") {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  return {
+    hostname: value.hostname as string,
+    peers,
+    ...(value.lock === true ? { lock: true } : {}),
+  };
 }
 
 function parseTunnelInboundList(value: unknown): TunnelInbound[] {

@@ -490,6 +490,51 @@ test("a table with a new carrier lets it in on the site's lock without a deploy,
   });
 });
 
+test("a table naming an unlocked site with lock: true locks it without a deploy, one reload, and not without lock: true", async () => {
+  await withHost(async ({ layout, sitesDir, calls }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    // Deployed before the name was on a tunnel: no tunnel block at all.
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "site.example.com"),
+      undefined,
+      noGrant,
+    );
+    const file = join(sitesDir, "env-1.caddy");
+    const plain = await Deno.readTextFile(file);
+    assertEquals(plain.includes("@tp_outside"), false);
+    const peers = ["10.0.0.5", "10.0.0.6"];
+    const withoutLock = (hash: string) =>
+      table({
+        hash,
+        routes: [],
+        peerAddresses: peers,
+        inbound: [{ hostname: "site.example.com", peers }],
+      });
+    await applyTunnelRoutes(layout, withoutLock(HASH_1), deps);
+    assertEquals(await Deno.readTextFile(file), plain);
+    const before = calls.length;
+    await applyTunnelRoutes(
+      layout,
+      table({
+        hash: HASH_2,
+        routes: [],
+        peerAddresses: peers,
+        inbound: [{ hostname: "site.example.com", peers, lock: true }],
+      }),
+      deps,
+    );
+    const site = await Deno.readTextFile(file);
+    assertStringIncludes(site, `${LOCK_LINE} 10.0.0.5 10.0.0.6\n`);
+    assertStringIncludes(site, "trusted_proxies 127.0.0.0/8 ::1 10.0.0.5");
+    assertEquals(site.includes("http://site.example.com"), false);
+    assertEquals(
+      calls.slice(before).filter((a) => a.includes("reload")).length,
+      1,
+    );
+  });
+});
+
 test("a removed carrier is shut out, and a table naming only the site's own names is kept", async () => {
   await withHost(async ({ layout, sitesDir, hostingDir }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };

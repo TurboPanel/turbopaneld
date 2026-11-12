@@ -14,7 +14,11 @@ import { errorText, logWarn } from "../util/logger.ts";
 import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import { snippetSiteAddresses } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
-import { inboundPeers, relockSiteText } from "./tunnel-lock.ts";
+import {
+  inboundLockNames,
+  inboundPeers,
+  relockSiteText,
+} from "./tunnel-lock.ts";
 import {
   type RenderedTunnelFile,
   renderTunnelFile,
@@ -292,6 +296,7 @@ export function relockWithStoredPeers(
     contents,
     inboundPeers(state.inbound),
     state.listenAddresses ?? [],
+    inboundLockNames(state.inbound),
   );
 }
 

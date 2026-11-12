@@ -1283,9 +1283,17 @@ daemon stores it with the table and `tunnel-lock.ts` rewrites, in the HTTPS
 block of each listed name, only the lines it wrote itself: the
 `@tp_outside not remote_ip` lock and every `trusted_proxies` line get exactly
 those peers (loopback always first), so a new carrier is let in and a removed
-one is shut out without a site deploy. A block with no lock never gets one,
-and nothing is ever opened: an absent or empty `inbound` leaves the deployed
-lock as it is. A bound site (`bind` holding loopback) also gets this server's
+one is shut out without a site deploy. A block with no lock gets one only
+when its `inbound` entry says `lock: true` (feature `tunnel-lock-add-v1`, sent
+by the control plane for a local-only name): `tunnel-lock.ts` then turns the
+block into what a deploy with a lock renders, byte for byte (the lock lines
+after the `tls` line, `trusted_proxies` on every `reverse_proxy`, loopback in a
+`bind`, the plain-HTTP redirect block of that name removed). A block with no
+`tls` line (an automatic certificate) is left to the next deploy. An entry
+without `lock: true` never adds a lock, and nothing is ever opened: an absent
+or empty `inbound` leaves the deployed lock as it is. The deploy-render test in
+`tunnel-lock.test.ts` fails if the deploy's block shape changes without this
+module following. A bound site (`bind` holding loopback) also gets this server's
 own `listenAddresses` added once it has peers, as a deploy would; nothing is
 taken out of a `bind`. `tunnel-apply.ts` judges the changed site files together
 with the forward file in one candidate set and reloads once; a refusal leaves

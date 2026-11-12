@@ -53,6 +53,7 @@ import {
   TUNNEL_CONNECTOR_FEATURE,
   TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE,
   TUNNEL_FORWARDING_FEATURE,
+  TUNNEL_LOCK_ADD_FEATURE,
   TUNNEL_LOCK_FOLLOW_FEATURE,
   TUNNEL_STATUS_FACTS_FEATURE,
   TUNNEL_STATUS_FEATURE,
@@ -582,11 +583,19 @@ test("site-db-url-ca-v1 is advertised, right after tunnel-table-generation-v1", 
   );
 });
 
-test("project-cache-v1 is advertised, and is the last entry", () => {
+test("project-cache-v1 is advertised, right after site-db-url-ca-v1", () => {
   assertEquals(PROJECT_CACHE_FEATURE, "project-cache-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), PROJECT_CACHE_FEATURE);
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(PROJECT_CACHE_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(SITE_DB_URL_CA_FEATURE) + 1,
+  );
+});
+
+test("tunnel-lock-add-v1 is advertised, and is the last entry", () => {
+  assertEquals(TUNNEL_LOCK_ADD_FEATURE, "tunnel-lock-add-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_LOCK_ADD_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_LOCK_ADD_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(PROJECT_CACHE_FEATURE) + 1,
   );
 });
