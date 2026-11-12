@@ -77,6 +77,24 @@ test("server.tunnel.routes parses inbound names, with or without peers, and alon
   assertEquals(parseTunnelRoutesPayload(alone), alone);
 });
 
+test("server.tunnel.routes parses inbound lock: true and refuses a non-boolean lock", () => {
+  const entry = { hostname: "site.example.com", peers: ["10.0.0.5"] };
+  const withLock = { ...GOOD, inbound: [{ ...entry, lock: true }] };
+  assertEquals(parseTunnelRoutesPayload(withLock), withLock);
+  // lock: false is the same as absent.
+  assertEquals(
+    parseTunnelRoutesPayload({ ...GOOD, inbound: [{ ...entry, lock: false }] }),
+    { ...GOOD, inbound: [entry] },
+  );
+  for (const lock of ["true", 1, null]) {
+    assertThrows(
+      () =>
+        parseTunnelRoutesPayload({ ...GOOD, inbound: [{ ...entry, lock }] }),
+      TypeError,
+    );
+  }
+});
+
 test("server.tunnel.routes refuses bad inbound names", () => {
   const entry = { hostname: "site.example.com", peers: ["10.0.0.5"] };
   const bad: unknown[] = [

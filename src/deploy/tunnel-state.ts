@@ -14,7 +14,11 @@ import { errorText, logWarn } from "../util/logger.ts";
 import { isDaemonReservedHostingSite } from "./instance-acme-http01.ts";
 import { snippetSiteAddresses } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
-import { inboundPeers, relockSiteText } from "./tunnel-lock.ts";
+import {
+  inboundLockNames,
+  inboundPeers,
+  relockSiteText,
+} from "./tunnel-lock.ts";
 import {
   type RenderedTunnelFile,
   renderTunnelFile,
@@ -282,17 +286,39 @@ export function deployTunnelGeneration(
   return found.length === 0 ? undefined : Math.max(...found);
 }
 
-/** `contents` with the tunnel peers of the stored table; as it was when there is no table or no `inbound`. */
-export function relockWithStoredPeers(
+function relockWith(
   state: TunnelState | undefined,
   contents: string,
+  lockNames: ReadonlySet<string>,
 ): string {
   if (!state?.inbound) return contents;
   return relockSiteText(
     contents,
     inboundPeers(state.inbound),
     state.listenAddresses ?? [],
+    lockNames,
   );
+}
+
+/**
+ * `contents` with the tunnel peers of the stored table; as it was when there is
+ * no table or no `inbound`. It never adds a lock: a deploy uses this, and a
+ * name removed from its tunnel could still be in the stored table until the new
+ * table arrives, so a public site must not be locked by it.
+ */
+export function relockWithStoredPeers(
+  state: TunnelState | undefined,
+  contents: string,
+): string {
+  return relockWith(state, contents, new Set<string>());
+}
+
+/** As {@link relockWithStoredPeers}, and a block with no lock gets one where the table says `lock: true`. Only a table apply uses this. */
+export function relockAddingLocks(
+  state: TunnelState | undefined,
+  contents: string,
+): string {
+  return relockWith(state, contents, inboundLockNames(state?.inbound));
 }
 
 /**
@@ -323,7 +349,7 @@ export async function plannedRelocks(
     files.map((file) => Deno.readTextFile(join(sitesDir, file))),
   );
   return files.flatMap((file, i) => {
-    const next = relockWithStoredPeers(state, texts[i]!);
+    const next = relockAddingLocks(state, texts[i]!);
     return next === texts[i] ? [] : [{ file, contents: next }];
   });
 }

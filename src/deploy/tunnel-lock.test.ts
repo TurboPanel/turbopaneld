@@ -1,6 +1,10 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import { siteSnippet } from "./ingress.ts";
-import { inboundPeers, relockSiteText } from "./tunnel-lock.ts";
+import {
+  inboundLockNames,
+  inboundPeers,
+  relockSiteText,
+} from "./tunnel-lock.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -149,4 +153,154 @@ test("a peer that is not an exact address is refused", () => {
       peersOf("app.example.com", ["10.0.0.0/8"]),
     )
   );
+});
+
+const NAME = "app.example.com";
+const PEERS = ["10.0.0.5", "10.0.0.6"];
+const LISTEN = ["10.0.0.7"];
+
+type Shape = {
+  upstream?: Parameters<typeof siteSnippet>[0]["upstream"];
+  routes?: Parameters<typeof siteSnippet>[0]["routes"];
+  bindAddress?: string;
+  tlsId?: string;
+};
+
+const SHAPES: Record<string, Shape> = {
+  "the default upstream": {},
+  "a loopback upstream": { upstream: UPSTREAM },
+  "a compressed loopback upstream": {
+    upstream: { ...UPSTREAM, compress: true },
+  },
+  "a pinned certificate": { tlsId: "cert-1" },
+  "a bound site": { bindAddress: "10.0.0.8" },
+  "path routes": {
+    routes: [
+      { pathPrefix: "/api", upstream: UPSTREAM },
+      { upstream: { kind: "traefik" } },
+    ],
+  },
+};
+
+function render(shape: Shape, lock: boolean): string {
+  return siteSnippet({
+    hostname: NAME,
+    tlsDir: TLS_DIR,
+    ...shape,
+    ...(lock
+      ? { tunnel: { lock: true, peers: PEERS, extraBind: LISTEN } }
+      : {}),
+  });
+}
+
+const addLock = (text: string, listen = LISTEN) =>
+  relockSiteText(
+    text,
+    peersOf(NAME, PEERS),
+    listen,
+    inboundLockNames([{ hostname: NAME, peers: PEERS, lock: true }]),
+  );
+
+for (const [label, shape] of Object.entries(SHAPES)) {
+  test(`lock: true adds exactly what a deploy renders, for ${label}`, () => {
+    const unlocked = render(shape, false);
+    assertEquals(unlocked.includes("@tp_outside"), false);
+    const after = addLock(unlocked);
+    assertEquals(after, render(shape, true));
+    // Re-applying changes nothing.
+    assertEquals(addLock(after), after);
+  });
+}
+
+test("without lock: true a block with no lock is left exactly as it was", () => {
+  for (const shape of Object.values(SHAPES)) {
+    const unlocked = render(shape, false);
+    assertEquals(
+      relockSiteText(unlocked, peersOf(NAME, PEERS), LISTEN),
+      unlocked,
+    );
+    // The entry lists the name but does not ask for a lock.
+    assertEquals(
+      relockSiteText(
+        unlocked,
+        peersOf(NAME, PEERS),
+        LISTEN,
+        inboundLockNames([{ hostname: NAME, peers: PEERS }]),
+      ),
+      unlocked,
+    );
+  }
+});
+
+test("lock: true only touches the listed name, and leaves other sites in the file alone", () => {
+  const other = siteSnippet({
+    hostname: "other.example.com",
+    tlsDir: TLS_DIR,
+    upstream: UPSTREAM,
+  });
+  const before = `${other}\n${render({}, false)}`;
+  const after = addLock(before);
+  assertEquals(after, `${other}\n${render({}, true)}`);
+  assertEquals(after.includes("http://other.example.com {"), true);
+});
+
+test("lock: true on an open name that already has trusted peers adds the lock and drops its plain HTTP block", () => {
+  const open = siteSnippet({
+    hostname: NAME,
+    tlsDir: TLS_DIR,
+    upstream: UPSTREAM,
+    tunnel: { lock: false, peers: PEERS, extraBind: LISTEN },
+  });
+  assertEquals(open.includes("http://app.example.com {"), true);
+  assertEquals(addLock(open), render({ upstream: UPSTREAM }, true));
+});
+
+test("a block with an automatic certificate (no tls line) is left to the next deploy", () => {
+  const acme = siteSnippet({
+    hostname: NAME,
+    tlsDir: TLS_DIR,
+    upstream: UPSTREAM,
+    tlsMode: "acme",
+  });
+  assertEquals(addLock(acme), acme);
+});
+
+test("a peer that is not an exact address is refused when adding a lock", () => {
+  assertThrows(() =>
+    relockSiteText(
+      render({}, false),
+      peersOf(NAME, ["10.0.0.0/8"]),
+      [],
+      inboundLockNames([{ hostname: NAME, peers: ["10.0.0.0/8"], lock: true }]),
+    )
+  );
+});
+
+test("a redirect block (no reverse_proxy) is never locked, and its neighbours are", () => {
+  const redirect = siteSnippet({
+    hostname: NAME,
+    tlsDir: TLS_DIR,
+    redirectTo: "example.com",
+  });
+  assertEquals(redirect.includes("reverse_proxy"), false);
+  assertEquals(addLock(redirect), redirect);
+  const www = `www.${NAME}`;
+  const pair = `${render({}, false)}\n${
+    siteSnippet({
+      hostname: www,
+      tlsDir: TLS_DIR,
+      redirectTo: NAME,
+    })
+  }`;
+  const after = relockSiteText(
+    pair,
+    new Map([[NAME, PEERS], [www, PEERS]]),
+    LISTEN,
+    inboundLockNames([
+      { hostname: NAME, peers: PEERS, lock: true },
+      { hostname: www, peers: PEERS, lock: true },
+    ]),
+  );
+  assertEquals(after.includes(`${www} {`), true);
+  assertEquals(after.split("@tp_outside not remote_ip").length, 2);
 });

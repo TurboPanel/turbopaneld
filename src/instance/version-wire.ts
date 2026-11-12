@@ -133,6 +133,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-table-generation-v1",
   "site-db-url-ca-v1",
   "project-cache-v1",
+  "tunnel-lock-add-v1",
 ] as const;
 
 /**
@@ -825,3 +826,12 @@ export const SITE_DB_URL_CA_FEATURE: DaemonWireFeature = "site-db-url-ca-v1";
  * on purpose: wire features are expand-only and a later feature goes after it.
  */
 export const PROJECT_CACHE_FEATURE: DaemonWireFeature = "project-cache-v1";
+
+/**
+ * An `inbound` entry of `server.tunnel.routes` may carry `lock: true`. The
+ * daemon then puts the tunnel lock (and trusted peers) into that name's site
+ * block when the block has none, so a hostname added to a tunnel after its
+ * site was deployed is locked without a redeploy. Without the feature the
+ * control plane leaves such a name to the site's next deploy and warns.
+ */
+export const TUNNEL_LOCK_ADD_FEATURE: DaemonWireFeature = "tunnel-lock-add-v1";
