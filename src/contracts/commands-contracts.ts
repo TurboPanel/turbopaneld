@@ -6169,6 +6169,12 @@ function parseSiteDbCa(
     ),
     pem: value.pem,
   };
+  // An empty list means no URL names, the same as leaving the key out.
+  if (
+    Array.isArray(value.urlVariables) && value.urlVariables.length === 0
+  ) {
+    return dbCa;
+  }
   if (value.urlVariables !== undefined) {
     dbCa.urlVariables = parseSiteEnvNames(
       value.urlVariables,
