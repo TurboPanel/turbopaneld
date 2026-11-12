@@ -5389,3 +5389,183 @@ test("a site that leaves, and an environment that stops, lose their root copy of
     await cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// A deploy that leaves a site with no variables must not leave the last
+// deploy's variables in `hosting.env`.
+// ---------------------------------------------------------------------------
+
+const STALE_ENV = { CACHE_PASSWORD: "stale-secret-value", CACHE_HOST: "cache" };
+
+function assertNoStaleHostingEnv(body: string): void {
+  assertEquals(body.includes("CACHE_PASSWORD"), false);
+  assertEquals(body.includes("stale-secret-value"), false);
+  assertEquals(body.includes("CACHE_HOST"), false);
+}
+
+async function assertSecondDeployEmptiesHostingEnv(
+  envId: string,
+  site: SiteApplySpec,
+  metaPath: (layout: LayoutPaths) => string,
+  lane: Record<string, unknown>,
+  seed?: (layout: LayoutPaths) => Promise<unknown>,
+): Promise<void> {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seed?.(layout);
+    const opts = { run, runPlaybook, ...lane };
+    await applySites(layout, envId, [{ ...site, webEnv: STALE_ENV }], opts);
+    const path = metaPath(layout);
+    assertStringIncludes(await Deno.readTextFile(path), "CACHE_PASSWORD=");
+    await applySites(layout, envId, [{ ...site, webEnv: {} }], opts);
+    assertNoStaleHostingEnv(await Deno.readTextFile(path));
+  } finally {
+    await cleanup();
+  }
+}
+
+const releaseHostingEnvPath = (layout: LayoutPaths) =>
+  join(siteTreeRoot(layout), ".turbopanel-hosting", "hosting.env");
+
+test("a second release-site deploy with no variables empties hosting.env", async () => {
+  await assertSecondDeployEmptiesHostingEnv(
+    "envstale1",
+    nginxSite,
+    releaseHostingEnvPath,
+    { releaseBindings: releaseBindingsFor("www") },
+    (layout) => seedRelease(layout, "rel-1", "public", "<h1>one</h1>"),
+  );
+});
+
+test("a second managed-directory deploy with no variables empties hosting.env", async () => {
+  await assertSecondDeployEmptiesHostingEnv(
+    "envstale2",
+    managedSite,
+    releaseHostingEnvPath,
+    { managedDirectoryBindings: managedBindingsFor("www") },
+  );
+});
+
+test("a second daemon-owned site deploy with no variables empties hosting.env", async () => {
+  await assertSecondDeployEmptiesHostingEnv(
+    "envstale3",
+    nginxSite,
+    (layout) =>
+      join(
+        layout.stateDir,
+        "sites",
+        "envstale3",
+        "www",
+        ".turbopanel",
+        "hosting.env",
+      ),
+    {},
+  );
+});
+
+/**
+ * The daemon cannot traverse an owner's tree in production, so its stat of
+ * `hosting.env` is denied and the answer comes from tp-host's `test -e`. The
+ * metadata folder is made untraversable until that question is asked.
+ */
+async function assertDeniedStatDecides(
+  envId: string,
+  site: SiteApplySpec,
+  lane: Record<string, unknown>,
+  fileThere: boolean,
+  seed?: (layout: LayoutPaths) => Promise<unknown>,
+): Promise<void> {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const group = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  const metaDir = join(siteTreeRoot(layout), ".turbopanel-hosting");
+  const asked: string[][] = [];
+  const run: SiteRunFn = async (command, args) => {
+    if (command === "sudo" && args.includes("test") && args.includes("-e")) {
+      asked.push([...args]);
+      await Deno.chmod(metaDir, 0o755);
+      try {
+        await Deno.stat(args.at(-1) as string);
+        return { success: true, stdout: "", stderr: "" };
+      } catch {
+        return { success: false, stdout: "", stderr: "" };
+      }
+    }
+    return await group(command, args);
+  };
+  try {
+    await seed?.(layout);
+    await Deno.mkdir(metaDir, { recursive: true });
+    if (fileThere) {
+      await Deno.writeTextFile(
+        join(metaDir, "hosting.env"),
+        "CACHE_PASSWORD=stale-secret-value\n",
+      );
+    }
+    await Deno.chmod(metaDir, 0o000);
+    await applySites(layout, envId, [{ ...site, webEnv: {} }], {
+      run,
+      runPlaybook,
+      ...lane,
+    });
+    assertEquals(asked.length, 1);
+    const path = join(metaDir, "hosting.env");
+    if (fileThere) {
+      assertNoStaleHostingEnv(await Deno.readTextFile(path));
+    } else {
+      await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
+    }
+  } finally {
+    await Deno.chmod(metaDir, 0o755).catch(() => {});
+    await cleanup();
+  }
+}
+
+for (const fileThere of [true, false]) {
+  const verb = fileThere ? "rewrites" : "does not create";
+  test(`a release site with a denied stat ${verb} hosting.env`, async () => {
+    await assertDeniedStatDecides(
+      `envdeny-r${fileThere}`,
+      nginxSite,
+      { releaseBindings: releaseBindingsFor("www") },
+      fileThere,
+      (layout) => seedRelease(layout, "rel-1", "public", "<h1>one</h1>"),
+    );
+  });
+  test(`a managed-directory site with a denied stat ${verb} hosting.env`, async () => {
+    await assertDeniedStatDecides(
+      `envdeny-m${fileThere}`,
+      managedSite,
+      { managedDirectoryBindings: managedBindingsFor("www") },
+      fileThere,
+    );
+  });
+}
+
+test("a site that never had variables gets no hosting.env", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const mock = createSiteRunMock();
+  const run = withGroupMembership(mock.run, { tpnginx: ["tpnginx"] });
+  const { runPlaybook } = capturePlaybooks();
+  try {
+    await seedRelease(layout, "rel-1", "public", "<h1>one</h1>");
+    await applySites(layout, "envstale4", [{ ...nginxSite, webEnv: {} }], {
+      run,
+      runPlaybook,
+      releaseBindings: releaseBindingsFor("www"),
+    });
+    await assertRejects(
+      () =>
+        Deno.stat(
+          join(siteTreeRoot(layout), ".turbopanel-hosting", "hosting.env"),
+        ),
+      Deno.errors.NotFound,
+    );
+  } finally {
+    await cleanup();
+  }
+});
