@@ -766,7 +766,7 @@ install` call as `hosting.env` (owner's Linux user, `0400`, directory
 `root:root` `0711`), and every name in `dbCa.variables` is set to that path, so
 a multi-line certificate never enters the web server's environment. With
 feature `site-db-url-ca-v1`, `dbCa.urlVariables` (up to 16 names, like
-`variables`) lists variables holding a PostgreSQL URL: `withDbCaVariables`
+`variables`; an empty list means none, like leaving it out) lists variables holding a PostgreSQL URL: `withDbCaVariables`
 passes each one present in the site's environment through
 `withPostgresRootCert` (`db-url-ca.ts`), which appends `sslrootcert=<CA file>`
 (path percent-encoded outside `[A-Za-z0-9/._-]`) only for a `postgres://` or

@@ -331,9 +331,20 @@ test("dbCa urlVariables parse up to 16 names and refuse 17", () => {
     }), Error);
   assertThrows(
     () =>
-      parseSite({ dbCa: { variables: ["X"], urlVariables: [], pem: CERT } }),
+      parseSite({
+        dbCa: { variables: ["X"], urlVariables: "DB_URL", pem: CERT },
+      }),
     Error,
   );
+});
+
+test("dbCa urlVariables as an empty list means none", () => {
+  const parsed = parseSite({
+    dbCa: { variables: ["X"], urlVariables: [], pem: CERT },
+  });
+  assertEquals(parsed?.dbCa?.variables, ["X"]);
+  assertEquals(parsed?.dbCa?.urlVariables, undefined);
+  assertEquals("urlVariables" in (parsed?.dbCa ?? {}), false);
 });
 
 test("an older control plane's site (no dbCa, no requiredEnv) parses unchanged", () => {
