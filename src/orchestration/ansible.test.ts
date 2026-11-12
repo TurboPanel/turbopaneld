@@ -6,6 +6,7 @@ import {
   devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
+  serverPlaybookExtraArgs,
 } from "./ansible.ts";
 import {
   DEV_CONVERGE_MANIFEST_FILE,
@@ -604,7 +605,7 @@ test("instance-migrate uses the dev-user HOME for pnpm", async () => {
   );
   assertMatch(
     tasks,
-    /HOME: "{{ turbopanel_dev_root if \(turbopanel_dev_user/,
+    /HOME: "{{ turbopanel_dev_home if \(turbopanel_dev_user/,
     "instance-migrate HOME follows the co-located dev user",
   );
 });
@@ -871,16 +872,27 @@ test(
     );
     assertMatch(
       caddyfile,
+      /:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/platform-ca\.crt[\s\S]*?\{% include 'Caddyfile-hostname-sites\.j2' %\}/,
+      "the named hostname sites follow the :8443 catch-all as a shared include",
+    );
+    const hostnameSites = await Deno.readTextFile(
+      join(
+        CHECKOUT_ORCHESTRATION_DIR,
+        "roles/instance-launch/templates/Caddyfile-hostname-sites.j2",
+      ),
+    );
+    assertMatch(
+      hostnameSites,
       /\{\{ _site \}\}:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.crt \{\{ _certs_dir \}\}\/\{\{ _leaf \}\}\.key/,
       "an uploaded hostname is a named :8443 site with uploaded-<cert_id> files",
     );
     assertMatch(
-      caddyfile,
+      hostnameSites,
       /_site in \(turbopanel_letsencrypt_ready \| default\(\[\]\)\)[\s\S]*?\{\{ _site \}\}:8443 \{\n\s+tls \{\{ _certs_dir \}\}\/letsencrypt-\{\{ _site \}\}\.crt \{\{ _certs_dir \}\}\/letsencrypt-\{\{ _site \}\}\.key/,
       "a Let's Encrypt hostname is a named :8443 site only when its files exist",
     );
     assertEquals(
-      caddyfile.includes("{{ _site }} {"),
+      hostnameSites.includes("{{ _site }} {"),
       false,
       "a bare hostname would bind :443 implicitly",
     );
@@ -889,10 +901,30 @@ test(
       /trusted_proxies static 127\.0\.0\.0\/8 ::1/,
       "loopback peers are trusted so {client_ip} survives the hosting hop",
     );
+    assertMatch(
+      caddyfile,
+      /trusted_proxies static 127\.0\.0\.0\/8 ::1(?:\{% for c in turbopanel_edge_cidrs[^%]*%\} \{\{ c \}\}\{% endfor %\})?\s+trusted_proxies_strict\n/,
+      "X-Forwarded-For is read from the right, so a client cannot forge the leftmost entry",
+    );
     assertEquals(
       (caddyfile.match(/header_up X-Real-IP \{client_ip\}/g) ?? []).length,
       3,
       "the three unix proxies forward {client_ip}",
+    );
+    assertMatch(
+      caddyfile,
+      /@not_cloudflare_peer not remote_ip 127\.0\.0\.0\/8 ::1\{% for c in turbopanel_edge_cf_cidrs/,
+      "Cloudflare headers survive only from loopback and Cloudflare ranges",
+    );
+    assertMatch(
+      caddyfile,
+      /@not_edge_peer not remote_ip 127\.0\.0\.0\/8 ::1\{% for c in turbopanel_edge_cidrs/,
+      "X-Forwarded-For survives only from loopback and edge ranges",
+    );
+    assertMatch(
+      caddyfile,
+      /request_header @not_edge_peer -X-Forwarded-For/,
+      "every other peer still has X-Forwarded-For stripped",
     );
     assertEquals(caddyfile.includes("{remote_host}"), false);
     assertEquals(
@@ -1760,6 +1792,68 @@ test("Apache runs as tpapache with its own top-level log and runtime dirs", asyn
   );
 });
 
+test("the Apache role tests first, restarts by what is running, puts the link back on failure and prunes only after", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/tasks/main.yml"),
+  );
+  const has = (text: string) => assert(tasks.includes(text), text);
+  has("register: _apache_link");
+  has("register: _apache_conf");
+  has("register: _apache_current_before");
+  // The config is tested as the server's own account, never as root.
+  has("runuser -u {{ apache_service_user }} --");
+  has("{{ turbopanel_vendor_dir }}/apache/current/bin/httpd -t");
+  has("-f {{ turbopanel_config_dir }}/apache/httpd.conf");
+  assert(!tasks.includes("become_user"), "no become_user for the test");
+  // The unit-change restart no longer runs before the test: the only
+  // restarts are inside the tested block and its rescue.
+  assert(
+    !tasks.includes("Restart a running Apache after its unit changed"),
+    "no restart ahead of the test",
+  );
+  const block = tasks.indexOf("Test the config, then move Apache onto it");
+  const test = tasks.indexOf("Test the Apache config with the installed build");
+  const restart = tasks.indexOf("Restart Apache onto the new build");
+  const reload = tasks.indexOf("Reload Apache after its config");
+  const rescue = tasks.indexOf("  rescue:");
+  const prune = tasks.indexOf("Find superseded Apache version directories");
+  assert(
+    block > 0 && block < test && test < restart && restart < reload &&
+      reload < rescue && rescue < prune,
+  );
+  // Sticky: the test runs on every run while Apache is up (the block is only
+  // conditioned on the unit being active), and the restart is decided by the
+  // running binary against the installed one, not by whether this run moved
+  // the link.
+  assert(
+    !/Test the Apache config with the installed build[\s\S]*?when:[\s\S]*?_apache_link\.changed/
+      .test(tasks.slice(test, restart)),
+    "the test does not depend on a change in this run",
+  );
+  has("readlink -f /proc/{{ _apache_main_pid.stdout | trim }}/exe");
+  has("readlink -f {{ turbopanel_vendor_dir }}/apache/current/bin/httpd");
+  has("_apache_needs_restart");
+  has("when: _apache_needs_restart | bool");
+  has("- not (_apache_needs_restart | bool)");
+  // A failed test or restart: link back, restart a failed unit onto the old
+  // build, and end the run in a failure so the prune never runs.
+  const rescued = tasks.slice(rescue, prune);
+  assert(rescued.includes("{{ _apache_current_before.stat.lnk_source }}"));
+  assert(rescued.includes("systemctl restart turbopanel-apache.service"));
+  assert(rescued.includes("_apache_restart is failed"));
+  assert(
+    rescued.lastIndexOf("ansible.builtin.fail") >
+      rescued.lastIndexOf("ansible.builtin.file"),
+    "the rescue ends in a failure",
+  );
+  // The prune keeps `current` and the pinned version only.
+  has('- current\n      - "{{ apache_version }}"');
+  has('paths: "{{ turbopanel_vendor_dir }}/apache"');
+  // Per-site error logs live in a sites folder the server account owns.
+  has('path: "/var/log/{{ apache_logs_directory }}/sites"');
+  has('owner: "{{ apache_service_user }}"');
+});
+
 test("Apache loads mod_remoteip and logs the client address for nginx in front", async () => {
   const conf = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/apache/templates/httpd.conf.j2"),
@@ -1779,6 +1873,43 @@ test("Apache loads mod_remoteip and logs the client address for nginx in front",
     line.startsWith("CustomLog ") && line.endsWith(" combined")
   );
   assertEquals(format >= 0 && format < custom, true);
+});
+
+test("a managed server's own playbooks get no extra-vars, whatever the run-mode env says", () => {
+  assertEquals(serverPlaybookExtraArgs({}), []);
+  assertEquals(
+    serverPlaybookExtraArgs({
+      TURBOPANEL_UI_MODE: "dev",
+      TURBOPANEL_INSTANCE_RUN_MODE: "source",
+      TURBOPANEL_INSTANCE_RUNTIME: "workers",
+      TURBOPANEL_PUBLIC_URLS: "https://203.0.113.10",
+    }),
+    [],
+  );
+});
+
+test("a co-located development host's server playbooks get the ownership vars and never the run-mode trio", () => {
+  const args = serverPlaybookExtraArgs({
+    TURBOPANEL_DEV_USER: "dev",
+    TURBOPANEL_DEV_UID: "1000",
+    TURBOPANEL_DEV_GID: "1000",
+    TURBOPANEL_DEV_ROOT: "/home/dev/turbopanel",
+    TURBOPANEL_UI_MODE: "dev",
+    TURBOPANEL_INSTANCE_RUN_MODE: "source",
+  });
+  assertEquals(args.includes("turbopanel_dev_user=dev"), true);
+  assertEquals(args.includes("turbopanel_dev_uid=1000"), true);
+  assertEquals(args.includes("turbopanel_dev_gid=1000"), true);
+  assertEquals(args.includes("turbopanel_dev_root=/home/dev/turbopanel"), true);
+  for (
+    const key of [
+      "turbopanel_ui_mode",
+      "turbopanel_instance_run_mode",
+      "turbopanel_instance_runtime",
+    ]
+  ) {
+    assertEquals(args.some((arg) => arg.startsWith(`${key}=`)), false);
+  }
 });
 
 test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
@@ -1801,6 +1932,21 @@ test("devOwnershipPlaybookExtraArgs emits user uid gid and root", () => {
     ],
   );
   assertEquals(devOwnershipPlaybookExtraArgs({}), []);
+  assertEquals(
+    devOwnershipPlaybookExtraArgs({
+      TURBOPANEL_DEV_USER: "pat",
+      TURBOPANEL_DEV_ROOT: "/home/pat/work/turbopanel",
+      TURBOPANEL_DEV_HOME: "/home/pat",
+    }),
+    [
+      "-e",
+      "turbopanel_dev_user=pat",
+      "-e",
+      "turbopanel_dev_root=/home/pat/work/turbopanel",
+      "-e",
+      "turbopanel_dev_home=/home/pat",
+    ],
+  );
   assertEquals(
     devOwnershipPlaybookExtraArgs({
       TURBOPANEL_DEV_USER: "vagrant",
@@ -2402,7 +2548,10 @@ test("runDockerSetup passes docker addressing as -e extra-vars", () => {
   const body = source.slice(start, end);
   assertEquals(body.includes("buildDockerSetupExtraArgs(resolved)"), true);
   assertEquals(body.includes("readDockerNetworkingState("), true);
-  assertEquals(body.includes("devInstanceExtraArgs()"), true);
+  // The development ownership vars the docker role reads, and never the
+  // co-located run-mode trio.
+  assertEquals(body.includes("serverPlaybookExtraArgs()"), true);
+  assertEquals(body.includes("devInstanceExtraArgs()"), false);
 });
 
 test(
@@ -2783,4 +2932,109 @@ test("the pre-update snapshot holds a restorable full dump of the control-plane 
       rollback.includes("turbopanel.dump"),
     "the rollback replays the same file with pg_restore",
   );
+});
+
+test("co-located development renders named hostname sites into the dev sites directory", async () => {
+  const tasks = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/caddyfile-dev-sites.yml",
+    ),
+  );
+  const taskCount = (tasks.match(/^- name: /gm) ?? []).length;
+  const gated = (tasks.match(
+    /^ {2}when: turbopanel_dev_user \| default\(''\) \| length > 0$/gm,
+  ) ??
+    []).length;
+  assertEquals(taskCount > 0, true);
+  assertEquals(
+    gated,
+    taskCount,
+    "every dev sites task is gated on turbopanel_dev_user",
+  );
+  assertMatch(
+    tasks,
+    /src: "\{\{ role_path \| default\(playbook_dir ~ '\/\.\.\/roles\/instance-launch'\) \}\}\/templates\/Caddyfile-dev-sites\.j2"\n\s+dest: "\{\{ turbopanel_dev_sites_dir \}\}\/hostnames\.caddy\.candidate"/,
+    "the candidate is rendered from Caddyfile-dev-sites.j2 by an explicit path that also resolves outside the role",
+  );
+  assertMatch(
+    tasks,
+    /TURBOPANEL_DEV_SITES_DIR="\$staging" "\$CADDY_BIN" validate --config "\$CADDYFILE" --adapter caddyfile/,
+    "the candidate is validated against the dev Caddyfile through a staging directory",
+  );
+  assertEquals(
+    tasks.indexOf("validate --config") <
+      tasks.indexOf('dest: "{{ turbopanel_dev_sites_dir }}/hostnames.caddy"\n'),
+    true,
+    "validation precedes the install",
+  );
+  assertMatch(
+    tasks,
+    /dest: "\{\{ turbopanel_dev_sites_dir \}\}\/hostnames\.caddy"\n[\s\S]*?register: turbopanel_dev_sites_install/,
+    "the install registers turbopanel_dev_sites_install for the reload",
+  );
+
+  const caddyfileTasks = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/tasks/caddyfile.yml",
+    ),
+  );
+  assertMatch(
+    caddyfileTasks,
+    /ansible\.builtin\.import_tasks: caddyfile-dev-sites\.yml/,
+    "a converge renders the dev sites",
+  );
+  assertMatch(
+    caddyfileTasks,
+    /turbopanel_dev_sites_install is changed[\s\S]*?notify:\n\s+- Reload turbopanel caddy/,
+    "a changed dev sites file reloads Caddy on a converge",
+  );
+
+  const playbook = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "playbooks/instance-certs-apply.yml"),
+  );
+  const devSites = playbook.indexOf("tasks/caddyfile-dev-sites.yml");
+  const active = playbook.indexOf("Read whether control-plane Caddy is active");
+  const devReload = playbook.indexOf("Reload the development Caddy unit");
+  assertEquals(devSites >= 0 && devSites < active, true);
+  assertEquals(
+    active < devReload,
+    true,
+    "the dev unit reload follows the render",
+  );
+
+  const devTemplate = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/Caddyfile-dev-sites.j2",
+    ),
+  );
+  assertMatch(
+    devTemplate,
+    /\{% set _certs_dir = turbopanel_instance_certs_dir %\}[\s\S]*?\{% include 'Caddyfile-hostname-sites\.j2' %\}/,
+    "the dev template shares the hostname sites include with Caddyfile.j2",
+  );
+
+  const unit = await Deno.readTextFile(
+    join(
+      CHECKOUT_ORCHESTRATION_DIR,
+      "roles/instance-launch/templates/turbopanel-caddy.service.j2",
+    ),
+  );
+  assertMatch(
+    unit,
+    /\{% if turbopanel_dev_user \| default\(''\) \| length > 0 %\}[\s\S]*?Environment=TURBOPANEL_DEV_SITES_DIR=\{\{ turbopanel_dev_sites_dir \}\}/,
+    "the dev Caddy unit exports the sites directory",
+  );
+  for (const role of ["instance-certs", "instance-launch"]) {
+    const defaults = await Deno.readTextFile(
+      join(CHECKOUT_ORCHESTRATION_DIR, `roles/${role}/defaults/main.yml`),
+    );
+    assertMatch(
+      defaults,
+      /turbopanel_dev_sites_dir: "\{\{ turbopanel_config_dir \}\}\/caddy\/dev-sites"/,
+      `${role} defaults the dev sites directory`,
+    );
+  }
 });

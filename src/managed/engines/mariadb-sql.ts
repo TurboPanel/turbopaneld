@@ -118,14 +118,30 @@ export function dropDatabaseSql(name: string): string {
   return `DROP DATABASE IF EXISTS ${db};`;
 }
 
-export const { grantDatabaseSql, revokePlainDatabaseGrantSql } = grantSqlFor(
+export const {
+  grantDatabaseSql,
+  revokePlainDatabaseGrantSql,
+  grantBackupSql,
+  listGrantRowsSql,
+  revokeRowsSql,
+  listConnectionsSql,
+} = grantSqlFor(
   {
     quoteIdentifier,
     quoteLiteral,
     accountAt,
+    processlistTable: "information_schema.PROCESSLIST",
     extraPrivileges: [
       ["DELETE HISTORY", "Delete_history_priv"],
       ["SHOW CREATE ROUTINE", "Show_create_routine_priv"],
+    ],
+    backupPrivileges: [
+      "SELECT",
+      "SHOW VIEW",
+      "TRIGGER",
+      "EVENT",
+      "LOCK TABLES",
+      "SHOW CREATE ROUTINE",
     ],
   },
   MANAGED_DOCKER_NETWORK_HOST,

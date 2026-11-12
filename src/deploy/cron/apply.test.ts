@@ -617,6 +617,7 @@ test("apply issues exactly this host command sequence", async () => {
       `sudo -n systemctl disable --now ${stale}.timer`,
       `sudo -n rm -f -- <units>/${stale}.timer`,
       `sudo -n rm -f -- <units>/${stale}.service`,
+      `sudo -n rm -f -- /var/lib/systemd/timers/stamp-${stale}.timer`,
       "sudo -n systemctl daemon-reload",
       `sudo -n systemctl enable --now ${UNIT}.timer`,
     ]);
@@ -639,6 +640,7 @@ test("removeCronJobs issues exactly this host command sequence", async () => {
       `sudo -n systemctl disable --now ${UNIT}.timer`,
       `sudo -n rm -f -- <units>/${UNIT}.timer`,
       `sudo -n rm -f -- <units>/${UNIT}.service`,
+      `sudo -n rm -f -- /var/lib/systemd/timers/stamp-${UNIT}.timer`,
       "sudo -n systemctl daemon-reload",
     ]);
   } finally {

@@ -82,6 +82,12 @@ export function resolveInstanceConfig(
   return { kind: "socket", socketPath: resolveInstanceSocket(resolved) };
 }
 
+/** A network target at `url` (one entry of a pinned server's address list). */
+export function urlInstanceConfig(url: string): InstanceConfig {
+  const baseUrl = stripTrailingSlashes(url);
+  return { kind: "url", baseUrl, wsBaseUrl: httpToWs(baseUrl) };
+}
+
 /** Base URL used with the Unix-socket HTTP client (host is ignored). */
 export const INSTANCE_HTTP_ORIGIN = "http://instance"; // NOSONAR typescript:S5332 — Unix-socket origin only; host ignored, never a network cleartext endpoint
 

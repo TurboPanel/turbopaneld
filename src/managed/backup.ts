@@ -2,7 +2,7 @@
  * Managed engine backup / restore: streamed `pg_dump` / `pg_restore` (or
  * future engine equivalents) through `docker exec`.
  *
- * Rules (see `AGENTS.md`):
+ * Rules (see `src/managed/AGENTS.md`):
  * - Never buffer a dump/restore payload in memory — everything is piped
  *   file-to-process or process-to-file via `ReadableStream`/`WritableStream`.
  * - Never return artifact bytes on the wire — only metadata (path, size,

@@ -919,3 +919,40 @@ test("unsubscribe stops change and reachability delivery", async () => {
     assertEquals(reach, []);
   }, 50);
 });
+
+test("a network create event calls the network listeners; other network and container create events do not", async () => {
+  const client = new MockDockerClient();
+  client.containers = [makeSummary()];
+  client.inspects.set(CONTAINER_ID, makeInspect());
+  await withMonitor(client, async (monitor, controller) => {
+    let created = 0;
+    const changes: DockerMonitorChange[] = [];
+    monitor.subscribeNetworkCreated(() => {
+      created += 1;
+    });
+    monitor.subscribe((change) => changes.push(change));
+    monitor.start(controller.signal);
+    await monitor.waitUntilReady();
+
+    client.pushEvent({
+      Type: "network",
+      Action: "destroy",
+      Actor: { ID: "n1" },
+    });
+    client.pushEvent({
+      Type: "container",
+      Action: "create",
+      Actor: { ID: CONTAINER_ID },
+    });
+    client.pushEvent({
+      Type: "network",
+      Action: "create",
+      Actor: { ID: "n2" },
+    });
+    await waitFor("network create", () => created > 0 ? created : undefined);
+
+    assertEquals(created, 1);
+    // The reconcile may report the container, but no event reaches listeners.
+    assertEquals(changes.filter((change) => change.event !== undefined), []);
+  });
+});

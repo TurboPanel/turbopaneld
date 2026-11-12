@@ -5,6 +5,15 @@
  * inline instance-only imports.
  */
 import type { SensorCapabilities } from "../metrics/collector/sensors/discovery.ts";
+import {
+  CACHE_PORT_MAX,
+  CACHE_PORT_MIN,
+  CACHE_RUNTIMES,
+  MAX_CACHE_MEMORY_MB,
+  MAX_CACHES_PER_COMMAND,
+  MAX_HELPER_REACH_PER_DEPLOY,
+  MIN_CACHE_MEMORY_MB,
+} from "../deploy/cache/limits.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 import {
   type FolderRefParts,
@@ -27,6 +36,9 @@ export const COMMAND_TYPES = [
   "server.backups.reconcile",
   "server.backups.test-target",
   "server.folders.remove",
+  "server.tunnel.routes",
+  "server.tunnel.connectors",
+  "server.tunnel.status",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -42,6 +54,7 @@ export const COMMAND_TYPES = [
   "storage.backup",
   "storage.restore",
   "system.reconcile",
+  "cache.apply",
 ] as const;
 
 export type CommandType = (typeof COMMAND_TYPES)[number];
@@ -362,7 +375,7 @@ export type FirewallPolicy = {
  * can tell which desired state a report describes.
  *
  * `controlPlane.tcpPorts` names the co-located control plane's entrypoint
- * (8443 by default; 80 and 443 under `lets_encrypt`). The daemon treats those
+ * (always 8443; 80 and 443 belong to hosting). The daemon treats those
  * as invariants — accepted before any rule — and refuses a default-drop apply
  * on a host where `turbopanel-instance.service` is active and the list is
  * absent, because a panel that forgot its own port must not lock its wizard
@@ -711,23 +724,44 @@ export type FabricReconcileNetwork = {
 /**
  * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
  * `{ enabled: false }` is a **tear down** (`tp0`, routed bridges, `TP-FORWARD`,
- * keys, state) — not a no-op.
+ * keys, state) — not a no-op. `retainKeys: true` (daemons that advertise
+ * `fabric-retain-keys-v1`) only pauses: `tp0` and its routes go, the key,
+ * bridges and forwarding stay, and the next enable reuses the same key.
  */
 export type FabricReconcileDisabledPayload = {
   enabled: false;
+  retainKeys?: boolean;
 };
 
-/** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * A member's container subnet reached over a shared trusted LAN, routed via
+ * that member's LAN address (`fabric-lan-routes-v1`).
+ */
+export type FabricReconcileLanRoute = {
+  cidr: string;
+  via: string;
+};
+
+/**
+ * Must stay in sync with the instance canonical `server.fabric.reconcile` shape.
+ * `tunnel: false` (`fabric-lan-routes-v1`; absent means `true`): this server
+ * needs no tunnel, so `tp0` is not created (and is taken down when present,
+ * keeping its key), `peers` must be empty and `address` may be absent.
+ */
 export type FabricReconcileEnabledPayload = {
   enabled: true;
   fabricId?: string;
   listenPort?: number;
   mtu?: number;
-  address: string;
+  /** Absent only when `tunnel` is `false`. */
+  address?: string;
   prefix: string;
   peers: FabricReconcilePeer[];
   networks?: FabricReconcileNetwork[];
   gateway?: boolean;
+  tunnel?: boolean;
+  lanRoutes?: FabricReconcileLanRoute[];
 };
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` shape. */
@@ -767,6 +801,12 @@ export type FabricReconcileResult = {
   publicKey?: string;
   skipped?: boolean;
   peers?: FabricReconcileObservedPeer[];
+  /**
+   * Plain sentences about what an apply that worked had to leave out (a LAN
+   * or `tp0` route another interface already holds, container bridges that
+   * wait for Docker). Absent when nothing was left out.
+   */
+  warnings?: string[];
 };
 
 export type EnvironmentDeployHostingProxy = {
@@ -822,6 +862,12 @@ export type EnvironmentDeployHosting = {
    * private IP, or loopback). Omitted when bind is public with no pin.
    */
   bindAddress?: string;
+  /**
+   * Tunnel names of this hosting and who may reach them. When present the
+   * server answers those names only to local connectors and the listed peer
+   * addresses, and also listens on `extraBind`. Absent = no tunnel names.
+   */
+  tunnel?: EnvironmentDeployHostingTunnel;
   /**
    * `http` (default/omitted) routes `hostnames` through Traefik + hosting Caddy.
    * `tcp` / `udp` publish `ports[]` straight through Traefik — no hostname/TLS
@@ -953,6 +999,15 @@ export type EnvironmentDeployPrincipalMaterial = {
    * reconciles to the state the account already had.
    */
   passwordHash?: string;
+  /**
+   * The same hash as a `tpdaemon.…` envelope, sent instead of `passwordHash` by
+   * a control plane that sees `daemon-sealed-secrets-v1` (environment deploys)
+   * or `daemon-sealed-principal-reconcile-v1` (principals reconcile). The daemon
+   * opens it
+   * through `/secrets/decrypt` (which answers sealed to its own key) before the
+   * account is touched. Never both fields.
+   */
+  passwordHashEnvelope?: string;
 };
 
 /**
@@ -1027,6 +1082,85 @@ export type EnvironmentDeployHostingPhp = {
 export type EnvironmentDeploySiteDbCa = {
   variables: string[];
   pem: string;
+  /**
+   * Names of variables holding a PostgreSQL URL (feature `site-db-url-ca-v1`).
+   * A URL in `verify-ca` or `verify-full` mode with no `sslrootcert` gets the
+   * CA file's path appended. Only the listed names are touched.
+   */
+  urlVariables?: string[];
+};
+
+/**
+ * One project cache the host runs for this environment (feature
+ * `project-cache-v1`): a native Valkey process run as the Hosting Account
+ * `username`, with a named login (`app`, the default user off) whose password
+ * the host knows only as `passwordSha256`. The plain password reaches the
+ * sites as a sealed variable, never here.
+ */
+export type EnvironmentDeployCache = {
+  /** Lower-case UUID; it forms the unit name and every path. */
+  id: string;
+  /** Short name unique in the environment: lower case letters, digits and dashes. */
+  name: string;
+  /** The Hosting Account the process runs as. */
+  username: string;
+  engine: "valkey";
+  /** A key of the daemon's `CACHE_RUNTIMES.valkey`, such as `8.1`. */
+  version: string;
+  /** `socket`: a private unix socket only the account can open. `port`: a loopback port open to the account only. */
+  access: "socket" | "port";
+  /** Loopback port from the listen band (18080-18999); present if and only if `access` is `port`. */
+  port?: number;
+  /** `maxmemory` in MiB (16-65536); the unit's memory ceiling is twice this plus 32 MiB. */
+  maxMemoryMb: number;
+  /** Lower-case hex SHA-256 of the login password. */
+  passwordSha256: string;
+  /** The account's ceiling, written to its slice when sent. Never rewritten to empty limits. */
+  accountLimits?: { cpus?: number; memoryBytes?: number; tasksMax?: number };
+};
+
+/**
+ * A helper container's published port (feature `project-cache-v1`): the
+ * control plane has injected `127.0.0.1:<hostPort>:<containerPort>` into the
+ * compose document, and the host opens `hostPort` to the Hosting Account
+ * `username` only.
+ */
+export type EnvironmentDeployHelperReach = {
+  composeServiceName: string;
+  containerPort: number;
+  hostPort: number;
+  username: string;
+};
+
+/** How one cache fared on this host. */
+export type CacheApplyResult = {
+  id: string;
+  /** `pending`: its Linux account is not on this host yet, so it starts with the next deploy. */
+  state: "ready" | "failed" | "pending";
+  /** Plain words, never a secret. Present for `failed` and `pending`. */
+  error?: string;
+  /** The patch release that runs, such as `8.1.11`. Present for `ready`. */
+  runtimeVersion?: string;
+};
+
+/** One cache to remove from this host with `cache.apply`. */
+export type CacheApplyRemoval = {
+  id: string;
+  username: string;
+  /** Delete the data folder too. Without it the data stays on the host. */
+  deleteData: boolean;
+};
+
+/** `cache.apply` (feature `project-cache-v1`): bring this host's caches for one environment in line. */
+export type CacheApplyPayload = {
+  environmentId: string;
+  /** The complete set this environment has on this host. */
+  caches: EnvironmentDeployCache[];
+  removed?: CacheApplyRemoval[];
+};
+
+export type CacheApplyCommandResult = {
+  caches: CacheApplyResult[];
 };
 
 export type EnvironmentDeploySitePrincipal = {
@@ -1084,6 +1218,44 @@ export type EnvironmentDeployCronJob = {
   concurrencyPolicy?: "forbid";
 };
 
+/** When a site's post-deploy commands run; omitted means `before-traffic`. */
+export type EnvironmentDeploySitePostDeployTiming =
+  | "before-traffic"
+  | "after-switch";
+
+/**
+ * Commands run as the site's account in the new release with the site's
+ * variables: before the release takes traffic (the default; a failure leaves
+ * the release that was serving in place) or right after the switch (a failure
+ * fails the deploy and the control plane offers a rollback). Sent only to a
+ * daemon that lists `site-php-lifecycle-v1`.
+ */
+export type EnvironmentDeploySitePostDeploy = {
+  /** 1 to 10 argv lists; `command[0]` is an absolute path. */
+  commands: string[][];
+  /** 30 to 1800; omitted means 900. */
+  timeoutSeconds?: number;
+  timing?: EnvironmentDeploySitePostDeployTiming;
+};
+
+/**
+ * One long-running command (a queue worker) kept running as a managed unit
+ * under the site's account. Restarted gracefully after every deploy. Sent only
+ * to a daemon that lists `site-php-lifecycle-v1`.
+ */
+export type EnvironmentDeploySiteWorker = {
+  /** Unit-name segment, unique within the site. */
+  name: string;
+  /** argv; `command[0]` is an absolute path. */
+  command: string[];
+  /** 1 to 8; omitted means 1. */
+  processes?: number;
+  /** `TimeoutStopSec=`, 10 to 3600; omitted means 90. */
+  stopTimeoutSeconds?: number;
+  /** `MemoryMax=` in bytes, 64 MiB to 64 GiB. */
+  memoryMaxBytes?: number;
+};
+
 export type EnvironmentDeploySite = {
   composeServiceName: string;
   /**
@@ -1106,6 +1278,13 @@ export type EnvironmentDeploySite = {
    * Requires `principal`: a timer with no `User=` would run as root.
    */
   cron?: EnvironmentDeployCronJob[];
+  /**
+   * Commands to run in each newly built release, as the site's principal.
+   * Requires `principal` and a release-backed site.
+   */
+  postDeploy?: EnvironmentDeploySitePostDeploy;
+  /** Background workers, run as the site's principal. Requires `principal`. */
+  workers?: EnvironmentDeploySiteWorker[];
   webEnv?: Record<string, string>;
   /**
    * Secret runtime variables, name to `tpdaemon` envelope (the sealed twin of
@@ -1142,16 +1321,17 @@ export type EnvironmentDeploySite = {
  * `env` is a **non-secret** build-time map only — build secrets ride
  * `variableMaterial[]` / `secretPlan[]`.
  *
- * `native` checks out, builds, and promotes a directory release. `railpack`
- * builds an OCI image with Railpack + BuildKit instead: nothing is promoted, no
+ * `native` checks out, builds, and promotes a directory release. `image`
+ * builds an OCI image with BuildKit instead: nothing is promoted, no
  * `current` symlink moves, and the resulting image tag is written back into
  * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
- * for `railpack` and is ignored rather than rejected, so a stale value left by
+ * for `image` and is ignored rather than rejected, so a stale value left by
  * a mode switch still parses. `kind: 'static'` is reserved for the
- * site release phase and is not produced today.
+ * site release phase and is not produced today. The old value of
+ * `image` is still accepted and means the same thing.
  */
 export type EnvironmentDeploySourceBuild = {
-  kind: "native" | "static" | "railpack";
+  kind: "native" | "static" | "image" | "railpack";
   /**
    * Package manager for a `kind: 'native'` node-app install. Omitted means
    * auto-detect from the lockfile after checkout. An explicit
@@ -1436,6 +1616,30 @@ export type EnvironmentDeploySecretPlanEntry = {
   forRuntime: boolean;
 };
 
+/** One piece of a generated config file: literal text or a secret's value. */
+export type EnvironmentDeployConfigFilePart =
+  | { text: string }
+  | { secretKey: string };
+
+/**
+ * A generated config file the daemon puts together on the `/run` tmpfs from
+ * ordered parts. Parts hold text and secret key names, never a value: each
+ * `secretKey` is read from the `variableMaterial[]` entry for the same
+ * `composeServiceName`. Only sent to a daemon that lists
+ * `deploy-config-files-v1`.
+ */
+export type EnvironmentDeployConfigFile = {
+  composeServiceName: string;
+  source: string;
+  relativePath: string;
+  parts: EnvironmentDeployConfigFilePart[];
+};
+
+/** Limits the control plane's own twin enforces too. */
+export const MAX_CONFIG_FILE_TEXT_BYTES = 65_536;
+export const MAX_CONFIG_FILES_PER_SERVICE = 16;
+export const MAX_CONFIG_FILES_TEXT_BYTES_PER_DEPLOY = 262_144;
+
 const DEPLOY_COMPOSE_FILE_ROLES = new Set<EnvironmentDeployComposeFileRole>([
   "project",
   "environment",
@@ -1591,6 +1795,12 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    */
   hideWebServerNames?: boolean;
   /**
+   * Send the hosting web server's `Via` response header. False strips it.
+   * Absent follows `hideWebServerNames` (stripped when names are hidden), so
+   * an older control plane changes nothing.
+   */
+  sendViaHeader?: boolean;
+  /**
    * `sequential` stops the previous version, runs migrations, starts the new
    * version, gates on health and rolls back (see `deploy/sequential-deploy.ts`).
    * Absent or `inplace` is the original `compose up -d` deploy. An older
@@ -1610,6 +1820,8 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   variableMaterial?: EnvironmentDeployVariableMaterial[];
   envFile?: string;
   secretPlan?: EnvironmentDeploySecretPlanEntry[];
+  /** Generated config files (parts only); see {@link EnvironmentDeployConfigFile}. */
+  configFiles?: EnvironmentDeployConfigFile[];
   storageMaterial?: EnvironmentDeployStorageMaterial[];
   /**
    * The folder of every service this deploy runs on the host (a site, a native
@@ -1637,6 +1849,19 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
   principalMaterial?: EnvironmentDeployPrincipalMaterial[];
   serviceHooks?: EnvironmentDeployServiceHook[];
   /**
+   * The complete set of project caches this environment has on this host
+   * (feature `project-cache-v1`). Absent: an old control plane, so the host
+   * leaves every cache alone. Present (even empty): a cache on the host that is
+   * not listed loses its unit and config, and its data stays.
+   */
+  caches?: EnvironmentDeployCache[];
+  /**
+   * Helper container ports to open to a Hosting Account (feature
+   * `project-cache-v1`). Absent leaves the environment's list alone; an empty
+   * list removes it.
+   */
+  helperReach?: EnvironmentDeployHelperReach[];
+  /**
    * Server-owner org effective ProxySQL client listener ports. When present,
    * tenant tcp/udp ingress must also reserve these in addition to the platform
    * defaults (`15432` / `13306`).
@@ -1658,12 +1883,17 @@ export type EnvironmentDeployContainer = {
   role: "service" | "ingress" | "turbopanel";
 };
 
+/** True for the image-build kind, under its new value and the old one. */
+export function isImageBuildKind(kind: string): boolean {
+  return kind === "image" || kind === "railpack";
+}
+
 /**
  * One Git-backed release this deploy put live, as reported back to the control
  * plane.
  *
  * Enough for the release-history / rollback surface to name a release without
- * a second round trip to the host. A **Railpack** release has no promoted
+ * a second round trip to the host. An **image-built** release has no promoted
  * directory and no commit-backed tree to point at, so its identity on that
  * surface is the image tag plus the pinned tools that produced it; a native
  * release simply omits those three fields.
@@ -1681,8 +1911,8 @@ export type EnvironmentDeployResultRelease = {
   releaseId: string;
   commitSha: string;
   imageTag?: string;
-  railpackFrontendVersion?: string;
-  railpackPlanVersion?: string;
+  builderFrontendVersion?: string;
+  builderPlanVersion?: string;
 };
 
 /**
@@ -1739,6 +1969,8 @@ export type EnvironmentDeployResult = {
    * Omitted otherwise. Additive: older control planes ignore it.
    */
   unchanged?: boolean;
+  /** One entry per cache the deploy was sent (feature `project-cache-v1`); omitted when none. */
+  caches?: CacheApplyResult[];
 };
 
 /** A service folder a deploy left in place, by its components. */
@@ -1785,6 +2017,37 @@ export type EnvironmentStopPayload = {
    * teardown; a plain stop never carries it.
    */
   retirePrincipals?: Array<{ username: string }>;
+  /**
+   * Remove the whole deployment dir
+   * (`<stateDir>/deployments/<projectId>/<environmentId>`), including anything a
+   * relative bind such as `./data` wrote there. Only an environment or project
+   * delete sets it; without it the daemon removes only its own compose files.
+   */
+  removeDeploymentDir?: true;
+  /**
+   * Also remove these registered Docker volumes after the stack is down (the
+   * Destroy dialog's "Also Delete the Data Volumes"). Each is named by its
+   * storage id, which is the Docker volume's exact name; nothing else is ever
+   * removed. A volume a container still uses is kept and reported. Only a
+   * control plane that saw `environment-stop-remove-volumes-v1` sends it.
+   */
+  removeVolumes?: StopVolumeRemoval[];
+};
+
+/** One registered Docker volume a stop is asked to remove, by its storage id (its exact name). */
+export type StopVolumeRemoval = { storageId: string };
+
+/** What happened to one volume a stop was asked to remove. */
+export type EnvironmentStopVolumeState = {
+  storageId: string;
+  /**
+   * `removed`: gone now. `absent`: there was no such volume on this server.
+   * `kept`: left in place on purpose (a container still uses it, or Docker is
+   * not installed). `failed`: Docker refused to remove it.
+   */
+  state: "removed" | "absent" | "kept" | "failed";
+  /** Why the volume stayed, in plain words. Present for `kept` and `failed`. */
+  reason?: string;
 };
 
 export type EnvironmentStopResult = {
@@ -1798,6 +2061,8 @@ export type EnvironmentStopResult = {
    * is true once the folder is gone from the host (or was never there).
    */
   folders?: EnvironmentStopFolderState[];
+  /** One entry per volume in `removeVolumes`; present only when it was sent. */
+  volumes?: EnvironmentStopVolumeState[];
 };
 
 /** One reclaimed (or not) service folder, by its components. */
@@ -1947,9 +2212,19 @@ export type ManagedApplyCredential = {
    * never resets or revokes anything below the database.
    */
   grantMode?: ManagedGrantMode;
+  /**
+   * `backup`: the cluster's backup login. `role` stays `user`; the daemon
+   * gives it the read-only rights a full logical dump needs on every listed
+   * database (per engine) and nothing else, whatever `privileges` and
+   * `grantMode` say. Absent (or a value this daemon does not know) means an
+   * ordinary login.
+   */
+  kind?: ManagedCredentialKind;
   /** Daemon-recipient sealed password (`tpdaemon.…`). */
   password: string;
 };
+
+export type ManagedCredentialKind = "backup";
 
 /** Must stay in sync with the instance canonical `managed.apply` shape. */
 export type ManagedApplyDatabaseOp = {
@@ -3790,7 +4065,7 @@ export function ipLiteralToBigInt(value: string): bigint | null {
   return out;
 }
 
-type ParsedCidrLiteral = {
+export type ParsedCidrLiteral = {
   version: 4 | 6;
   prefix: number;
   /** Network address (host bits cleared). */
@@ -4028,13 +4303,55 @@ function parseFabricNetworkEntry(value: unknown): FabricReconcileNetwork {
   return network;
 }
 
+function parseFabricLanRouteEntry(value: unknown): FabricReconcileLanRoute {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Invalid fabric lanRoutes entry");
+  }
+  const record = value as Record<string, unknown>;
+  const { cidr, via } = record;
+  if (typeof cidr !== "string" || !isValidWireguardAllowedIp(cidr.trim())) {
+    throw new TypeError("Invalid fabric lanRoutes cidr");
+  }
+  if (
+    typeof via !== "string" ||
+    !(isValidIpv4Literal(via.trim()) || isValidIpv6Literal(via.trim()))
+  ) {
+    throw new TypeError("Invalid fabric lanRoutes via");
+  }
+  return { cidr: cidr.trim(), via: via.trim() };
+}
+
+function parseFabricTunnelFlag(value: unknown): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new TypeError("Invalid fabric tunnel");
+  return value;
+}
+
+/** `address` is required unless the payload asks for no tunnel. */
+function parseFabricAddress(
+  value: unknown,
+  tunnel: boolean | undefined,
+): string | undefined {
+  if (value === undefined && tunnel === false) return undefined;
+  if (typeof value !== "string" || !isValidWireguardAllowedIp(value)) {
+    throw new TypeError("Invalid fabric address");
+  }
+  return value.trim();
+}
+
+function parseFabricLanRoutes(
+  value: unknown,
+): FabricReconcileLanRoute[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new TypeError("Invalid fabric lanRoutes");
+  return value.map(parseFabricLanRouteEntry);
+}
+
 function parseEnabledFabricPayload(
   record: Record<string, unknown>,
 ): FabricReconcileEnabledPayload {
-  const address = record.address;
-  if (typeof address !== "string" || !isValidWireguardAllowedIp(address)) {
-    throw new TypeError("Invalid fabric address");
-  }
+  const tunnel = parseFabricTunnelFlag(record.tunnel);
+  const address = parseFabricAddress(record.address, tunnel);
   const prefix = record.prefix;
   if (typeof prefix !== "string" || !isValidWireguardAllowedIp(prefix)) {
     throw new TypeError("Invalid fabric prefix");
@@ -4042,15 +4359,30 @@ function parseEnabledFabricPayload(
   if (!Array.isArray(record.peers)) {
     throw new TypeError("Invalid fabric peers");
   }
+  if (tunnel === false && record.peers.length > 0) {
+    throw new TypeError("Invalid fabric peers: a payload with no tunnel");
+  }
   const payload: FabricReconcileEnabledPayload = {
     enabled: true,
-    address: address.trim(),
+    ...(address === undefined ? {} : { address }),
     prefix: prefix.trim(),
     peers: record.peers.map(parseFabricPeerEntry),
   };
+  if (tunnel !== undefined) payload.tunnel = tunnel;
+  const lanRoutes = parseFabricLanRoutes(record.lanRoutes);
+  if (lanRoutes) payload.lanRoutes = lanRoutes;
   if (record.fabricId !== undefined) {
     payload.fabricId = parseFabricUuid(record.fabricId, "fabricId");
   }
+  applyOptionalFabricFields(payload, record);
+  return payload;
+}
+
+/** The optional tunnel settings of an enabled payload, each checked when present. */
+function applyOptionalFabricFields(
+  payload: FabricReconcileEnabledPayload,
+  record: Record<string, unknown>,
+): void {
   if (record.listenPort !== undefined) {
     if (!isValidWireguardListenPort(record.listenPort)) {
       throw new TypeError("Invalid fabric listenPort");
@@ -4072,7 +4404,6 @@ function parseEnabledFabricPayload(
     }
     payload.gateway = record.gateway;
   }
-  return payload;
 }
 
 /** Must stay in sync with the instance canonical `server.fabric.reconcile` validator. */
@@ -4087,7 +4418,9 @@ export function parseFabricReconcilePayload(
     throw new TypeError("Invalid fabric enabled");
   }
   if (!record.enabled) {
-    return { enabled: false };
+    return typeof record.retainKeys === "boolean"
+      ? { enabled: false, retainKeys: record.retainKeys }
+      : { enabled: false };
   }
   return parseEnabledFabricPayload(record);
 }
@@ -4126,7 +4459,28 @@ export function parseFabricReconcileResult(
     }
     result.peers = record.peers.map(parseFabricObservedPeer);
   }
+  if (record.warnings !== undefined) {
+    result.warnings = parseFabricResultWarnings(record.warnings);
+  }
   return result;
+}
+
+const FABRIC_RESULT_WARNINGS_MAX = 64;
+const FABRIC_RESULT_WARNING_MAX_LENGTH = 500;
+
+function parseFabricResultWarnings(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > FABRIC_RESULT_WARNINGS_MAX) {
+    throw new TypeError("Invalid fabric reconcile result warnings");
+  }
+  return value.map((entry) => {
+    if (
+      typeof entry !== "string" || entry.length === 0 ||
+      entry.length > FABRIC_RESULT_WARNING_MAX_LENGTH
+    ) {
+      throw new TypeError("Invalid fabric reconcile result warning");
+    }
+    return entry;
+  });
 }
 
 function parseNonNegativeInteger(value: unknown, field: string): number {
@@ -4452,6 +4806,16 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const tlsMode = parseHostingTlsMode(value.tlsMode);
   const proxy = parseHostingProxy(value.proxy);
   const bindAddress = parseHostingBindAddress(value.bindAddress);
+  const hostnames = parseHostingHostnames(value.hostnames);
+  const tunnel = parseHostingTunnel(value.tunnel, hostnames);
+  if (
+    tunnel && tlsMode === "acme" &&
+    tunnel.hostnames.some((name) => !tunnel.openHostnames?.includes(name))
+  ) {
+    throw new TypeError(
+      "Invalid hostings[].tunnel: tlsMode acme needs every tunnel name open",
+    );
+  }
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
@@ -4463,13 +4827,14 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     hostingId: parseNonEmptyString(value, "hostingId"),
     serviceId: parseNonEmptyString(value, "serviceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    hostnames: parseHostingHostnames(value.hostnames),
+    hostnames,
     ...(pathPrefix === undefined ? {} : { pathPrefix }),
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
     ...(tlsMode === undefined ? {} : { tlsMode }),
     ...(proxy === undefined ? {} : { proxy }),
     ...(bindAddress === undefined ? {} : { bindAddress }),
+    ...(tunnel === undefined ? {} : { tunnel }),
     ...(protocol === undefined ? {} : { protocol }),
     ...(ports === undefined ? {} : { ports }),
     ...(web === undefined ? {} : { web }),
@@ -4538,6 +4903,104 @@ function parseSecretPlanEntry(
     forBuild: value.forBuild === true,
     forRuntime: value.forRuntime !== false,
   };
+}
+
+const textEncoder = new TextEncoder();
+
+function parseConfigFilePart(
+  value: unknown,
+): EnvironmentDeployConfigFilePart {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy configFiles part");
+  }
+  const keys = Object.keys(value);
+  if (keys.length !== 1) {
+    throw new TypeError("Invalid environment deploy configFiles part");
+  }
+  if (typeof value.text === "string") {
+    if (value.text.includes("\u0000")) {
+      throw new TypeError("configFiles text must not contain NUL");
+    }
+    if (
+      textEncoder.encode(value.text).length > MAX_CONFIG_FILE_TEXT_BYTES
+    ) {
+      throw new TypeError("configFiles text exceeds maximum size");
+    }
+    return { text: value.text };
+  }
+  if (typeof value.secretKey === "string" && value.secretKey.length > 0) {
+    return { secretKey: value.secretKey };
+  }
+  throw new TypeError("Invalid environment deploy configFiles part");
+}
+
+function configFileTextBytes(file: EnvironmentDeployConfigFile): number {
+  let total = 0;
+  for (const part of file.parts) {
+    if ("text" in part) total += textEncoder.encode(part.text).length;
+  }
+  return total;
+}
+
+function parseConfigFileEntry(value: unknown): EnvironmentDeployConfigFile {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid environment deploy configFiles entry");
+  }
+  const relativePath = parseNonEmptyString(value, "relativePath");
+  const source = parseNonEmptyString(value, "source");
+  if (
+    relativePath.includes("..") || !SECRET_PLAN_NAME_RE.test(relativePath) ||
+    !SECRET_PLAN_NAME_RE.test(source) || relativePath.endsWith(".tmp") ||
+    source.endsWith(".tmp")
+  ) {
+    throw new TypeError("Invalid environment deploy configFiles name");
+  }
+  if (!Array.isArray(value.parts)) {
+    throw new TypeError("configFiles parts must be an array");
+  }
+  const file: EnvironmentDeployConfigFile = {
+    composeServiceName: parseNonEmptyString(value, "composeServiceName"),
+    source,
+    relativePath,
+    parts: value.parts.map(parseConfigFilePart),
+  };
+  if (configFileTextBytes(file) > MAX_CONFIG_FILE_TEXT_BYTES) {
+    throw new TypeError("configFiles file exceeds maximum size");
+  }
+  return file;
+}
+
+/** Entry checks plus the limits that span entries (names, per service, total). */
+function parseConfigFiles(
+  value: unknown,
+): EnvironmentDeployConfigFile[] | undefined {
+  const files = parseOptionalMaterialArray(
+    value,
+    "configFiles",
+    parseConfigFileEntry,
+  );
+  if (files === undefined) return undefined;
+  const sources = new Set<string>();
+  const paths = new Set<string>();
+  const perService = new Map<string, number>();
+  let total = 0;
+  for (const file of files) {
+    if (sources.has(file.source) || paths.has(file.relativePath)) {
+      throw new TypeError("configFiles names must be unique");
+    }
+    sources.add(file.source);
+    paths.add(file.relativePath);
+    const count = (perService.get(file.composeServiceName) ?? 0) + 1;
+    if (count > MAX_CONFIG_FILES_PER_SERVICE) {
+      throw new TypeError("too many configFiles for one service");
+    }
+    perService.set(file.composeServiceName, count);
+    total += configFileTextBytes(file);
+  }
+  if (total > MAX_CONFIG_FILES_TEXT_BYTES_PER_DEPLOY) {
+    throw new TypeError("configFiles exceed the maximum total size");
+  }
+  return files;
 }
 
 function parseOptionalEnvFile(value: unknown): string | undefined {
@@ -4620,6 +5083,250 @@ function parseTakeoverHostnames(
     }
     return { hostname, fromEnvironmentId };
   });
+}
+
+const CACHE_NAME_RE = /^[a-z][a-z0-9-]{0,62}$/;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+
+function parseCacheInt(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new TypeError(`${field} must be an integer`);
+  }
+  return value;
+}
+
+function parseCachePort(value: unknown, field: string): number {
+  const port = parseCacheInt(value, field);
+  if (port < CACHE_PORT_MIN || port > CACHE_PORT_MAX) {
+    throw new TypeError(
+      `${field} must be in ${CACHE_PORT_MIN}-${CACHE_PORT_MAX}`,
+    );
+  }
+  return port;
+}
+
+function parseCacheIdentity(
+  value: Record<string, unknown>,
+): Pick<EnvironmentDeployCache, "id" | "name" | "username"> {
+  if (typeof value.id !== "string" || !isPathId(value.id)) {
+    throw new TypeError("caches id must be a lower-case UUID");
+  }
+  if (typeof value.name !== "string" || !CACHE_NAME_RE.test(value.name)) {
+    throw new TypeError("caches name is not a short lower-case name");
+  }
+  if (!isValidPrincipalUsername(value.username)) {
+    throw new TypeError("caches username is not a Hosting Account name");
+  }
+  return { id: value.id, name: value.name, username: value.username };
+}
+
+function parseCacheEngine(
+  value: Record<string, unknown>,
+): Pick<EnvironmentDeployCache, "engine" | "version"> {
+  if (value.engine !== "valkey") {
+    throw new TypeError("caches engine must be valkey");
+  }
+  if (
+    typeof value.version !== "string" ||
+    !Object.hasOwn(CACHE_RUNTIMES.valkey, value.version)
+  ) {
+    throw new TypeError("caches version is not one the host vendors");
+  }
+  return { engine: "valkey", version: value.version };
+}
+
+function parseCacheAccess(
+  value: Record<string, unknown>,
+): Pick<EnvironmentDeployCache, "access" | "port"> {
+  if (value.access !== "socket" && value.access !== "port") {
+    throw new TypeError("caches access must be socket or port");
+  }
+  if ((value.access === "port") !== (value.port !== undefined)) {
+    throw new TypeError("caches port is set if and only if access is port");
+  }
+  return {
+    access: value.access,
+    ...(value.port === undefined
+      ? {}
+      : { port: parseCachePort(value.port, "caches port") }),
+  };
+}
+
+function parseCacheEntry(value: unknown): EnvironmentDeployCache {
+  if (!isRecord(value)) throw new TypeError("Invalid caches entry");
+  const identity = parseCacheIdentity(value);
+  const engine = parseCacheEngine(value);
+  const access = parseCacheAccess(value);
+  const maxMemoryMb = parseCacheInt(value.maxMemoryMb, "caches maxMemoryMb");
+  if (maxMemoryMb < MIN_CACHE_MEMORY_MB || maxMemoryMb > MAX_CACHE_MEMORY_MB) {
+    throw new TypeError(
+      `caches maxMemoryMb must be ${MIN_CACHE_MEMORY_MB}-${MAX_CACHE_MEMORY_MB}`,
+    );
+  }
+  if (
+    typeof value.passwordSha256 !== "string" ||
+    !SHA256_HEX_RE.test(value.passwordSha256)
+  ) {
+    throw new TypeError("caches passwordSha256 must be 64 lower-case hex");
+  }
+  const accountLimits = parseNativeAppAccountLimits(value.accountLimits);
+  return {
+    ...identity,
+    ...engine,
+    ...access,
+    maxMemoryMb,
+    passwordSha256: value.passwordSha256,
+    ...(accountLimits === undefined ? {} : { accountLimits }),
+  };
+}
+
+/**
+ * The caches of a deploy or a `cache.apply`: absent stays absent (an old
+ * control plane), an empty array stays empty (the environment has none). Ids,
+ * names (per environment) and ports (per host) are each unique.
+ */
+function parseDeployCaches(
+  value: unknown,
+  field: string,
+): EnvironmentDeployCache[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_CACHES_PER_COMMAND) {
+    throw new TypeError(
+      `${field} must be an array of at most ${MAX_CACHES_PER_COMMAND} entries`,
+    );
+  }
+  const caches = value.map(parseCacheEntry);
+  for (const key of ["id", "name", "port"] as const) {
+    const seen = new Set<unknown>();
+    for (const cache of caches) {
+      const item = cache[key];
+      if (item === undefined) continue;
+      if (seen.has(item)) {
+        throw new TypeError(`${field} names a cache ${key} twice`);
+      }
+      seen.add(item);
+    }
+  }
+  return caches;
+}
+
+function parseHelperReachEntry(value: unknown): EnvironmentDeployHelperReach {
+  if (
+    !isRecord(value) || typeof value.composeServiceName !== "string" ||
+    value.composeServiceName === "." || value.composeServiceName === ".." ||
+    !DEPLOY_COMPOSE_SERVICE_NAME_RE.test(value.composeServiceName) ||
+    !isValidPrincipalUsername(value.username)
+  ) {
+    throw new TypeError("Invalid helperReach entry");
+  }
+  const containerPort = parseCacheInt(
+    value.containerPort,
+    "helperReach containerPort",
+  );
+  if (containerPort < 1 || containerPort > 65535) {
+    throw new TypeError("helperReach containerPort must be 1-65535");
+  }
+  return {
+    composeServiceName: value.composeServiceName,
+    containerPort,
+    hostPort: parseCachePort(value.hostPort, "helperReach hostPort"),
+    username: value.username,
+  };
+}
+
+/** Absent stays absent (leave the list), empty stays empty (remove it). One entry per container and per host port. */
+function parseHelperReach(
+  value: unknown,
+): EnvironmentDeployHelperReach[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_HELPER_REACH_PER_DEPLOY) {
+    throw new TypeError(
+      `helperReach must be an array of at most ${MAX_HELPER_REACH_PER_DEPLOY} entries`,
+    );
+  }
+  const reach = value.map(parseHelperReachEntry);
+  const names = new Set<string>();
+  const ports = new Set<number>();
+  for (const entry of reach) {
+    if (names.has(entry.composeServiceName) || ports.has(entry.hostPort)) {
+      throw new TypeError("helperReach names a container or port twice");
+    }
+    names.add(entry.composeServiceName);
+    ports.add(entry.hostPort);
+  }
+  return reach;
+}
+
+function parseCacheRemovals(value: unknown): CacheApplyRemoval[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_CACHES_PER_COMMAND) {
+    throw new TypeError("removed must be an array of cache removals");
+  }
+  const seen = new Set<string>();
+  return value.map((entry) => {
+    if (
+      !isRecord(entry) || typeof entry.id !== "string" ||
+      !isPathId(entry.id) || !isValidPrincipalUsername(entry.username) ||
+      typeof entry.deleteData !== "boolean"
+    ) {
+      throw new TypeError("Invalid removed cache entry");
+    }
+    if (seen.has(entry.id)) {
+      throw new TypeError("removed names a cache twice");
+    }
+    seen.add(entry.id);
+    return {
+      id: entry.id,
+      username: entry.username,
+      deleteData: entry.deleteData,
+    };
+  });
+}
+
+/** `cache.apply`. The `caches` set may be empty (the environment has none left); it is never absent. */
+export function parseCacheApplyPayload(value: unknown): CacheApplyPayload {
+  if (!isRecord(value)) throw new TypeError("Invalid cache.apply payload");
+  const caches = parseDeployCaches(value.caches, "caches");
+  if (caches === undefined) {
+    throw new TypeError("cache.apply caches must be an array");
+  }
+  const removed = parseCacheRemovals(value.removed);
+  const listed = new Set(caches.map((cache) => cache.id));
+  if (removed?.some((entry) => listed.has(entry.id))) {
+    throw new TypeError("cache.apply removes a cache it also lists");
+  }
+  return {
+    environmentId: parseNonEmptyString(value, "environmentId"),
+    caches,
+    ...(removed === undefined ? {} : { removed }),
+  };
+}
+
+/** The result of `cache.apply`, as the control plane reads it. */
+export function parseCacheApplyResult(value: unknown): CacheApplyCommandResult {
+  if (!isRecord(value) || !Array.isArray(value.caches)) {
+    throw new TypeError("Invalid cache.apply result");
+  }
+  return {
+    caches: value.caches.map((entry): CacheApplyResult => {
+      if (
+        !isRecord(entry) || typeof entry.id !== "string" ||
+        !isPathId(entry.id) ||
+        (entry.state !== "ready" && entry.state !== "failed" &&
+          entry.state !== "pending")
+      ) {
+        throw new TypeError("Invalid cache.apply result entry");
+      }
+      return {
+        id: entry.id,
+        state: entry.state,
+        ...(typeof entry.error === "string" ? { error: entry.error } : {}),
+        ...(typeof entry.runtimeVersion === "string"
+          ? { runtimeVersion: entry.runtimeVersion }
+          : {}),
+      };
+    }),
+  };
 }
 
 /** The sites that left the compose file: an array of compose service names, or absent. */
@@ -4878,6 +5585,14 @@ function parsePrincipalMaterial(
     (raw) => PASSWORD_HASH_RE.test(raw),
   );
   if (passwordHash !== undefined) material.passwordHash = passwordHash;
+  const passwordHashEnvelope = parsePrincipalOptionalString(
+    value.passwordHashEnvelope,
+    "passwordHashEnvelope",
+    (raw) => raw.startsWith("tpdaemon.") && passwordHash === undefined,
+  );
+  if (passwordHashEnvelope !== undefined) {
+    material.passwordHashEnvelope = passwordHashEnvelope;
+  }
   return material;
 }
 
@@ -5403,7 +6118,7 @@ function parseNativeAppService(
 
 /** Largest CA bundle accepted for a site (a handful of certificates). */
 const MAX_SITE_DB_CA_BYTES = 65_536;
-const MAX_SITE_DB_CA_VARIABLES = 8;
+const MAX_SITE_DB_CA_VARIABLES = 16;
 const MAX_SITE_REQUIRED_ENV = 64;
 const PEM_CERTIFICATE_BEGIN = "-----BEGIN CERTIFICATE-----";
 
@@ -5446,7 +6161,7 @@ function parseSiteDbCa(
       `Invalid ${field}: expected certificate PEM blocks only`,
     );
   }
-  return {
+  const dbCa: EnvironmentDeploySiteDbCa = {
     variables: parseSiteEnvNames(
       value.variables,
       MAX_SITE_DB_CA_VARIABLES,
@@ -5454,6 +6169,20 @@ function parseSiteDbCa(
     ),
     pem: value.pem,
   };
+  // An empty list means no URL names, the same as leaving the key out.
+  if (
+    Array.isArray(value.urlVariables) && value.urlVariables.length === 0
+  ) {
+    return dbCa;
+  }
+  if (value.urlVariables !== undefined) {
+    dbCa.urlVariables = parseSiteEnvNames(
+      value.urlVariables,
+      MAX_SITE_DB_CA_VARIABLES,
+      `${field}.urlVariables`,
+    );
+  }
+  return dbCa;
 }
 
 function parseSiteRequiredEnv(
@@ -5466,6 +6195,43 @@ function parseSiteRequiredEnv(
     MAX_SITE_REQUIRED_ENV,
     `sites.${service}.requiredEnv`,
   );
+}
+
+function assertSitePrincipals(site: EnvironmentDeploySite): void {
+  // A managed directory is "a directory **and a principal**": without an owner
+  // there is no account to write into it and nobody the tree could belong to.
+  // Rejected rather than silently falling back to the daemon-owned tree, which
+  // would look like it worked and be unreachable over SFTP.
+  // A timer with no `User=` runs as root. Refused rather than defaulted: there
+  // is no safe account to guess, and running a tenant's job as root because a
+  // field was missing is not a failure mode to leave open.
+  if (site.cron && site.cron.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
+    );
+  }
+  if (site.sourceKind === "managed-directory" && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
+    );
+  }
+  // Commands and workers run as the site's account, never as root.
+  if (site.postDeploy && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: post-deploy commands require a principal to run as`,
+    );
+  }
+  if (site.workers && site.workers.length > 0 && !site.principal) {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: workers require a principal to run as`,
+    );
+  }
+  // A managed directory has no release for a command to run in.
+  if (site.postDeploy && site.sourceKind === "managed-directory") {
+    throw new TypeError(
+      `sites.${site.composeServiceName}: a managed-directory site has no release to run post-deploy commands in`,
+    );
+  }
 }
 
 function parseSite(
@@ -5488,6 +6254,16 @@ function parseSite(
   if (sourceKind) site.sourceKind = sourceKind;
   const cron = parseCronJobs(value.cron, `sites.${site.composeServiceName}`);
   if (cron) site.cron = cron;
+  const postDeploy = parseSitePostDeploy(
+    value.postDeploy,
+    `sites.${site.composeServiceName}`,
+  );
+  if (postDeploy) site.postDeploy = postDeploy;
+  const workers = parseSiteWorkers(
+    value.workers,
+    `sites.${site.composeServiceName}`,
+  );
+  if (workers) site.workers = workers;
   const webEnv = parseStringRecord(value.webEnv);
   if (webEnv) site.webEnv = webEnv;
   const webSecretEnv = parseStringRecord(value.webSecretEnv);
@@ -5503,23 +6279,7 @@ function parseSite(
   if (php) site.php = php;
   const principal = parseSitePrincipal(value.principal);
   if (principal) site.principal = principal;
-  // A managed directory is "a directory **and a principal**": without an owner
-  // there is no account to write into it and nobody the tree could belong to.
-  // Rejected rather than silently falling back to the daemon-owned tree, which
-  // would look like it worked and be unreachable over SFTP.
-  // A timer with no `User=` runs as root. Refused rather than defaulted: there
-  // is no safe account to guess, and running a tenant's job as root because a
-  // field was missing is not a failure mode to leave open.
-  if (site.cron && site.cron.length > 0 && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: scheduled jobs require a principal to run as`,
-    );
-  }
-  if (site.sourceKind === "managed-directory" && !site.principal) {
-    throw new TypeError(
-      `sites.${site.composeServiceName}: a managed-directory site requires a principal`,
-    );
-  }
+  assertSitePrincipals(site);
   return site;
 }
 
@@ -5595,6 +6355,125 @@ function parseCronJobs(
   });
 }
 
+/** A command argv as the cron rule: non-empty, bounded, no control characters, absolute first word. */
+function isCommandArgv(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 &&
+    value.every((arg) =>
+      typeof arg === "string" && arg.length > 0 && arg.length <= 512 &&
+      !/[\0\n\r]/.test(arg)
+    ) &&
+    (value[0] as string).startsWith("/");
+}
+
+/** Mirrors panel limits for `postDeploy`. */
+const MAX_POST_DEPLOY_COMMANDS = 10;
+const MIN_POST_DEPLOY_TIMEOUT_SECONDS = 30;
+const MAX_POST_DEPLOY_TIMEOUT_SECONDS = 1800;
+
+function parseSitePostDeploy(
+  value: unknown,
+  label: string,
+): EnvironmentDeploySitePostDeploy | undefined {
+  if (value === undefined) return undefined;
+  if (
+    !isRecord(value) || !Array.isArray(value.commands) ||
+    value.commands.length < 1 ||
+    value.commands.length > MAX_POST_DEPLOY_COMMANDS ||
+    !value.commands.every(isCommandArgv)
+  ) {
+    throw new TypeError(`Invalid ${label} postDeploy`);
+  }
+  const out: EnvironmentDeploySitePostDeploy = {
+    commands: value.commands.map((argv) => [...argv]),
+  };
+  if (value.timeoutSeconds !== undefined) {
+    const seconds = value.timeoutSeconds;
+    if (
+      typeof seconds !== "number" || !Number.isInteger(seconds) ||
+      seconds < MIN_POST_DEPLOY_TIMEOUT_SECONDS ||
+      seconds > MAX_POST_DEPLOY_TIMEOUT_SECONDS
+    ) {
+      throw new TypeError(`Invalid ${label} postDeploy timeoutSeconds`);
+    }
+    out.timeoutSeconds = seconds;
+  }
+  if (value.timing !== undefined) {
+    if (value.timing !== "before-traffic" && value.timing !== "after-switch") {
+      throw new TypeError(`Invalid ${label} postDeploy timing`);
+    }
+    out.timing = value.timing;
+  }
+  return out;
+}
+
+/** Mirrors panel limits for `workers`. */
+const MAX_SITE_WORKERS = 10;
+const MAX_WORKER_PROCESSES = 8;
+const MIN_WORKER_STOP_TIMEOUT_SECONDS = 10;
+const MAX_WORKER_STOP_TIMEOUT_SECONDS = 3600;
+const MIN_WORKER_MEMORY_BYTES = 64 * 1024 * 1024;
+const MAX_WORKER_MEMORY_BYTES = 64 * 1024 * 1024 * 1024;
+
+function integerInRange(
+  value: unknown,
+  min: number,
+  max: number,
+): value is number {
+  return typeof value === "number" && Number.isInteger(value) &&
+    value >= min && value <= max;
+}
+
+function parseSiteWorkers(
+  value: unknown,
+  label: string,
+): EnvironmentDeploySiteWorker[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_SITE_WORKERS) {
+    throw new TypeError(`Invalid ${label} workers`);
+  }
+  const seen = new Set<string>();
+  return value.map((raw) => {
+    if (
+      !isRecord(raw) || typeof raw.name !== "string" ||
+      !CRON_JOB_NAME_RE.test(raw.name) || !isCommandArgv(raw.command)
+    ) {
+      throw new TypeError(`Invalid ${label} workers entry`);
+    }
+    if (seen.has(raw.name)) {
+      throw new TypeError(`Duplicate ${label} worker: ${raw.name}`);
+    }
+    seen.add(raw.name);
+    const worker: EnvironmentDeploySiteWorker = {
+      name: raw.name,
+      command: [...raw.command],
+    };
+    const limits: Array<
+      [
+        "processes" | "stopTimeoutSeconds" | "memoryMaxBytes",
+        number,
+        number,
+      ]
+    > = [
+      ["processes", 1, MAX_WORKER_PROCESSES],
+      [
+        "stopTimeoutSeconds",
+        MIN_WORKER_STOP_TIMEOUT_SECONDS,
+        MAX_WORKER_STOP_TIMEOUT_SECONDS,
+      ],
+      ["memoryMaxBytes", MIN_WORKER_MEMORY_BYTES, MAX_WORKER_MEMORY_BYTES],
+    ];
+    for (const [key, min, max] of limits) {
+      const value = raw[key];
+      if (value === undefined) continue;
+      if (!integerInRange(value, min, max)) {
+        throw new TypeError(`Invalid ${label} workers entry`);
+      }
+      worker[key] = value;
+    }
+    return worker;
+  });
+}
+
 function parseSiteSourceKind(
   value: unknown,
 ): EnvironmentDeploySiteSourceKind | undefined {
@@ -5617,7 +6496,9 @@ const SOURCE_RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const SOURCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 
 const SOURCE_PROVIDERS = new Set(["github", "gitlab", "git"]);
-const SOURCE_BUILD_KINDS = new Set(["native", "static", "railpack"]);
+// The old spelling of `image` is still accepted while the control plane sends
+// it.
+const SOURCE_BUILD_KINDS = new Set(["native", "static", "image", "railpack"]);
 
 /** Cap mirrors compose `SOURCE_COMMAND_MAX_LENGTH`. */
 const MAX_SOURCE_COMMAND_CHARS = 1000;
@@ -6539,6 +7420,10 @@ export function parseEnvironmentDeployPayload(
         value.hideWebServerNames,
         "hideWebServerNames",
       ),
+      sendViaHeader: parseOptionalBoolean(
+        value.sendViaHeader,
+        "sendViaHeader",
+      ),
       deployStrategy: parseDeployStrategy(value.deployStrategy),
       migrations: parseDeployMigrations(value.migrations),
       healthTimeoutSeconds: parseDeployHealthTimeout(
@@ -6569,6 +7454,7 @@ export function parseEnvironmentDeployPayload(
         "secretPlan",
         parseSecretPlanEntry,
       ),
+      configFiles: parseConfigFiles(value.configFiles),
       storageMaterial: parseOptionalMaterialArray(
         value.storageMaterial,
         "storageMaterial",
@@ -6587,6 +7473,8 @@ export function parseEnvironmentDeployPayload(
         "serviceHooks",
         parseServiceHook,
       ),
+      caches: parseDeployCaches(value.caches, "caches"),
+      helperReach: parseHelperReach(value.helperReach),
       listenerPorts: value.listenerPorts === undefined
         ? undefined
         : parseManagedIngressListenerPorts(value.listenerPorts),
@@ -6676,6 +7564,688 @@ function parseFolderRemoval(value: unknown): FolderRemoval {
   return entry;
 }
 
+// ---------------------------------------------------------------------------
+// Tunnel traffic between servers of one datacenter. Twin of the instance
+// `src/contracts/commands/tunnel-routes.ts`; both are optional on the wire.
+// ---------------------------------------------------------------------------
+
+/** The fixed certificate name of the hop between servers. Same on both sides. */
+export const TUNNEL_PEER_TLS_NAME = "tp-peer.internal";
+
+const MAX_TUNNEL_HOSTNAMES = 256;
+const MAX_TUNNEL_ADDRESSES = 64;
+const MAX_TUNNEL_ROUTES = 2000;
+const MAX_TUNNEL_UPSTREAMS = 16;
+const MAX_TUNNEL_UPSTREAM_ADDRESSES = 8;
+const TUNNEL_SHA256_HEX_RE = /^[0-9a-f]{64}$/;
+const TUNNEL_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TUNNEL_ENVELOPE_PREFIX = "tpdaemon.";
+/** Longest certificate, trust bundle or sealed key accepted (bytes of text). */
+const MAX_TUNNEL_PEM_LENGTH = 65_536;
+/** A strict ISO-8601 timestamp with a time zone, as `Date.toISOString` writes it. */
+const TUNNEL_ISO_TIMESTAMP_RE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/** A certificate or bundle: sized, holds a certificate, and never a private key. */
+function isTunnelCertificateText(value: unknown): value is string {
+  return typeof value === "string" && value.length <= MAX_TUNNEL_PEM_LENGTH &&
+    value.includes("BEGIN CERTIFICATE") && !value.includes("PRIVATE KEY");
+}
+
+/** A bare address (no prefix length, no brackets). Peers are exact addresses, never ranges. */
+function parseTunnelAddressList(
+  value: unknown,
+  label: string,
+  min: number,
+  max: number,
+): string[] {
+  if (
+    !Array.isArray(value) || value.length < min || value.length > max ||
+    !value.every((entry) =>
+      typeof entry === "string" && !entry.includes("/") &&
+      (isValidIpv4Literal(entry) || isValidIpv6Literal(entry))
+    ) || new Set(value).size !== value.length
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value as string[];
+}
+
+function parseTunnelHostnameList(
+  value: unknown,
+  label: string,
+  min: number,
+): string[] {
+  if (
+    !Array.isArray(value) || value.length < min ||
+    value.length > MAX_TUNNEL_HOSTNAMES || !value.every(isValidHostname) ||
+    new Set(value).size !== value.length
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value as string[];
+}
+
+/**
+ * `environment.deploy` hostings[].tunnel: the tunnel names this hosting
+ * answers, and who may reach them.
+ */
+export type EnvironmentDeployHostingTunnel = {
+  /** Tunnel names of this hosting; each is also in the hosting's `hostnames`. */
+  hostnames: string[];
+  /**
+   * Tunnel names that are also public names on this server. Listed in
+   * `hostnames` too; the local-only lock is off for them.
+   */
+  openHostnames?: string[];
+  /** Exact datacenter addresses of the servers that may forward to this one. */
+  peers: string[];
+  /** Addresses the web server must also listen on so peers can reach it. */
+  extraBind?: string[];
+  /**
+   * Generation of the organization tunnel table these peers were taken from
+   * (feature `tunnel-table-generation-v1`). A daemon that already applied a
+   * higher generation keeps its stored peers. Absent = as before.
+   *
+   * The control plane sends `max(previous + 1, current Unix time in milliseconds)`, so the counter survives a restore or reset;
+   * a table with no generation clears the daemon's record.
+   */
+  generation?: number;
+};
+
+/** A table generation: a non-negative safe integer, or `undefined` when absent. */
+function parseTunnelGeneration(
+  value: unknown,
+  label: string,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "number" || !Number.isSafeInteger(value) || value < 0
+  ) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  return value;
+}
+
+function parseHostingTunnel(
+  value: unknown,
+  siteHostnames: readonly string[],
+): EnvironmentDeployHostingTunnel | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new TypeError("Invalid hostings[].tunnel");
+  const hostnames = parseTunnelHostnameList(
+    value.hostnames,
+    "hostings[].tunnel hostnames",
+    1,
+  );
+  const own = new Set(siteHostnames);
+  if (!hostnames.every((name) => own.has(name))) {
+    throw new TypeError("Invalid hostings[].tunnel hostnames");
+  }
+  const tunnel: EnvironmentDeployHostingTunnel = {
+    hostnames,
+    peers: parseTunnelAddressList(
+      value.peers,
+      "hostings[].tunnel peers",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    ),
+  };
+  if (value.openHostnames !== undefined) {
+    const open = parseTunnelHostnameList(
+      value.openHostnames,
+      "hostings[].tunnel openHostnames",
+      1,
+    );
+    if (!open.every((name) => hostnames.includes(name))) {
+      throw new TypeError("Invalid hostings[].tunnel openHostnames");
+    }
+    tunnel.openHostnames = open;
+  }
+  if (value.extraBind !== undefined) {
+    tunnel.extraBind = parseTunnelAddressList(
+      value.extraBind,
+      "hostings[].tunnel extraBind",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  const generation = parseTunnelGeneration(
+    value.generation,
+    "hostings[].tunnel generation",
+  );
+  if (generation !== undefined) tunnel.generation = generation;
+  return tunnel;
+}
+
+/** One server that runs a copy of a site, and where to reach its web server. */
+export type TunnelRouteUpstream = {
+  serverId: string;
+  /** Every datacenter address of the server, the preferred family first. */
+  addresses: string[];
+  /** Port of the server's web server on those addresses. Default 443. */
+  port?: number;
+};
+
+export type TunnelRoute = {
+  hostname: string;
+  /** The site runs on this server: left out of the forwarding file. */
+  local: boolean;
+  /**
+   * True = only local connectors and listed peers are answered; anyone else is
+   * dropped. False = the name is also public on this server.
+   */
+  lock: boolean;
+  /** Servers that run the site. At least one unless `local` is true. */
+  upstreams: TunnelRouteUpstream[];
+};
+
+/** A leaf of the organization's CA for the peer hop; the key is sealed for this daemon. */
+export type TunnelPeerMaterial = {
+  certificatePem: string;
+  privateKeyEnvelope: string;
+  caCertPem: string;
+  notAfter?: string;
+};
+
+/**
+ * A tunnel name whose site runs on this server, with the exact addresses of the
+ * other servers that carry it (empty when only this server does). The lock on
+ * that name's site block follows these peers without a deploy (feature
+ * `tunnel-lock-follow-v1`).
+ *
+ * `lock: true` (feature `tunnel-lock-add-v1`) says the name is local-only: when
+ * its block has no lock yet the daemon adds one. Absent or false never adds a
+ * lock and never opens a name.
+ */
+export type TunnelInbound = {
+  hostname: string;
+  peers: string[];
+  lock?: boolean;
+};
+
+/** Must stay in sync with the instance `server.tunnel.routes` shape. */
+export type TunnelRoutesPayload = {
+  /** Lower-case sha256 of the desired state. */
+  hash: string;
+  routes: TunnelRoute[];
+  /** Exact datacenter addresses of the servers that may forward to this one. */
+  peerAddresses: string[];
+  /** This server's own addresses the peer-facing site must listen on. */
+  listenAddresses?: string[];
+  /** Required when `routes` or `peerAddresses` is not empty. */
+  peerMaterial?: TunnelPeerMaterial;
+  /**
+   * Every tunnel name whose site runs here, with who may forward it. Absent
+   * (an older control plane) = the locks stay as the last deploy wrote them.
+   */
+  inbound?: TunnelInbound[];
+  /**
+   * Monotonic per organization tunnel table (one counter for the whole table,
+   * not per tunnel; `tunnel-table-generation-v1`). A table lower than the last
+   * applied generation is ignored; equal or higher applies. Absent = applied
+   * as before.
+   */
+  generation?: number;
+};
+
+/** Must stay in sync with the instance `server.tunnel.routes` shape. */
+export type TunnelRoutesResult = {
+  hash: string;
+  /** The files were written (or removed). False when already current. */
+  applied: boolean;
+  /** Forwarded names now in the file. */
+  routeCount: number;
+  /** Names left out because the site runs on this server. */
+  dropped: string[];
+  warnings: string[];
+};
+
+function parseTunnelUpstream(value: unknown): TunnelRouteUpstream {
+  if (
+    !isRecord(value) || typeof value.serverId !== "string" ||
+    !TUNNEL_UUID_RE.test(value.serverId)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes upstream");
+  }
+  const upstream: TunnelRouteUpstream = {
+    serverId: value.serverId,
+    addresses: parseTunnelAddressList(
+      value.addresses,
+      "server.tunnel.routes upstream addresses",
+      1,
+      MAX_TUNNEL_UPSTREAM_ADDRESSES,
+    ),
+  };
+  if (value.port !== undefined) {
+    if (
+      typeof value.port !== "number" || !Number.isInteger(value.port) ||
+      value.port < 1 || value.port > 65535
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes upstream port");
+    }
+    upstream.port = value.port;
+  }
+  return upstream;
+}
+
+function parseTunnelRoute(value: unknown): TunnelRoute {
+  if (
+    !isRecord(value) || !isValidHostname(value.hostname) ||
+    typeof value.local !== "boolean" || typeof value.lock !== "boolean" ||
+    !Array.isArray(value.upstreams) ||
+    value.upstreams.length > MAX_TUNNEL_UPSTREAMS
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes route");
+  }
+  const upstreams = value.upstreams.map(parseTunnelUpstream);
+  if (!value.local && upstreams.length === 0) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes route: a remote site needs an upstream",
+    );
+  }
+  if (
+    new Set(upstreams.map((upstream) => upstream.serverId)).size !==
+      upstreams.length
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes route upstreams");
+  }
+  return {
+    hostname: value.hostname as string,
+    local: value.local,
+    lock: value.lock,
+    upstreams,
+  };
+}
+
+function parseTunnelPeerMaterial(value: unknown): TunnelPeerMaterial {
+  if (
+    !isRecord(value) || !isTunnelCertificateText(value.certificatePem) ||
+    typeof value.privateKeyEnvelope !== "string" ||
+    value.privateKeyEnvelope.length > MAX_TUNNEL_PEM_LENGTH ||
+    !value.privateKeyEnvelope.startsWith(TUNNEL_ENVELOPE_PREFIX) ||
+    value.privateKeyEnvelope.length === TUNNEL_ENVELOPE_PREFIX.length ||
+    !isTunnelCertificateText(value.caCertPem)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes peerMaterial");
+  }
+  const material: TunnelPeerMaterial = {
+    certificatePem: value.certificatePem,
+    privateKeyEnvelope: value.privateKeyEnvelope,
+    caCertPem: value.caCertPem,
+  };
+  if (value.notAfter !== undefined) {
+    if (
+      typeof value.notAfter !== "string" ||
+      !TUNNEL_ISO_TIMESTAMP_RE.test(value.notAfter) ||
+      Number.isNaN(Date.parse(value.notAfter))
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes peerMaterial notAfter");
+    }
+    material.notAfter = value.notAfter;
+  }
+  return material;
+}
+
+function parseTunnelInbound(value: unknown): TunnelInbound {
+  if (!isRecord(value) || !isValidHostname(value.hostname)) {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  const peers = parseTunnelAddressList(
+    value.peers,
+    "server.tunnel.routes inbound peers",
+    0,
+    MAX_TUNNEL_ADDRESSES,
+  );
+  if (value.lock !== undefined && typeof value.lock !== "boolean") {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  return {
+    hostname: value.hostname as string,
+    peers,
+    ...(value.lock === true ? { lock: true } : {}),
+  };
+}
+
+function parseTunnelInboundList(value: unknown): TunnelInbound[] {
+  if (!Array.isArray(value) || value.length > MAX_TUNNEL_ROUTES) {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  const inbound = value.map(parseTunnelInbound);
+  if (
+    new Set(inbound.map((entry) => entry.hostname.toLowerCase())).size !==
+      inbound.length
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes inbound");
+  }
+  return inbound;
+}
+
+/** Parse `server.tunnel.routes`. */
+export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid server.tunnel.routes payload");
+  }
+  if (
+    typeof value.hash !== "string" || !TUNNEL_SHA256_HEX_RE.test(value.hash)
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes hash");
+  }
+  if (!Array.isArray(value.routes) || value.routes.length > MAX_TUNNEL_ROUTES) {
+    throw new TypeError("Invalid server.tunnel.routes routes");
+  }
+  const routes = value.routes.map(parseTunnelRoute);
+  if (new Set(routes.map((route) => route.hostname)).size !== routes.length) {
+    throw new TypeError("Invalid server.tunnel.routes routes");
+  }
+  const peerAddresses =
+    Array.isArray(value.peerAddresses) && value.peerAddresses.length === 0
+      ? []
+      : parseTunnelAddressList(
+        value.peerAddresses,
+        "server.tunnel.routes peerAddresses",
+        1,
+        MAX_TUNNEL_ADDRESSES,
+      );
+  const payload: TunnelRoutesPayload = {
+    hash: value.hash,
+    routes,
+    peerAddresses,
+  };
+  if (value.listenAddresses !== undefined) {
+    payload.listenAddresses = parseTunnelAddressList(
+      value.listenAddresses,
+      "server.tunnel.routes listenAddresses",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  if (value.peerMaterial !== undefined) {
+    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (value.inbound !== undefined) {
+    payload.inbound = parseTunnelInboundList(value.inbound);
+  }
+  const generation = parseTunnelGeneration(
+    value.generation,
+    "server.tunnel.routes generation",
+  );
+  if (generation !== undefined) payload.generation = generation;
+  if (
+    (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial
+  ) {
+    throw new TypeError(
+      "Invalid server.tunnel.routes peerMaterial: required with routes or peers",
+    );
+  }
+  return payload;
+}
+
+export function parseTunnelRoutesResult(value: unknown): TunnelRoutesResult {
+  if (
+    !isRecord(value) || typeof value.hash !== "string" ||
+    !TUNNEL_SHA256_HEX_RE.test(value.hash) ||
+    typeof value.applied !== "boolean" ||
+    typeof value.routeCount !== "number" ||
+    !Number.isInteger(value.routeCount) || value.routeCount < 0 ||
+    !Array.isArray(value.dropped) ||
+    !value.dropped.every((name) => typeof name === "string") ||
+    !Array.isArray(value.warnings) ||
+    !value.warnings.every((warning) => typeof warning === "string")
+  ) {
+    throw new TypeError("Invalid server.tunnel.routes result");
+  }
+  return {
+    hash: value.hash,
+    applied: value.applied,
+    routeCount: value.routeCount,
+    dropped: value.dropped as string[],
+    warnings: value.warnings as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorInstall = {
+  /** The provider's tunnel id (lower-case UUID). */
+  tunnelId: string;
+  /** `tpdaemon.` envelope holding the run token. */
+  tokenEnvelope: string;
+};
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorsPayload = {
+  install: TunnelConnectorInstall[];
+  remove: string[];
+};
+
+/** Must stay in sync with the instance `server.tunnel.connectors` shape. */
+export type TunnelConnectorsResult = {
+  /** Ids whose connector this command installed. */
+  installed: string[];
+  /** Ids whose connector already ran and was left as it was. */
+  unchanged: string[];
+  /** Ids whose connector was removed (or was not there). */
+  removed: string[];
+};
+
+const MAX_TUNNEL_CONNECTORS = 64;
+/** A sealed run token is a few hundred characters; this leaves a wide margin. */
+const MAX_TUNNEL_TOKEN_ENVELOPE_LENGTH = 8192;
+const TUNNEL_PROVIDER_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isTunnelProviderId(value: unknown): value is string {
+  return typeof value === "string" && TUNNEL_PROVIDER_ID_RE.test(value);
+}
+
+function parseTunnelConnectorInstall(value: unknown): TunnelConnectorInstall {
+  if (
+    !isRecord(value) || !isTunnelProviderId(value.tunnelId) ||
+    typeof value.tokenEnvelope !== "string" ||
+    !value.tokenEnvelope.startsWith("tpdaemon.") ||
+    value.tokenEnvelope.length === "tpdaemon.".length ||
+    value.tokenEnvelope.length > MAX_TUNNEL_TOKEN_ENVELOPE_LENGTH
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors install entry");
+  }
+  return { tunnelId: value.tunnelId, tokenEnvelope: value.tokenEnvelope };
+}
+
+function parseTunnelProviderIdList(value: unknown, label: string): string[] {
+  if (
+    !Array.isArray(value) || value.length > MAX_TUNNEL_CONNECTORS ||
+    !value.every(isTunnelProviderId)
+  ) {
+    throw new TypeError(`Invalid server.tunnel.connectors ${label}`);
+  }
+  return value;
+}
+
+/** Parse `server.tunnel.connectors`. */
+export function parseTunnelConnectorsPayload(
+  value: unknown,
+): TunnelConnectorsPayload {
+  if (!isRecord(value)) {
+    throw new TypeError("Invalid server.tunnel.connectors payload");
+  }
+  if (
+    !Array.isArray(value.install) ||
+    value.install.length > MAX_TUNNEL_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors install");
+  }
+  const install = value.install.map(parseTunnelConnectorInstall);
+  const remove = parseTunnelProviderIdList(value.remove, "remove");
+  const named = [...install.map((entry) => entry.tunnelId), ...remove];
+  if (named.length === 0 || new Set(named).size !== named.length) {
+    throw new TypeError(
+      "Invalid server.tunnel.connectors: name each tunnel once, at least one",
+    );
+  }
+  return { install, remove };
+}
+
+export function parseTunnelConnectorsResult(
+  value: unknown,
+): TunnelConnectorsResult {
+  if (
+    !isRecord(value) || !Array.isArray(value.installed) ||
+    !value.installed.every(isTunnelProviderId) ||
+    !Array.isArray(value.unchanged) ||
+    !value.unchanged.every(isTunnelProviderId) ||
+    !Array.isArray(value.removed) || !value.removed.every(isTunnelProviderId)
+  ) {
+    throw new TypeError("Invalid server.tunnel.connectors result");
+  }
+  return {
+    installed: value.installed as string[],
+    unchanged: value.unchanged as string[],
+    removed: value.removed as string[],
+  };
+}
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusConnector = {
+  /** A lower-case UUID, or `instance` / `default` for the instance's own tunnel. */
+  tunnelId: string;
+  status: "not-installed" | "connected" | "connecting" | "stopped" | "failed";
+  /** Connector program version the carrying unit runs. */
+  version: string;
+  /** Which of the tunnel's two units carries it (the other exists only during an update). */
+  slot: "a" | "b";
+  /** How the last connector update ended; absent before any attempt. */
+  lastUpdate?: {
+    outcome: "updated" | "rolled-back";
+    /** ISO-8601 time of the attempt. */
+    at: string;
+    /** Why a rolled-back attempt stopped (at most 300 characters). */
+    reason?: string;
+  };
+  /** Live edge connections from the connector's `/ready` (feature `tunnel-status-facts-v1`). */
+  edgeConnections?: number;
+  /** Names the connector routes, from its `/config`, at most 100 (feature `tunnel-status-facts-v1`). */
+  hostnames?: string[];
+};
+
+/** Must stay in sync with the instance `server.tunnel.status` shape. */
+export type TunnelStatusResult = {
+  /** The connector version this daemon is pinned to and moves every tunnel to. */
+  pinnedVersion: string;
+  connectors: TunnelStatusConnector[];
+};
+
+const TUNNEL_STATUS_VALUES = new Set([
+  "not-installed",
+  "connected",
+  "connecting",
+  "stopped",
+  "failed",
+]);
+/** The metrics band (`20300` to `20899`) holds 600 connectors. */
+const MAX_TUNNEL_STATUS_CONNECTORS = 600;
+const TUNNEL_CONNECTOR_VERSION_RE = /^\d+(?:\.\d+){0,4}$/;
+
+function isTunnelConnectorVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 32 &&
+    TUNNEL_CONNECTOR_VERSION_RE.test(value);
+}
+
+/** Parse `server.tunnel.status`: it takes no input, so the payload is empty. */
+export function parseTunnelStatusPayload(
+  value: unknown,
+): Record<string, never> {
+  if (!isRecord(value) || Object.keys(value).length > 0) {
+    throw new TypeError("Invalid server.tunnel.status payload");
+  }
+  return {};
+}
+
+function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
+  if (
+    !isRecord(value) || typeof value.tunnelId !== "string" ||
+    !(value.tunnelId === "instance" || value.tunnelId === "default" ||
+      TUNNEL_UUID_RE.test(value.tunnelId)) ||
+    typeof value.status !== "string" ||
+    !TUNNEL_STATUS_VALUES.has(value.status) ||
+    !isTunnelConnectorVersion(value.version) ||
+    (value.slot !== "a" && value.slot !== "b")
+  ) {
+    throw new TypeError("Invalid server.tunnel.status connector");
+  }
+  const connector: TunnelStatusConnector = {
+    tunnelId: value.tunnelId,
+    status: value.status as TunnelStatusConnector["status"],
+    version: value.version,
+    slot: value.slot,
+  };
+  const last = value.lastUpdate;
+  if (last !== undefined) {
+    if (
+      !isRecord(last) ||
+      (last.outcome !== "updated" && last.outcome !== "rolled-back") ||
+      typeof last.at !== "string" || !TUNNEL_ISO_TIMESTAMP_RE.test(last.at) ||
+      (last.reason !== undefined &&
+        (typeof last.reason !== "string" || last.reason.length > 300))
+    ) {
+      throw new TypeError("Invalid server.tunnel.status lastUpdate");
+    }
+    connector.lastUpdate = {
+      outcome: last.outcome,
+      at: last.at,
+      ...(last.reason === undefined ? {} : { reason: last.reason }),
+    };
+  }
+  return withTunnelStatusFacts(connector, value);
+}
+
+const MAX_TUNNEL_STATUS_EDGE_CONNECTIONS = 1000;
+const MAX_TUNNEL_STATUS_HOSTNAMES = 100;
+
+/** The optional connector facts (`edgeConnections`, `hostnames`), checked. */
+function withTunnelStatusFacts(
+  connector: TunnelStatusConnector,
+  value: Record<string, unknown>,
+): TunnelStatusConnector {
+  const edge = value.edgeConnections;
+  if (edge !== undefined) {
+    if (
+      typeof edge !== "number" || !Number.isInteger(edge) || edge < 0 ||
+      edge > MAX_TUNNEL_STATUS_EDGE_CONNECTIONS
+    ) {
+      throw new TypeError("Invalid server.tunnel.status edgeConnections");
+    }
+    connector.edgeConnections = edge;
+  }
+  const names = value.hostnames;
+  if (names !== undefined) {
+    if (
+      !Array.isArray(names) || names.length > MAX_TUNNEL_STATUS_HOSTNAMES ||
+      !names.every((name) =>
+        typeof name === "string" && name.length > 0 && name.length <= 253
+      )
+    ) {
+      throw new TypeError("Invalid server.tunnel.status hostnames");
+    }
+    connector.hostnames = [...names] as string[];
+  }
+  return connector;
+}
+
+export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
+  if (
+    !isRecord(value) || !isTunnelConnectorVersion(value.pinnedVersion) ||
+    !Array.isArray(value.connectors) ||
+    value.connectors.length > MAX_TUNNEL_STATUS_CONNECTORS
+  ) {
+    throw new TypeError("Invalid server.tunnel.status result");
+  }
+  return {
+    pinnedVersion: value.pinnedVersion,
+    connectors: value.connectors.map(parseTunnelStatusConnector),
+  };
+}
+
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
 function parseRetirePrincipalEntry(value: unknown): { username: string } {
   if (
@@ -6685,6 +8255,36 @@ function parseRetirePrincipalEntry(value: unknown): { username: string } {
     throw new TypeError("Invalid retirePrincipals entry");
   }
   return { username: value.username };
+}
+
+/** A storage id: the exact name of the Docker volume the control plane registered for it. */
+const STOP_VOLUME_STORAGE_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** The most volumes one stop may name. */
+const MAX_STOP_REMOVE_VOLUMES = 200;
+
+function parseStopVolumeRemovals(
+  value: unknown,
+): StopVolumeRemoval[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_STOP_REMOVE_VOLUMES) {
+    throw new TypeError("Invalid environment.stop removeVolumes");
+  }
+  const seen = new Set<string>();
+  const out: StopVolumeRemoval[] = [];
+  for (const entry of value) {
+    if (
+      !isRecord(entry) || typeof entry.storageId !== "string" ||
+      !STOP_VOLUME_STORAGE_ID_RE.test(entry.storageId)
+    ) {
+      throw new TypeError("Invalid environment.stop removeVolumes entry");
+    }
+    if (seen.has(entry.storageId)) continue;
+    seen.add(entry.storageId);
+    out.push({ storageId: entry.storageId });
+  }
+  return out;
 }
 
 function parseStopFabricNetworks(value: unknown): string[] | undefined {
@@ -6733,6 +8333,7 @@ export function parseEnvironmentStopPayload(
     "retirePrincipals",
     parseRetirePrincipalEntry,
   );
+  const removeVolumes = parseStopVolumeRemovals(value.removeVolumes);
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
     projectId: parseNonEmptyString(value, "projectId"),
@@ -6742,6 +8343,10 @@ export function parseEnvironmentStopPayload(
     ...(siteReleases === undefined ? {} : { siteReleases }),
     ...(releaseCleanup === undefined ? {} : { releaseCleanup }),
     ...(retirePrincipals === undefined ? {} : { retirePrincipals }),
+    ...(value.removeDeploymentDir === true
+      ? { removeDeploymentDir: true as const }
+      : {}),
+    ...(removeVolumes === undefined ? {} : { removeVolumes }),
   };
 }
 
@@ -7503,6 +9108,8 @@ function parseManagedApplyCredentialEntry(
     ...(entry.grantMode === undefined
       ? {}
       : { grantMode: entry.grantMode as ManagedGrantMode }),
+    // Expand-only: a kind this daemon does not know is ignored, never refused.
+    ...(entry.kind === "backup" ? { kind: "backup" as const } : {}),
   };
 }
 

@@ -20,6 +20,8 @@ import {
   resolveLayout,
 } from "../paths/layout.ts";
 import { cronServiceContent, cronTimerContent } from "../deploy/cron/unit.ts";
+import { postDeployUnitContent } from "../deploy/site/post-deploy.ts";
+import { workerUnitContent } from "../deploy/site/workers.ts";
 import {
   nativeAppUnitContent,
   principalSliceContent,
@@ -27,6 +29,7 @@ import {
 import { renderNativeAppEnvFile } from "../deploy/native/variables-runtime.ts";
 import { caddyUnit } from "../deploy/ingress.ts";
 import { phpFpmPoolConfig } from "../deploy/site.ts";
+import { isReservedPrincipalUsername } from "../deploy/reserved-principal-names.ts";
 import { allAccessGroups } from "../runtime/registry.ts";
 import { sshdDropInContent } from "../deploy/ssh/sshd-config.ts";
 import { backupServiceContent, backupTimerContent } from "../backups/units.ts";
@@ -44,6 +47,8 @@ import type {
 import {
   sitePhpConfigDir,
   sitePhpFpmConf,
+  sitePhpGuardPath,
+  sitePhpGuardPhp,
   sitePhpIni,
   sitePhpKey,
   sitePhpRuntimeId,
@@ -1152,6 +1157,45 @@ test("setfacl grants tpedge the instance ACME socket and nothing else", async ()
   });
 });
 
+test("setfacl grants tpedge one certificate order's issuer socket by its request id and nothing near it", async () => {
+  await withHost(async (host) => {
+    const sock = host.path("run/turbopanel/tenant-acme-req_1-A.sock");
+    const other = host.path("run/turbopanel/tenant-other.sock");
+    const listeners = [sock, other].map((path) =>
+      Deno.listen({ transport: "unix", path })
+    );
+    try {
+      const ok = await host.run(["setfacl", "-P", "-m", "u:tpedge:rw", sock]);
+      assertEquals(ok.code, 0, ok.stderr);
+      assertEquals(
+        ok.stdout.trim(),
+        "EXEC [setfacl] [-P] [-m] [u:tpedge:rw] [--] [tenant-acme-req_1-A.sock]",
+      );
+      await refused(host, ["setfacl", "-P", "-m", "u:tpedge:rw", other]);
+      for (
+        const bad of [
+          "run/turbopanel/tenant-acme-.sock",
+          "run/turbopanel/tenant-acme-a.b.sock",
+          "run/turbopanel/tenant-acme-a b.sock",
+          `run/turbopanel/tenant-acme-${"a".repeat(65)}.sock`,
+          "run/turbopanel/sub/tenant-acme-a.sock",
+          "run/turbopanel/tenant-acme-a/b.sock",
+        ]
+      ) {
+        await refused(host, [
+          "setfacl",
+          "-P",
+          "-m",
+          "u:tpedge:rw",
+          host.path(bad),
+        ]);
+      }
+    } finally {
+      for (const listener of listeners) listener.close();
+    }
+  });
+});
+
 test("scheduled-backup units pass only in their exact shape; tenant units gain nothing", async () => {
   await withHost(async (host) => {
     const layout = resolveLayout({
@@ -1485,11 +1529,28 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
       ok.stdout,
       "EXEC [systemctl] [--no-pager] [enable] [--now]",
     );
+    // TurboFabric retires a wg-quick@tp0 left from older releases.
+    for (
+      const args of [
+        ["systemctl", "is-enabled", "wg-quick@tp0"],
+        ["systemctl", "is-active", "wg-quick@tp0"],
+        ["systemctl", "disable", "--now", "wg-quick@tp0"],
+        ["systemctl", "is-active", "turbopaneld-update-guard.timer"],
+      ]
+    ) {
+      const unit = await host.run(args);
+      assertEquals(unit.code, 0, `${args.join(" ")}: ${unit.stderr}`);
+    }
     for (
       const args of [
         ["systemctl", "link", host.path("tmp/evil.service")],
         ["systemctl", "edit", "turbopanel-app-x.service"],
         ["systemctl", "start", "evil.service"],
+        // Root arms and starts the update guard; the daemon may not.
+        ["systemctl", "start", "turbopaneld-update-guard.service"],
+        ["systemctl", "restart", "turbopaneld-update-guard.timer"],
+        ["systemctl", "stop", "turbopaneld-update-guard.timer"],
+        ["systemctl", "start", "turbopaneld-update-guard-retry-1"],
         ["systemctl", "set-environment", "LD_PRELOAD=/tmp/x.so"],
         [
           "journalctl",
@@ -1533,6 +1594,323 @@ test("systemctl, journalctl, sysctl, ip, xtables and wg accept only the daemon's
     const empty = host.path("tmp/empty.conf");
     await Deno.writeTextFile(empty, "");
     await refused(host, ["wg", "syncconf", "tp0", empty]);
+  });
+});
+
+test("ip route accepts only fabric routes on tp0 and route reads", async () => {
+  await withHost(async (host) => {
+    for (
+      const args of [
+        ["ip", "route", "replace", "10.250.0.12/32", "dev", "tp0"],
+        ["ip", "route", "del", "10.193.0.0/16", "dev", "tp0"],
+        ["ip", "route", "replace", "10.0.0.0/8", "dev", "tp0"],
+        ["ip", "route", "replace", "fd00:1:0:0:0:0:0:0/48", "dev", "tp0"],
+        ["ip", "route", "del", "fd00:1::5/128", "dev", "tp0"],
+        ["ip", "-4", "route", "show"],
+        ["ip", "-6", "route", "show"],
+        ["ip", "-4", "route", "show", "dev", "tp0"],
+        ["ip", "-6", "route", "show", "dev", "tp0"],
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const args of [
+        ["ip", "route", "replace", "0.0.0.0/0", "dev", "tp0"],
+        ["ip", "route", "replace", "default", "dev", "tp0"],
+        ["ip", "route", "replace", "10.0.0.0/7", "dev", "tp0"],
+        ["ip", "route", "replace", "256.1.1.1/32", "dev", "tp0"],
+        ["ip", "route", "replace", "01.2.3.4/32", "dev", "tp0"],
+        ["ip", "route", "replace", "10.1.2/24", "dev", "tp0"],
+        ["ip", "route", "replace", "10.1.2.3", "dev", "tp0"],
+        ["ip", "route", "replace", "10.1.2.3/33", "dev", "tp0"],
+        ["ip", "route", "replace", "fd00::/47", "dev", "tp0"],
+        ["ip", "route", "replace", "fd00:::1/64", "dev", "tp0"],
+        ["ip", "route", "replace", "10.250.0.12/32", "dev", "eth0"],
+        ["ip", "route", "add", "10.250.0.12/32", "dev", "tp0"],
+        ["ip", "route", "flush", "dev", "tp0"],
+        [
+          "ip",
+          "route",
+          "replace",
+          "10.250.0.12/32",
+          "dev",
+          "tp0",
+          "table",
+          "local",
+        ],
+        ["ip", "route", "replace", "10.250.0.12/32", "via", "10.0.0.1"],
+        ["ip", "route", "show", "table", "all"],
+      ]
+    ) {
+      await refused(host, args);
+    }
+  });
+});
+
+test("ip route takes LAN routes only via a connected subnet of a plain interface", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("tp-test"), { recursive: true });
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-link-eth1"),
+      "10.0.0.0/24 proto kernel src 10.0.0.11\n10.0.8.9 proto kernel\n", // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
+    );
+    const lan = (action: string, cidr: string, via: string, dev = "eth1") => [
+      "ip",
+      "route",
+      action,
+      cidr,
+      "via",
+      via,
+      "dev",
+      dev,
+    ];
+    for (
+      const args of [
+        lan("replace", "10.193.5.0/24", "10.0.0.12"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("del", "10.193.5.0/24", "10.0.0.12"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "172.20.1.0/24", "10.0.0.254"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "192.168.7.0/24", "10.0.8.9"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const args of [
+        lan("add", "10.193.5.0/24", "10.0.0.12"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "0.0.0.0/0", "10.0.0.12"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "8.8.8.0/24", "10.0.0.12"), // NOSONAR typescript:S1313 — sample public range for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.1.12"), // NOSONAR typescript:S1313 — not on the connected subnet, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.8.10"), // NOSONAR typescript:S1313 — not on the connected host route, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0.12", "eth2"), // NOSONAR typescript:S1313 — interface with no connected subnet, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0.12", "tp0"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.0.12", "lo"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.0.12", "br-1234"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.0.12", "eth1/x"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.0.12", "abcdefghijklmnop"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("replace", "10.193.5.0/24", "10.0.0.255"), // NOSONAR typescript:S1313 — the subnet's broadcast address, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0.0"), // NOSONAR typescript:S1313 — the subnet's network address, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0.012"), // NOSONAR typescript:S1313 — leading zero, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0"), // NOSONAR typescript:S1313 — short address, test fixture only
+        lan("replace", "10.193.5.0/24", "10.0.0.0/24"), // NOSONAR typescript:S1313 — a range is not a next hop, test fixture only
+        lan("replace", "fd00:1::/64", "fd00:2::12"),
+        [
+          "ip",
+          "route",
+          "replace",
+          "10.193.5.0/24",
+          "via",
+          "10.0.0.12", // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+          "dev",
+          "eth1",
+          "table",
+          "local",
+        ],
+        ["ip", "route", "replace", "10.193.5.0/24", "via", "10.0.0.12"], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        ["ip", "route", "replace", "10.193.5.0/24", "dev", "eth1"],
+      ]
+    ) {
+      await refused(host, args);
+    }
+  });
+});
+
+test("ip route on tp0 takes only private ranges", async () => {
+  await withHost(async (host) => {
+    const route = (
+      cidr: string,
+    ) => ["ip", "route", "replace", cidr, "dev", "tp0"];
+    for (
+      const cidr of [
+        "10.0.0.0/8",
+        "10.255.1.0/24",
+        "172.16.0.0/12",
+        "172.31.255.0/24",
+        "192.168.0.0/16",
+        "192.168.4.0/24",
+        "100.64.0.0/10",
+        "100.127.0.0/16",
+        "fc00:0:0:0:0:0:0:0/48",
+        "fd12:3456:789a::/48",
+        "FD00::1/128",
+      ]
+    ) {
+      const answer = await host.run(route(cidr));
+      assertEquals(answer.code, 0, `${cidr}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const cidr of [
+        "8.8.8.0/24",
+        "1.1.1.1/32",
+        "11.0.0.0/8",
+        "172.15.0.0/16",
+        "172.32.0.0/16",
+        "172.16.0.0/11",
+        "192.167.0.0/16",
+        "192.168.0.0/15",
+        "100.63.0.0/16",
+        "100.128.0.0/16",
+        "100.64.0.0/9",
+        "2600::/48",
+        "2a00:1450::/48",
+        "fe80::/64",
+        "fc::/48",
+        "::/48",
+      ]
+    ) {
+      await refused(host, route(cidr));
+    }
+  });
+});
+
+test("ip route replace never takes over a connected subnet on any interface", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("tp-test"), { recursive: true });
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-link-eth1"),
+      "10.0.0.0/24 proto kernel src 10.0.0.11\n", // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
+    );
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-kernel"),
+      [
+        "10.0.0.0/24 dev eth1 proto kernel scope link src 10.0.0.11", // NOSONAR typescript:S1313 — sample LAN for this test fixture, not a reachable host
+        "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown", // NOSONAR typescript:S1313 — docker0's usual subnet, test fixture only
+        "10.250.0.0/16 dev tp0 proto kernel scope link", // NOSONAR typescript:S1313 — sample fabric subnet for this test fixture
+        "",
+      ].join("\n"),
+    );
+    const lan = (action: string, cidr: string) => [
+      "ip",
+      "route",
+      action,
+      cidr,
+      "via",
+      "10.0.0.12", // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      "dev",
+      "eth1",
+    ];
+    const tp0 = (action: string, cidr: string) => [
+      "ip",
+      "route",
+      action,
+      cidr,
+      "dev",
+      "tp0",
+    ];
+    const taken = [
+      "10.0.0.0/24", // equal to the LAN's own subnet
+      "10.0.0.0/16", // contains it
+      "10.0.0.128/25", // sits inside it
+      "172.17.0.0/16", // equal to docker0's
+      "172.16.0.0/12", // contains it
+      "172.17.5.0/24", // sits inside it
+    ];
+    for (const cidr of taken) {
+      await refused(host, lan("replace", cidr));
+      await refused(host, tp0("replace", cidr));
+    }
+    // A LAN route checks every interface, tp0 included.
+    await refused(host, lan("replace", "10.250.5.0/24"));
+    for (
+      const args of [
+        lan("replace", "10.193.5.0/24"),
+        lan("del", "10.0.0.128/25"),
+        tp0("replace", "10.193.5.0/24"),
+        tp0("replace", "10.250.0.12/32"),
+        tp0("replace", "fd12:3456:789a::/48"),
+        tp0("del", "10.0.0.0/24"),
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+  });
+});
+
+test("ip route accepts a connected network whoever made it, and nothing that is not one", async () => {
+  await withHost(async (host) => {
+    await Deno.mkdir(host.path("tp-test"), { recursive: true });
+    // `ip route show dev eth0 scope link` as a DHCP host prints it (no `dev`).
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-link-eth0"),
+      [
+        "10.10.0.0/22 proto dhcp scope link src 10.10.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+        "10.20.0.0/24 proto static scope link", // NOSONAR typescript:S1313 — sample static LAN for this test fixture, not a reachable host
+        "10.30.0.0/24 via 10.10.0.1 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
+        "default proto dhcp scope link",
+        "blackhole 10.40.0.0/24 proto static",
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(
+      host.path("tp-test/ip-route-kernel"),
+      [
+        "10.10.0.0/22 dev eth0 proto dhcp scope link src 10.10.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+        "10.30.0.0/24 via 10.10.0.1 dev eth0 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
+        "10.250.5.0/24 dev tp0 proto boot scope link",
+        "",
+      ].join("\n"),
+    );
+    const lan = (cidr: string, via: string, dev = "eth0") => [
+      "ip",
+      "route",
+      "replace",
+      cidr,
+      "via",
+      via,
+      "dev",
+      dev,
+    ];
+    for (
+      const args of [
+        lan("10.194.0.0/16", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.195.0.0/16", "10.20.0.7"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        [
+          "ip",
+          "route",
+          "del",
+          "10.194.0.0/16",
+          "via",
+          "10.10.3.86",
+          "dev",
+          "eth0",
+        ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+      assertStringIncludes(answer.stdout, "EXEC [ip]");
+    }
+    for (
+      const args of [
+        lan("10.194.0.0/16", "10.30.0.9"), // NOSONAR typescript:S1313 — behind a gateway, not on a connected network
+        lan("10.194.0.0/16", "10.40.0.9"), // NOSONAR typescript:S1313 — blackhole, not a connected network
+        lan("10.194.0.0/16", "10.10.0.0"), // NOSONAR typescript:S1313 — the network address
+        lan("10.194.0.0/16", "10.10.3.86", "eth1"), // NOSONAR typescript:S1313 — no connected network on eth1
+        lan("10.194.0.0/16", "10.10.3.86", "tp0"), // NOSONAR typescript:S1313 — never tp0
+        lan("0.0.0.0/0", "10.10.3.86"), // NOSONAR typescript:S1313 — never the default route
+        lan("10.10.0.0/22", "10.10.3.86"), // NOSONAR typescript:S1313 — the connected network itself
+        lan("10.10.1.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — inside the connected network
+      ]
+    ) {
+      await refused(host, args);
+    }
+    // A routed network and `tp0`'s own routes do not count as connected.
+    for (
+      const args of [
+        lan("10.30.0.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.250.5.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      ]
+    ) {
+      const answer = await host.run(args);
+      assertEquals(answer.code, 0, `${args.join(" ")}: ${answer.stderr}`);
+    }
   });
 });
 
@@ -2120,6 +2498,7 @@ function phpService(host: Host, mode: PhpMode): string {
     "[Unit]",
     `Description=PHP for site ${PHP_SITE}`,
     ...(mode === "fpm" ? [] : [`Requires=${socket}`, `After=${socket}`]),
+    "StartLimitIntervalSec=0",
     "",
     "[Service]",
     `ExecStartPre=+${host.path("opt/turbopanel/lib")}/tp-php-loopback sync`,
@@ -2143,6 +2522,9 @@ function phpService(host: Host, mode: PhpMode): string {
     "StandardOutput=journal",
     "StandardError=journal",
     "Restart=on-failure",
+    "RestartSec=5",
+    "RestartSteps=10",
+    "RestartMaxDelaySec=120",
     "MemoryMax=512M",
     ...(mode === "fpm" ? ["", "[Install]", "WantedBy=multi-user.target"] : []),
     "",
@@ -2701,6 +3083,242 @@ async function installPhpConf(
   ]);
 }
 
+/** A fixed 64-hex fixture, never a real key. */
+const GUARD_TEST_KEY =
+  "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+test("per-site PHP ini: a release's open_basedir (the whole release, shared, tmp, the CA file) and the guard are accepted", async () => {
+  await withPhpHost(async (host) => {
+    const dir = phpConfDir(host);
+    const made = await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      dir,
+    ]);
+    assertEquals(made.code, 0, made.stderr);
+    const guardPath = `${dir}/site-guard.php`;
+    const ok = await installPhpConf(host, "site-guard.php", sitePhpGuardPhp());
+    assertEquals(ok.code, 0, ok.stderr);
+    const service = host.path("srv/users/alice/production/services/web");
+    const release = [
+      `${service}/current`,
+      `${service}/shared`,
+      "/tmp",
+      `${service}/.turbopanel-hosting/managed-ca.pem`,
+    ].join(":");
+    const ini = (basedir: string) =>
+      [
+        PHP_INI,
+        `turbopanel.site_key = ${GUARD_TEST_KEY}`,
+        `auto_prepend_file = ${guardPath}`,
+        `open_basedir = ${basedir}`,
+        "",
+      ].join("\n");
+    const accepted = await installPhpConf(
+      host,
+      "php.ini",
+      ini(`${release}:${guardPath}`),
+    );
+    assertEquals(accepted.code, 0, accepted.stderr);
+  });
+});
+
+test("per-site PHP guard: the exact guard text and an ini that names only this runtime's own guard", async () => {
+  await withPhpHost(async (host) => {
+    const dir = phpConfDir(host);
+    const made = await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      dir,
+    ]);
+    assertEquals(made.code, 0, made.stderr);
+    const guardPath = `${dir}/site-guard.php`;
+    const otherGuard = `${phpConfDir(host, "other-site")}/site-guard.php`;
+    const home = host.path("srv/users/alice");
+    const ini = (...extra: string[]) =>
+      [
+        PHP_INI,
+        `turbopanel.site_key = ${GUARD_TEST_KEY}`,
+        `auto_prepend_file = ${guardPath}`,
+        `open_basedir = ${home}/sites/${PHP_SITE}:/tmp:${guardPath}`,
+        ...extra,
+        "",
+      ].join("\n");
+
+    // The renderer's own bytes are accepted, a changed byte is not.
+    const guard = sitePhpGuardPhp();
+    // The previous guard (with the putenv call) stays accepted for hosts that
+    // have not re-rendered yet.
+    const previousGuard = guard.replace(
+      "$_ENV['TP_SITE_KEY']);\n",
+      "$_ENV['TP_SITE_KEY']);\n    if (function_exists('putenv')) {\n        putenv('TP_SITE_KEY');\n    }\n",
+    );
+    assertEquals(previousGuard === guard, false);
+    const prev = await installPhpConf(host, "site-guard.php", previousGuard);
+    assertEquals(prev.code, 0, prev.stderr);
+    const ok = await installPhpConf(host, "site-guard.php", guard);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(await Deno.readTextFile(guardPath), guard);
+    for (
+      const bad of [
+        guard.replace("403", "200"),
+        `${guard}// more\n`,
+        guard.trimEnd(),
+        `${guard}?>\n`,
+        "<?php\nsystem($_GET['c']);\n",
+      ]
+    ) {
+      assertEquals(
+        (await installPhpConf(host, "site-guard.php", bad)).code === 0,
+        false,
+        bad,
+      );
+    }
+    assertEquals(
+      (await installPhpConf(host, "site-guard.php", guard, { mode: "0644" }))
+        .code === 0,
+      false,
+      "mode",
+    );
+    assertEquals(
+      (await installPhpConf(host, "site-guard.php.tpprev", guard)).code === 0,
+      false,
+      ".tpprev is written by cp -p only",
+    );
+
+    // The rollout copy covers the guard like every config file: keep it as
+    // `.tpprev`, restore it over the live name.
+    const keepGuard = await host.run([
+      "cp",
+      "-p",
+      "--",
+      guardPath,
+      `${guardPath}.tpprev`,
+    ]);
+    assertEquals(keepGuard.code, 0, keepGuard.stderr);
+    const restoreGuard = await host.run([
+      "mv",
+      "-f",
+      "--",
+      `${guardPath}.tpprev`,
+      guardPath,
+    ]);
+    assertEquals(restoreGuard.code, 0, restoreGuard.stderr);
+    assertEquals(await Deno.readTextFile(guardPath), guard);
+    assertEquals(
+      (await host.run(["cp", "-p", "--", guardPath, `${guardPath}.other`]))
+        .code === 0,
+      false,
+      "only the .tpprev name",
+    );
+
+    // An ini that wires this runtime's own guard is accepted.
+    const accepted = await installPhpConf(host, "php.ini", ini());
+    assertEquals(accepted.code, 0, accepted.stderr);
+
+    // URL includes may only be off; the pool takes the same lines.
+    assertEquals(
+      (await installPhpConf(host, "php.ini", ini("allow_url_include = Off")))
+        .code,
+      0,
+    );
+    const pool = phpFpmConf(host);
+    for (
+      const good of [
+        `php_admin_value[auto_prepend_file] = ${guardPath}`,
+        "php_admin_flag[allow_url_include] = off",
+      ]
+    ) {
+      const ok = await installPhpConf(host, "php-fpm.conf", `${pool}${good}\n`);
+      assertEquals(ok.code, 0, `${good}: ${ok.stderr}`);
+    }
+    for (
+      const bad of [
+        "php_admin_value[auto_prepend_file] = /tmp/x.php",
+        `php_admin_value[auto_prepend_file] = ${otherGuard}`,
+        "php_admin_flag[allow_url_include] = on",
+        "php_value[allow_url_include] = 1",
+      ]
+    ) {
+      assertEquals(
+        (await installPhpConf(host, "php-fpm.conf", `${pool}${bad}\n`)).code ===
+          0,
+        false,
+        bad,
+      );
+    }
+
+    // Another path, another site's guard, a bad key, or a foreign
+    // open_basedir entry is refused.
+    for (
+      const bad of [
+        ini("auto_prepend_file = /tmp/x.php"),
+        ini(`auto_prepend_file = ${otherGuard}`),
+        ini("allow_url_include = On"),
+        ini("allow_url_include = 1"),
+        ini("turbopanel.site_key = abc"),
+        ini(`turbopanel.site_key = ${GUARD_TEST_KEY.toUpperCase()}`),
+        ini(`turbopanel.site_key = ${GUARD_TEST_KEY}0`),
+        // The fake root lives under /tmp, which an open_basedir entry may
+        // name, so the foreign guard is spelled outside it.
+        `${PHP_INI}open_basedir = ${home}/sites/${PHP_SITE}:/etc/turbopanel/php/sites/other-site/site-guard.php\n`,
+        `${PHP_INI}auto_prepend_file = ${guardPath}\n`.replace(
+          guardPath,
+          "/etc/passwd",
+        ),
+      ]
+    ) {
+      assertEquals(
+        (await installPhpConf(host, "php.ini", bad)).code === 0,
+        false,
+        bad,
+      );
+    }
+    // Without the guard path in this runtime's folder the same lines are
+    // another site's: an ini for a different site id cannot name this guard.
+    await host.run([
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      phpConfDir(host, "other-site"),
+    ]);
+    await Deno.writeTextFile(host.path("tmp/conf"), ini());
+    const crossed = await host.run([
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      "alice",
+      host.path("tmp/conf"),
+      `${phpConfDir(host, "other-site")}/php.ini`,
+    ]);
+    assertEquals(
+      crossed.code === 0,
+      false,
+      "another site's ini names this guard",
+    );
+  });
+});
+
 test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist", async () => {
   await withPhpHost(async (host) => {
     const dir = phpConfDir(host);
@@ -3096,25 +3714,36 @@ test("per-site PHP: what the daemon renders for each mode and web server passes 
           dir,
         ]);
         assertEquals(made.code, 0, made.stderr);
-        const configs: Array<[string, string]> = [[
-          "php.ini",
-          sitePhpIni(
-            [
-              { key: "memory_limit", value: "256M" },
-              { key: "open_basedir", value: `${site}/current/public:/tmp` },
-              { key: "realpath_cache_ttl", value: "0" },
-              { key: "session.save_path", value: "/var/lib/php/sessions" },
-            ],
-            home,
-            spec,
-          ),
-        ]];
+        // An Apache runtime also gets the site guard and the key.
+        const guard = webAccount === "tpapache"
+          ? { key: GUARD_TEST_KEY, path: sitePhpGuardPath(spec.configDir, id) }
+          : undefined;
+        const configs: Array<[string, string]> = [
+          ...(guard
+            ? [["site-guard.php", sitePhpGuardPhp()] as [string, string]]
+            : []),
+          [
+            "php.ini",
+            sitePhpIni(
+              [
+                { key: "memory_limit", value: "256M" },
+                { key: "open_basedir", value: `${site}/current/public:/tmp` },
+                { key: "realpath_cache_ttl", value: "0" },
+                { key: "session.save_path", value: "/var/lib/php/sessions" },
+              ],
+              home,
+              spec,
+              guard,
+            ),
+          ],
+        ];
         if (mode === "fpm") {
           configs.push([
             "php-fpm.conf",
             sitePhpFpmConf(spec, {
               pool: [{ key: "pm.max_children", value: "8" }],
               chdir: `${site}/current/public`,
+              guard,
             }),
           ]);
         }
@@ -3967,6 +4596,19 @@ test("php-loopback-sync runs the installed guard with sync and nothing else", as
   });
 });
 
+test("tunnel-loopback-sync runs the installed port lock with sync and nothing else", async () => {
+  await withHost(async (host) => {
+    const ok = await host.run(["tunnel-loopback-sync"]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(
+      ok.stdout.trim(),
+      `EXEC [${host.path("opt/turbopanel/lib")}/tp-tunnel-loopback] [sync]`,
+    );
+    const extra = await host.run(["tunnel-loopback-sync", "20300"]);
+    assertEquals(extra.code, 1);
+  });
+});
+
 test("the top of the config and state roots is root's: no verb removes, renames, re-owns or writes a root-owned entry there", async () => {
   await withHost(async (host) => {
     const staged = host.path("tmp/staged");
@@ -4026,8 +4668,8 @@ test("the top of the config and state roots is root's: no verb removes, renames,
       join(config, "hosting"),
     ]);
 
-    // The daemon's leaves stay its own to rearrange, and root's own folders
-    // are still created (root-owned) by callers that need them.
+    // The daemon's leaves stay its own to rearrange, and the control plane's
+    // config folder is still created (root-owned) by the env file writer.
     await Deno.mkdir(join(config, "hosting"), { recursive: true });
     assertEquals(
       (await host.run(["rm", "-rf", "--", join(config, "hosting")])).code,
@@ -4038,9 +4680,17 @@ test("the top of the config and state roots is root's: no verb removes, renames,
       "-d",
       "-m",
       "0750",
-      join(config, "instance-acme"),
+      join(config, "instance"),
     ]);
     assertEquals(made.code, 0, made.stderr);
+    // Any other root folder there is not the daemon's to make.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      join(config, "instance-acme"),
+    ]);
   });
 });
 
@@ -4115,6 +4765,11 @@ test("iptables and ip6tables: only the options the daemon sends, in no spelling 
           ["-F", "TP-FORWARD"],
           ["-X", "TP-FORWARD"],
           ["-D", "DOCKER-USER", "-j", "TP-FORWARD"],
+          // A host without Docker hangs TP-FORWARD off FORWARD instead.
+          ["-S", "DOCKER-USER"],
+          ["-C", "FORWARD", "-j", "TP-FORWARD"],
+          ["-I", "FORWARD", "1", "-j", "TP-FORWARD"],
+          ["-D", "FORWARD", "-j", "TP-FORWARD"],
           ["--version"],
           ["-V"],
         ]
@@ -4233,17 +4888,10 @@ test("the root php-fpm master's own config and conf.d are not the daemon's to wr
       host,
       "extension=/var/lib/turbopanel/spool/x.so\n",
     );
-    // pool.d is still the daemon's.
-    const pool = await host.run([
-      "install",
-      "-m",
-      "0644",
-      staged,
-      host.path("etc/turbopanel/php/8.4/pool.d/svc1.conf"),
-    ]);
-    assertEquals(pool.code, 0, pool.stderr);
     for (
       const dest of [
+        // Only pools/ is the daemon's; a folder of any other name is not.
+        "etc/turbopanel/php/8.4/pool.d/svc1.conf",
         "etc/turbopanel/php/8.4/conf.d/zz.ini",
         "etc/turbopanel/php/conf.d/zz.ini",
         "etc/turbopanel/php/8.4/php-fpm.conf",
@@ -4440,6 +5088,35 @@ test("the sysctl drop-in: only the forwarding switch, through install and tee", 
         await stage(host, content),
         dest,
       ]);
+    }
+  });
+});
+
+test("rm removes only TurboPanel's own timer stamp files", async () => {
+  const exists = (path: string) =>
+    Deno.lstat(path).then(() => true, () => false);
+  await withHost(async (host) => {
+    const dir = host.path("var/lib/systemd/timers");
+    await Deno.mkdir(dir, { recursive: true });
+    const own =
+      `${dir}/stamp-turbopanel-backup-0192a3b4-c5d6-7e8f-9a0b-1c2d3e4f5a6b.timer`;
+    await Deno.writeTextFile(own, "");
+    await Deno.writeTextFile(`${dir}/stamp-fstrim.timer`, "");
+    await Deno.writeTextFile(`${dir}/stamp-turbopanel-x.service`, "");
+    const ok = await host.run(["rm", "-f", "--", own]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals(await exists(own), false);
+    for (
+      const path of [
+        `${dir}/stamp-fstrim.timer`,
+        `${dir}/stamp-turbopanel-x.service`,
+        `${dir}/stamp-turbopanel-../x.timer`,
+        `${dir}/sub/stamp-turbopanel-x.timer`,
+        dir,
+      ]
+    ) await refused(host, ["rm", "-f", "--", path]);
+    for (const kept of ["stamp-fstrim.timer", "stamp-turbopanel-x.service"]) {
+      assertEquals(await exists(`${dir}/${kept}`), true, kept);
     }
   });
 });
@@ -4645,11 +5322,11 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
           },
           principal: {
             principalId: "00000000-0000-4000-8000-000000000099",
-            username: "site_user",
+            username: "alice",
           },
         },
         "/var/lib/turbopanel/sites/env1/phpapp/public",
-        "/run/turbopanel/php/tp-env1-phpapp.sock",
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
         {
           openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
           releaseSymlinkSwap: true,
@@ -4737,5 +5414,688 @@ test("a directory renamed over a php-fpm series or pools directory is refused", 
       `${php}/8.4/pools/a.conf`,
     ]);
     assertEquals(ok.code, 0, ok.stderr);
+  });
+});
+
+/** Append `/etc/group` lines to a test host. */
+async function addGroups(host: Host, lines: string[]): Promise<void> {
+  await Deno.writeTextFile(host.path("etc/group"), `${lines.join("\n")}\n`, {
+    append: true,
+  });
+}
+
+test("below the config root only the daemon's own places are writable: root-run scripts and root config are refused to every verb", async () => {
+  await withHost(async (host) => {
+    const config = host.path("etc/turbopanel");
+    const staged = host.path("tmp/staged");
+    await Deno.mkdir(join(config, "system"), { recursive: true });
+    await Deno.mkdir(join(config, "instance"), { recursive: true });
+    await Deno.mkdir(join(config, "nginx/sites"), { recursive: true });
+    await Deno.mkdir(join(config, "caddy"), { recursive: true });
+    const script = join(config, "system/postgres-backup.sh");
+    const other = join(config, "instance/secrets.env");
+    for (const path of [script, other]) {
+      await Deno.writeTextFile(path, "#!/bin/sh\n");
+    }
+    for (const path of [script, other, join(config, "system/new.sh")]) {
+      await refused(host, [
+        "install",
+        "-m",
+        "0750",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        staged,
+        path,
+      ]);
+      await refused(host, ["install", "-m", "0640", staged, path]);
+      await refused(host, ["tee", path], "#!/bin/sh\n");
+      await refused(host, ["cp", "-p", "--", script, `${path}.x`]);
+      await refused(host, ["mv", "-f", "--", `${path}.x`, path]);
+      await refused(host, ["rm", "-f", "--", path]);
+      await refused(host, ["chown", "tp:tp", path]);
+      await refused(host, ["chmod", "0750", path]);
+    }
+    for (const dir of [join(config, "system"), join(config, "system/sub")]) {
+      await refused(host, ["install", "-d", "-m", "0750", dir]);
+      await refused(host, ["mkdir", "-p", dir]);
+      await refused(host, ["rm", "-rf", "--", dir]);
+    }
+    await refused(host, ["chmod", "0755", config]);
+    assertEquals(await Deno.readTextFile(script), "#!/bin/sh\n");
+
+    // A symlinked folder on the way into an allowed place is still refused.
+    await Deno.symlink(
+      join(config, "system"),
+      join(config, "nginx/linked"),
+    );
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "nginx/linked/postgres-backup.sh"),
+    ]);
+
+    // What the daemon really writes there still works.
+    for (
+      const sub of [
+        "apache/sites",
+        "openlitespeed/sites",
+        "openlitespeed/vhosts/svc1",
+        "site-caddy/sites",
+      ]
+    ) {
+      await Deno.mkdir(join(config, sub), { recursive: true });
+    }
+    for (
+      const path of [
+        join(config, "nginx/sites/svc1.conf"),
+        join(config, "apache/sites/svc1.conf"),
+        join(config, "openlitespeed/sites/svc1.conf"),
+        join(config, "openlitespeed/vhosts/svc1/vhconf.conf"),
+        join(config, "openlitespeed/httpd_config.conf"),
+        join(config, "site-caddy/sites/svc1.caddy"),
+        join(config, "site-caddy/Caddyfile"),
+        join(config, "instance/runtime.env"),
+        join(config, "caddy/instance-acme.json"),
+        join(config, "caddy/instance-acme-settings.json"),
+      ]
+    ) {
+      const ok = await host.run(["install", "-m", "0640", staged, path]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "caddy/Caddyfile"),
+    ]);
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      staged,
+      join(config, "nginx/../system/postgres-backup.sh"),
+    ]);
+    // The files the daemon keeps there are never made folders.
+    for (
+      const path of [
+        join(config, "instance/runtime.env"),
+        join(config, "caddy/instance-acme.json"),
+        join(config, "firewall.v4"),
+      ]
+    ) {
+      await Deno.remove(path).catch(() => undefined);
+      await refused(host, ["install", "-d", "-m", "0750", path]);
+      await refused(host, ["mkdir", "-p", path]);
+    }
+    // The control plane's folder is made only root's, 0750.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0755",
+      join(config, "instance"),
+    ]);
+  });
+});
+
+test("a php-fpm series folder and its pools folder stay root's: no verb re-owns, removes or remakes them", async () => {
+  await withHost(async (host) => {
+    await addGroups(host, ["tpapache:x:9991:", "tpols:x:9992:"]);
+    const php = host.path("etc/turbopanel/php");
+    await Deno.mkdir(`${php}/8.4/pools`, { recursive: true });
+    await Deno.mkdir(`${php}/8.4/conf.d`, { recursive: true });
+    const pool = `${php}/8.4/pools/a.conf`;
+    await Deno.writeTextFile(pool, "; x\n");
+    for (const dir of [php, `${php}/8.4`, `${php}/8.4/pools`, `${php}/8.3`]) {
+      await refused(host, ["chown", "tp", dir]);
+      await refused(host, ["chown", "-R", "tp:tp", dir]);
+      await refused(host, ["chmod", "0755", dir]);
+      await refused(host, ["rm", "-rf", "--", dir]);
+      await refused(host, ["install", "-d", "-m", "0750", "-o", "tp", dir]);
+      await refused(host, ["mkdir", "-p", dir]);
+    }
+    // A pools folder takes only the daemon's own shape.
+    for (
+      const spec of [
+        ["-m", "0750", "-o", "tp", "-g", "tpapache"],
+        ["-m", "0750", "-o", "root", "-g", "tp"],
+        ["-m", "0755", "-o", "root", "-g", "tpapache"],
+        ["-m", "0750"],
+      ]
+    ) {
+      await refused(host, ["install", "-d", ...spec, `${php}/8.4/pools`]);
+      await refused(host, ["install", "-d", ...spec, `${php}/8.3/pools`]);
+    }
+    for (const group of ["tpapache", "tpols"]) {
+      const ok = await host.run([
+        "install",
+        "-d",
+        "-m",
+        "0750",
+        "-o",
+        "root",
+        "-g",
+        group,
+        `${php}/8.3/pools`,
+      ]);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    // Nothing but files inside pools/.
+    await refused(host, [
+      "install",
+      "-d",
+      "-m",
+      "0750",
+      "-o",
+      "tp",
+      `${php}/8.4/pools/x`,
+    ]);
+    await refused(host, ["mkdir", "-p", `${php}/8.4/pools/x`]);
+    // A pool file is root's: never handed to the daemon or anyone else.
+    await refused(host, ["chown", "tp", pool]);
+    await refused(host, ["chown", "tpnginx:tpnginx", pool]);
+    const rendered = phpFpmPoolConfig(
+      "env1",
+      {
+        composeServiceName: "phpapp",
+        engine: "nginx",
+        root: "public",
+        listenPort: 18081,
+        php: { version: "8.4" },
+      },
+      "/srv/root",
+      "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+    );
+    await refused(host, [
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "tp",
+      "-g",
+      "tpnginx",
+      await stage(host, rendered),
+      pool,
+    ]);
+    const ok = await host.run([
+      "install",
+      "-m",
+      "0640",
+      "-o",
+      "root",
+      "-g",
+      "tpnginx",
+      await stage(host, rendered),
+      pool,
+    ]);
+    assertEquals(ok.code, 0, ok.stderr);
+    assertEquals((await host.run(["chown", "root:tpnginx", pool])).code, 0);
+    assertEquals((await host.run(["rm", "-f", "--", pool])).code, 0);
+  });
+});
+
+test("a shared php-fpm pool runs only as a site owner with its own group or as one web server account", async () => {
+  await withHost(async (host) => {
+    await addGroups(host, ["disk:x:6:", "shadow:x:42:", "adm:x:4:"]);
+    await Deno.mkdir(host.path("etc/turbopanel/php/8.4/pools"), {
+      recursive: true,
+    });
+    const dest = host.path("etc/turbopanel/php/8.4/pools/tp-env1-phpapp.conf");
+    const site = {
+      composeServiceName: "phpapp",
+      engine: "nginx" as const,
+      root: "public",
+      listenPort: 18081,
+      php: { version: "8.4" },
+    };
+    const socket = "/run/turbopanel/php/8.4/tp-env1-phpapp.sock";
+    const engine = phpFpmPoolConfig("env1", site, "/srv/root", socket);
+    const owned = phpFpmPoolConfig(
+      "env1",
+      {
+        ...site,
+        principal: {
+          principalId: "00000000-0000-4000-8000-000000000099",
+          username: "alice",
+        },
+      },
+      "/srv/root",
+      socket,
+    );
+    const install = async (content: string) =>
+      await host.run([
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "tpnginx",
+        await stage(host, content),
+        dest,
+      ]);
+    for (const content of [engine, owned]) {
+      const ok = await install(content);
+      assertEquals(ok.code, 0, ok.stderr);
+    }
+    const hostile = [
+      ...["disk", "shadow", "docker", "sudo", "adm", "tp", "carol"].map((g) =>
+        owned.replace("group = alice", `group = ${g}`)
+      ),
+      engine.replace("group = tpnginx", "group = disk"),
+      engine.replace("user = tpnginx", "user = tp"),
+      engine.replace(
+        "user = tpnginx\ngroup = tpnginx",
+        "user = tp\ngroup = tp",
+      ),
+      // carol has a group in the band but no account of her own.
+      owned.replace(
+        "user = alice\ngroup = alice",
+        "user = carol\ngroup = carol",
+      ),
+      owned.replace("listen.owner = tpnginx", "listen.owner = tp"),
+      owned.replace(
+        "listen.owner = tpnginx\nlisten.group = tpnginx",
+        "listen.owner = tp\nlisten.group = tp",
+      ),
+      owned.replace("listen.group = tpnginx", "listen.group = alice"),
+      `${engine}user = alice\n`,
+      `${owned}group = disk\n`,
+      engine.replace("user = tpnginx\n", ""),
+      // The socket is the pool's own, in its series folder, mode 0660.
+      ...[
+        "/etc/turbopanel/system/postgres-backup.sh",
+        "/run/turbopanel/php/8.3/tp-env1-phpapp.sock",
+        "/run/turbopanel/php/8.4/tp-env1-other.sock",
+        "/run/turbopanel/php/8.4/../tp-env1-phpapp.sock",
+        "/run/turbopanel/tp-env1-phpapp.sock",
+        "127.0.0.1:9000",
+      ].map((path) => owned.replace(`listen = ${socket}`, `listen = ${path}`)),
+      owned.replace(`listen = ${socket}\n`, ""),
+      `${owned}listen = ${socket}\n`,
+      ...["0666", "0777", "0600", "0661"].map((mode) =>
+        owned.replace("listen.mode = 0660", `listen.mode = ${mode}`)
+      ),
+      // INI words php-fpm turns into uid or gid 1 or an empty value.
+      ...["yes", "on", "true", "no", "off", "none", "false", "null"].flatMap((
+        word,
+      ) => [
+        owned.replace("group = alice", `group = ${word}`),
+        owned.replace("listen.owner = tpnginx", `listen.owner = ${word}`),
+      ]),
+      // A good pool followed by a bad one.
+      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel/php/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
+      engine.replace("listen.group = tpnginx\n", ""),
+    ];
+    for (const content of hostile) {
+      assertEquals(content === engine || content === owned, false, content);
+      await refused(host, [
+        "install",
+        "-m",
+        "0640",
+        "-o",
+        "root",
+        "-g",
+        "tpnginx",
+        await stage(host, content),
+        dest,
+      ]);
+      await refused(host, ["tee", dest], content);
+    }
+  });
+});
+
+test("a site owner name is never a word an INI reader turns into 1 or nothing", async () => {
+  await withHost(async (host) => {
+    // The same shape with an ordinary name goes through.
+    const control = await host.run(["groupadd", "-g", "15020", "bob"]);
+    assertEquals(control.code, 0, control.stderr);
+    for (
+      const word of ["yes", "no", "on", "off", "true", "false", "none", "null"]
+    ) {
+      assertEquals(isReservedPrincipalUsername(word), true, word);
+      await refused(host, ["groupadd", "-g", "15021", word]);
+      await refused(host, [
+        "useradd",
+        "-K",
+        "UID_MIN=15001",
+        "-K",
+        "UID_MAX=60000",
+        "-g",
+        word,
+        "-d",
+        host.path(`srv/users/${word}/home`),
+        "-M",
+        "-s",
+        "/bin/bash",
+        word,
+      ]);
+    }
+  });
+});
+
+// --- site-env-install / site-env-remove, and a site unit's EnvironmentFile= ---
+// A site's variables for its cron jobs: one folder per Linux user under
+// <config>/site-env, and a site unit may name only its own account's file.
+
+const SITE_ENV_ID = "web-0123456789ab";
+const SITE_ENV_STAGED =
+  `var/lib/turbopanel/sites/.env-stage/${SITE_ENV_ID}.env`;
+const SITE_ENV_COPY = `etc/turbopanel/site-env/alice/${SITE_ENV_ID}.env`;
+
+const SITE_ENV_ENTRIES = [
+  { name: "DB_HOST", value: "db.example.test" },
+  { name: "TEST_SECRET", value: 'it\'s $HOME `x` \\ "y"' },
+];
+
+async function stageSiteEnv(host: Host, text: string, id = SITE_ENV_ID) {
+  const rel = `var/lib/turbopanel/sites/.env-stage/${id}.env`;
+  await Deno.mkdir(host.path(rel.slice(0, rel.lastIndexOf("/"))), {
+    recursive: true,
+  });
+  await Deno.writeTextFile(host.path(rel), text);
+}
+
+test("site-env-install copies a checked file into the account's own root-only folder", async () => {
+  await withHost(async (host) => {
+    const text = renderNativeAppEnvFile(SITE_ENV_ENTRIES);
+    await stageSiteEnv(host, text);
+    const result = await host.run([
+      "site-env-install",
+      "alice",
+      SITE_ENV_ID,
+    ]);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await Deno.readTextFile(host.path(SITE_ENV_COPY)), text);
+    assertEquals(await modeOf(host.path(SITE_ENV_COPY)), 0o600);
+    assertEquals(
+      await modeOf(host.path("etc/turbopanel/site-env/alice")),
+      0o700,
+    );
+    assertEquals(await modeOf(host.path("etc/turbopanel/site-env")), 0o700);
+    // A later run replaces the copy.
+    await stageSiteEnv(
+      host,
+      renderNativeAppEnvFile([{ name: "A", value: "1" }]),
+    );
+    assertEquals(
+      (await host.run(["site-env-install", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    assertEquals(
+      await Deno.readTextFile(host.path(SITE_ENV_COPY)),
+      renderNativeAppEnvFile([{ name: "A", value: "1" }]),
+    );
+  });
+});
+
+test("site-env-install refuses a non-principal, a bad id, a link and a bad file", async () => {
+  await withHost(async (host) => {
+    const good = renderNativeAppEnvFile(SITE_ENV_ENTRIES);
+    await stageSiteEnv(host, good);
+    await refused(host, ["site-env-install", "root", SITE_ENV_ID]);
+    await refused(host, ["site-env-install", "nobody", SITE_ENV_ID]);
+    await refused(host, ["site-env-install", "alice"]);
+    await refused(host, ["site-env-install", "alice", SITE_ENV_ID, "extra"]);
+    for (const id of ["../web", "Web", "-web", "web.env", "a/b", ""]) {
+      await refused(host, ["site-env-install", "alice", id]);
+    }
+    // A link at the staged path to a file only root can read.
+    await Deno.remove(host.path(SITE_ENV_STAGED));
+    await Deno.symlink(host.path("outside/secret"), host.path(SITE_ENV_STAGED));
+    await refused(host, ["site-env-install", "alice", SITE_ENV_ID]);
+    // Content the daemon never writes.
+    await Deno.remove(host.path(SITE_ENV_STAGED));
+    await Deno.writeTextFile(host.path(SITE_ENV_STAGED), "A=unquoted\n");
+    await refused(host, ["site-env-install", "alice", SITE_ENV_ID]);
+    const copied = await Deno.lstat(host.path(SITE_ENV_COPY)).then(
+      () => true,
+      () => false,
+    );
+    assertEquals(copied, false);
+  });
+});
+
+test("site-env-remove deletes the copy; no folder is fine; no generic verb reaches it", async () => {
+  await withHost(async (host) => {
+    assertEquals(
+      (await host.run(["site-env-remove", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    await stageSiteEnv(host, renderNativeAppEnvFile(SITE_ENV_ENTRIES));
+    assertEquals(
+      (await host.run(["site-env-install", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    assertEquals(
+      (await host.run(["site-env-remove", "alice", SITE_ENV_ID])).code,
+      0,
+    );
+    const left = await Deno.lstat(host.path(SITE_ENV_COPY)).then(
+      () => true,
+      () => false,
+    );
+    assertEquals(left, false);
+    await refused(host, ["site-env-remove", "root", SITE_ENV_ID]);
+    await refused(host, ["site-env-remove", "alice", "../x"]);
+    await refused(host, [
+      "install",
+      "-m",
+      "0644",
+      "-o",
+      "root",
+      "-g",
+      "root",
+      host.path("tmp/staged"),
+      host.path(SITE_ENV_COPY),
+    ]);
+  });
+});
+
+test("a site's cron unit may load only its own account's variables copy", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const base = {
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+    };
+    const own = host.path(SITE_ENV_COPY);
+    const name = "turbopanel-cron-env1-web-nightly.service";
+    const install = async (content: string, unit = name) =>
+      await host.run([
+        "install",
+        "-m",
+        "0644",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        await stageContent(host, content),
+        host.path(`etc/systemd/system/${unit}`),
+      ]);
+    const ok = await install(
+      cronServiceContent({ ...base, environmentFile: own, phpSeries: "8.4" }),
+    );
+    assertEquals(ok.code, 0, ok.stderr);
+    const text = cronServiceContent({ ...base, environmentFile: own });
+    const bad = [
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${host.path("etc/turbopanel/site-env/bob/x.env")}`,
+      ),
+      text.replace(`EnvironmentFile=${own}`, `EnvironmentFile=-${own}`),
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${own}\nEnvironmentFile=${own}`,
+      ),
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${host.path("etc/turbopanel/daemon.env")}`,
+      ),
+      text.replace(
+        `EnvironmentFile=${own}`,
+        `EnvironmentFile=${host.path("etc/turbopanel/site-env/alice/Bad.env")}`,
+      ),
+    ];
+    for (const content of bad) {
+      assertEquals((await install(content)).code === 0, false, content);
+    }
+    // The same line in a unit that is not a site unit is refused.
+    const other = await install(
+      cronServiceContent({ ...base, environmentFile: own }),
+      "turbopanel-other-env1-web.service",
+    );
+    assertEquals(other.code === 0, false);
+  });
+});
+
+test("a site's command and worker units carry the PHP walls, each pinned", async () => {
+  await withHost(async (host) => {
+    const layout = resolveLayout({
+      TURBOPANEL_HOME: host.path("opt/turbopanel"),
+      TURBOPANEL_RUNTIMES_DIR: host.path("opt/turbopanel/vendor"),
+      TURBOPANEL_CONFIG_DIR: host.path("etc/turbopanel"),
+      TURBOPANEL_STATE_DIR: host.path("var/lib/turbopanel"),
+      TURBOPANEL_PRINCIPAL_HOME_ROOT: host.path("srv/users"),
+    }, { forceMode: "production" });
+    const own = host.path(SITE_ENV_COPY);
+    const base = {
+      layout: { ...layout, libDir: host.path("opt/turbopanel/lib") },
+      username: "alice",
+      workingDirectory: host.path("srv/users/alice/sites/web/current"),
+      environmentFile: own,
+      phpSeries: "8.4",
+      siteWritableDirs: [host.path("srv/users/alice/sites/web/shared")],
+      environmentId: "env1",
+      composeServiceName: "web",
+    };
+    const command = postDeployUnitContent({
+      ...base,
+      releaseId: "rel1",
+      extraWritablePaths: [
+        host.path("srv/users/alice/sites/web/releases/rel1/bootstrap/cache"),
+      ],
+      postDeploy: {
+        commands: [["/usr/bin/php8.4", "artisan", "migrate", "--force"]],
+        timeoutSeconds: 300,
+      },
+    });
+    const worker = workerUnitContent({
+      ...base,
+      worker: {
+        name: "queue",
+        command: ["/usr/bin/php8.4", "artisan", "queue:work"],
+        processes: 2,
+        memoryMaxBytes: 536870912,
+      },
+    });
+    const commandName = "turbopanel-deploycmd-env1-web.service";
+    const workerName = "turbopanel-worker-env1-web-queue@.service";
+    for (
+      const [name, text] of [[commandName, command], [workerName, worker]]
+    ) {
+      const ok = await installUnit(host, name, text);
+      assertEquals(ok.code, 0, `${name}: ${ok.stderr}`);
+      const guard = `ExecStartPre=+${
+        host.path("opt/turbopanel/lib")
+      }/tp-php-loopback sync`;
+      assertStringIncludes(text, guard);
+      const bad = [
+        // Each wall removed.
+        text.replace(guard, ""),
+        text.replace(/^IPAddressDeny=.*$/m, ""),
+        text.replace(/^IPAddressAllow=.*$/m, ""),
+        text.replace(/^PrivateDevices=.*$/m, ""),
+        // Each wall changed.
+        text.replace(/^IPAddressDeny=.*$/m, "IPAddressDeny=localhost"),
+        text.replace(/^IPAddressAllow=.*$/m, "IPAddressAllow=any"),
+        text.replace("PrivateDevices=yes", "PrivateDevices=no"),
+        // Another root hook, or a second hook of any kind.
+        text.replace(guard, "ExecStartPre=+/bin/true"),
+        text.replace(guard, `${guard}\nExecStartPre=/bin/true`),
+        text.replace(guard, `${guard}\n${guard}`),
+        // Another account's variables copy, or none of its own pinned form.
+        text.replace(
+          `EnvironmentFile=${own}`,
+          `EnvironmentFile=${host.path("etc/turbopanel/site-env/bob/x.env")}`,
+        ),
+      ];
+      for (const content of bad) {
+        assertEquals(
+          (await installUnit(host, name, content)).code === 0,
+          false,
+        );
+      }
+    }
+    // A scheduled job may not carry a root hook: the guard line is refused there.
+    const cron = cronServiceContent({
+      layout,
+      environmentId: "env1",
+      composeServiceName: "web",
+      job: {
+        name: "nightly",
+        schedule: "*-*-* 03:00:00",
+        command: ["/usr/bin/php8.4", "artisan", "schedule:run"],
+      } as unknown as EnvironmentDeployCronJob,
+      username: "alice",
+      workingDirectory: base.workingDirectory,
+      environmentFile: own,
+    });
+    const guardLine = command.split("\n").find((line) =>
+      line.startsWith("ExecStartPre=")
+    ) ?? "";
+    await refusedUnit(
+      host,
+      "turbopanel-cron-env1-web-nightly.service",
+      cron.replace("[Service]\n", `[Service]\n${guardLine}\n`),
+    );
+    // The same unit under a name outside the two families is refused.
+    await refusedUnit(host, "turbopanel-other-env1-web.service", command);
+  });
+});
+
+test("journalctl reads a site's command and worker units, nothing else", async () => {
+  await withHost(async (host) => {
+    const form = (unit: string) => [
+      "journalctl",
+      `--unit=${unit}`,
+      "-n",
+      "2000",
+      "--no-pager",
+      "--output=short-iso",
+    ];
+    for (
+      const unit of [
+        "turbopanel-deploycmd-env1-web.service",
+        "turbopanel-worker-env1-web-queue@1.service",
+      ]
+    ) {
+      // tp-host's test mode refuses to exec journald; reaching that point
+      // means the unit name passed the check.
+      const result = await host.run(form(unit));
+      assertEquals(result.stderr.includes("refusing unit"), false, unit);
+    }
+    for (const unit of ["turbopanel-php-x.service", "ssh.service", "sshd"]) {
+      await refused(host, form(unit));
+    }
   });
 });

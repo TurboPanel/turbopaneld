@@ -15,6 +15,8 @@
 - name: Install staged license credentials into daemon state directory
   when: _staged_license_id.stat.exists
   block:
+    # license.id stays group-readable: a co-located control plane (group tp)
+    # reads it to recognise its own seat. It is not a secret on its own.
     - name: Copy staged license.id into daemon state directory
       ansible.builtin.copy:
         src: "{{ turbopanel_daemon_license_staging_dir }}/license.id"
@@ -31,7 +33,8 @@
         remote_src: true
         owner: "{{ turbopanel_user }}"
         group: "{{ turbopanel_group }}"
-        mode: "0640"
+        # Daemon only: group tp also holds the service accounts.
+        mode: "0600"
 
     - name: Remove staged license credentials
       ansible.builtin.file:

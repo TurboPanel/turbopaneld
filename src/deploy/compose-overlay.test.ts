@@ -3,7 +3,7 @@ import { join } from "@std/path";
 import { parse } from "yaml";
 import { DAEMON_COMPOSE_FILENAME } from "./compose-files.ts";
 import {
-  applyRailpackImagesToComposeYaml,
+  applyImageBuildImagesToComposeYaml,
   isEmptyFragment,
   mergeComposeOverlayFragments,
   mergeOverlayIntoComposeYaml,
@@ -180,7 +180,7 @@ test("mergeOverlayIntoComposeYaml drops aliases when the overlay uses list form"
   ]);
 });
 
-test("applyRailpackImagesToComposeYaml sets the built image and drops build", () => {
+test("applyImageBuildImagesToComposeYaml sets the built image and drops build", () => {
   const yaml = `services:
   api:
     build:
@@ -191,7 +191,7 @@ test("applyRailpackImagesToComposeYaml sets the built image and drops build", ()
     image: redis:7
 `;
   const out = parse(
-    applyRailpackImagesToComposeYaml(
+    applyImageBuildImagesToComposeYaml(
       yaml,
       new Map([["api", "turbopanel-app/api:rel-1"]]),
     ),
@@ -205,12 +205,12 @@ test("applyRailpackImagesToComposeYaml sets the built image and drops build", ()
   assertEquals(out.services.cache.image, "redis:7");
 });
 
-test("applyRailpackImagesToComposeYaml is a no-op without railpack services", () => {
+test("applyImageBuildImagesToComposeYaml is a no-op without image-build services", () => {
   const yaml = "services:\n  cache:\n    image: redis:7\n";
-  assertEquals(applyRailpackImagesToComposeYaml(yaml, new Map()), yaml);
+  assertEquals(applyImageBuildImagesToComposeYaml(yaml, new Map()), yaml);
   // A named service the compile step already stripped is ignored, not an error.
   assertEquals(
-    applyRailpackImagesToComposeYaml(
+    applyImageBuildImagesToComposeYaml(
       yaml,
       new Map([["gone", "turbopanel-app/gone:rel-1"]]),
     ),
@@ -284,15 +284,15 @@ test("mergeOverlayIntoComposeYaml folds volumes and ignores a non-object documen
   assertEquals(scalar.includes("web:"), true);
 });
 
-test("applyRailpackImagesToComposeYaml ignores non-object documents and services", () => {
+test("applyImageBuildImagesToComposeYaml ignores non-object documents and services", () => {
   const images = new Map([["api", "turbopanel-app/api:rel-1"]]);
-  assertEquals(applyRailpackImagesToComposeYaml("[]\n", images), "[]\n");
+  assertEquals(applyImageBuildImagesToComposeYaml("[]\n", images), "[]\n");
   assertEquals(
-    applyRailpackImagesToComposeYaml("services: []\n", images),
+    applyImageBuildImagesToComposeYaml("services: []\n", images),
     "services: []\n",
   );
   assertEquals(
-    applyRailpackImagesToComposeYaml("services:\n  api: nginx\n", images),
+    applyImageBuildImagesToComposeYaml("services:\n  api: nginx\n", images),
     "services:\n  api: nginx\n",
   );
 });

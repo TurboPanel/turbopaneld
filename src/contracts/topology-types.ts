@@ -2,7 +2,7 @@
  * Topology discovery types — the daemon-side identity/generation contract
  * that later phases (adapters, Cloudflare packer/query reconstruction) build
  * on. This module only discovers and assigns stable identity; it does not
- * collect telemetry for any of these entities (see `../AGENTS.md`).
+ * collect telemetry for any of these entities (see `../metrics/AGENTS.md`).
  *
  * A `TopologyDeviceId`/`FilesystemId`/`GpuId`/`SignalId` is an opaque stable
  * string, derived by `identity.ts` — never a bare kernel/interface name,
@@ -198,6 +198,14 @@ export type NumaNodeTopology = {
 
 /** Freshly-discovered topology data, before `generation.ts` stamps a topology generation onto it. */
 export type TopologySnapshotInputs = Omit<TopologySnapshot, "generation">;
+
+/**
+ * A snapshot as `topology-report` carries it: the generation numbers are left
+ * out once the control plane lists `topology-generation-optional-v1`.
+ */
+export type TopologyReportSnapshot =
+  & Omit<TopologySnapshot, "generation" | "bootGeneration">
+  & Partial<Pick<TopologySnapshot, "generation" | "bootGeneration">>;
 
 export type TopologySnapshot = {
   generation: number;

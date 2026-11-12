@@ -28,6 +28,17 @@ export type GrantQuoting = {
   accountAt: (username: string, host: string) => string;
   /** Database-level privileges only this dialect has: [name, `mysql.db` column]. */
   extraPrivileges?: ReadonlyArray<readonly [string, string]>;
+  /**
+   * What the backup login holds on every database (`*.*`) in this dialect: a
+   * logical dump of rows, views, triggers, events and routine definitions.
+   */
+  backupPrivileges: readonly string[];
+  /**
+   * The table that lists open connections (`ID`, `USER`). MySQL reads
+   * `performance_schema.processlist` (the information_schema table is
+   * deprecated there); MariaDB keeps `information_schema.PROCESSLIST`.
+   */
+  processlistTable: string;
 };
 
 /** The database name as a schema in a grant: exact, wildcards escaped. */
@@ -44,22 +55,20 @@ export function quoteGrantSchema(quoting: GrantQuoting, name: string): string {
 }
 
 /**
- * Removes the plain (unescaped) database-level grant of one account on one
- * database, only when that exact grant row exists (a `REVOKE` of a grant that
- * is not there is an error). Touches nothing but that row: the escaped grant,
- * grants on other databases and the account itself stay. The caller runs it
- * only after the escaped grant is in place, so the login never loses access.
+ * Removes one stored database-level grant row of one account, only when that
+ * exact row exists (a `REVOKE` of a grant that is not there is an error).
+ * `storedDb` is the name as `mysql.db` keeps it (an escaped name keeps its
+ * backslashes) and `schema` the same name quoted for the `ON` clause.
  */
-function revokePlainPatternGrantSql(
+function revokeStoredRowSql(
   quoting: GrantQuoting,
-  database: string,
+  storedDb: string,
+  schema: string,
   username: string,
   host: string,
 ): string {
   const { quoteLiteral } = quoting;
-  const target = `${quoting.quoteIdentifier(database)}.* FROM ${
-    quoting.accountAt(username, host)
-  }`;
+  const target = `${schema}.* FROM ${quoting.accountAt(username, host)}`;
   // `ALL PRIVILEGES, GRANT OPTION` does not parse with an `ON` clause, so the
   // two revokes are separate, and each re-checks that the row is still there
   // (a `REVOKE` of a grant that is gone is an error).
@@ -69,7 +78,7 @@ function revokePlainPatternGrantSql(
   ].map((revoke) =>
     [
       `SET @tp_plain_grant = (SELECT COUNT(*) FROM mysql.db WHERE Db = ${
-        quoteLiteral(database)
+        quoteLiteral(storedDb)
       } AND User = ${quoteLiteral(username)} AND Host = ${
         quoteLiteral(host)
       });`,
@@ -81,6 +90,136 @@ function revokePlainPatternGrantSql(
       "DEALLOCATE PREPARE tp_plain_revoke;",
     ].join("\n")
   ).join("\n");
+}
+
+/**
+ * Removes the plain (unescaped) database-level grant of one account on one
+ * database. Touches nothing but that row: the escaped grant, grants on other
+ * databases and the account itself stay. The caller runs it only after the
+ * escaped grant is in place, so the login never loses access.
+ */
+function revokePlainPatternGrantSql(
+  quoting: GrantQuoting,
+  database: string,
+  username: string,
+  host: string,
+): string {
+  return revokeStoredRowSql(
+    quoting,
+    database,
+    quoting.quoteIdentifier(database),
+    username,
+    host,
+  );
+}
+
+/** One database-level grant row of an account, as `mysql.db` stores it. */
+export type StoredGrantRow = { host: string; db: string };
+
+// deno-lint-ignore no-control-regex -- intentional control-char reject
+const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
+
+/** Schemas the platform's own accounts need; never revoked from a login. */
+const SYSTEM_SCHEMAS = new Set([
+  "mysql",
+  "sys",
+  "information_schema",
+  "performance_schema",
+]);
+
+/**
+ * Every database-level grant row the account holds, at any host. Host and
+ * schema come back hex-encoded so no character in a name can break the
+ * output (batch mode would double a backslash).
+ */
+export function listDatabaseGrantRowsSql(
+  quoting: GrantQuoting,
+  username: string,
+): string {
+  return `SELECT HEX(Host), HEX(Db) FROM mysql.db WHERE User = ${
+    quoting.quoteLiteral(username)
+  };`;
+}
+
+function unhex(value: string): string {
+  const bytes = new Uint8Array(value.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = Number.parseInt(value.slice(i * 2, i * 2 + 2), 16);
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/** Parses the batch output of {@link listDatabaseGrantRowsSql}. */
+export function parseDatabaseGrantRows(stdout: string): StoredGrantRow[] {
+  const rows: StoredGrantRow[] = [];
+  for (const line of stdout.split("\n")) {
+    const match = /^([0-9A-Fa-f]*)\t([0-9A-Fa-f]+)\s*$/.exec(line);
+    if (match && match[1].length % 2 === 0 && match[2].length % 2 === 0) {
+      const row = { host: unhex(match[1]), db: unhex(match[2]) };
+      // A name that cannot be quoted cannot be revoked either; leave it out
+      // rather than fail every apply of the login.
+      if (!CONTROL_CHAR_RE.test(row.db + row.host)) rows.push(row);
+    }
+  }
+  return rows;
+}
+
+/**
+ * The grant rows a login must lose: every row on a schema it is not listed
+ * for (a plain or wildcard name, such as `%`, counts too). A listed database
+ * is kept under both its escaped and its plain spelling; the plain one is the
+ * business of {@link revokePlainPatternGrantSql}.
+ */
+export function unlistedGrantRows(
+  rows: readonly StoredGrantRow[],
+  listed: readonly string[],
+): StoredGrantRow[] {
+  const keep = new Set<string>(SYSTEM_SCHEMAS);
+  for (const name of listed) {
+    keep.add(name);
+    keep.add(escapeGrantSchemaPattern(name));
+  }
+  return rows.filter((row) => !keep.has(row.db));
+}
+
+/** Backtick-quote a stored schema name (backslashes stay: they are the escape). */
+function quoteStoredSchema(storedDb: string): string {
+  if (storedDb.length === 0 || CONTROL_CHAR_RE.test(storedDb)) {
+    throw new Error("grant schema holds control characters");
+  }
+  return `\`${storedDb.replaceAll("`", "``")}\``;
+}
+
+/** The guarded revokes for the rows {@link unlistedGrantRows} returned. */
+export function revokeStoredRowsSql(
+  quoting: GrantQuoting,
+  username: string,
+  rows: readonly StoredGrantRow[],
+): string {
+  // The `mysql` client of the official MySQL images connects as latin1, which
+  // would send a non-ASCII schema name as other bytes than the row holds.
+  return [
+    "SET NAMES utf8mb4;",
+    ...rows.map((row) =>
+      revokeStoredRowSql(
+        quoting,
+        row.db,
+        quoteStoredSchema(row.db),
+        username,
+        row.host,
+      )
+    ),
+  ].join("\n");
+}
+
+/** The open connection ids of the account (one `KILL` each); never this session's. */
+export function listLoginConnectionsSql(
+  quoting: GrantQuoting,
+  username: string,
+): string {
+  return `SELECT ID FROM ${quoting.processlistTable} WHERE USER = ${
+    quoting.quoteLiteral(username)
+  } AND ID <> CONNECTION_ID();`;
 }
 
 /**
@@ -229,21 +368,8 @@ export function grantOnDatabaseSql(
   const account = quoting.accountAt(username, host);
   // The name as `mysql.db` stores it: wildcards escaped, no backticks.
   const schema = db.slice(1, -1);
-  const revokeFrom = (
-    held: readonly string[],
-  ) =>
-    revokeExcessSql(
-      quoting,
-      schema,
-      database,
-      username,
-      host,
-      [
-        ...DATABASE_PRIVILEGES,
-        ...(quoting.extraPrivileges ?? []),
-      ].filter(([name]) => !held.includes(name)),
-      true,
-    );
+  const revokeFrom = (held: readonly string[]) =>
+    revokeAllButSql(quoting, schema, database, username, host, held);
   switch (privilege) {
     case "admin":
       return `GRANT ALL PRIVILEGES ON ${db}.* TO ${account} WITH GRANT OPTION;`;
@@ -267,6 +393,46 @@ export function grantOnDatabaseSql(
   }
 }
 
+/** Revokes every database-level privilege but `held` (and `GRANT OPTION`). */
+function revokeAllButSql(
+  quoting: GrantQuoting,
+  schema: string,
+  database: string,
+  username: string,
+  host: string,
+  held: readonly string[],
+): string {
+  return revokeExcessSql(
+    quoting,
+    schema,
+    database,
+    username,
+    host,
+    [
+      ...DATABASE_PRIVILEGES,
+      ...(quoting.extraPrivileges ?? []),
+    ].filter(([name]) => !held.includes(name)),
+    true,
+  );
+}
+
+/**
+ * The backup login's one `GRANT` for one account: the dialect's
+ * {@link GrantQuoting.backupPrivileges} at global level (`*.*`), so it reads
+ * every database, including one made later with plain `CREATE DATABASE`. It
+ * holds no write, DDL or account right anywhere; the only administrative right
+ * is MySQL's `FLUSH_TABLES`, which a consistent `mysqldump` needs.
+ */
+export function grantBackupOnAllSql(
+  quoting: GrantQuoting,
+  username: string,
+  host: string,
+): string {
+  return `GRANT ${quoting.backupPrivileges.join(", ")} ON *.* TO ${
+    quoting.accountAt(username, host)
+  };`;
+}
+
 /** Both grant builders bound to one dialect's quoting and default host. */
 export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
   grantDatabaseSql: (
@@ -280,8 +446,22 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
     username: string,
     host?: string,
   ) => string;
+  grantBackupSql: (username: string, host?: string) => string;
+  listGrantRowsSql: (username: string) => string;
+  revokeRowsSql: (
+    username: string,
+    rows: readonly StoredGrantRow[],
+  ) => string;
+  listConnectionsSql: (username: string) => string;
 } {
   return {
+    listGrantRowsSql: (username) => listDatabaseGrantRowsSql(quoting, username),
+    revokeRowsSql: (username, rows) =>
+      revokeStoredRowsSql(quoting, username, rows),
+    listConnectionsSql: (username) =>
+      listLoginConnectionsSql(quoting, username),
+    grantBackupSql: (username, host = defaultHost) =>
+      grantBackupOnAllSql(quoting, username, host),
     grantDatabaseSql: (database, username, privilege, host = defaultHost) =>
       grantOnDatabaseSql(quoting, database, username, privilege, host),
     revokePlainDatabaseGrantSql: (database, username, host = defaultHost) =>

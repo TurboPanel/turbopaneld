@@ -68,7 +68,7 @@ the unit starts. Per app:
 **Check before the switch.** Steps, as the transcript and the step rail name
 them:
 
-1. *Start the new release* (`start-release`). Publishing did not move
+1. *Start the New Release* (`start-release`). Publishing did not move
    `current`: for an app that is switched on and whose unit is active,
    `applySourceReleases` publishes with tp-host `publish-keep`
    (`promoteRelease`'s `keepCurrent`, asked through `nativeAppIsServing`), so a
@@ -94,19 +94,23 @@ them:
    before the copy's variables, so an interrupted deploy always leaves the
    marker its cleanup looks for. The app's own unit, variables file and
    `current` are not touched.
-2. *Check it answers* (`health`): the same probe as a first start, on the
-   spare port. When the copy does not start or does not answer, its journal
+2. *Check Service Health* (`health`): the same probe as a first start, on the
+   spare port. The probe is an HTTP request to the loopback port and any
+   status code counts as an answer, so the step ends as *Service Is Reachable*
+   ("Answered HTTP on 127.0.0.1:PORT after N s") and never claims healthy; a
+   silent app ends it as *Service Did Not Answer*. Only the first start and
+   the check beside the serving release report; a rollback's probe does not. When the copy does not start or does not answer, its journal
    goes to the transcript, the copy is stopped and removed, and the deploy
    fails saying the new release never took traffic and the release that was
    serving keeps serving. Nothing to roll back: nothing switched.
-3. *Switch traffic* (`switch-traffic`): the app's own variables file and unit
+3. *Switch Traffic* (`switch-traffic`): the app's own variables file and unit
    are written for the new release (reload only if the unit changed), the
    check copy is stopped (it shares the account's ceilings), `current` moves,
    and the app's own unit restarts on its own port — that is where the old
    release's process stops — and is probed again; only that answer marks the
    release healthy. A unit that does not restart or does not answer rolls
    back to the previous release when it once answered.
-4. *Stop the old release* (`stop-old-release`): the check copy's unit,
+4. *Stop the Old Release* (`stop-old-release`): the check copy's unit,
    variables copy and staged file are removed; the previous release stays on
    disk for a rollback (retention keeps five).
 
@@ -269,6 +273,16 @@ listen on 127.0.0.1 and `$PORT`. No unit setting forces this: systemd's
 directions, so they would also cut the app off from every outside service it
 calls.
 
+**Account walls.** The app runs as its account, so the account walls
+(`lib/tp-php-loopback`, see `../site/AGENTS.md`) bind it: on loopback it may
+reach the database proxy (127.0.0.1:13306, 15432), the resolver, and its own
+account's app ports (each `turbopanel-app-*.service`'s `User=` and `PORT=`,
+check copies included), nothing else, and no container by bridge address.
+The apply runs `tp-host php-loopback-sync` after the units are on disk and
+before any starts (so an app that calls its own port finds it open), after a
+check copy is retired and after apps are removed (so a port the ledger hands
+on stops opening for the old account). A failed sync only warns.
+
 **Application mode.** `appMode` renders as `Environment=NODE_ENV=<mode>` in the
 unit (default `production`; any other value matching `NATIVE_APP_MODE_RE`,
 such as `staging`, is passed as is) and rides into the release build as the same value
@@ -298,11 +312,12 @@ the single place it becomes systemd's: `condition` → `Restart=` (`any` is
 `RestartSec=`, `max_attempts` → `StartLimitBurst=`, `window` →
 `StartLimitIntervalSec=`. The two rate-limit directives are `[Unit]`, not
 `[Service]`, so they are emitted apart from `Restart=`; systemd would ignore
-them under `[Service]`. A payload carrying no policy renders the historical
-`Restart=on-failure` / `RestartSec=2` and a bounded crash-loop budget
-(`StartLimitBurst=10`, `StartLimitIntervalSec=120`): systemd's own default (five
-in ten seconds) never trips at `RestartSec=2`, so an app that failed instantly
-restarted for ever. The unit `PATH` leads with the release's
+them under `[Service]`. A payload carrying no `max_attempts` or `window`
+renders `Restart=on-failure` / `RestartSec=2`, `StartLimitIntervalSec=0` (no
+start limit) and `RestartSteps=10` / `RestartMaxDelaySec=120`, so a burst of
+failed starts (a full disk) never leaves the app stopped, and the delay grows
+instead of hammering the host (an authored `delay` is kept as written, with no growing delay). An author who sets either limit asked for a
+give-up and gets exactly it, without the growing delay. The unit `PATH` leads with the release's
 `node_modules/.bin` (then the vendored Node, then `/usr/bin:/bin`) so a start
 command naming a local binary resolves it; a standalone Next.js release has no
 `.bin`, so leave its start command empty. A deploy whose app never answers
@@ -371,11 +386,16 @@ points to). Rules that are not obvious:
   `turbopanel-app-<id>.service`, only equal to the root copy's path for the same
   `<id>`, and only `app-env-install` / `app-env-remove` (a service id, never a
   path) touch that folder; no generic verb accepts a path in it (see the
-  `tp-host` bullet in `../../../AGENTS.md`). A new `tp-host` is needed before the
+  `tp-host` bullet in `../../../orchestration/scripts/AGENTS.md`). A new `tp-host` is needed before the
   daemon that calls the verbs (the update playbooks install it first).
 - Unlike the compose secret files (tmpfs `/run`, rehydrated after a reboot),
   the copy lives on disk under `/etc` so the unit can start at boot before the
   daemon is up. The daemon cannot read it back.
+- **Sites use the same pattern with one more level** (`../site/site-env-file.ts`,
+  `tp-host site-env-install <user> <site id>`, copy at
+  `<config>/site-env/<user>/<site id>.env`): the site's cron units load it, and
+  `tp-host` ties the path to the unit's own `User=`. It reuses this file's
+  renderer, size limit and value normalization.
 
 **Health probe.** Any completed HTTP response counts as started — a 404 or a 500
 is a running app, and this gate answers "did the release come up", not "is the

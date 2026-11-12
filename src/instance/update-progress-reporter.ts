@@ -7,6 +7,7 @@ import type {
 } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { assertTestRunMayWrite } from "../permissions/test-write-guard.ts";
 import { redactUrlSecrets } from "../util/redact-url-secrets.ts";
 
 const STAGE_MARKER_PREFIX = "::turbopanel-stage::";
@@ -55,11 +56,21 @@ export type UpdateProgressReporterOptions = {
   persist?: UpdateProgressPersist;
 };
 
+/** Disk writes refuse a real state dir in a `deno test` run (test-write-guard.ts). */
 const defaultPersist: UpdateProgressPersist = {
-  mkdir: (path) => Deno.mkdir(path, { recursive: true }),
+  mkdir: async (path) => {
+    assertTestRunMayWrite(path);
+    await Deno.mkdir(path, { recursive: true });
+  },
   readTextFile: (path) => Deno.readTextFile(path),
-  writeTextFile: (path, data) => Deno.writeTextFile(path, data),
-  remove: (path) => Deno.remove(path),
+  writeTextFile: async (path, data) => {
+    assertTestRunMayWrite(path);
+    await Deno.writeTextFile(path, data);
+  },
+  remove: async (path) => {
+    assertTestRunMayWrite(path);
+    await Deno.remove(path);
+  },
 };
 
 /**

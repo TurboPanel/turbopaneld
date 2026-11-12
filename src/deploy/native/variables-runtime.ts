@@ -28,8 +28,8 @@
  * never logged; only names are.
  */
 
-import { join } from "@std/path";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
+import { writePrivateFileAtomic } from "../../permissions/host-unit-files.ts";
 import type {
   EnvironmentDeployNativeAppService,
   EnvironmentDeployVariableMaterial,
@@ -123,16 +123,18 @@ export function normalizeNativeAppEnvValue(
   composeServiceName: string,
   name: string,
   value: string,
+  /** What the service is, for the error: a native app, or a site. */
+  subject = "native app",
 ): string {
   const normalized = value.replaceAll("\r\n", "\n");
   if (normalized.includes("\r")) {
     throw new Error(
-      `native app ${composeServiceName}: variable ${name} holds a carriage return that is not part of a Windows line ending (CR LF); remove it and deploy again`,
+      `${subject} ${composeServiceName}: variable ${name} holds a carriage return that is not part of a Windows line ending (CR LF); remove it and deploy again`,
     );
   }
   if (normalized.includes("\0")) {
     throw new Error(
-      `native app ${composeServiceName}: variable ${name} holds a NUL character, which an environment variable cannot carry`,
+      `${subject} ${composeServiceName}: variable ${name} holds a NUL character, which an environment variable cannot carry`,
     );
   }
   return normalized;
@@ -249,18 +251,7 @@ export async function stageNativeAppEnvFile(
   const dir = nativeAppEnvStageDir(layout);
   await Deno.mkdir(dir, { recursive: true, mode: NATIVE_APP_ENV_DIR_MODE });
   await Deno.chmod(dir, NATIVE_APP_ENV_DIR_MODE);
-  const path = nativeAppEnvStagePath(layout, serviceId);
-  const tmp = join(dir, `.${serviceId}.env.${crypto.randomUUID()}.tmp`);
-  try {
-    await Deno.writeTextFile(tmp, text, {
-      mode: NATIVE_APP_ENV_FILE_MODE,
-      createNew: true,
-    });
-    await Deno.rename(tmp, path);
-  } catch (err) {
-    await Deno.remove(tmp).catch(() => undefined);
-    throw err;
-  }
+  await writePrivateFileAtomic(dir, `${serviceId}.env`, text);
 }
 
 /** Remove the staged file. Absent is fine: nothing to clean. */

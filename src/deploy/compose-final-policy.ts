@@ -185,12 +185,34 @@ function describeReservedHostPorts(): string {
   ).join(", ");
 }
 
+/** The helper ports the control plane injected; each exempts exactly one publish. */
+export type HelperReachPublish = {
+  composeServiceName: string;
+  containerPort: number;
+  hostPort: number;
+};
+
+/** True for the one publish a helper port stands for: `127.0.0.1:<hostPort>:<containerPort>`, TCP, no range. */
+function isHelperPublish(
+  entry: unknown,
+  helper: HelperReachPublish,
+): boolean {
+  if (!isRecord(entry)) return false;
+  const protocol = entry.protocol ?? "tcp";
+  const range = publishedRange(entry.published);
+  return entry.host_ip === "127.0.0.1" && protocol === "tcp" &&
+    range?.[0] === helper.hostPort && range[1] === helper.hostPort &&
+    entry.target === helper.containerPort;
+}
+
 function reservedPortFindings(
   name: string,
   service: Record<string, unknown>,
+  helpers: readonly HelperReachPublish[] = [],
 ): string[] {
   if (!Array.isArray(service.ports)) return [];
   return service.ports.flatMap((entry): string[] => {
+    if (helpers.some((helper) => isHelperPublish(entry, helper))) return [];
     const range = isRecord(entry) ? publishedRange(entry.published) : undefined;
     if (range === undefined) return [];
     const hit = RESERVED_HOST_PORT_RANGES.some(([lo, hi]) =>
@@ -203,6 +225,22 @@ function reservedPortFindings(
         }, which the platform reserves for its own services (reserved host ports: ${describeReservedHostPorts()}); publish a different host port`,
       ]
       : [];
+  });
+}
+
+/** A helper port whose publish is missing would leave its port open to no account at all, or to the wrong one. */
+function helperPublishFindings(
+  services: Record<string, unknown>,
+  helpers: readonly HelperReachPublish[],
+): string[] {
+  return helpers.flatMap((helper) => {
+    const service = services[helper.composeServiceName];
+    const ports = isRecord(service) && Array.isArray(service.ports)
+      ? service.ports
+      : [];
+    return ports.some((entry) => isHelperPublish(entry, helper)) ? [] : [
+      `service ${helper.composeServiceName} does not publish its helper port 127.0.0.1:${helper.hostPort}:${helper.containerPort}`,
+    ];
   });
 }
 
@@ -254,26 +292,39 @@ function networkFindings(networks: unknown): string[] {
   return found;
 }
 
+export type ComposePolicyOptions = {
+  hostLevelApproved?: boolean;
+  platformNetworks?: readonly string[];
+  /** The helper ports this deploy opens to an account; each exempts its one publish. */
+  helperReach?: readonly HelperReachPublish[];
+};
+
 /** Findings for a resolved model; host-level service keys pass when approved. */
 export function collectComposePolicyFindings(
   document: Record<string, unknown>,
-  opts: { hostLevelApproved?: boolean; platformNetworks?: readonly string[] },
+  opts: ComposePolicyOptions,
 ): string[] {
   const approved = opts.hostLevelApproved === true;
   const services = isRecord(document.services) ? document.services : {};
+  const helpers = opts.helperReach ?? [];
   const perService = Object.entries(services).flatMap(([name, service]) => {
     if (!isRecord(service)) return [];
     return [
       ...(approved ? [] : [
         ...hostLevelServiceFindings(name, service),
         ...deviceFindings(name, service),
-        ...reservedPortFindings(name, service),
+        ...reservedPortFindings(
+          name,
+          service,
+          helpers.filter((helper) => helper.composeServiceName === name),
+        ),
       ]),
       ...imageShadowFindings(name, service),
     ];
   });
   return [
     ...perService,
+    ...helperPublishFindings(services, helpers),
     // Joining the hosting-ingress or managed network by hand is never
     // approved: the daemon attaches those itself.
     ...platformNetworkFindings(document.networks, opts.platformNetworks ?? []),
@@ -287,7 +338,7 @@ export function collectComposePolicyFindings(
 /** Refuse (throws {@link ComposePolicyError}) a resolved model the platform will not run. */
 export function assertComposePolicy(
   document: Record<string, unknown>,
-  opts: { hostLevelApproved?: boolean; platformNetworks?: readonly string[] },
+  opts: ComposePolicyOptions,
 ): void {
   const findings = collectComposePolicyFindings(document, opts);
   if (findings.length > 0) throw new ComposePolicyError(findings);

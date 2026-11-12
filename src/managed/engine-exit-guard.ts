@@ -5,6 +5,16 @@
  * Docker's `restart: unless-stopped` revives a `docker kill`, but
  * `compose stop` (operator stop, boot hold, demoted fence) leaves the project
  * stopped until something starts it again. This guard is that backstop.
+ *
+ * One exception: a primary with peers whose engine is already down the first
+ * time this process looks at it is never started here. The daemon did not see
+ * it stop, and while it was down the control plane may have promoted another
+ * member; starting it would let it take writes as a second primary until the
+ * control plane's return fence reaches it. It gets a boot hold instead
+ * (`boot-hold.ts`), which the control plane answers with a start (still the
+ * primary) or leaves stopped (replaced). Once this process has seen the engine
+ * running, or a control-plane command has settled it, later exits are started
+ * as before.
  */
 
 import type { EnvironmentDeployContainer } from "../contracts/commands-contracts.ts";
@@ -29,7 +39,11 @@ import {
 } from "./ha-member.ts";
 import { replicaStandbyDataAllowsEngineStart } from "./replica-start-guard.ts";
 import { tryWithManagedLifecycleLock } from "./target-lock.ts";
-import { isBootHoldUnsettled } from "./boot-hold.ts";
+import {
+  holdUnconfirmedPrimary,
+  isBootHoldUnsettled,
+  isHoldablePrimary,
+} from "./boot-hold.ts";
 
 export const ENGINE_EXIT_GUARD_INTERVAL_MS = 60_000;
 export const ENGINE_EXIT_GUARD_MIN_START_GAP_MS = 60_000;
@@ -54,7 +68,19 @@ export type ManagedEngineExitGuardDeps = {
   startPaused?: () => boolean;
   /** Called once when the guard stops trying for one engine (test seam). */
   onGiveUp?: (managedId: string) => void;
+  /** Test seam — defaults to {@link holdUnconfirmedPrimary}. */
+  holdPrimary?: (member: ManagedHaMemberRecord) => Promise<void>;
 };
+
+/** Why an engine is left stopped, or `undefined` when it may be started. */
+type StayStopped =
+  /** A control-plane command or marker owns the engine's state. */
+  | "settled"
+  /**
+   * Local doubt or a marker that ends by the clock (boot hold not finished,
+   * unreadable marker, active command window).
+   */
+  | "unsure";
 
 type StartAttempts = { count: number; lastMs: number; gaveUp: boolean };
 
@@ -80,29 +106,38 @@ async function pathExists(path: string): Promise<boolean> {
 function intentLookupBlocksEngineStart(
   lookup: IntentLookup,
   nowMs: number,
-): boolean {
-  if (lookup.status === "unreadable") return true;
-  if (lookup.status !== "found") return false;
+): StayStopped | undefined {
+  if (lookup.status === "unreadable") return "unsure";
+  if (lookup.status !== "found") return undefined;
   // A requested stop stands until an explicit start, restart, apply, promote
   // or failover replaces the marker, even after its timer ran out: a stop
   // that failed half way leaves only a timed marker, and the engine must not
-  // come back on its own once that expires.
-  if (lookup.intent.kind === "stop") return true;
-  if (isHeldIntent(lookup) && lookup.intent.kind === "destroy") return true;
-  return isIntentLookupActive(lookup, nowMs);
+  // come back on its own once that expires. Only a control-plane command can
+  // lift these, so they settle the engine.
+  if (lookup.intent.kind === "stop") return "settled";
+  if (isHeldIntent(lookup) && lookup.intent.kind === "destroy") {
+    return "settled";
+  }
+  // Any other marker ends by the clock (the window after an apply, a command
+  // cut off by a daemon crash): it blocks the start but vouches for nothing.
+  return isIntentLookupActive(lookup, nowMs) ? "unsure" : undefined;
 }
 
 async function intentBlocksEngineStart(
   stateDir: string,
   managedId: string,
   nowMs: number,
-): Promise<boolean> {
+): Promise<StayStopped | undefined> {
   const [cluster, host] = await Promise.all([
     lookupManagedIntent(stateDir, managedId),
     lookupManagedIntent(stateDir, HOST_WIDE_INTENT_ID),
   ]);
-  return intentLookupBlocksEngineStart(cluster, nowMs) ||
-    intentLookupBlocksEngineStart(host, nowMs);
+  const reasons = new Set([
+    intentLookupBlocksEngineStart(cluster, nowMs),
+    intentLookupBlocksEngineStart(host, nowMs),
+  ]);
+  if (reasons.has("unsure")) return "unsure";
+  return reasons.has("settled") ? "settled" : undefined;
 }
 
 async function composeStartStoppedEngine(
@@ -136,8 +171,22 @@ export class ManagedEngineExitGuard {
   readonly #nowMs: () => number;
   readonly #startPaused: () => boolean;
   readonly #onGiveUp: (managedId: string) => void;
+  readonly #holdPrimary: (member: ManagedHaMemberRecord) => Promise<void>;
   readonly #attempts = new Map<string, StartAttempts>();
   readonly #loggedSkip = new Set<string>();
+  /**
+   * Clusters this process has seen running, held, or left to a control-plane
+   * command. A primary with peers that is down and not in here is held instead
+   * of started (see the file comment).
+   */
+  readonly #vouched = new Set<string>();
+  /**
+   * Clusters whose hold failed part way. The held stop marker may already be
+   * on disk without `boot-hold.json`: the marker alone keeps the engine
+   * stopped but is never reported, so the hold is finished before anything
+   * else looks at the cluster.
+   */
+  readonly #pendingHolds = new Set<string>();
 
   constructor(deps: ManagedEngineExitGuardDeps) {
     this.#layout = deps.layout;
@@ -150,6 +199,9 @@ export class ManagedEngineExitGuard {
     this.#nowMs = deps.nowMs ?? (() => Date.now());
     this.#startPaused = deps.startPaused ?? (() => false);
     this.#onGiveUp = deps.onGiveUp ?? (() => undefined);
+    this.#holdPrimary = deps.holdPrimary ??
+      ((member) =>
+        holdUnconfirmedPrimary(member, { layout: deps.layout, run: deps.run }));
   }
 
   start(): void {
@@ -199,11 +251,22 @@ export class ManagedEngineExitGuard {
     member: ManagedHaMemberRecord,
     now: number,
   ): Promise<boolean> {
+    const reason = await this.#stayStoppedReason(member, now);
+    // What happens next to a settled engine is a control-plane command, which
+    // knows the member's role: a later exit needs no new confirmation.
+    if (reason === "settled") this.#vouched.add(member.managedId);
+    return reason !== undefined;
+  }
+
+  async #stayStoppedReason(
+    member: ManagedHaMemberRecord,
+    now: number,
+  ): Promise<StayStopped | undefined> {
     const { managedId } = member;
-    if (isBootHoldUnsettled(managedId)) return true;
+    if (isBootHoldUnsettled(managedId)) return "unsure";
     if (await isManagedMemberDemoted(this.#layout, managedId)) {
       this.#loggedSkip.delete(managedId);
-      return true;
+      return "settled";
     }
     if (
       await isManagedMemberDestroyed(
@@ -213,9 +276,87 @@ export class ManagedEngineExitGuard {
       )
     ) {
       this.#loggedSkip.delete(managedId);
-      return true;
+      return "settled";
     }
     return await intentBlocksEngineStart(this.#layout.stateDir, managedId, now);
+  }
+
+  /**
+   * A primary with peers found down before this process ever saw it run:
+   * hold it for the control plane instead of starting it. True when the
+   * engine must not be started on this tick.
+   */
+  async #holdsUnconfirmedPrimary(
+    member: ManagedHaMemberRecord,
+  ): Promise<boolean> {
+    const { managedId } = member;
+    if (this.#vouched.has(managedId) || !isHoldablePrimary(member)) {
+      return false;
+    }
+    await this.#tryHold(member);
+    return true;
+  }
+
+  /**
+   * Take (or finish) the hold. On failure the cluster stays pending: the next
+   * tick finishes the hold before the marker checks, which would otherwise
+   * read a half-written hold (marker without hold file) as settled.
+   */
+  async #tryHold(member: ManagedHaMemberRecord): Promise<void> {
+    const { managedId } = member;
+    try {
+      await this.#holdPrimary(member);
+      this.#pendingHolds.delete(managedId);
+      this.#vouched.add(managedId);
+    } catch (err) {
+      this.#pendingHolds.add(managedId);
+      logWarn(
+        "managed",
+        `engine exit guard: could not hold unconfirmed primary managedId=${managedId}:`,
+        sanitizeForLog(err),
+      );
+    }
+  }
+
+  /**
+   * Finish a hold that failed part way. Not when the engine runs again (a
+   * command started it: nothing to hold) or a command has replaced the held
+   * stop marker since (the cluster is looked at as usual next tick).
+   */
+  async #finishPendingHold(member: ManagedHaMemberRecord): Promise<void> {
+    const { managedId } = member;
+    const containers = await this.#readContainers(managedId);
+    if (containers === undefined) return;
+    if (!engineContainersDown(containers)) {
+      this.#pendingHolds.delete(managedId);
+      this.#noteRunning(managedId);
+      return;
+    }
+    const lookup = await lookupManagedIntent(this.#layout.stateDir, managedId);
+    const replaced = lookup.status === "found" &&
+      !(isHeldIntent(lookup) && lookup.intent.kind === "stop");
+    if (replaced) {
+      this.#pendingHolds.delete(managedId);
+      return;
+    }
+    await this.#tryHold(member);
+  }
+
+  #readContainers(
+    managedId: string,
+  ): Promise<EnvironmentDeployContainer[] | undefined> {
+    return collectManagedContainers(
+      managedComposeProject(managedId),
+      (text) => sanitizeForLog(text),
+      this.#run,
+    );
+  }
+
+  /** The engine runs: it is vouched for and its start bookkeeping resets. */
+  #noteRunning(managedId: string): void {
+    this.#vouched.add(managedId);
+    this.#loggedSkip.delete(managedId);
+    this.#attempts.delete(managedId);
   }
 
   /** The wait is still running, or the guard has given up on this engine. */
@@ -273,22 +414,22 @@ export class ManagedEngineExitGuard {
   async #maybeStart(member: ManagedHaMemberRecord): Promise<void> {
     const { managedId } = member;
     if (!(await pathExists(managedDir(this.#layout, managedId)))) return;
+    if (this.#pendingHolds.has(managedId)) {
+      await this.#finishPendingHold(member);
+      return;
+    }
 
     const now = this.#nowMs();
     if (await this.#meantToStayStopped(member, now)) return;
 
     const project = managedComposeProject(managedId);
-    const containers = await collectManagedContainers(
-      project,
-      (text) => sanitizeForLog(text),
-      this.#run,
-    );
+    const containers = await this.#readContainers(managedId);
     if (containers === undefined) return;
     if (!engineContainersDown(containers)) {
-      this.#loggedSkip.delete(managedId);
-      this.#attempts.delete(managedId);
+      this.#noteRunning(managedId);
       return;
     }
+    if (await this.#holdsUnconfirmedPrimary(member)) return;
 
     // Cheap checks first: the standby probe runs a container.
     if (this.#startBackoffBlocks(managedId, now)) return;

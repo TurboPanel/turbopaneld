@@ -17,8 +17,13 @@ import {
 import { ensurePython } from "./python.ts";
 import { ensureUv } from "./uv.ts";
 import { resolveInstanceConfig } from "../instance/sockets.ts";
-import { detectInstallMode, type InstallMode } from "../paths/layout.ts";
-import { logError, logInfo, sanitizeForLog } from "../util/logger.ts";
+import {
+  detectInstallMode,
+  type InstallMode,
+  resolveLayout,
+} from "../paths/layout.ts";
+import { logError, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
+import { recordBootConvergeDone } from "./boot-converge-done.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import {
   DAEMON_INSTALL_PLAYBOOK,
@@ -30,7 +35,7 @@ import {
  * True when local dev (console/converge) already manages the instance stack and the daemon
  * should only connect (no Ansible bootstrap on startup).
  */
-function shouldSkipOrchestration(): boolean {
+export function shouldSkipOrchestration(): boolean {
   const flag = Deno.env.get("TURBOPANEL_SKIP_ORCHESTRATION")?.trim()
     .toLowerCase();
   return flag === "1" || flag === "true" || flag === "yes";
@@ -67,7 +72,25 @@ export const setupTestHooks = {
     ["bootstrapOrchestrationRuntime", bootstrapOrchestrationRuntime],
   ],
   detectInstallMode: (): InstallMode => detectInstallMode(Deno.env.toObject()),
+  /** Production only: a development checkout has no installer waiting on it. */
+  recordBootConvergeDone: async (): Promise<void> => {
+    if (setupTestHooks.detectInstallMode() !== "production") return;
+    await recordBootConvergeDone(resolveLayout(Deno.env.toObject()).runDir);
+  },
 };
+
+/** Tell the installer's last step the boot converge has passed (best effort). */
+async function markBootConvergeDone(): Promise<void> {
+  try {
+    await setupTestHooks.recordBootConvergeDone();
+  } catch (err) {
+    logWarn(
+      "orchestration",
+      "could not record the finished boot converge:",
+      sanitizeForLog(err),
+    );
+  }
+}
 
 /**
  * Managed (compiled / JS-fallback) daemon on a self-hosted control-plane host:
@@ -116,9 +139,17 @@ export function shouldEnableDockerIntegration(): boolean {
 /**
  * True daemon-only managed servers (remote URL dial). These still auto-converge
  * on startup outside the dev-console deferred-start install path.
+ *
+ * Never a co-located development host, before or after its opt-in. On the
+ * Workers runtime that host also dials the control plane over HTTPS, but
+ * `daemon-converge.yml` is the managed-server playbook: it sets runtimes and
+ * logs to `root:tp` / `tp:tp`, which locks the developer's own services out of
+ * the vendored Deno and the log folder. The Developer Console's converge
+ * owns that host.
  */
 export function shouldRunDaemonConverge(): boolean {
   if (isPreOptInCoLocatedDev()) return false;
+  if (shouldInstallDevInstance()) return false;
   return resolveInstanceConfig().kind === "url";
 }
 
@@ -187,6 +218,7 @@ export async function runBootConverge(): Promise<boolean> {
         "co-located dev host awaiting opt-in (TURBOPANEL_DEV_INSTANCE); skipping converge",
       );
     }
+    await markBootConvergeDone();
     return true;
   }
   const started = performance.now();
@@ -194,6 +226,7 @@ export async function runBootConverge(): Promise<boolean> {
     await setupTestHooks.runDaemonConverge();
     const elapsed = ((performance.now() - started) / 1000).toFixed(1);
     logInfo("orchestration", `runtime ready in ${elapsed}s`);
+    await markBootConvergeDone();
     return true;
   } catch (err) {
     logError("orchestration", "bootstrap failed:", err);

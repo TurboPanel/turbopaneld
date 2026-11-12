@@ -3,9 +3,16 @@ turbopanel_install_root: /opt/turbopanel
 turbopanel_dev_user: ""
 turbopanel_dev_uid: ""
 turbopanel_dev_gid: ""
-# Co-located dev source checkout root (dev user's home); overridden by an
+# Co-located dev source checkout root (the folder that holds the repos, from
+# TURBOPANEL_DEV_ROOT; defaults to the dev user's home); overridden by an
 # extra-var (turbopanel_dev_root) from the dev converge.
 turbopanel_dev_root: "{{ ansible_env.HOME }}"
+# The dev user's real home, used as HOME for git, ssh and pnpm (keys, known_hosts,
+# gitconfig and the pnpm store live there). It differs from turbopanel_dev_root
+# when the repos sit in a sub-folder such as ~/work/turbopanel. Set by the
+# daemon (extra-var from TURBOPANEL_DEV_HOME) or a playbook getent pre_task;
+# the fallback keeps the old behaviour when neither is present.
+turbopanel_dev_home: "{{ turbopanel_dev_root }}"
 turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
 # Runtimes always live under the FHS vendor tree (dev shares it with prod).
 turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
@@ -60,6 +67,10 @@ turbopanel_hostnames: []
 # so public-urls apply passes this and resolve-hostnames.yml decodes it
 # into turbopanel_hostnames.
 turbopanel_hostnames_json: ""
+# Edge address ranges for Cloudflare proxy / Bunny pull zone hostnames, as a
+# compact JSON object {hash, cloudflare, bunny}. Empty reads the persisted
+# instance-edge-trust.json (resolve-edge-trust.yml).
+turbopanel_edge_trust_json: ""
 turbopanel_config_dir: /etc/turbopanel
 turbopanel_run_dir: /run/turbopanel
 turbopanel_ui_dist_dir: /opt/turbopanel/share/ui
@@ -75,6 +86,11 @@ turbopanel_caddyfile: >-
   {{ (turbopanel_dev_root ~ '/dev/orchestration/Caddyfile') if
   (turbopanel_dev_user | default('') | length > 0) else
   (turbopanel_config_dir ~ '/caddy/Caddyfile') }}
+# Co-located development only: the directory the dev overlay Caddyfile
+# imports (`*.caddy`) for named hostname sites, rendered by instance-launch
+# tasks/caddyfile-dev-sites.yml. A managed host renders those sites into
+# its own Caddyfile and never uses this.
+turbopanel_dev_sites_dir: "{{ turbopanel_config_dir }}/caddy/dev-sites"
 # Absolute paths on the target host (upload). Copied into the role-owned
 # certs/ tree so tpcaddy can read the key without mutating the operator's files.
 turbopanel_tls_cert_path: ""

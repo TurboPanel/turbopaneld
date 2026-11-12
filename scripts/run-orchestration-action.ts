@@ -188,6 +188,10 @@ export function devInstanceExtraArgs(
   if (devUser) {
     const devRoot = resolveDevRoot(env.toObject());
     args.push("-e", `turbopanel_dev_root=${devRoot}`);
+    // HOME for git, ssh and pnpm in the repo roles. Unset (an older dev
+    // console) leaves the roles on their fallback, the source-repo root.
+    const devHome = env.get("TURBOPANEL_DEV_HOME")?.trim();
+    if (devHome) args.push("-e", `turbopanel_dev_home=${devHome}`);
   }
   args.push(
     "-e",

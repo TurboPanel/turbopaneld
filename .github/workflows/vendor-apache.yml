@@ -2,7 +2,8 @@
 # arm64, and publishes it as the release `apache-httpd-<httpdver>` so hosts
 # download a tarball instead of compiling (the `apache` role,
 # orchestration/roles/apache). The build flags live in scripts/build-apache.sh;
-# the version pin is orchestration/roles/apache/defaults/main.yml.
+# the version pin (`apache_build_version`, not the `apache_version` hosts
+# install) is orchestration/roles/apache/defaults/main.yml.
 #
 # Runs on workflow_dispatch and when that pin changes on trunk. A release is
 # never overwritten (a rebuild would change the SHA-256 the role pins): if
@@ -99,7 +100,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          VER="$(sed -n 's/^apache_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
+          VER="$(sed -n 's/^apache_build_version: "\(.*\)"$/\1/p' orchestration/roles/apache/defaults/main.yml | head -n 1)"
           TAG="apache-httpd-${VER}"
           # `gh release view` cannot see a draft, so look through the API.
           # A published release is final: stop. Only then clear leftover drafts.

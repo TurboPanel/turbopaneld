@@ -24,6 +24,7 @@ import type {
 } from "../contracts/cell-messages.ts";
 import { COMMAND_RECOVERY_FEATURE } from "../instance/version-wire.ts";
 import { resolveLayout } from "../paths/layout.ts";
+import { assertTestRunMayWrite } from "../permissions/test-write-guard.ts";
 import { logWarn } from "../util/logger.ts";
 
 type OutcomeMessage =
@@ -181,6 +182,7 @@ async function removeJournal(id: string): Promise<void> {
   const file = journalFile(id);
   if (!file) return;
   try {
+    assertTestRunMayWrite(file);
     await Deno.remove(file);
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
@@ -193,6 +195,7 @@ async function removeJournal(id: string): Promise<void> {
 async function writeJournalAtomic(entry: JournalEntry): Promise<void> {
   const file = journalFile(entry.id);
   if (!file) return;
+  assertTestRunMayWrite(file);
   const temp = `${file}.${crypto.randomUUID()}.tmp`;
   await Deno.mkdir(journalDir(), { recursive: true, mode: 0o750 });
   try {

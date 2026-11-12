@@ -18,6 +18,7 @@ import { safeConfigToken } from "../../contracts/config-values.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { principalUnixGroupName } from "../ensure-principal.ts";
 import {
+  principalHardeningLines,
   principalReadWritePaths,
   principalSliceName,
   principalUnitEnvironment,
@@ -40,6 +41,29 @@ export const CRON_UNIT_PREFIX = "turbopanel-cron-";
  * tick and the box spikes on a fixed cadence.
  */
 export const CRON_RANDOMIZED_DELAY_SEC = 120;
+
+/**
+ * The spread for one schedule, so a job that must fire on the minute does:
+ * `*` in the minute field gives none, `<start>/<step>` gives a quarter of its
+ * step again as slack (at most the default), and anything else (hourly, daily,
+ * weekly) keeps the default.
+ */
+export function cronRandomizedDelaySec(onCalendar: string): number {
+  const time = onCalendar.split(/\s+/).find((token) =>
+    (token.match(/:/g) ?? []).length === 2
+  );
+  if (time === undefined) return CRON_RANDOMIZED_DELAY_SEC;
+  const minute = time.split(":")[1] ?? "";
+  if (minute === "*") return 0;
+  const step = /^[^/]+\/(\d+)$/.exec(minute);
+  if (step?.[1] !== undefined) {
+    const every = Number(step[1]);
+    if (Number.isSafeInteger(every) && every > 0) {
+      return Math.min(CRON_RANDOMIZED_DELAY_SEC, every * 15);
+    }
+  }
+  return CRON_RANDOMIZED_DELAY_SEC;
+}
 
 export type CronUnitIdentity = {
   environmentId: string;
@@ -91,7 +115,7 @@ const SYSTEMD_QUOTE_ESCAPE = String.raw`\$&`;
  * passes them through literally instead of expanding a variable or a
  * specifier (`%h`, `%u`, ...) before the job sees its own argument.
  */
-function quoteExecArg(arg: string): string {
+export function quoteExecArg(arg: string): string {
   const escaped = arg
     .replaceAll(/["\\]/g, SYSTEMD_QUOTE_ESCAPE)
     .replaceAll("$", () => "$$")
@@ -113,6 +137,13 @@ export type CronUnitOpts = {
    * managed lane). Empty or absent for a tree outside the principal's home.
    */
   siteWritableDirs?: readonly string[];
+  /**
+   * A site's environment file (`deploy/site/site-env-file.ts`), loaded with
+   * `EnvironmentFile=`. Absent for a native app.
+   */
+  environmentFile?: string;
+  /** The site's PHP series: a bare `php` in the job then runs that series. */
+  phpSeries?: string;
 };
 
 /**
@@ -147,6 +178,12 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     `Slice=${principalSliceName(opts.username)}`,
     `WorkingDirectory=${opts.workingDirectory}`,
     ...principalUnitEnvironment(opts.layout, opts.username),
+    ...(opts.phpSeries === undefined
+      ? []
+      : [`Environment=TURBOPANEL_PHP=${opts.phpSeries}`]),
+    ...(opts.environmentFile === undefined
+      ? []
+      : [`EnvironmentFile=${opts.environmentFile}`]),
     `ExecStart=${opts.job.command.map(quoteExecArg).join(" ")}`,
     // Output goes to the log viewer rather than a redirect the operator has to
     // invent — which is also why the command parser can refuse `>>`.
@@ -168,17 +205,7 @@ export function cronServiceContent(opts: CronUnitOpts): string {
     `TimeoutStartSec=${
       opts.job.timeoutSeconds ?? DEFAULT_CRON_TIMEOUT_SECONDS
     }`,
-    "NoNewPrivileges=yes",
-    "PrivateTmp=yes",
-    "ProtectSystem=strict",
-    "ProtectKernelTunables=yes",
-    "ProtectKernelModules=yes",
-    "ProtectControlGroups=yes",
-    "RestrictSUIDSGID=yes",
-    "RestrictRealtime=yes",
-    "LockPersonality=yes",
-    "CapabilityBoundingSet=",
-    "AmbientCapabilities=",
+    ...principalHardeningLines(),
     // `ProtectHome` is deliberately NOT set: the working directory is inside
     // the principal's home, and a job that cannot read the application it was
     // written for is not a job. It writes only the site's own writable dirs and
@@ -216,7 +243,7 @@ export function cronTimerContent(opts: CronUnitOpts): string {
     "[Timer]",
     `Unit=${unit}.service`,
     `OnCalendar=${opts.job.schedule}`,
-    `RandomizedDelaySec=${CRON_RANDOMIZED_DELAY_SEC}`,
+    `RandomizedDelaySec=${cronRandomizedDelaySec(opts.job.schedule)}`,
     "Persistent=false",
     // Every tenant job resolves against the host's timezone rather than
     // whatever the account's environment says, so two accounts reading the same

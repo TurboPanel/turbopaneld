@@ -28,7 +28,7 @@
     version: "{{ ui_branch }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_home if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
   register: _ui_clone
 
 - name: Check UI dependencies
@@ -47,7 +47,7 @@
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_home if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "{{ turbopanel_runtime_path }}"
   register: _ui_babel_probe
   changed_when: false
@@ -65,6 +65,6 @@
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
   environment:
-    HOME: "{{ turbopanel_dev_root if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
+    HOME: "{{ turbopanel_dev_home if (turbopanel_dev_user | default('') | length > 0) else turbopanel_install_root }}"
     PATH: "{{ turbopanel_runtime_path }}"
   register: _ui_pnpm_install

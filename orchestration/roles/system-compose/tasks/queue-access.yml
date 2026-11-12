@@ -1,0 +1,152 @@
+# Make sure the queue broker's application user can use its virtual host.
+#
+# The broker image creates that user (and grants it the virtual host) only
+# while seeding a brand-new data directory. A stop that lands inside that
+# seed leaves the user without permissions for good: the next boot finds
+# existing data and never seeds again, so every connection is refused with
+# "access to vhost refused", no command reaches any server and no mail goes
+# out. These tasks wait until the broker has really finished starting and
+# then repair whatever the seed left out. On a healthy broker they change
+# nothing.
+#
+# Included by tasks/main.yml on every converge and by
+# playbooks/queue-config-refresh.yml after every control-plane update (by
+# path, so that play still never runs this role's container lifecycle).
+#
+# Needs in scope: rabbitmq_container_name, rabbitmq_user, rabbitmq_vhost,
+# turbopanel_config_dir. The password is read here and reaches the broker on
+# standard input only: never on a command line, never in task output.
+
+- name: Read the queue application user's password
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
+  register: _queue_access_pass_raw
+  no_log: true
+
+# `rabbitmq-diagnostics ping` answers as soon as the runtime is up, seconds
+# before the broker application has started and seeded its data, so it is not
+# a readiness check. `check_running` answers only once the application runs.
+- name: Wait for the queue broker to finish starting
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmq-diagnostics, -q, check_running]
+  register: _queue_access_running
+  until: _queue_access_running.rc == 0
+  retries: 60
+  delay: 2
+  changed_when: false
+
+- name: List the queue broker's virtual hosts
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmqctl, -q, --formatter, json, list_vhosts, name]
+  register: _queue_access_vhosts
+  changed_when: false
+
+- name: List the queue broker's users
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmqctl, -q, --formatter, json, list_users]
+  register: _queue_access_users
+  changed_when: false
+
+# Exits non-zero when the user does not exist yet; that is an answer too.
+- name: List the queue application user's permissions
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ rabbitmq_container_name }}"
+      - rabbitmqctl
+      - -q
+      - --formatter
+      - json
+      - list_user_permissions
+      - "{{ rabbitmq_user }}"
+  register: _queue_access_permissions
+  changed_when: false
+  failed_when: false
+
+- name: Work out what the queue application user is missing
+  ansible.builtin.set_fact:
+    _queue_access_vhost_present: >-
+      {{ (_queue_access_vhosts.stdout | from_json)
+         | selectattr('name', 'equalto', rabbitmq_vhost) | list | length > 0 }}
+    _queue_access_user_present: >-
+      {{ (_queue_access_users.stdout | from_json)
+         | selectattr('user', 'equalto', rabbitmq_user) | list | length > 0 }}
+    _queue_access_user_tagged: >-
+      {{ (_queue_access_users.stdout | from_json)
+         | selectattr('user', 'equalto', rabbitmq_user)
+         | selectattr('tags', 'contains', 'administrator') | list | length > 0 }}
+    _queue_access_user_granted: >-
+      {{ ((_queue_access_permissions.stdout | from_json) if _queue_access_permissions.rc == 0 else [])
+         | selectattr('vhost', 'equalto', rabbitmq_vhost)
+         | selectattr('configure', 'equalto', '.*')
+         | selectattr('write', 'equalto', '.*')
+         | selectattr('read', 'equalto', '.*') | list | length > 0 }}
+
+# One line per repair on standard output ("changed:<what>"), nothing when the
+# broker already matches. The password check runs every time: a user whose
+# password differs from the generated one is as locked out as one without
+# permissions.
+- name: Repair the queue application user's access
+  ansible.builtin.shell:
+    cmd: |
+      set -euo pipefail
+      IFS= read -r password
+      ctl() { docker exec "$TP_QUEUE_CONTAINER" rabbitmqctl -q "$@" </dev/null; }
+      ctl_secret() { printf '%s\n' "$password" | docker exec -i "$TP_QUEUE_CONTAINER" rabbitmqctl -q "$@"; }
+      if [ "$TP_QUEUE_VHOST_PRESENT" != 1 ]; then
+        ctl add_vhost "$TP_QUEUE_VHOST" >/dev/null
+        echo changed:vhost
+      fi
+      if [ "$TP_QUEUE_USER_PRESENT" != 1 ]; then
+        ctl_secret add_user "$TP_QUEUE_USER" >/dev/null
+        echo changed:user
+      elif ! ctl_secret authenticate_user "$TP_QUEUE_USER" >/dev/null 2>&1; then
+        ctl_secret change_password "$TP_QUEUE_USER" >/dev/null
+        echo changed:password
+      fi
+      if [ "$TP_QUEUE_USER_TAGGED" != 1 ]; then
+        ctl set_user_tags "$TP_QUEUE_USER" administrator >/dev/null
+        echo changed:tags
+      fi
+      if [ "$TP_QUEUE_USER_GRANTED" != 1 ]; then
+        ctl set_permissions -p "$TP_QUEUE_VHOST" "$TP_QUEUE_USER" '.*' '.*' '.*' >/dev/null
+        echo changed:permissions
+      fi
+    executable: /bin/bash
+    stdin: "{{ _queue_access_pass_raw.content | b64decode | trim }}"
+  environment:
+    TP_QUEUE_CONTAINER: "{{ rabbitmq_container_name }}"
+    TP_QUEUE_USER: "{{ rabbitmq_user }}"
+    TP_QUEUE_VHOST: "{{ rabbitmq_vhost }}"
+    TP_QUEUE_VHOST_PRESENT: "{{ _queue_access_vhost_present | bool | ternary('1', '0') }}"
+    TP_QUEUE_USER_PRESENT: "{{ _queue_access_user_present | bool | ternary('1', '0') }}"
+    TP_QUEUE_USER_TAGGED: "{{ _queue_access_user_tagged | bool | ternary('1', '0') }}"
+    TP_QUEUE_USER_GRANTED: "{{ _queue_access_user_granted | bool | ternary('1', '0') }}"
+  register: _queue_access_repair
+  changed_when: "'changed:' in (_queue_access_repair.stdout | default(''))"
+  no_log: true
+
+# Outside no_log on purpose: this is the line an operator reads when the
+# repair did not take.
+- name: Confirm the queue application user can use its virtual host
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - "{{ rabbitmq_container_name }}"
+      - rabbitmqctl
+      - -q
+      - --formatter
+      - json
+      - list_user_permissions
+      - "{{ rabbitmq_user }}"
+  register: _queue_access_confirm
+  changed_when: false
+  failed_when: >-
+    _queue_access_confirm.rc != 0
+    or ((_queue_access_confirm.stdout | from_json)
+        | selectattr('vhost', 'equalto', rabbitmq_vhost)
+        | selectattr('configure', 'equalto', '.*')
+        | selectattr('write', 'equalto', '.*')
+        | selectattr('read', 'equalto', '.*') | list | length == 0)

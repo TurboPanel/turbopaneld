@@ -1,0 +1,66 @@
+---
+# Stop the control-plane proxy naming itself in an INSTALLED Caddyfile
+# (imported by main.yml).
+#
+# Caddy sends `Server: Caddy` on every response and `Via: 1.1 Caddy` on proxied
+# ones. The template deletes both, but a host whose Caddyfile was kept (Let's
+# Encrypt or uploaded hostnames, see caddyfile.yml) or rendered by an older
+# build does not. So add the deletions in place, only when missing: two lines
+# after X-Frame-Options in the shared header block, and one line at the top of
+# handle_errors (error responses bypass that block). Nothing else in the file
+# is touched, the result must still adapt with the vendored Caddy or the file
+# is left as it was, and a backup is kept.
+- name: Read the installed Caddyfile for the server header check
+  when: turbopanel_dev_user | default('') | length == 0
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_caddyfile }}"
+  register: _server_headers_caddyfile
+  failed_when: false
+
+- name: Remove the Server and Via headers in the installed Caddyfile when missing
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _server_headers_caddyfile.content is defined
+    - (_server_headers_caddyfile.content | b64decode) is not search('(?m)^\s*-Via\s*$')
+  ansible.builtin.replace:
+    path: "{{ turbopanel_caddyfile }}"
+    # Keep identical to the header block in templates/Caddyfile.j2.
+    regexp: '^( +)(X-Frame-Options "DENY"\n)'
+    replace: '\g<1>\g<2>\g<1>-Server\n\g<1>-Via\n'
+    backup: true
+    validate: "{{ turbopanel_vendor_dir }}/caddy/current/caddy adapt --config %s --adapter caddyfile"
+  register: _server_headers_inserted
+  failed_when: false
+  notify:
+    - Reload turbopanel caddy
+
+- name: Remove the Server header from error responses in the installed Caddyfile when missing
+  when:
+    - turbopanel_dev_user | default('') | length == 0
+    - _server_headers_caddyfile.content is defined
+    - (_server_headers_caddyfile.content | b64decode) is not search('(?m)^\s*header -Server\s*$')
+  ansible.builtin.replace:
+    path: "{{ turbopanel_caddyfile }}"
+    # Keep identical to handle_errors in templates/Caddyfile.j2.
+    regexp: '^( +)(handle_errors \{\n)'
+    replace: '\g<1>\g<2>\g<1>        header -Server\n'
+    backup: true
+    validate: "{{ turbopanel_vendor_dir }}/caddy/current/caddy adapt --config %s --adapter caddyfile"
+  register: _server_headers_errors_inserted
+  failed_when: false
+  notify:
+    - Reload turbopanel caddy
+
+- name: Warn when the server header deletions could not be added
+  when: >-
+    (_server_headers_inserted is not skipped
+     and _server_headers_inserted.msg is defined
+     and _server_headers_inserted.msg is search('failed to validate'))
+    or (_server_headers_errors_inserted is not skipped
+     and _server_headers_errors_inserted.msg is defined
+     and _server_headers_errors_inserted.msg is search('failed to validate'))
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: could not remove the Server and Via headers in
+      {{ turbopanel_caddyfile }}; the file is unchanged. Responses keep
+      naming the proxy until Hostnames is re-applied in the app.

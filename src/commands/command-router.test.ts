@@ -1404,3 +1404,107 @@ test({
     }
   },
 });
+
+test({
+  name: "capOutcomeResult keeps a result at the cap and fails one over it",
+  fn: async () => {
+    const { capOutcomeResult } = await import("./command-router.ts");
+    // `{"blob":""}` is 11 bytes of JSON around the string.
+    const atCap = { blob: "x".repeat(64 * 1024 - 11) };
+    assertEquals(capOutcomeResult({ ok: true, result: atCap }), {
+      ok: true,
+      result: atCap,
+    });
+    assertEquals(
+      capOutcomeResult({ ok: true, result: { blob: "x".repeat(64 * 1024) } }),
+      {
+        ok: false,
+        error:
+          "The server's report was too large to store (65 KB; limit 64 KB).",
+      },
+    );
+    const failed = { ok: false, error: "boom" };
+    assertEquals(capOutcomeResult(failed), failed);
+    assertEquals(capOutcomeResult({ ok: true }), { ok: true });
+  },
+});
+
+test({
+  name: "handleCommandDispatch sends a result over the cap as a failed outcome",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    setCommandRouterHandlersForTests({
+      handleSystemReconcile: () =>
+        Promise.resolve({ summary: "x".repeat(70 * 1024) }),
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-oversized",
+          commandId: "cmd-oversized",
+          commandType: "system.reconcile",
+          payload: ROUTER_STUB_SYSTEM_RECONCILE,
+          at: new Date().toISOString(),
+        },
+        ws,
+      );
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, false);
+      assertEquals(frames[1]?.result, undefined);
+      assertEquals(
+        frames[1]?.error,
+        "The server's report was too large to store (71 KB; limit 64 KB).",
+      );
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch runs cache.apply and returns its per-cache results",
+  permissions: { env: true, read: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const id = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
+    const seen: string[] = [];
+    setCommandRouterHandlersForTests({
+      handleCacheApply: (payload) => {
+        seen.push(payload.environmentId);
+        return Promise.resolve({
+          caches: [{ id, state: "ready", runtimeVersion: "8.1.11" }],
+        });
+      },
+    });
+    try {
+      const ws = new MockWebSocket() as unknown as WebSocket;
+      await handleCommandDispatch(
+        {
+          type: "command-dispatch",
+          id: "req-cache",
+          commandId: "cmd-cache",
+          commandType: "cache.apply",
+          payload: { environmentId: "env-1", caches: [] },
+          at: new Date().toISOString(),
+        },
+        ws,
+      );
+      const frames = parseFrames((ws as unknown as MockWebSocket).sentFrames);
+      assertEquals(frames[1]?.type, "command-outcome");
+      assertEquals(frames[1]?.ok, true);
+      assertEquals(frames[1]?.result, {
+        caches: [{ id, state: "ready", runtimeVersion: "8.1.11" }],
+      });
+      assertEquals(seen, ["env-1"]);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+    }
+  },
+});

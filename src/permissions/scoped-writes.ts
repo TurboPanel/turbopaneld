@@ -41,6 +41,17 @@ export class ScopedWriteError extends Error {
 export const VENDOR_BINARY_MODE = "0755"; // NOSONAR typescript:S2612 — service users execute these
 
 /**
+ * A vendored folder a service user must pass through to reach a binary:
+ * traverse only (no listing) for everyone but the owner and its group.
+ */
+export const VENDOR_DIR_MODE = "0751"; // NOSONAR typescript:S2612 — traverse only, no read bit
+
+/** Make `dir` traversable by service users ({@link VENDOR_DIR_MODE}). */
+export async function makeVendorDirTraversable(dir: string): Promise<void> {
+  await runOrThrow("chmod", [VENDOR_DIR_MODE, dir], dir);
+}
+
+/**
  * Put `source` in place at `dest` with mode {@link VENDOR_BINARY_MODE}.
  *
  * `cp -f` unlinks a destination it cannot open for writing, so replacing a

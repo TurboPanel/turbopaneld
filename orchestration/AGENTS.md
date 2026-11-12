@@ -34,6 +34,32 @@ stringify them). `timesyncd.conf` is `root:<systemd-timesync|root>` mode
   is gated on `turbopanel_ntp_enabled | bool` so a disable + config change does
   not restart/start timesyncd after `timedatectl set-ntp false`.
 
+### OS security updates (`os-security-updates`)
+
+Every managed server installs Debian security updates on its own and never
+restarts by itself (owner decision 2026-11-01). The role installs
+`unattended-upgrades` with `install_recommends: false` (no `apt-listchanges`,
+no mail) and copies one file, `/etc/apt/apt.conf.d/52turbopanel-security-updates`
+(`root:root` `0644`). It sorts after the package's `50unattended-upgrades`, so
+its `#clear Unattended-Upgrade::Origins-Pattern` drops the package default
+(which also takes stable point releases) and leaves the
+`${distro_codename}-security` origin and the PHP package archive
+(`origin=deb.sury.org`, owner decision 2026-11-10: PHP patches arrive daily
+and automatically; the daemon then restarts each site's PHP runtime in order,
+`src/deploy/site/AGENTS.md`); it also turns on the two
+`APT::Periodic` switches and sets `Automatic-Reboot "false"`. The package's own
+conffiles are never edited. The apt timers (`apt-daily`, `apt-daily-upgrade`)
+are enabled. A kernel update leaves `/var/run/reboot-required` (the package's
+`/etc/kernel/postinst.d` hook); the metrics collector reports it as host text
+`rebootRequired`, and the web interface shows Restart Needed on the server
+page. Debian only (`ansible_distribution == 'Debian'`): Ubuntu keeps its own
+defaults. Docker's packages come from Docker's repository and are held, so they
+are never touched. Wired into `daemon-converge.yml` (every boot of a managed
+server), `daemon-install.yml`, `instance-install.yml` and
+`daemon-colocated-refresh.yml`. The development overlay does not run it: a
+contributor VM is not a managed server. The purge removes the file and keeps
+the package (`scripts/AGENTS.md` rule 3).
+
 ### Docker (`docker`)
 
 Installs Docker Engine itself (`tasks/install.yml`, no Galaxy role, nothing
@@ -68,9 +94,17 @@ on the host, which is Ansible's own requirement for the apt module in check mode
   hosts); `bundled` never fetches. A key expiring within 60 days warns.
   `scripts/check-repo-keys.ts` (`deno task check:repo-keys`) compares the
   shipped copy with the live key and exits non-zero on drift or near-expiry; a
-  weekly workflow for it is a separate step. Other third-party repository keys
+  weekly workflow in the control plane repository (which owns the issues) runs it and files or updates one issue: exit 1 drift, 3 a key near expiry, 2 only failed downloads (retried, no issue). Other third-party repository keys
   can reuse `roles/repo-key` (inputs `repo_key_*`).
-  TODO: the warning is only in the run output, not yet a control-plane notice.
+  A key outside the list also sets a structured twin of that line: the role's
+  `Report the key change to the daemon` debug task, whose message is
+  `{turbopanel_repo_key_changed: {name, expected, got}}`. `runPlaybookStreaming`
+  reads it from the task result (`src/orchestration/repo-key-changes.ts`, quiet
+  runs too) and the instance client sends one `repo-key-changed` frame per key
+  name and fingerprint (`src/instance/repo-key-reporter.ts`), which the control
+  plane turns into a bell and channel notice for the organization's managers.
+  The failed-fetch warning is not reported (noise), and `enforce` stops the
+  install before the structured message, so it reports nothing.
 - **Version and upgrades**: `turbopanel_docker_version` (apt version glob,
   default the stable release recorded in `defaults/main.yml`) with the packages
   held (`apt-mark hold` on `docker-ce` and `docker-ce-cli`). Debian's
@@ -269,9 +303,20 @@ root-owned; the role extracts it with `--no-same-owner` and re-asserts root
 ownership and no group/world write. The role refuses to run while a digest is the `UNPINNED` placeholder: run
 the workflow, then pin its checksums. A published release is never overwritten
 (a rebuild changes the digest); to change the build, bump the version or use a
-new release name. A release is never rebuilt on the host as a fallback. Main config is
+new release name. A version bump takes two changes: first `apache_build_version`, its source
+digest and the signer (merge, then wait for the vendor run to publish the
+release); then `apache_version` and `apache_sha256`, which hosts install. A release is never rebuilt on the host as a fallback. Main config is
 `/etc/turbopanel/apache/httpd.conf` with `IncludeOptional …/sites/*.conf`
-and loads `mod_proxy` + `mod_proxy_fcgi` for PHP. Driven by
+and loads `mod_proxy` + `mod_proxy_fcgi` for PHP, plus the modules ordinary
+`.htaccess` files use: `authn_core`, `authn_file`, `auth_basic`, `authz_user`,
+`authz_groupfile` (Basic auth), `access_compat` (`Order`/`Allow`/`Deny`),
+`expires`, `filter` + `deflate` (output compression) and `autoindex` (opt-in
+listing; `IndexIgnore` hides dotfiles). Each only adds directives the vhost
+already allows by name (`src/deploy/site/apache-overrides.ts`; a test keeps the
+two in step). Never load `cgi`, `cgid`, `actions`, `include`, `ext_filter`,
+`substitute`, `sed`, `lua`, `userdir`, `info`, `status` or a `proxy_*` beyond
+`proxy` + `proxy_fcgi`: they would let a `.htaccess` run programs, rewrite
+content, reach other HTTP services or leak every vhost. Driven by
 **`turbopanel-apache.service`**, which runs the whole server, master
 included, as `tpapache` (`User=`/`Group=` in the unit, none in
 `httpd.conf`). Logs live in the unit's nested
@@ -279,7 +324,26 @@ included, as `tpapache` (`User=`/`Group=` in the unit, none in
 engines' logs; systemd leaves the existing parent alone and gives the inner
 folder to `tpapache`) and the pidfile in `RuntimeDirectory=turbopanel-apache`
 (`/run/turbopanel-apache`, removed with the unit). A changed unit restarts a running server (`try-restart`);
-a reload would keep the old master. The daemon's config test is
+a reload would keep the old master. So does a new build, and the role decides by what is running: it reads the
+binary the master was started from (`/proc/<pid>/exe`) and restarts when that is
+not the installed `current` (or the unit changed), so a run after a failed one
+still restarts. Before any restart or reload it tests the config on every run
+while Apache is up, with the installed binary as `tpapache` (`runuser`; root
+never parses it). A failed test or restart puts the previous link back (a failed
+restart also starts the old build again) and ends the run in a failure, so the
+prune is skipped and the next run tests again. A changed `httpd.conf` or vhost
+on the same build is a reload. After the restart it prunes the superseded
+version folders (only `current` and `apache_version` stay). The role also
+brings every vhost on disk (`*.conf`, `*.tpprev`) to the closed override list at
+the host's first Apache deploy, without waiting for each site's own deploy: the
+exact lines the daemon rendered earlier (`Options Indexes …`, `AllowOverride All`
+or the `FileInfo` class) are replaced by the new classes and the named list
+(`apache_override_classes` / `apache_override_list`, held equal to
+`apache-overrides.ts` by a test), `Indexes` leaves the default `Options`, and the
+strip lines go in (`lineinfile`, idempotent); a vhost that still allows
+`FileInfo` or `All` afterwards stops the run. It creates `sites/` under the Apache
+log folder for the per-site error logs (`tpapache`-owned `0750`; no rotation
+yet). The daemon's config test is
 `sudo -n -u tpapache -- httpd -t -f /etc/turbopanel/apache/httpd.conf`,
 pinned in sudoers. Main config includes a
 bootstrap `Listen 127.0.0.1:19080` so httpd can start before any site
@@ -329,7 +393,10 @@ the major (`2`). The playbook and its `deno_app_versions` extra-var are on
 ### php-fpm (`php-fpm`)
 
 Moved to `roles/php-fpm/AGENTS.md` — co-installed sury series, per-series
-`turbopanel-php-fpm@<series>` instances, statoverrides, masked sury units.
+`turbopanel-php-fpm@<series>` instances, masked sury units, the PHP shell
+dispatcher and the vendored PHP package manager (`vendor/composer/<version>/`,
+pinned with its digest, `other:x` ACL like the other runtime trees; site builds
+put its `bin` on `PATH`).
 
 ### OpenLiteSpeed (`openlitespeed`)
 
@@ -344,7 +411,61 @@ owns public `:80`/`:443` for tenant sites and does **not** publish panel names.
 `turbopanel_hostnames` is the list of `{host, source, cert_id}` the
 `public-urls-update` wire renders. `uploaded` names are extra `:8443` sites
 with `tls uploaded-<cert_id>.{crt,key}` (legacy empty `cert_id` uses
-`uploaded.{crt,key}`). `lets-encrypt` names are extra `:8443` sites with
+`uploaded.{crt,key}`). On a managed host the daemon cannot write the cert
+directory, so it stages each uploaded pair (an administrator's upload or the
+control plane's DNS-01 certificate) as
+`<state>/system/instance-certs/<id>.{crt,key}` (`0600`, its own `0700`
+folder) and `tp-host instance-cert-install <id>` checks the id (a UUID), the
+shapes (1 to 10 PEM `CERTIFICATE` blocks, at most 64 KiB; exactly one
+unencrypted PEM private key, at most 16 KiB), reads both as the daemon account
+refusing links, and places them `root:tp` `0640` (key first); co-located
+development writes them directly. Every DNS-01 renewal brings a new id, so
+after a successful apply the daemon removes the pairs of ids no hostname uses
+(`pruneUploadedInstanceCerts`: it lists the folder, and only when a stale pair
+is there runs `tp-host instance-cert-prune <ids in use>`; development removes
+them itself). A failed apply never prunes. `<state>/tls` (the CA folder) is
+`root:tp 0750` from both this role and `daemon-layout`; it is not a daemon
+leaf, and tp-host's generic verbs name nothing in it but `instance-ca-pin` and
+`certs/letsencrypt-<host>.{crt,key}`. Applies are serialised in the daemon, so
+one apply's prune never removes a pair another apply is rendering.
+
+**Control-plane TLS key modes (owner decision 2026-11-04).** The Platform CA
+key `<state>/tls/ca.key` is `root:root 0600` on a managed host: only the
+certificate generator reads it, and `instance-certs` runs that as root there
+(co-located development keeps it the developer's own, `0640`). The server
+leaf key `<certs>/platform-ca.key` is `tpcaddy:tpcaddy 0600`, like the Let's
+Encrypt keys: control-plane Caddy (`User=tpcaddy`) is its only reader, and
+`caddy validate` runs as root. The leaf certificate stays group `tp` `0640`.
+The generator chmods both keys to `0640` on every run; the role sets them
+back each converge (so those two tasks report a change each time), and since
+neither key's group is `tp` that window never lets the daemon account read
+one. Existing hosts move to these modes on their next converge that runs
+`instance-certs` (an install, a colocated refresh, a hostname apply); until
+then they keep the old ones, and the first such run after the upgrade still
+has `ca.key` group `tp` until its task runs. Because the CA key is now root's
+alone, a Platform CA rotation (`TURBOPANEL_TLS_CA_ROTATE=1`) must run the
+generator as root, as `instance-certs` does on a managed host.
+
+**Folder checks before root writes.** Before root tasks touch `<state>/tls`,
+the certs folder or `<state>/instance-acme`, `instance-certs` and
+`instance-launch` include `instance-certs/tasks/tls-folders-check.yml`: each
+folder must be missing (created next) or a real folder, not a link, owned by
+the expected account (`root` or the developer for `<state>/tls`, the instance
+account for the certs folder, `caddy_user` for `instance-acme`) or by root.
+One exception: hosts installed before `<state>/tls` became root's still have
+it owned by `tp` (daemon-layout re-owns it, but runs after these roles), so
+on a managed host a real `tp`-owned `<state>/tls` is re-owned to `root:tp
+0750` (`follow: false`) and the play goes on. Anything else stops the play with a message saying what was found, that
+nothing was changed, and to restore the original folder or ask for help; it
+warns never to delete `tls/`, which holds the Platform CA key (a new CA would
+break every daemon's pin). Nothing is renamed, set aside or rotated. `instance-certs` also
+refuses `self-signed.{crt,key}` unless each is a regular file or the link it
+makes to `platform-ca.*`, every file and copy task there sets
+`follow: false`, the Let's Encrypt migration script refuses a link, and the
+issuer unit's first `ExecStartPre` refuses a link or file in place of
+`<state>/instance-acme` before its root `install -d`. The certs folder itself
+is still the instance account's (`tpctrl:tp 0750`), so these checks narrow but
+do not close a swap race by that account inside it. `lets-encrypt` names are extra `:8443` sites with
 `tls letsencrypt-<host>.{crt,key}` under `turbopanel_instance_certs_dir`,
 rendered **only when both files exist** (`letsencrypt-files.yml` stats them
 before the template). The daemon installs each certificate as `root:tp`
@@ -424,7 +545,7 @@ key. The daemon restarts the unit when its rendered content changes
 
 The control-plane Let's Encrypt window (co-located instance) proxies
 HTTP-01 challenges to `unix/<run dir>/instance-acme.sock`. Connecting needs
-`x` on `/run/turbopanel` (`tp:tp` `2770`) and `w` on the socket. The role
+`x` on `/run/turbopanel` (`tp:tp` `3770`) and `w` on the socket. The role
 grants `tpedge` traverse only (`u:tpedge:x`, no listing, no default entry) on
 the run directory, and because `/run` is tmpfs it also writes
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf` (`a+ … u:tpedge:x`) so the
@@ -433,7 +554,10 @@ daemon's preflight listener (as `tp`) or the issuer Caddy (as `tpcaddy`),
 neither of which can name another user in an ACL, so the daemon then calls
 `tp-host setfacl -P -m u:tpedge:rw <run dir>/instance-acme.sock`. That shape
 accepts only that path and that entry, waits up to 5 s for the issuer to
-bind, refuses a symlink, and never follows one (`-P`). `tpedge` is never put
+bind, refuses a symlink, and never follows one (`-P`). The run directory is
+sticky, so the issuer cannot replace a preflight socket the daemon left
+behind; before starting the issuer the daemon removes a socket owned by the
+directory's owner (itself) and leaves any other. `tpedge` is never put
 in group `tp`. Residual: traverse lets `tpedge` open anything directly in
 the run directory whose own mode grants "other" access (today the empty
 `daemon.lock`, `0644`); no socket there is world-writable.
@@ -444,6 +568,7 @@ Vars (both roles; extra-vars win):
 | --- | --- |
 | `turbopanel_hostnames` | Per-hostname `{host, source, cert_id}` list |
 | `turbopanel_hostnames_json` | Compact JSON of that list. `tp-orchestrate` accepts only `key=value` extra-vars, which stay strings, so public-urls apply passes this and `resolve-hostnames.yml` loads it with `from_json` into `turbopanel_hostnames` before `selectattr` and the Caddy template |
+| `turbopanel_edge_trust_json` | Compact JSON object `{hash, cloudflare, bunny}` of edge CIDRs from `public-urls-update` `edgeTrust`. `resolve-edge-trust.yml` turns it into `turbopanel_edge_cidrs` (union), `turbopanel_edge_cf_cidrs` and `turbopanel_edge_bunny_cidrs`, which `Caddyfile.j2` puts in `trusted_proxies` and in the `@not_edge_peer` / `@not_cloudflare_peer` strip matchers. The apply persists it as `caddy/instance-edge-trust.json`; a converge that passes none reads that file, so ranges survive an update. Empty lists clear it |
 | `turbopanel_tls_mode` | Deprecated alias. Display-only once hostnames are set |
 | `turbopanel_tls_cert_path` / `turbopanel_tls_key_path` | Legacy uploaded pair when `cert_id` is empty; copied to `uploaded.{crt,key}` |
 | `turbopanel_public_hostname` / `turbopanel_acme_email` | Deprecated single ACME name, and the account email (no longer rendered into the Caddyfile) |
@@ -463,6 +588,43 @@ paths are baked in at render time — no Caddy env placeholders, no static site
 config in the instance release package. The unit does not grant
 `CAP_NET_BIND_SERVICE`. Updating the proxy config is a template edit plus a
 converge, never a hand edit of the rendered file.
+
+**Named hostname sites in co-located development.** The dev overlay
+Caddyfile is a static file and stays the loaded config, so the per-hostname
+loop lives in its own template, `templates/Caddyfile-hostname-sites.j2`,
+included by `Caddyfile.j2` and by `templates/Caddyfile-dev-sites.j2`.
+`tasks/caddyfile-dev-sites.yml` (imported by `caddyfile.yml` on a converge
+and included by `instance-certs-apply.yml` on a hostname apply; every task
+gated on `turbopanel_dev_user`) renders the dev template to
+`{{ turbopanel_dev_sites_dir }}/hostnames.caddy`
+(`/etc/turbopanel/caddy/dev-sites`, root:`<dev user>` `0750`, file `0640`),
+which the dev Caddyfile picks up with
+`import {$TURBOPANEL_DEV_SITES_DIR}/*.caddy` (the Caddy unit exports that
+variable in dev). The candidate is validated against the dev Caddyfile with
+a staging directory standing in for the sites directory, and only then
+installed, so a bad render never reaches a file Caddy reads on its next
+start; the dev unit is reloaded on a change. One file, rewritten on every
+apply, so a removed hostname disappears with it. A DNS-01 pair the control
+plane issued reaches the daemon as `uploaded` and is served by name (SNI) on
+`:8443` while the bare `:8443` site keeps the Platform CA leaf, which is
+what lets the development panel test a real certificate for its own
+hostname both on the LAN and through a tunnel. `lets-encrypt` (HTTP-01)
+stays managed-install only.
+
+**Edge port redirect.** An edge in front of the control plane (a tunnel, a
+proxy) can answer one hostname on 443 and 8443 and forward both to `:8443`;
+only the Host header still says which (443 sends the bare name). The shared
+`(turbopanel_app)` snippet includes `templates/Caddyfile-edge-port-redirect.j2`:
+a listed DNS name on the wrong port gets `308` to its public port with
+`Cache-Control: no-store`. The public port is only the entry's `public_port`,
+which the control plane sends as `publicPort` on `public-urls-update` to a
+daemon advertising `instance-hostname-public-port-v1` and the sidecar keeps; a
+name without one gets no redirect (its URL port is the origin's, not the
+visitors'), so a kept Caddyfile is never patched. Exempt: `/api/daemon/*`,
+`/ws/daemon/*`, `/api/health`, `/webhook/*` (providers do not follow
+redirects) and any WebSocket upgrade. LAN names and IPs carry their port in
+Host, so nothing loops. Caddy's `host` matcher and site addresses ignore the
+Host port; match the port with `header Host`, which takes one value per line.
 
 **Managed install layout.** The instance package lies flat in the install
 root beside the daemon — `bin/turbopanel` and `lib/libduckdb.so` (the unit's
@@ -562,6 +724,28 @@ converge (`instance-launch`); no data is touched.
 `src/orchestration/instance-unit-sandbox.test.ts` renders the unit and pins all
 of it. `scripts/canary-instance-sandbox-proof.sh` is the on-host proof.
 
+### instance-launch dev migrate before start
+
+On a co-located dev source install (the same condition that sets
+`TURBOPANEL_DEV_SURFACE=1`) the instance unit runs the control plane's
+`scripts/dev-migrate-on-start.mjs` as `ExecStartPre`, so every restart brings
+the dev database up to the checkout (owner decision 2026-11-05; the instance
+itself refuses to start on an older schema). The script backs up first
+(`pg_dump -Fc` in `turbopanel-database` into
+`<daemon state>/dev-updates/backups`, the Update and Restart job's folder),
+applies only migrations that are on `origin/trunk` unchanged, and otherwise
+fails the start with one plain line in `instance.err.log`. A database that is
+still starting is waited for inside the script (up to a minute per try). A
+checkout from before the script skips the step. In this dev layout only, `StartLimitBurst=10` in 120 s
+(every other layout has no start limit and a growing restart delay) stops a refused pre-start (about a second per try) instead of retrying every
+`RestartSec` (`RestartPreventExitStatus` does not cover `ExecStartPre`).
+Manual starts count toward it too; after the unit stops on the limit, fix the
+cause and run `sudo systemctl reset-failed turbopanel-instance`, then start it
+(or wait 120 s). A converge whose restart handler hits a refused migration now
+fails there instead of passing and leaving the instance to refuse later.
+`TimeoutStartSec=20min` leaves room for the backup. Production, compiled, static-UI and Workers units get none of it
+(pinned in `src/orchestration/instance-unit-sandbox.test.ts`).
+
 ### instance-launch secret keyring
 
 The `instance-launch` role persists the control-plane root secret keyring under
@@ -619,6 +803,18 @@ disk, and "Restart the instance when its binary was replaced under it" notifies
 `Restart turbopanel instance` (handler, end of play). Without it a canary kept
 serving the previous panel build after a successful update.
 
+## Daemon features file (`daemon-features`)
+
+`daemon-features` at the root of this tree lists, one name per line (`#`
+starts a comment), what the daemon release shipping with it does, for
+`scripts/run.sh` to check without running the binary (`tp_daemon_has_feature`).
+The tree ships in the same release and under the same manifest as the binary,
+so the file always describes the daemon it sits next to; a release without
+the file has none of the names. Add a name only in the change that makes the
+daemon do it, and never remove one a released daemon still has. Today:
+`enroll-status` (the daemon writes `/run/turbopanel/enroll-status`, which the
+installer waits for; see `scripts/AGENTS.md`).
+
 ## Container image pins
 
 Every image the platform pulls is pinned by digest in `image-pins.json` (the
@@ -639,3 +835,179 @@ and the control-plane compose (`system-compose`) only take the digest on first
 create, on a deliberate tag change, or when the stored image already carries a
 digest and the table's digest changed. Existing databases therefore keep their
 current image until a deliberate change.
+
+## Ansible style (SonarQube)
+
+- Prefer **`mode: "0640"`** / **`0750"`** with explicit **`owner`** /
+  **`group`** over world-readable modes (`ansible:S2612`).
+
+## Deno Version Pin
+
+**Deno version pin:** `DENO_VERSION` (`src/orchestration/assets.ts`) =
+**`2.9.8`**. Keep it in step with `deno_version` in
+`orchestration/roles/deno-runtime/defaults/main.yml`, `TP_DENO_VERSION` in
+`scripts/run.sh`, and `DENO_VERSION` in
+[TurboPanel/dev](https://github.com/TurboPanel/dev) `src/lib/paths.ts` (dev
+console bootstrap fallback + status label). `src/orchestration/assets.test.ts`
+pins the const to the role default. Bumping the pin is a fleet-wide rollout:
+`deno-runtime` runs on the install/converge path (`daemon-install.yml`,
+`daemon-converge.yml`) and on the instance-launch refresh path
+(`instance-launch-only.yml`, ahead of `instance-launch`), because instance and
+mailer units ExecStart through the vendored Deno path — it is not only the
+daemon's JS-fallback concern. `src/orchestration/assets.test.ts` pins that
+ordering too.
+
+## Dev Source-Repo Root and Home
+
+In co-located dev (`turbopanel_dev_user` set) every repo path is
+`<turbopanel_dev_root>/<repo>`. The root is the folder that holds the repos: the
+daemon forwards `TURBOPANEL_DEV_ROOT` as an extra-var. It is always a folder
+named `turbopanel` (default `~/turbopanel`, or e.g. `~/work/turbopanel`), on
+every dev machine including the Vagrant guest, which mounts the host repos at
+`~/turbopanel/<repo>`; the dev console refuses any other name.
+Extra-vars outrank `set_fact`, so a playbook's getent pre_task only fills the
+root on a direct run, with the same rule (`instance-launch-only.yml`). Tasks that run git, ssh or pnpm
+set `HOME` to `turbopanel_dev_home` (the dev user's real home, from
+`TURBOPANEL_DEV_HOME` or getent), never to the root, so keys, `known_hosts`,
+git config and the pnpm store stay in the home. Each role that sets `HOME`
+defaults `turbopanel_dev_home` to `turbopanel_dev_root`, which keeps older dev
+consoles working. Validation and the reasons for it live in
+the dev repo's dev-environment runbook (Repos Outside the Home Folder).
+
+## Vendored Runtimes and Ansible Environment
+
+**Vendored Node/Deno layout:** Ansible roles install pinned runtimes under
+`/opt/turbopanel/vendor/<tool>/<version>/` with a `current` symlink (see
+`node-runtime`, `deno-runtime`, `caddy`). Consumers resolve `turbopanel_node`
+(`…/node/current/bin/node`), `turbopanel_deno` (`…/deno/current/deno`), and
+`turbopanel_runtime_path` (colon-separated PATH prefix for systemd/Ansible
+tasks). Node **26.7.0** is pinned in `node-runtime/defaults/main.yml` — keep in
+step with `NODE_VERSION` in [TurboPanel/dev](https://github.com/TurboPanel/dev)
+`scripts/lib/paths.sh`. Node 25+ no longer ships Corepack; the `node-runtime`
+role installs it with vendored `npm install -g corepack` into the versioned
+prefix, then `corepack enable pnpm`. The vendored runtime root is defined once in
+`src/paths/layout.ts` (`resolveRuntimesDir()` / `PROD_RUNTIME_DIR_DEFAULT`);
+shell helpers live in `scripts/lib/runtime-paths.sh`.
+
+**Valkey (project caches):** the `valkey-runtime` role vendors the pinned Valkey
+release under `vendor/valkey/<version>/` (the upstream `jammy` build, SHA-256
+pinned per architecture) with its LICENSE beside the binary, run lazily by
+`playbooks/cache-runtime-apply.yml`. The role default, the daemon's
+`CACHE_RUNTIMES` (`src/deploy/cache/limits.ts`) and both digests change
+together. Detail: `roles/valkey-runtime/AGENTS.md`, `../src/deploy/cache/AGENTS.md`.
+
+**Manual troubleshooting (retired `/opt/turbopanel/runtimes` shell-rc line):**
+an old Deno bootstrap may have appended a line like
+`. "/opt/turbopanel/runtimes/deno/.install/env"` to `~/.bashrc` / `~/.profile` /
+similar. That path is gone after the vendor rename, so every login prints "No
+such file or directory". Managed install/converge does **not** rewrite shell
+profiles — remove the stale line by hand (or reset the dev environment) if it
+appears.
+
+**Ansible home (no root pollution):** `ansibleEnv()` /
+`devOrchestrationAnsibleEnv()` set `ANSIBLE_HOME` to `/tmp/turbopanel-ansible`
+(alongside `ANSIBLE_LOCAL_TEMP` under `vendor/uv/cache/ansible-tmp`). Galaxy
+download cache is disposable scratch — first-party roles live under FHS
+`share/orchestration/roles`; Galaxy collections live under
+`vendor/ansible/galaxy-collections`. Managed
+`run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
+accidental `/root/.ansible` after install. Runtime orchestration runs as
+`tp` (dev: the current dev user).
+
+**Galaxy content ships in the package, nothing is downloaded:** the exact
+`ansible.posix` release tarball is committed under
+`orchestration/vendor/galaxy/` (version recorded in
+`orchestration/requirements.yml`, digest pinned as `GALAXY_POSIX_SHA256`).
+Bootstrap (`ensureGalaxyCollections`) checks the digest and installs it
+offline, only collections, under
+`vendor/ansible/galaxy-collections` — needed for the JSONL callback and
+`ansible.posix.sysctl` on every playbook. **No Galaxy role is used:** Docker
+Engine is installed by our own `docker` role (`orchestration/roles/docker/tasks/install.yml`,
+shipped in the release package with the rest of `orchestration/roles/`) from
+Docker's official apt repository when a host first needs the container runtime
+(`runDockerSetup` / co-located dev converge / postgres|rabbitmq|proxysql setup),
+so fresh daemon installs and pre-Docker hosts never fetch it and a host with a
+healthy Docker (including an offline one) is left alone. The signing key is
+fetched over HTTPS at install time and refused unless it carries the
+fingerprint pinned in `roles/docker/vars/main.yml`; a release Docker has not
+published packages for yet falls back to the newest published suite.
+Do not vend Galaxy content into the repo — Sonar would scan third-party
+`mode: 0644`/`0755` as false vulnerabilities; release hosts reinstall
+collections at bootstrap. Keep leftover checkout copies (`orchestration/.ansible/`)
+out of ansible-lint / the Ansible IDE extension via `exclude_paths`.
+
+**Upstream licenses:** Ansible Core, `ansible-lint`, the `ansible.posix`
+collection, and any packages these
+playbooks install remain under their upstream licenses (pins in
+`orchestration/requirements.txt` (constraints),
+`orchestration/requirements.lock.txt` (CI hash lock),
+and `orchestration/requirements.yml`). Installing them on a host is a
+different licensing event from redistributing them. Any TurboPanel-published
+appliance, VM/OCI image, or offline bundle that ships copies must carry the
+applicable upstream license, copyright, notice, and source-compliance
+material. Canonical copy of this boundary: `orchestration/AGENTS.md`.
+
+**Apple Silicon VMs (UTM / Parallels) + ansible cryptography:** hypervisors often
+advertise SVE2 in the guest without implementing it. cryptography 47+ ships
+OpenSSL that probes those features at import and **SIGILL**s (`ansible-playbook
+--version` exits 132). Orchestration `runtimeEnv()` and shell
+`scripts/lib/runtime-paths.sh` always set `OPENSSL_armcap=0` so OpenSSL skips
+ARM CPU probing (harmless on real aarch64 and x86_64). The Vagrant guest profile
+exports the same for interactive shells. Shell wrappers that invoke ansible under
+`sudo` must source `runtime-paths.sh` (or export the var explicitly) because
+`sudo` resets the user environment.
+
+**Debian `/bin/sh` is dash:** `ansible.builtin.shell` defaults to `/bin/sh`.
+Dash rejects `set -o pipefail` (`set: Illegal option -o pipefail`), which is
+how cache/Deno/Caddy/… install snippets start — the task then fails with
+“non-zero return code” before curl/dpkg run. Runtime `ansible.cfg` sets
+`executable = /bin/bash`, and `ansibleEnv()` / `devOrchestrationAnsibleEnv()`
+export `ANSIBLE_EXECUTABLE=/bin/bash`. Keep those in step; do not drop
+`pipefail` from bash snippets that actually pipe (password generators).
+
+**`instance-dev-install --if-needed`:** `scripts/run-orchestration-action.ts`
+accepts an `--if-needed` flag on `instance-dev-install`. When set, it calls
+`coLocatedInstanceServiceEnabled()` + `emitDevConvergeSkippedIfNeeded()`
+(`src/orchestration/converge-stamp.ts`) and, when the stamp matches, emits a
+single `dev_converge_skipped` JSONL event and exits **before**
+`ensureAnsible` / the playbook run. Unflagged
+invocations (and any flow with `TURBOPANEL_FORCE_CONVERGE=1` set) behave
+exactly as before via `shouldSkipDevConverge()` / `forceConvergeRequested()`.
+The [dev](https://github.com/TurboPanel/dev) console threads this as
+`installDevEnvironment(..., mode)` with `mode: "if-needed" | "force"` —
+`"if-needed"` only for the post-daemon-install chain; `"force"` (and
+`TURBOPANEL_FORCE_CONVERGE=1`) for Developer → Converge / re-converge and
+legacy reset/provisioner callers. Optional co-located tooling arrives as
+**one** structured payload — `TURBOPANEL_DEV_CONVERGE_OPTIONS`, JSON
+`{ "optionalServices": { "<stem>": bool } }` keyed by Ansible stem, built from
+the dev console's single catalog (`dev/src/lib/optional-dev-services.ts`).
+`src/orchestration/dev-converge-options.ts` parses it once per
+`instance-dev-install` and emits a single `-e '{"turbopanel_optional_<stem>": …}'`
+extra-vars object; the same normalised payload is folded into the converge
+stamp. No payload means no optional extra-vars (playbook `vars:` and role
+`| default()` filters decide). Drizzle Studio, Mailpit, Expo UI, website, and
+Redis Insight start only when selected; units are still installed so the TUI
+can enable them later.
+
+## Host-Base Prerequisite Boundary
+
+**Host-base prerequisite boundary:** TurboPanel-managed vendors (uv, Python,
+Ansible venv, Deno, Node, Caddy, Redis, cloudflared) install under `vendor` via
+orchestration bootstrap — not via apt in `run.sh`. The minimal host-base set is
+**sudo, curl, ca-certificates, tar, python3-minimal, zstd, openssl** (`run.sh` may apt-install
+these only when absent). `python3-minimal` extracts Deno release zips without
+apt `unzip`. The `daemon-prereqs` role covers the broader managed-host set (git,
+gnupg, pamtester, xz-utils, iptables, …) once Ansible can converge, and
+**removes the distribution firewall front-ends** — ufw, firewalld,
+iptables-persistent/netfilter-persistent purged, nftables.service disabled — on
+every converge of every host (`tasks/firewall-takeover.yml`; TurboPanel owns
+the host firewall, decided 2026-09-20; every step moves the kernel toward
+ACCEPT so it cannot lock a host out); Redis is vendored by
+extracting the official `packages.redis.io` `.deb` with `dpkg-deb -x` (no
+compile toolchain).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |

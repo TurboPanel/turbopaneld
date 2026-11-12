@@ -1,0 +1,461 @@
+# Host Scripts (sudo, tp-host, tp-orchestrate) — AGENTS.md
+
+Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are relative to the repo root.
+
+## Privileged Host Scripts
+
+- **sudo** — `roles/turbopanel-user/templates/sudoers.j2` grants root exactly
+  four commands: **`tp-host`** (`orchestration/scripts/tp-host`, installed
+  `root:root 0755` at `<install>/lib/tp-host`), `tp-orchestrate`, and the two
+  pinned engine config tests. There is no raw host utility, no Docker, no
+  shell. `(tp) NOPASSWD: ALL` stays for the self re-exec pattern and engine
+  config tests run as the engine service users.
+  `src/orchestration/sudoers-contract.test.ts` pins that set and runs a corpus
+  of classic escapes (`find -exec`, `tee`/`cp`/`install`/`mv`/`chown`/`chmod`
+  to system paths, `systemctl link`, `useradd -o -u 0`, `usermod -aG sudo`,
+  `sysctl kernel.core_pattern`, `ip netns exec`, `iptables --modprobe`,
+  `docker run -v /:/h`, a foreign engine config) through a sudoers matcher.
+- **tp-host** — every root host command the daemon issues goes
+  `sudo -n -- <install>/lib/tp-host <verb> …`: every `sudo -n <cmd>` call site
+  passes its argv through `hostSudoArgs` (`src/permissions/host-sudo.ts`),
+  which rewrites a tp-host verb on a managed install and leaves root on a
+  managed install, `-u` re-execs, tp-orchestrate and engine tests alone. The
+  verbs are split in two: `HOST_PROGRAM_VERBS` (real programs: `install`,
+  `systemctl`, `iptables`, `useradd`, …) run directly in development, and
+  `TP_HOST_ONLY_VERBS` (`tunnel-env-install`, `app-env-install`, `site-env-install`, `release-layout-folders`, `instance-cert-install`, `panel-identity-write`, `publish`,
+  `cert-dates`, …, which no host program provides) run in development through
+  the checkout's own `<checkout>/orchestration/scripts/tp-host` with sudo and
+  every check it applies on a managed host. `tp_dir_sealed_at` stays
+  root-only everywhere (publish chain, staging, home parents). One exception,
+  for the co-located layout that keeps `/etc/turbopanel` dev-owned
+  (`daemon-seal`): `tp_appenv_enter` (the `node-app-env` / `tunnel-env`
+  folders) also accepts a parent that is exactly the config root (physical
+  path), owned by the running tp-host's owner, that owner not root, the parent
+  not group- or world-writable, and the script owner-writable
+  (`tp_config_root_self_sealed` / `tp_self_sealed_ok`; anything else fails
+  closed). Unprivileged tests can only exercise that rule lifted from the
+  script, since it needs a directory owned by a uid other than the stand-in
+  root. Verbs
+  that use `INSTALL_ROOT` (`$_self_dir/..`: `lib/`, `vendor/lsphp`) still
+  assume the installed layout.
+  `host-sudo.test.ts` fails on any unwrapped `sudo -n <verb>` literal in `src/`.
+  tp-host accepts only the argument shapes the daemon produces and:
+  - confines paths to the trees TurboPanel owns (`/etc/turbopanel`,
+    `/var/lib|log/turbopanel`, `/run/turbopanel`, the principal home root —
+    recorded root-side in `lib/tp-host.conf`, never read from `daemon.env` —
+    `/etc/ssh/turbopanel`) plus named files (`turbopanel-*` units,
+    `60-turbopanel.conf`, `/etc/wireguard/tp0.conf`,
+    `/etc/sysctl.d/99-turbopanel-*.conf`, `rm` of `/var/lib/systemd/timers/stamp-turbopanel-*.timer` (a deleted timer's stamp file, nothing else in that folder), operator storage under
+    `/mnt|/media|/data|/srv` for principal-owned volumes);
+  - below the config root, lets the generic write verbs (`install`,
+    `install -d`, `mkdir`, `tee`, `cp -p`, `mv`, `rm`, `chown`, `chmod`)
+    touch only what the daemon really writes (`tp_config_write_ok`, an
+    allow-list): its leaves and loose files, the engine config folders
+    (`nginx`, `apache`, `openlitespeed`, `site-caddy`), files in
+    `php/<series>/pools/`, `instance/runtime.env` and
+    `caddy/instance-acme.json` / `caddy/instance-acme-settings.json`.
+    Everything else is root's (the system stack's scripts and the backup job
+    root runs on a timer under `system/`, the control plane's other config, a
+    php-fpm series folder and its `conf.d`), and so is the config root itself.
+    `install -d -m 0750` of `instance` itself is allowed only without an owner. A
+    `pools` folder is made only as `install -d -m 0750 -o root -g
+    tpapache|tpols`, re-owned only by that same `install -d` (to the other master group), never removed or chmodded, holds no folder, and a pool file is
+    always root-owned. A new folder the daemon needs under the config root
+    goes on that list in the same change, with its reader named;
+  - checks a shared php-fpm master's pool file (`tp_phppool_ok`): only the
+    directives `phpFpmPoolConfig` renders, no `[global]`, and `user`,
+    `group`, `listen.owner`, `listen.group` each exactly once per pool; the
+    workers run as a site owner with its own group (`tp_principal_own_group`)
+    or as one web server account (`ENGINE_USERS`) with the group of that
+    name, and the socket belongs to one web server account, owner and group
+    the same; `listen` is exactly `<run>/php/<series>/<pool>.sock` (the
+    pool file's own series) and `listen.mode` is `0660`, because the root
+    master removes, binds and re-owns whatever path is named there. Never
+    root, `tp`, another account's group, a system group (`disk`, `shadow`,
+    `docker`, ...) or a word an INI reader turns into 1 or an empty value
+    (`yes`, `on`, `none`, ...; site owner names refuse these too). The
+    daemon's own files there (`instance/runtime.env`, the two issuer files,
+    the loose files) are never made folders;
+  - pins every path (`cd -P` + `pwd -P` equality, so no component is a
+    symlink) and works relative to the pinned directory; writes go through a
+    root-only 0700 scratch directory and `mv -T`; root reads are checked on
+    the opened descriptor (`/proc/self/fd/3`); files the daemon staged are
+    read *as the daemon account* (`setpriv`);
+  - checks systemd unit content before installing it: known directives only,
+    tenant services `User=<principal>` / `Group=<principal>` /
+    `Slice=turbopanel-<principal>.slice` (each `-` in the name written `.`:
+    systemd reads a dash as a slice level, so `a-b` would otherwise sit inside
+    `a`'s slice; `tp_principal_slice`, `principalSliceName`; `containers` and
+    `tpbuild` are platform slices no principal may take) /
+    `NoNewPrivileges=yes` / empty
+    capability sets, no `+`/`!`/`:` exec prefixes, no line ending in a
+    backslash (systemd would join it onto the next line, hiding e.g. `User=`
+    from this line-by-line check), a timer may only start its own service;
+    a `turbopanel-app-<id>.service` may carry exactly one `EnvironmentFile=`,
+    equal to `<config>/node-app-env/<id>.env` (its own variables copy; systemd
+    reads it as root, so no other path, no `-` prefix, no second line;
+    `tp_app_envfile_ok`) and no other unit may carry one except the backup unit
+    below, and a `turbopanel-cron-*.service` may carry exactly one
+    `EnvironmentFile=`, equal to `<config>/site-env/<the unit's own
+    User=>/<site id>.env` (`tp_site_envfile_ok`: a unit can never load another
+    account's variables; no `-` prefix, no second line). A
+    `turbopanel-deploycmd-*.service` or `turbopanel-worker-*@.service` (a site's
+    post-deploy commands and workers) may carry the same file and, beyond the
+    account checks, must carry (`tp_site_lifecycle_ok`) exactly one
+    `ExecStartPre=+<lib>/tp-php-loopback sync` (the only `+` prefix any tenant
+    unit may have), `IPAddressDeny=` and `IPAddressAllow=` equal to
+    `SITE_IP_DENY` / `SITE_IP_ALLOW` (the same strings the per-site PHP unit is
+    pinned to) and `PrivateDevices=yes`; no other unit may carry these keys.
+    `journalctl --unit=` accepts these two name families beside
+    `turbopanel-app-*`. `site-env-install
+    USER ID` / `site-env-remove USER ID` fill and empty those per-account
+    folders the way `app-env-install` does (staged file
+    `<state>/sites/.env-stage/<id>.env`, the same content checker, `0600 root:root`
+    in a `root:root 0700` folder per account); `principal-remove` removes the
+    account's folder. That folder is root's alone: only `app-env-install <id>` fills it
+    (it reads the daemon's staged `<config>/node-apps/envs/<id>.env` as the
+    daemon account on an open descriptor, refuses a symlink, a non-regular
+    file, another owner, a second hard link or more than 1 MiB, checks the
+    copy it made in root's scratch directory line by line against what the
+    daemon renders, then places it `0600 root:root` with `mv -T`; the folder
+    is `root:root 0700` under a sealed config root, checked on every run) and
+    `app-env-remove <id>` empties it; tunnel connector tokens work the same
+    way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
+    staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
+    `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
+    <id>`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
+    sync`, which lets only root and the daemon account reach the connector
+    metrics band on loopback, see `src/tunnels/AGENTS.md`); a project's helper
+    container ports work the same way in `<config>/reach-ports/<environment
+    id>.list` (`reach-ports-install <id>` reads the daemon's staged
+    `<state>/reach/.stage/<id>.list`: one to 64 distinct `<user> <port>`
+    lines, each user a principal and each port in the listen band 18080-18999,
+    `TP_LISTEN_PORT_MIN`/`MAX`, kept equal to `lib/tp-php-loopback` and the
+    compose policy by tests; `reach-ports-remove <id>`; the daemon runs
+    `php-loopback-sync` after either, and no generic verb names
+    `<config>/reach-ports` or `<config>/cache`); a project cache is made by
+    `cache-prepare <user> <id>`, `cache-config-install <user> <id>` (the staged
+    `<state>/caches/.stage/<id>.conf`, rebuilt from its few variable values and
+    compared whole, `tp_cache_conf_text`) and `cache-remove <user> <id>
+    [--data]`, and its unit `turbopanel-cache-<id>.service` is likewise rebuilt
+    and compared whole (`tp_cache_unit_text`); see `src/permissions/AGENTS.md`);
+    a control-plane hostname's uploaded certificate pair goes the
+    same way into the instance-certs role's `<state>/tls/certs`
+    (`instance-cert-install <id>` reads the daemon's staged
+    `<state>/system/instance-certs/<id>.{crt,key}`, checks one PEM chain and
+    one unencrypted PEM key within their caps, writes both in one scratch
+    folder and renames the key in before the chain, as
+    `uploaded-<id>.{crt,key}` `root:tp 0640`; `<id>` is a lower-case UUID,
+    matched with shell patterns as one whole value, never a line-based
+    match; `instance-cert-prune [<id>...]` removes `uploaded-<uuid>.{crt,key}`
+    there for every id it is not given, only plain files or links of exactly
+    that name, never a folder or a link's target, at most 64 ids; no
+    generic verb names anything in `<state>/tls` but `instance-ca-pin` and
+    `certs/letsencrypt-<host>.{crt,key}`, `tp_instance_tls_path_ok`), and a `turbopanel-tunnel-<id>.service` (or `...-<id>-b.service`, the
+    second unit while a connector update runs) unit is installed only if it
+    equals `tp_tunnel_unit_text` (a throwaway `DynamicUser=` account, no
+    capability); `tp_path_class` refuses the folder to
+    every generic verb. Checking the text of a daemon-writable path is not
+    enough: the daemon could swap it for a link to any root-only file after
+    the check;
+    the hosting-Caddy unit must run as `tpedge:tpedge` with
+    `NoNewPrivileges=yes`, exactly `CAP_NET_BIND_SERVICE` in both capability
+    sets, `StateDirectory=turbopanel/hosting-caddy` and only the
+    `HOME`/`XDG_*` environment that points into it, and may only exec the
+    vendored Caddy against the hosting Caddyfile; the `turbopanel-backup-` prefix is reserved for
+    scheduled backups — a name under it must be exactly
+    `turbopanel-backup-<lower-case uuid>.service|.timer`, and the service
+    must run as `tp:tp` (`DAEMON_ACCOUNT`), with exactly one
+    `ExecStart=<install>/lib/tp-backup-run <that uuid>`, only
+    `EnvironmentFile=-/etc/turbopanel/daemon.env`, `Nice=10`,
+    `IOSchedulingClass=idle` (those three directives exist for no other
+    unit), and no `Environment=`, `Slice=` or `ExecReload=`
+    (`tp_backup_unit_ok`);
+  - reserves `turbopanel-php-<siteId>.service|.socket` for per-site PHP
+    running as the site's owner (`tp_php_unit_ok`): FastCGI (`php-cgi<series>`
+    on a socket), php-fpm (`Type=notify`, its own runtime directory) or
+    detached lsphp (vendored, `PHPRC=` its php.ini, on a socket). Every line is
+    pinned: the owner, its group and slice, no capabilities, the exec line per
+    mode and series, `IPAddressDeny=localhost link-local multicast
+    0.0.0.0/8 fc00::/7` with only `IPAddressAllow=127.0.0.53` (required,
+    exact),
+    `BindPaths=<home>/tmp:/tmp`, `ProtectSystem=strict` with
+    writes only inside the home, and `TemporaryFileSystem=/etc/turbopanel:ro`
+    plus `BindReadOnlyPaths=` of the site's config directory (the owner cannot
+    traverse tp's 0750 tree otherwise). Sockets sit at
+    `/run/turbopanel-php-<siteId>/`, the owner's, group a web server's, 0660.
+    Config lives in `/etc/turbopanel/php/sites/<siteId>/` (dir 0750, files
+    0640, root:<owner>, directive allowlist; php.ini's only non-plain
+    section is `[PATH=<owner home>]`, the locked limits; an Apache runtime
+    also has `site-guard.php`, which must equal the bytes held in
+    `tp_php_guard_ok` (rendered by `sitePhpGuardPhp`; change both together),
+    and its ini (or pool) may name `auto_prepend_file` only as that runtime's own
+    guard path, `turbopanel.site_key` only as 64 lowercase hex,
+    `allow_url_include` only as off, and the guard path as an `open_basedir`
+    entry; php-fpm pools take
+    `listen.acl_users`, never `user`/`group`/`listen.group`);
+    `php-test <siteId>` runs the installed unit's binary on that config as
+    the owner. daemon-install's tp:tp pass over the config tree skips it;
+  - changes only principal accounts (uid ≥ 15001, primary group the
+    account's own group `<name>` in the same band, home under the principal
+    root, a listed shell), adds principals only to the SSH access
+    groups `runtime-registry.json` defines and engine accounts only to a site owner's
+    own group (`tp_principal_own_group`: the account `<name>` exists in the
+    band and the group `<name>` is its primary group), and creates a group
+    (`groupadd`) only under a name `useradd` would take: never `root`, `tp*`,
+    `systemd-*`, a name in `TP_RESERVED_NAMES` (privileged and system group
+    names such as `sudo`, `admin`, `wheel`, `adm`, `lxd`, `docker`, kept equal
+    to the control plane's reserved list), a name a `sysusers.d` file declares
+    (a package's system user or group that may not exist yet), a group sudoers
+    names (`%name`, quoted or escaped, in `/etc/sudoers`, `sudoers.d` and the
+    files it `@include`s), a name ending in `-grp` (an older owner's group),
+    an all-digit name, an existing account or an existing group. `useradd`
+    takes the same names and only a fresh group of the user's own name: in the
+    band, nobody's primary group yet, no members. Residual risk accepted with
+    the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
+    lines that name a group are not scanned. `groupmod` only renames a site
+    owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
+    input only as one sha512-crypt line;
+  - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
+    units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
+    xtables without `--modprobe` or rule files. The one `ip` route form off
+    `tp0` is a TurboFabric LAN route, `route replace|del <CIDR> via <ADDR> dev
+    <NIC>`: IPv4 only, the CIDR in the same private blocks and prefix limits as
+    a `tp0` route, `<NIC>` a plain name (not `tp0`, `lo`, `docker*`, `br-*`,
+    `veth*`, `tpn*`), and `<ADDR>` a host (not the network or broadcast
+    address) inside a connected network of `<NIC>` that the wrapper itself
+    reads: a `scope link` route with no `via`, whoever made it (`proto kernel`,
+    `dhcp`, `static`, ...; `ip -4 route show dev <NIC> scope link`, test mode
+    `$P/tp-test/ip-route-link-<NIC>`). A `replace` (LAN or `tp0`) is refused
+    when its IPv4 CIDR equals, contains or sits inside any connected network
+    on any interface (`proto kernel` routes, plus `scope link` routes with no
+    `via` that are not on `tp0`; `ip -4 route show`, test mode
+    `$P/tp-test/ip-route-kernel`; for `tp0` routes, `tp0`'s own subnet is
+    left out), so a route can never take over the LAN's subnet or `docker0`'s.
+    A `del` skips that check so installed routes can still be removed.
+  - starts tenant builds only through
+    `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
+    owner is the site owner's Linux user, an existing principal with a uid
+    in 15001-60000 and a plain name with no `--`, never another `tp*` name,
+    or `tpbuild` for a build nobody owns; checked again under the build lock;
+    nothing else in argv). Every build runs as a **throwaway user systemd creates for that one
+    run** (`DynamicUser=yes`, `User=tpb-<16 hex of sha256(owner/project)>`: a
+    uid from systemd's 61184-65519 range that exists only while the unit runs,
+    never a host account, never in docker/tp/sudo, refused if a host account
+    or group already has that name or any group lists a `tpb-*` member; no
+    supplementary group: the vendored runtimes are readable by everyone),
+    inside the **site owner's own resource group**
+    (`Slice=turbopanel-<owner>-build.slice`, a child of the owner's
+    `turbopanel-<owner>.slice`, dashes in the owner's name written `.`, so a
+    build counts against whatever limits that slice carries;
+    `turbopanel-tpbuild.slice` with no owner; both slice names are refused as
+    unit files). It checks the root-owned
+    `/var/lib/turbopanel-build/{work,caches}` layout, takes a host-wide lock
+    (one build at a time), makes `caches/<owner>/<project>` (root 0700 dirs;
+    a cache is never shared between site owners or projects), and execs
+    `systemd-run --wait --pipe` with a fixed property set (`NoNewPrivileges`,
+    no capabilities, `ProtectSystem=strict`, systemd's private tmp, private
+    devices/IPC/PIDs, the daemon's trees, principal homes,
+    Docker/containerd/gate sockets and `/etc/ssh` made inaccessible,
+    `/var/lib/turbopanel-build` a read-only tmpfs with only this build's work
+    tree and cache bound in, private/link-local/CGNAT egress denied except
+    the host's literal nameservers, loopback open but port-filtered for the
+    unit's own cgroup by `lib/tp-build-loopback` (nftables table
+    `inet turbopanel_build`, `socket cgroupv2 level N "<unit cgroup>"`; loaded
+    empty by `build-run` to prove nft works, then with the build's rules as the
+    unit's first `ExecStartPre=+ … sync <id> <owner>`, which refuses unless
+    its own cgroup is exactly the one systemd builds for that owner's build
+    slice; no `nft` or a load failure means the build does not start), 4G
+    memory, 200% CPU, 1800 s). The unit's second `ExecStartPre=+` is
+    `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
+    is exactly that unit's, it reads the throwaway uid from the unit's
+    `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd
+    owned by that user; read-only to the build so it cannot fill `/run`),
+    takes the work tree from the daemon (top directory root 0700), refuses
+    (and unlinks) any regular file with more than one name in it (a hard link
+    the daemon planted to a file outside), and only then hands the pinned
+    cache and work tree to the build's user (`chown -R -h -P`). The only command is
+    `/bin/sh` on `lib/tp-build-runner`, loaded as a systemd credential (PID 1
+    reads it; the build's user gets a private copy); the spec rides stdin to
+    the runner (format in its header; `TMPDIR` is `<work>/tmp`, because
+    `DynamicUser=` always gives the unit systemd's own private `/tmp`: a 10%
+    of RAM tmpfs on systemd 257, a hard limit; host `/tmp` on 255, which
+    `build-watch` checks every 10 s against 1.5 GB, not a hard limit).
+    `principal-remove` deletes the owner's `caches/<owner>`, so a later owner
+    given the same name never builds with them. The image builder's plan
+    version is recorded only when it is 1-64 plain characters. Not `CacheDirectory=`: on systemd 257 with `DynamicUser=` it is
+    owned by `nobody` on disk and mounted `noexec`, which breaks `npx`/`pnpm
+    dlx`. Below systemd 255 (Debian 13 / Ubuntu 24.04 floor) it warns and
+    drops the newer properties, below 247 it refuses. `build-return
+    <build-id>` chowns the tree back to the caller only once
+    `turbopanel-build-<id>.service` is inactive; abort is `systemctl stop
+    turbopanel-build-<id>.service`. `turbopanel-build-*.service` unit files
+    are refused at install. On a managed host the daemon sends every
+    native/static release build, and the image builder's prepare step,
+    through it (`src/deploy/release/build-sandbox.ts`,
+    `src/deploy/release/image-prepare-sandbox.ts`), so no tenant build command
+    and no repository-reading build tool runs as `tp`. The shared `tpbuild`
+    account, its cache and `tpbuild.slice` are retired (the `build-user` role
+    removes them; uid 9994 stays reserved);
+    **Build loopback (plain words):** Turbopack's helper processes talk over
+    127.0.0.1 on ports the build picks, so the build may use loopback. The
+    build is refused every known platform port (list in one place,
+    `DENY_PORTS` in `lib/tp-build-loopback`, pinned to the code constants by
+    `src/orchestration/build-loopback.test.ts`): ssh 22, web 80/443, web
+    server admin 2019/2029/2039, database proxy 6032/6070/6132/13306/15432,
+    router 7080/7081/7443, panel 8443, GPU metrics 9400, 19080/19820, database
+    HA 33001/33002, platform Postgres 5432 (when `postgres_expose_port` is
+    true), legacy ProxySQL 3306, site and app listen bands 18080-18999 and
+    19100-19799 (includes 18110). Nothing inside the kernel ephemeral range
+    (32768-60999) is listed, because a build's own workers may be handed any
+    port there; managed private ports (45000-45999) bind a non-loopback
+    address, so they are not listed either. The resolver stub (53) is not
+    listed, so it stays reachable. **Residual risk, accepted by
+    the owner:** anything else listening on 127.0.0.1 on a port not in that
+    list (for example a Docker port a site owner published on loopback with
+    an ephemeral port) can be reached by a build, because nftables cannot
+    tell the build's own listeners from another service's. Adding a new
+    fixed loopback port to the platform means adding it to `DENY_PORTS`;
+  - brings a release into `<home>/sites/<svc>/releases/<id>` only through
+    `publish-open <user> <svc> <id>` (a fresh daemon-owned leaf under
+    `<principal root>/.tp-staging`, `root:tp 0710`, a class no generic verb
+    accepts) and `publish <user> <svc> <id>` (`publish-keep` takes the same words and
+    publishes without moving `current`, for a Node app that is
+    serving); the same two verbs also take six
+    words, `<owner> <scope> <slug> <service id> <release id> <publish id>`,
+    for the scope tree (`<home>/<scope>/services/<slug>/releases/<id>`; the
+    leaf is named by the publish id, the lock by the service id, all three
+    lowercase UUIDs). Ownership in a home is checked by position: depth 1 is
+    `home`/`tmp`/`data`, the older `sites`/`volumes`, or a scope folder
+    (root-owned); below a scope only `services` and `volumes`; `rm` leaves
+    scope, `services` and `volumes` folders alone; `asset-path` prints a
+    folder's host path from its components and refuses what the shared
+    name rules refuse; `folder-list` prints every well-formed asset folder
+    (`<owner> <scope> service|volume <name>`, names only, links skipped) and
+    ends with `complete` only when the whole walk finished; `setfacl -m
+    u:<uid>:rwx,d:u:<uid>:rwx -- <volume folder>` gives one numeric uid (never
+    0) an access and a default entry on a volume folder root and nothing else;
+    `sftp-chroot check` walks the scope tree. Publish: it takes the leaf, refuses hard
+    links, special files and a shipped `shared`, seals it recursively
+    (`root:<user>`, no set-id, nothing group/other-writable), refuses a
+    symlink that resolves outside it, renames it in through a root-owned chain
+    on the same filesystem, links `shared`, sets the top to `0550` and swaps
+    `current` (a directory at `current` or `current.tmp.<id>` is refused).
+    `install -d` / `mkdir -p` under `releases/<id>` are refused, `cp -a` is
+    gone, and `ln` uses `-T`;
+  `src/permissions/tp-host.test.ts` runs it unprivileged in its test mode
+  (`TP_HOST_TEST_PREFIX`, ignored as root) against the daemon's own rendered
+  units and a hostile corpus. Known gap: it is TOCTOU-safe for paths it pins,
+  but `chown -R`/`chmod -R`/`find -exec chmod g+s` over a tenant-owned tree
+  rely on coreutils not following symlinks (and run as the tree's owner where
+  possible), not on per-entry pinning.
+- **tp-orchestrate** (`orchestration/scripts/tp-orchestrate`, POSIX sh,
+  `root:tp 0750`) — Ansible `become` from `tp` would need `sudo /bin/sh`, so on
+  managed hosts `runPlaybookStreaming` routes through
+  `sudo -n tp-orchestrate playbook …` (`src/orchestration/privileged.ts`):
+  the helper accepts only `-i localhost, -c local`, allowlisted extra-vars and
+  one shipped playbook **basename** resolved under the root-owned tree.
+  `tp_extra_var_value_ok` lists every key the daemon passes with its value
+  shape (enums, RFC 1123 hosts, a plain email, an https directory, backups
+  only under storage roots) and pins `turbopanel_install_root` /
+  `turbopanel_instance_dir` to its own tree; it refuses `ansible_*`,
+  `turbopanel_dev_*`, any unknown key, whitespace, controls and Jinja
+  delimiters. A JSON `-e` object is accepted only with
+  `TP_JSON_EXTRA_VAR_KEYS`, parsed by the Ansible venv's python3.
+  `src/orchestration/tp-orchestrate-argv.test.ts` runs the daemon's real argv
+  builders and a hostile corpus through the validator lifted verbatim from
+  the script (`src/testing/tp-orchestrate-validator.ts`). It rebuilds
+  PATH/ANSIBLE_* itself, and keeps Ansible's temp/home in a root-only
+  `/tmp/turbopanel-orchestrate`. `update` fetches
+  `run.sh` (CDN, or an HTTPS overlay host with the canonical
+  Platform CA — never `-k`) and runs it with re-validated flags, which is how
+  panel-driven daemon updates work now (`executeRunReconcile` →
+  `rootHelperReconcileInvocation`; the daemon never hands root a script body).
+  **`tp-update-guard`** (`orchestration/scripts/tp-update-guard`, POSIX sh,
+  `root:tp 0750`) is installed with `turbopaneld-update-guard.service` /
+  `.timer` and runs only as **root** via `OnFailure=` and the one-shot timer
+  after a daemon self-update — not through `sudo` and not from the `tp` user.
+  `daemon-launch` also copies it to `/opt/turbopanel/lib/tp-update-guard`, and
+  the unit's `ExecStart` is that path, so restoring an older orchestration
+  tree cannot remove the only executable the timer can run. Its records live
+  in `tp`-owned `RUN_DIR`/`STATE_DIR`, so every root write goes through
+  `tp_write_file` (a verified root-only 0700 subdirectory, then `mv -T`) and
+  never through a symlink `tp` planted (`update-guard.test.ts`). The rollback
+  decision is taken only from root's `lib/update-guard-armed` (written by
+  run.sh when it arms, consumed once), never from those `tp`-owned files, and
+  tp-host refuses `start`/`stop`/`restart` of `turbopaneld-update-guard*`.
+  `update` and `update-colocated` run only an installer that enforces the
+  root daemon build floor and never carry `TURBOPANEL_ALLOW_DOWNGRADE`
+  (`src/update/AGENTS.md`, Root build floor).
+  The control plane is a separate verb, `sudo -n tp-orchestrate update-instance
+  --channel canary|rc|release [--manifest-url …] --no-start`
+  (`rootHelperInstanceUpdateInvocation`). It takes no license, host, overlay,
+  or Platform CA. `--manifest-url` is passed to `run.sh` as
+  `--instance-manifest-url` so it does not set `TURBOPANEL_MANIFEST_URL` (that
+  pin is the daemon package). `trunk` and `edge` are refused: the instance and
+  UI packages publish only through GitHub Releases. `--no-start` is required;
+  the daemon restarts `turbopanel-instance` and `turbopanel-caddy` after a
+  successful install and does not restart itself. Before the helper runs, the
+  daemon refuses a target below `MIN_SUPPORTED_INSTANCE_VERSION`. A missing
+  or non-semver target is unknown and is allowed. The control plane accepts
+  `instance-update` from any connected daemon. Daemon self-update does not
+  consult the instance floor. Detail: `src/instance/AGENTS.md` (Managed updates).
+  Root (`run-installer`) and co-located dev run `ansible-playbook` directly.
+  Tests: `src/orchestration/tp-orchestrate.test.ts`, `privileged.test.ts`,
+  `sudoers-contract.test.ts`.
+
+## Panel key pin and update origin
+
+`lib/panel-identity` and `lib/update-origin` are written by `run.sh` and changed afterwards only by
+`tp-host panel-identity-write` (no generic verb may name them). With no argument it reads the
+`X-TurboPanel-Signature` header line and the exact identity document from stdin, checks the
+signature against the pinned key itself (python3 through `tp_python`, which runs `python3 -I -S` from `/` so
+nothing in the caller's directory is imported as root, + `openssl pkeyutl`), refuses an empty address
+list, then rewrites the pin's `urls=` and `update-origin`'s `hosts=` together (the daemon tries
+the pin's addresses in order). `tp-orchestrate update` accepts `--host` equal to `host=` or any
+entry of `hosts=`, matched as a quoted whole value.
+
+While no rotation passkey is pinned, a verified document's `rotation` block fills `rp_id=` and
+`passkeys=` (`<pkid>.<es256|eddsa>.<base64url raw key>`, sorted) once, with its key set; after
+that a document must carry exactly the pinned key set and its next key is never pinned (`next=`
+stays empty; the daemon's `pinAccepts` also ignores `next=` once passkeys are pinned).
+`panel-identity-write statement` takes a
+key-set envelope (`{statement, approvals}`, at most 16 KiB) and is the only way the key, key set
+or passkeys move afterwards: python3 checks the statement and every WebAuthn assertion
+(`rpIdHash`, UP+UV, `webauthn.get`, challenge = SHA-256 of the statement bytes, origin under the
+rp id, strict DER for ES256) and the approval rules (prev = pinned key, key set above the pinned
+one, `iat` at most 300 s ahead, a pinned approval, removals approved by a passkey that stays,
+additions or an rp id move proving possession). Passkey plus old key (owner decision 2026-11-10):
+`rotate` and `passkeys` also need the envelope's `keySig` `{pub, sig}`, the replaced key's Ed25519
+signature over `"tp-keyset\n"` + the statement bytes, with `pub` hashing to the pinned `current=`;
+a `revoke` carries none and needs two pinned approvals with different ids; a key change keeps the
+pinned passkeys and rp id. There is no fallback for a statement without `keySig`. openssl verifies
+every signature (`dgst -sha256` for ES256, `pkeyutl -rawin` for EdDSA and `keySig`) and any failure
+refuses the whole statement. It rewrites
+`current=`, `keyset=`, `rp_id=`, `passkeys=`, empties `next=`, and moves `panel_key=` in
+`update-origin`. Both python3 checks run through `tp_python` (`python3 -I -S` from `/`: no
+`PYTHON*` variables, no site module, no import from the caller's directory), and a statement's `v`, `keyset` and `iat`
+must be plain whole numbers (`v` exactly `1`, never `true` or `1.0`; nothing above 2^53 - 1), as
+the control plane reads them. The shared vectors (`src/testing/keyset-statement-vectors.json`) are
+byte-identical to the control plane's and pinned by `check:contract-drift`. Root can hand-apply
+a downloaded statement: `sudo tp-host panel-identity-write statement < key-set-N.json`.
+
+## Release publish with a framework layout
+
+`publish` and `publish-keep` take an optional seventh word after the six-word
+form: `layout=laravel` or `layout=wordpress` (anything else is refused, and
+`publish-open` takes none). In the sealed leaf, before the link check
+(`tp_publish_layout`), the one recipe path (`tp_layout_recipe`: Laravel
+`storage` -> `shared/storage`, WordPress `wp-content/uploads` ->
+`../shared/uploads`) is replaced by its link, refusing a parent that is a link;
+for Laravel the real `bootstrap/cache` folder (when it is not a link) is made the
+site account's (`0750`, files `0640`), the only entry of the release that is not
+root's. `tp_publish_links` skips exactly that path with exactly that text
+(`find ... ! ( -path -lname )`), so a user link that goes through the recipe link
+still resolves under `shared/` and is refused. After the release is placed,
+`tp_layout_folders` makes the layout's folders in the service's `shared/` **as
+the owner** (`tp_as`, never as root) with `0750`. `release-layout-folders OWNER
+SCOPE SLUG SERVICE-ID RELEASE-ID layout=NAME` does the same for a release that
+exists (the daemon runs it before a rollback swap). The recipe is the daemon's
+`platformLayoutLinks` (`src/deploy/release/framework-layout.ts`); a test keeps
+them equal.

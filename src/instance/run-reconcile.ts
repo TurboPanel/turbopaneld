@@ -37,7 +37,7 @@ import {
   resolveUpdateHealthTimeoutMs,
   waitForInstanceHealth,
 } from "./instance-health-check.ts";
-import { resolveInstanceSupport } from "./version-wire.ts";
+import { parseSemver, resolveInstanceSupport } from "./version-wire.ts";
 import { type RetryFetchOptions, retryTransient } from "../util/retry-fetch.ts";
 import {
   fetchWithPlatformCa,
@@ -484,7 +484,10 @@ export async function downloadRunScript(
   if (opts.insecureTls) {
     curlArgs.push("-k");
   } else if (opts.caPath?.trim()) {
-    curlArgs.push("--cacert", opts.caPath.trim());
+    // --capath at a folder that does not exist: Debian's curl otherwise keeps
+    // its built-in CA folder next to --cacert, and a publicly trusted
+    // certificate for the name would pass for the pinned CA.
+    curlArgs.push("--cacert", opts.caPath.trim(), "--capath", "/nonexistent");
   }
   curlArgs.push(...RUN_SCRIPT_CURL_RETRY_ARGS, runScriptUrl);
   const curl = await new Deno.Command("curl", {
@@ -860,14 +863,22 @@ export class InstanceUpdateRefusedError extends Error {
  * is this one: do not install a control plane the daemon would then flag
  * as unsupported. A missing or non-semver target is `unknown` and is
  * allowed, the same default as {@link resolveInstanceSupport}.
+ *
+ * Only the base `X.Y.Z` of the target is held against the floor. A canary
+ * or rc manifest labels its version (`0.1.22-canary.145`, `0.1.22-rc.1`),
+ * but the control plane it installs reports the plain base (`0.1.22`), so a
+ * labelled build of the floor's own base is not below it.
  */
 export function assertControlPlaneUpdateAllowed(
   targetVersion: string | undefined | null,
 ): void {
-  const support = resolveInstanceSupport(targetVersion);
+  const parsed = parseSemver(targetVersion);
+  const support = resolveInstanceSupport(
+    parsed ? `${parsed.major}.${parsed.minor}.${parsed.patch}` : targetVersion,
+  );
   if (support.status !== "unsupported") return;
   throw new InstanceUpdateRefusedError(
-    `refusing control-plane update: target version ${support.version} is below this daemon's supported minimum ${support.minVersion}`,
+    `refusing control-plane update: target version ${targetVersion?.trim()} is below this daemon's supported minimum ${support.minVersion}`,
   );
 }
 
@@ -1219,6 +1230,29 @@ export async function assertControlPlaneManifestPreflight(options: {
   return { url, commit, version };
 }
 
+/**
+ * The `version` of the signed manifest at a channel head URL, or null when
+ * the manifest names none. Always verified as a pinned manifest (a signature
+ * is required); the caller compares it with an unsigned message's URL.
+ */
+export async function fetchChannelHeadVersion(options: {
+  kind: "daemon" | "instance" | "ui";
+  headUrl: string;
+  env?: Record<string, string | undefined>;
+  fetchText?: InstanceUpdateHooks["fetchText"];
+  retry?: RetryFetchOptions;
+  publicKeyHex?: string;
+}): Promise<string | null> {
+  const manifest = await fetchVerifiedManifest(
+    options.headUrl,
+    options.kind,
+    options.fetchText ?? defaultFetchManifestText,
+    manifestSignaturePolicy({ ...options, pinned: true }),
+    options.retry,
+  );
+  return typeof manifest.version === "string" ? manifest.version : null;
+}
+
 /** The database container must already be running before a dump is attempted. */
 export async function assertControlPlaneBackupPreflight(
   run: NonNullable<InstanceUpdateHooks["run"]>,
@@ -1266,13 +1300,16 @@ async function defaultReadCaddyfile(): Promise<string | null> {
 }
 
 /**
- * A Caddyfile from an older build: no updating page, or no UI cache rules
- * (browsers then keep running an old panel page after an update).
+ * A Caddyfile from an older build: no updating page, no UI cache rules
+ * (browsers then keep running an old panel page after an update), or still
+ * naming the proxy in the Server and Via response headers.
  */
 function caddyNeedsRefresh(text: string | null): boolean {
   if (!text) return true;
+  const lines = new Set(text.split("\n").map((line) => line.trim()));
   return !text.includes("handle_errors") || !text.includes("updating.html") ||
-    !text.includes("@ui_hashed");
+    !text.includes("@ui_hashed") || !lines.has("-Via") ||
+    !lines.has("header -Server");
 }
 
 /** The plain fact first: what did not happen, and for how long we waited. */
@@ -1572,6 +1609,11 @@ async function refreshCaddyIfNeeded(
  * WebSocket, not through the broker, so the restart cannot drop it; the
  * panel's consumers reconnect. Running last means a failed or rolled-back
  * update never restarts the broker. Never blocks: a failure is a warning.
+ *
+ * The same play makes sure the broker's application user still has its
+ * password and its access to the virtual host, config change or not: a host
+ * whose first broker boot was interrupted has that user without permissions
+ * ("Command queue unavailable" on every command) and heals here.
  */
 async function refreshBrokerConfig(
   run: NonNullable<InstanceUpdateHooks["run"]>,

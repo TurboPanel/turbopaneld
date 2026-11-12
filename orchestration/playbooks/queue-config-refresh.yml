@@ -16,6 +16,12 @@
 #   recreate the database or queue container.
 # - It restarts the queue container once, and only when rabbitmq.conf was
 #   actually rewritten. A host whose config is current is left untouched.
+# - It makes sure the broker's application user exists with the generated
+#   password and full access to its virtual host (the shared tasks in
+#   roles/system-compose/tasks/queue-access.yml, included by path). A host
+#   whose first boot was interrupted has that user without permissions and
+#   answers every command with "Command queue unavailable"; this is where it
+#   heals, on its next update. A healthy broker is left untouched.
 # - It skips hosts with no broker (no queue password file).
 # - It never fails the update: any error is reported as a warning.
 - name: TurboPanel queue config refresh
@@ -56,20 +62,15 @@
             - _queue_refresh_running.stdout | default('') | trim | length > 0
           changed_when: true
 
-        - name: Wait for the queue to answer
-          ansible.builtin.command:
-            argv: [docker, exec, "{{ rabbitmq_container_name }}", rabbitmq-diagnostics, -q, ping]
-          register: _queue_refresh_ping
-          until: _queue_refresh_ping.rc == 0
-          retries: 30
-          delay: 2
-          changed_when: false
-          when:
-            - rabbitmq_conf_written is changed
-            - _queue_refresh_running.stdout | default('') | trim | length > 0
+        # Waits until the broker has really started (also after the restart
+        # above), then repairs the application user's access when it is
+        # incomplete. Runs whether or not the config changed.
+        - name: Ensure the queue application user can use the broker
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../roles/system-compose/tasks/queue-access.yml"
+          when: _queue_refresh_running.stdout | default('') | trim | length > 0
       rescue:
         - name: Report that the broker config could not be refreshed
           ansible.builtin.debug:
             msg: >-
-              WARNING: queue config not refreshed, the running broker keeps
+              WARNING: queue refresh did not finish, the running broker keeps
               its settings: {{ ansible_failed_result.msg | default('unknown error') }}

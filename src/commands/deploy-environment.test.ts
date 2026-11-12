@@ -38,6 +38,7 @@ import {
   setIngressHostCommandForTest,
 } from "../deploy/ingress.ts";
 import "../testing/stub-hosting-caddy-host.ts";
+import { instantlyHealthy } from "../testing/instant-health-gate.ts";
 
 /**
  * Shared hosting-ingress Docker network — the `hosting-ingress` system
@@ -61,8 +62,12 @@ const test = Deno.test.bind(Deno);
 
 const hermeticDeployDeps = {
   ensureDocker: () => Promise.resolve(),
+  waitForHealth: instantlyHealthy,
   ensureExternalDockerNetworks: () => Promise.resolve(),
   ensureFabricDockerNetworks: () => Promise.resolve(),
+  // The account wall reload after a container deploy must not reach real sudo.
+  runPrivileged: () =>
+    Promise.resolve({ success: true, stdout: "", stderr: "" }),
 };
 
 test("hostingsNeedPublicHttpEdge matches containerHostingsNeedSharedHttpIngress", () => {
@@ -1198,7 +1203,7 @@ services:
       assertEquals(envText.includes("web__PORT=3000"), true);
       assertEquals(composeText.includes(secretPath), true);
       assertEquals(await Deno.readTextFile(secretPath), secretValue);
-      assertEquals((await Deno.stat(secretPath)).mode! & 0o777, 0o600);
+      assertEquals((await Deno.stat(secretPath)).mode! & 0o777, 0o444);
       const manifest = JSON.parse(
         await Deno.readTextFile(
           join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
@@ -1773,8 +1778,129 @@ test({
         },
       );
 
-      // The owner's files stay: only an explicit delete removes a folder.
-      assertEquals(sudo.calls, []);
+      // The owner's files stay: only an explicit delete removes a folder. The
+      // one privileged call is the account wall reload after the deploy.
+      assertEquals(
+        sudo.calls.map((call) => call.args.includes("php-loopback-sync")),
+        [true],
+      );
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy reloads the account wall after compose up, before it reports success",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async ({ stateDir }) => {
+      const environmentId = "envwall1";
+      const order: string[] = [];
+      const payload = {
+        environmentId,
+        projectId: "proj-1",
+        organizationId: "org-1",
+        projectName: "tp-demo-wall",
+        composeFiles: [{
+          filename: RUNTIME_COMPOSE_FILENAME,
+          role: "runtime" as const,
+          source: "inline" as const,
+          content: "services:\n  web:\n    image: nginx:alpine\n",
+        }],
+        hostings: [],
+      };
+      const deps = (
+        sync: { success: boolean; stderr: string },
+      ) => ({
+        ...hermeticDeployDeps,
+        runDocker: (args: string[]) => {
+          if (args.includes("up")) order.push("up");
+          return fakeReclaimRunDocker(args);
+        },
+        runPrivileged: (_command: string, args: string[]) => {
+          if (args.includes("php-loopback-sync")) order.push("wall-sync");
+          return Promise.resolve({
+            success: !args.includes("php-loopback-sync") || sync.success,
+            stdout: "",
+            stderr: args.includes("php-loopback-sync") ? sync.stderr : "",
+          });
+        },
+      });
+
+      await handleEnvironmentDeploy(
+        payload,
+        new Date().toISOString(),
+        deps({ success: true, stderr: "" }),
+      );
+      assertEquals(order.indexOf("wall-sync") > order.indexOf("up"), true);
+      assertEquals(order.includes("wall-sync"), true);
+
+      // A wall that cannot be reloaded fails the deploy: no network is left
+      // open to site accounts behind a success.
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            { ...payload, environmentId: "envwall2" },
+            new Date().toISOString(),
+            deps({ success: false, stderr: "nft refused the ruleset" }),
+          ),
+        Error,
+        "nft refused the ruleset",
+      );
+      assertEquals(typeof stateDir, "string");
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentDeploy reloads the account wall when the deploy fails after compose up",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withReclaimEnv(async () => {
+      const syncs: string[][] = [];
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            {
+              environmentId: "envwall3",
+              projectId: "proj-1",
+              organizationId: "org-1",
+              projectName: "tp-demo-wall3",
+              composeFiles: [{
+                filename: RUNTIME_COMPOSE_FILENAME,
+                role: "runtime" as const,
+                source: "inline" as const,
+                content: "services:\n  web:\n    image: nginx:alpine\n",
+              }],
+              hostings: [],
+            },
+            new Date().toISOString(),
+            {
+              ...hermeticDeployDeps,
+              runDocker: (args: string[]) =>
+                args.includes("up")
+                  ? Promise.resolve({
+                    success: false,
+                    stdout: "",
+                    stderr: "compose up failed",
+                    code: 1,
+                  })
+                  : fakeReclaimRunDocker(args),
+              runPrivileged: (_command: string, args: string[]) => {
+                if (args.includes("php-loopback-sync")) syncs.push(args);
+                return Promise.resolve({
+                  success: true,
+                  stdout: "",
+                  stderr: "",
+                });
+              },
+            },
+          ),
+        Error,
+        "compose up failed",
+      );
+      assertEquals(syncs.length, 1);
     });
   },
 });

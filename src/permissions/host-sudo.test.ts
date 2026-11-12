@@ -1,6 +1,11 @@
 import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
-import { hostSudoArgs, TP_HOST_VERBS } from "./host-sudo.ts";
+import {
+  HOST_PROGRAM_VERBS,
+  hostSudoArgs,
+  TP_HOST_ONLY_VERBS,
+  TP_HOST_VERBS,
+} from "./host-sudo.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -78,6 +83,78 @@ test("development and root processes keep the direct sudo argv", () => {
   assertEquals(
     hostSudoArgs(args, { installMode: "production", uid: 0 }),
     args,
+  );
+});
+
+const DEV = {
+  installMode: "development" as const,
+  uid: 1000,
+  env: {
+    TURBOPANEL_ORCHESTRATION_DIR:
+      "/home/dev/turbopanel/turbopaneld/orchestration",
+  },
+};
+const DEV_TP_HOST =
+  "/home/dev/turbopanel/turbopaneld/orchestration/scripts/tp-host";
+
+test("development runs a tp-host-only verb through the checkout's tp-host", () => {
+  assertEquals(hostSudoArgs(["-n", "tunnel-env-install", "instance"], DEV), [
+    "-n",
+    "--",
+    DEV_TP_HOST,
+    "tunnel-env-install",
+    "instance",
+  ]);
+  assertEquals(hostSudoArgs(["-n", "--", "app-env-remove", "s1"], DEV), [
+    "-n",
+    "--",
+    DEV_TP_HOST,
+    "app-env-remove",
+    "s1",
+  ]);
+  for (const verb of TP_HOST_ONLY_VERBS) {
+    assertEquals(hostSudoArgs(["-n", verb], DEV), [
+      "-n",
+      "--",
+      DEV_TP_HOST,
+      verb,
+    ]);
+  }
+});
+
+test("development keeps the direct argv for a verb that is a host program", () => {
+  for (const verb of HOST_PROGRAM_VERBS) {
+    assertEquals(hostSudoArgs(["-n", verb, "x"], DEV), ["-n", verb, "x"]);
+  }
+});
+
+test("a managed host routes tp-host-only verbs to the installed tp-host", () => {
+  for (const verb of TP_HOST_ONLY_VERBS) {
+    assertEquals(hostSudoArgs(["-n", verb], MANAGED), [
+      "-n",
+      "--",
+      "/opt/turbopanel/lib/tp-host",
+      verb,
+    ]);
+  }
+  // Root on a managed install is left as it was.
+  assertEquals(
+    hostSudoArgs(["-n", "tunnel-env-install", "instance"], {
+      installMode: "production",
+      uid: 0,
+    }),
+    ["-n", "tunnel-env-install", "instance"],
+  );
+});
+
+test("host program and tp-host-only verbs are disjoint and cover every verb", () => {
+  const overlap = [...TP_HOST_ONLY_VERBS].filter((v) =>
+    HOST_PROGRAM_VERBS.has(v)
+  );
+  assertEquals(overlap, []);
+  assertEquals(
+    TP_HOST_VERBS.size,
+    HOST_PROGRAM_VERBS.size + TP_HOST_ONLY_VERBS.size,
   );
 });
 

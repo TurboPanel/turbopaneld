@@ -11,6 +11,7 @@ import {
   folderRefParts,
   parseFolderRefParts,
 } from "../contracts/directory-names.ts";
+import type { EnvironmentDeployConfigFile } from "../contracts/commands-contracts.ts";
 import {
   type DeploymentGeneration,
   type DeploymentPrevious,
@@ -211,6 +212,11 @@ export type DeploymentManifest = {
   /** Host secret files (no plaintext). Absent on pre-secrets manifests. */
   secrets?: DeploymentManifestSecret[];
   /**
+   * Generated config files as parts (text and secret key names, no values),
+   * so a reboot can rebuild them. Optional: an older reader ignores it.
+   */
+  configFiles?: EnvironmentDeployConfigFile[];
+  /**
    * Compose service name → TurboPanel service UUID, for every compose service
    * the deploy payload named a service for.
    *
@@ -320,6 +326,47 @@ function parseManifestSecret(
     entry.forRuntime = record.forRuntime;
   }
   return entry;
+}
+
+function parseManifestConfigFile(
+  value: unknown,
+): EnvironmentDeployConfigFile | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const { composeServiceName, source, relativePath, parts } = record;
+  if (
+    typeof composeServiceName !== "string" || composeServiceName.length === 0 ||
+    typeof source !== "string" || !SECRET_PLAN_NAME_RE.test(source) ||
+    typeof relativePath !== "string" ||
+    relativePath.includes("..") || !SECRET_PLAN_NAME_RE.test(relativePath) ||
+    !Array.isArray(parts)
+  ) {
+    return null;
+  }
+  const out: EnvironmentDeployConfigFile["parts"] = [];
+  for (const part of parts) {
+    if (typeof part !== "object" || part === null) return null;
+    const p = part as Record<string, unknown>;
+    if (typeof p.text === "string") out.push({ text: p.text });
+    else if (typeof p.secretKey === "string" && p.secretKey.length > 0) {
+      out.push({ secretKey: p.secretKey });
+    } else return null;
+  }
+  return { composeServiceName, source, relativePath, parts: out };
+}
+
+function parseManifestConfigFiles(
+  value: unknown,
+): EnvironmentDeployConfigFile[] {
+  if (!Array.isArray(value)) return [];
+  const out: EnvironmentDeployConfigFile[] = [];
+  for (const item of value) {
+    const parsed = parseManifestConfigFile(item);
+    if (parsed) out.push(parsed);
+  }
+  return out;
 }
 
 /** Accept only `composeServiceName → non-empty string` pairs. */
@@ -447,6 +494,7 @@ export async function readDeploymentManifest(
   if (!isDeploymentManifest(parsed)) return null;
   const record = parsed as unknown as Record<string, unknown>;
   const secrets = parseManifestSecrets(record.secrets);
+  const configFiles = parseManifestConfigFiles(record.configFiles);
   const serviceIds = parseManifestServiceIds(record.serviceIds);
   // Older manifests carry no `releases` at all; that is a normal read, not a
   // rejected one — the field stays absent and every existing reader is
@@ -468,6 +516,7 @@ export async function readDeploymentManifest(
     composeSha256: parsed.composeSha256,
     services: parsed.services,
     ...(secrets.length > 0 ? { secrets } : {}),
+    ...(configFiles.length > 0 ? { configFiles } : {}),
     ...(Object.keys(serviceIds).length > 0 ? { serviceIds } : {}),
     ...(releases.length > 0 ? { releases } : {}),
     ...(generations.length > 0 ? { generations } : {}),

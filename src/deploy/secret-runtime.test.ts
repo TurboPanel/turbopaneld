@@ -1,10 +1,11 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   materializeSecretFiles,
   plannedSecretsMissing,
   pruneStaleSecretFiles,
   removeSecretTree,
+  rewriteComposeFileSources,
   rewriteComposeSecretFilePaths,
   SECRET_FILE_MODE,
   writeSecretFiles,
@@ -20,7 +21,7 @@ const test = Deno.test.bind(Deno);
 
 test({
   name:
-    "writeSecretFiles creates 0600 files and plannedSecretsMissing detects gaps",
+    "writeSecretFiles creates 0444 files in a 0700 folder and plannedSecretsMissing detects gaps",
   permissions: { read: true, write: true },
   fn: async () => {
     const root = await Deno.makeTempDir({ prefix: "tp-secret-runtime-" });
@@ -52,7 +53,9 @@ test({
         "web--DATABASE_PASSWORD",
       );
       const stat = await Deno.stat(path);
-      assertEquals(stat.mode! & 0o777, SECRET_FILE_MODE);
+      assertEquals(stat.mode! & 0o777, 0o444);
+      assertEquals(SECRET_FILE_MODE, 0o444);
+      assertEquals((await Deno.stat(dirname(path))).mode! & 0o777, 0o700);
       assertEquals(await Deno.readTextFile(path), "s3cret");
       assertEquals(
         await plannedSecretsMissing(layout, "proj", "env", plan),
@@ -611,4 +614,92 @@ test("pruneStaleSecretFiles is a no-op when the directory does not exist", async
   } finally {
     await Deno.remove(tmp, { recursive: true });
   }
+});
+
+test({
+  name:
+    "writeSecretFiles replaces a leftover 0444 tmp and widens an existing 0600 file",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-secret-tmp-" });
+    const layout = { runDir: join(root, "run") };
+    const dir = join(layout.runDir, "deployments", "proj", "env", "secrets");
+    try {
+      await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+      const old = join(dir, "web--OLD");
+      await Deno.writeTextFile(old, "old", { mode: 0o600 });
+      await Deno.chmod(old, 0o600);
+      const leftover = join(dir, "web--NEW.tmp");
+      await Deno.writeTextFile(leftover, "stale", { mode: 0o444 });
+      await Deno.chmod(leftover, 0o444);
+      await writeSecretFiles(layout, "proj", "env", [
+        { relativePath: "web--OLD", plaintext: "fresh" },
+        { relativePath: "web--NEW", plaintext: "created" },
+      ]);
+      assertEquals((await Deno.stat(old)).mode! & 0o777, 0o444);
+      assertEquals(await Deno.readTextFile(old), "fresh");
+      assertEquals(
+        await Deno.readTextFile(join(dir, "web--NEW")),
+        "created",
+      );
+      await assertRejects(() => Deno.stat(leftover), Deno.errors.NotFound);
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test({
+  name:
+    "writeSecretFiles replaces a leftover read-only tmp and widens an old 0600 file to 0444",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-secret-tmp-" });
+    const layout = { runDir: join(root, "run") };
+    const dir = join(layout.runDir, "deployments", "proj", "env", "secrets");
+    try {
+      await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+      await Deno.writeTextFile(join(dir, "web--A.tmp"), "half", {
+        mode: 0o444,
+      });
+      await Deno.writeTextFile(join(dir, "web--A"), "old", { mode: 0o600 });
+      await Deno.chmod(join(dir, "web--A"), 0o600);
+      await writeSecretFiles(layout, "proj", "env", [
+        { relativePath: "web--A", plaintext: "new" },
+      ]);
+      assertEquals(await Deno.readTextFile(join(dir, "web--A")), "new");
+      assertEquals((await Deno.stat(join(dir, "web--A"))).mode! & 0o777, 0o444);
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
+
+test("rewriteComposeFileSources drops authored content, environment and external", () => {
+  const yaml = [
+    "configs:",
+    "  web_conf:",
+    "    content: hello",
+    "    environment: HOME",
+    "    external: true",
+    "    name: keep-me",
+    "",
+  ].join("\n");
+  const out = rewriteComposeSecretFilePaths(
+    yaml,
+    { runDir: "/r" },
+    "p",
+    "e",
+    [],
+  );
+  assertEquals(out, yaml);
+  const rewritten = rewriteComposeFileSources(yaml, "configs", "/r/configs", [{
+    source: "web_conf",
+    relativePath: "web--conf",
+  }]);
+  assertEquals(rewritten.includes("content"), false);
+  assertEquals(rewritten.includes("environment"), false);
+  assertEquals(rewritten.includes("external"), false);
+  assertEquals(rewritten.includes("file: /r/configs/web--conf"), true);
+  assertEquals(rewritten.includes("name: keep-me"), true);
 });

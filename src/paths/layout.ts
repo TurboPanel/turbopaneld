@@ -88,18 +88,33 @@ export const PROD_ORCHESTRATION_DIR_DEFAULT = join(
 export const PROD_INSTANCE_DIR_DEFAULT = PROD_HOME_DEFAULT;
 
 /**
+ * Default source-repo root under a home folder: `<home>/turbopanel`, the folder
+ * every dev machine keeps the repos in (owner rule, enforced by the dev
+ * console), the Vagrant guest included.
+ */
+function devRootUnderHome(home: string): string {
+  return join(home, "turbopanel");
+}
+
+/**
  * Development source-repo root.
  *
  * In development the *source* repos (the daemon checkout, and its siblings) live
- * under this root — the daemon checkout resolves to `<devRoot>/turbopaneld`. Defaults
- * to the dev user's home (`$HOME`); override with `TURBOPANEL_DEV_ROOT`. Every
+ * under this root — the daemon checkout resolves to `<devRoot>/turbopaneld`. The
+ * dev console always writes `TURBOPANEL_DEV_ROOT` into daemon.env; without it the
+ * default is `$HOME/turbopanel`. Every
  * *mutable* dir (config/state/log/runtimes/run, instance install root) does NOT
  * use this root — it resolves to the same production FHS paths, owned by the dev
  * user at runtime.
  */
-const DEV_ROOT_DEFAULT = readEnv("TURBOPANEL_DEV_ROOT")?.trim() ||
-  readEnv("HOME")?.trim() ||
-  PROD_HOME_DEFAULT;
+const DEV_ROOT_DEFAULT = defaultDevRoot();
+
+function defaultDevRoot(): string {
+  const explicit = readEnv("TURBOPANEL_DEV_ROOT")?.trim();
+  if (explicit) return explicit;
+  const home = readEnv("HOME")?.trim();
+  return home ? devRootUnderHome(home) : PROD_HOME_DEFAULT;
+}
 
 /** Tenant principal home root — homes keyed as `/srv/users/<username>`. */
 const PRINCIPAL_HOME_ROOT_DEFAULT = "/srv/users";
@@ -107,18 +122,19 @@ const PRINCIPAL_HOME_ROOT_DEFAULT = "/srv/users";
 /**
  * Resolve the development source-repo root from an env bag.
  *
- * Prefers `env.TURBOPANEL_DEV_ROOT`, then `env.HOME`, then the module-level
- * default ({@link DEV_ROOT_DEFAULT}) so `resolveLayout(env)` and tests stay
+ * Prefers `env.TURBOPANEL_DEV_ROOT`, then `<env.HOME>/turbopanel`, then the
+ * module-level default
+ * ({@link DEV_ROOT_DEFAULT}) so `resolveLayout(env)` and tests stay
  * deterministic when the bag omits those keys.
  */
 export function resolveDevRoot(
   env: Record<string, string | undefined> = {},
 ): string {
-  return stripTrailingSlash(
-    env.TURBOPANEL_DEV_ROOT?.trim() ||
-      env.HOME?.trim() ||
-      DEV_ROOT_DEFAULT,
-  );
+  const explicit = env.TURBOPANEL_DEV_ROOT?.trim();
+  if (explicit) return stripTrailingSlash(explicit);
+  const home = env.HOME?.trim();
+  if (home) return stripTrailingSlash(devRootUnderHome(home));
+  return stripTrailingSlash(DEV_ROOT_DEFAULT);
 }
 
 /**
@@ -559,8 +575,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "backup", mode: "0750" },
   { name: "spool", mode: "0700" },
   { name: "network", mode: "0700" },
+  { name: "tenant-acme", mode: "0750" },
   { name: "cloudflared/tunnels", mode: "0750" },
-  { name: "tls", mode: "0750" },
   { name: "orchestrator", mode: "0750" },
   // In-flight and outcome command journal (command-outbox.ts).
   { name: "commands", mode: "0750" },
@@ -571,6 +587,10 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.
   { name: "ansible", mode: "0750" },
+  // Staged helper port lists, in `.stage`, that `tp-host reach-ports-install` copies (deploy/reach).
+  { name: "reach", mode: "0700" },
+  // The host index of each environment's project caches and their staged configs, in `.stage` (deploy/cache).
+  { name: "caches", mode: "0700" },
 ];
 
 /** `<backupDir>/<kind>`: the top folder of one kind of backup. */
@@ -653,6 +673,29 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
     root: "config",
     name: "node-app-env",
     madeBy: "tp-host app-env-install, root:root 0700; the unit reads it",
+  },
+  {
+    root: "config",
+    name: "site-env",
+    madeBy:
+      "tp-host site-env-install, root:root 0700 (a 0700 folder per Linux user); units read it",
+  },
+  {
+    root: "config",
+    name: "tunnel-env",
+    madeBy: "tp-host tunnel-env-install, root:root 0700; the unit reads it",
+  },
+  {
+    root: "config",
+    name: "reach-ports",
+    madeBy:
+      "tp-host reach-ports-install, root:root 0700; lib/tp-php-loopback reads it",
+  },
+  {
+    root: "config",
+    name: "cache",
+    madeBy:
+      "tp-host cache-prepare and cache-config-install (a folder per cache, root:<account> 0750); the cache unit reads it",
   },
   { root: "config", name: "instance", madeBy: "instance-launch role" },
   { root: "config", name: "caddy", madeBy: "instance-launch role" },

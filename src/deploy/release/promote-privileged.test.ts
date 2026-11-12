@@ -26,6 +26,7 @@ import {
   releaseLinkTargetsFindArgs,
   releaseLinkTextsFindArgs,
 } from "./release-links.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -103,8 +104,8 @@ async function stageWithDeniedReleaseDir(
       username: "appuser",
       workingDir,
       runFn: async (_command, args) => {
-        argv.push([...args]);
-        const result = respond([...args]);
+        argv.push(bareSudoArgs(args));
+        const result = respond(bareSudoArgs(args));
         if (result.success && args.includes("publish-open")) {
           await originalMkdir(paths.stagingDir, { recursive: true });
         }
@@ -234,7 +235,7 @@ test("linkReleaseSharedDir falls back to sudo when the unprivileged link fails",
     );
     const argv: string[][] = [];
     await linkReleaseSharedDir(releaseDir, (_command, args) => {
-      argv.push([...args]);
+      argv.push(bareSudoArgs(args));
       return Promise.resolve({ success: true, stdout: "", stderr: "" });
     });
     assertEquals(argv.some((args) => args.includes("ln")), true);
@@ -707,6 +708,7 @@ async function promoteManaged(
   respond: (args: string[]) => SudoResult,
   build: (workingDir: string) => Promise<void> = () => Promise.resolve(),
   keepCurrent?: true,
+  manifest: ReleaseManifestV1 = MANIFEST,
 ): Promise<{ argv: string[][]; paths: ReleasePaths; seen: string[] }> {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
@@ -731,11 +733,11 @@ async function promoteManaged(
       paths,
       workingDir,
       username: "appuser",
-      manifest: MANIFEST,
+      manifest,
       ...(keepCurrent ? { keepCurrent } : {}),
       runFn: async (_command, args) => {
-        argv.push([...args]);
-        const result = respond([...args]);
+        argv.push(bareSudoArgs(args));
+        const result = respond(bareSudoArgs(args));
         if (!result.success) return result;
         if (args.includes("publish-open")) {
           await Deno.mkdir(paths.stagingDir, { recursive: true });
@@ -789,6 +791,40 @@ test("promoteRelease publishes a managed-host release through tp-host only", asy
     ]);
     // The manifest and the payload were staged before publish ran.
     assertEquals(seen, [RELEASE_METADATA_DIRNAME, "index.html"]);
+  });
+});
+
+test("a release with a framework layout is published with it as the seventh word", async () => {
+  for (const keep of [undefined, true] as const) {
+    await withTempRelease(async (root) => {
+      const { argv } = await promoteManaged(
+        root,
+        () => SUDO_OK,
+        undefined,
+        keep,
+        { ...MANIFEST, frameworkLayout: "wordpress" },
+      );
+      const publish = argv.at(-1) ?? [];
+      assertEquals(publish[1], keep ? "publish-keep" : "publish");
+      assertEquals(publish.length, 9);
+      assertEquals(publish.at(-1), "layout=wordpress");
+    });
+  }
+  // publish-open never carries it, and a release without one sends six words.
+  await withTempRelease(async (root) => {
+    const { argv } = await promoteManaged(root, () => SUDO_OK, undefined);
+    assertEquals(argv.at(-1)?.length, 8);
+    assertEquals(argv[0]?.at(-1), PUBLISH_ID);
+  });
+  await withTempRelease(async (root) => {
+    const { argv } = await promoteManaged(
+      root,
+      () => SUDO_OK,
+      undefined,
+      undefined,
+      { ...MANIFEST, frameworkLayout: "laravel" },
+    );
+    assertEquals(argv[0]?.at(-1), PUBLISH_ID);
   });
 });
 
@@ -911,7 +947,7 @@ test("promoteRelease privileged cleanup runs when unprivileged remove fails", as
             username: "appuser",
             healthProbe: () => Promise.reject(new Error("probe failed")),
             runFn: (_command, args) => {
-              argv.push([...args]);
+              argv.push(bareSudoArgs(args));
               return Promise.resolve({ success: true, stdout: "", stderr: "" });
             },
           }),
@@ -1041,7 +1077,7 @@ test("swapCurrentSymlink privileged path succeeds after an unprivileged failure"
     );
     const argv: string[][] = [];
     await swapCurrentSymlink(paths, (_command, args) => {
-      argv.push([...args]);
+      argv.push(bareSudoArgs(args));
       return Promise.resolve({ success: true, stdout: "", stderr: "" });
     });
     assertEquals(argv.some((args) => args.includes("ln")), true);
@@ -1076,7 +1112,7 @@ test("swapCurrentSymlink swallows a failed tmp-link cleanup after rename is deni
     const argv: string[][] = [];
     try {
       await swapCurrentSymlink(paths, (_command, args) => {
-        argv.push([...args]);
+        argv.push(bareSudoArgs(args));
         return Promise.resolve({ success: true, stdout: "", stderr: "" });
       });
     } finally {
@@ -1105,7 +1141,7 @@ test("swapCurrentSymlink falls back to sudo when rename is denied", async () => 
     const argv: string[][] = [];
     try {
       await swapCurrentSymlink(paths, (_command, args) => {
-        argv.push([...args]);
+        argv.push(bareSudoArgs(args));
         return Promise.resolve({ success: true, stdout: "", stderr: "" });
       });
     } finally {
@@ -1484,7 +1520,7 @@ test("a release in a service folder is staged and published with components and 
         username: "appuser",
         workingDir,
         runFn: async (_command, args) => {
-          argv.push([...args]);
+          argv.push(bareSudoArgs(args));
           if (args.includes("publish-open")) {
             await originalMkdir(paths.stagingDir, { recursive: true });
           }

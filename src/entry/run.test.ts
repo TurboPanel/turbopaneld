@@ -33,6 +33,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   fabricReinstalls: number;
   firewallReinstalls: number;
   phpReconciles: number;
+  wallSyncs: number;
+  phpPatchArms: number;
   stackHeals: number;
   instanceStops: number;
   sentinelStops: number;
@@ -46,6 +48,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let fabricReinstalls = 0;
   let firewallReinstalls = 0;
   let phpReconciles = 0;
+  let wallSyncs = 0;
+  let phpPatchArms = 0;
   let stackHeals = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
@@ -86,6 +90,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       if (signal === "SIGTERM") queueMicrotask(handler);
     },
     initOrchestration: () => Promise.resolve(false),
+    // No test waits on a real retry timer; the retry tests turn this off.
+    shouldSkipOrchestration: () => true,
     applyManagedBootHold: () => Promise.resolve(),
     markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
@@ -105,9 +111,16 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
       stackHeals += 1;
       return Promise.resolve();
     },
+    syncAccountWall: () => {
+      wallSyncs += 1;
+      return Promise.resolve();
+    },
     reconcileSitePhpRuntimes: () => {
       phpReconciles += 1;
       return Promise.resolve();
+    },
+    armPhpPatchRestarts: () => {
+      phpPatchArms += 1;
     },
     shouldEnableDockerIntegration: () => false,
     shouldConnectToInstance: () => false,
@@ -148,8 +161,14 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get stackHeals() {
       return stackHeals;
     },
+    get phpPatchArms() {
+      return phpPatchArms;
+    },
     get phpReconciles() {
       return phpReconciles;
+    },
+    get wallSyncs() {
+      return wallSyncs;
     },
     get instanceStops() {
       return instanceStops;
@@ -169,6 +188,9 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 0);
   assertEquals(stub.phpReconciles, 0);
+  // The wall is reloaded at start even when orchestration never becomes ready.
+  assertEquals(stub.wallSyncs, 1);
+  assertEquals(stub.phpPatchArms, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
   assertEquals(stub.instanceStops, 0);
@@ -193,6 +215,11 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   await runDaemon(stub.io);
   assertEquals(stub.fabricRestores, 1);
   assertEquals(stub.phpReconciles, 1);
+  // The account wall learns the container networks at start, even when the
+  // PHP reconcile has nothing to do, and again when Docker comes back.
+  assertEquals(stub.wallSyncs >= 1, true);
+  // The patch restarts are armed once the runtimes are back.
+  assertEquals(stub.phpPatchArms, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);
   assertEquals(stub.dockerCloses, 1);
   assertEquals(stub.instanceStops, 1);
@@ -892,4 +919,126 @@ test("runDaemon restores the connection point and watcher every time Docker beco
   });
   await runDaemon(stub.io);
   assertEquals(stub.stackHeals, 1);
+});
+
+test("a failed boot converge on an enrolled host is retried in the background, with the recovery steps", async () => {
+  const calls: string[] = [];
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(false),
+    initOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: async (attempt, onRecovered) => {
+      calls.push("retry scheduled");
+      calls.push(`attempt=${await attempt()}`);
+      await onRecovered();
+      return true;
+    },
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => {
+      calls.push("converge");
+      return Promise.resolve(true);
+    },
+    restoreFabricFromPersistedState: () => {
+      calls.push("restore fabric");
+      return Promise.resolve();
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(calls, [
+    "retry scheduled",
+    "converge",
+    "attempt=true",
+    "restore fabric",
+  ]);
+  stop();
+  await done;
+});
+
+test("a failed boot converge on the connect-first path is retried too", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    bootstrapOrchestration: () => Promise.resolve(true),
+    runBootConverge: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 1);
+  stop();
+  await done;
+});
+
+test("no retry is scheduled when orchestration is switched off", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(false),
+    initOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => true,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 0);
+  stop();
+  await done;
+});
+
+test("a failed tools bootstrap on the connect-first path is retried too", async () => {
+  let scheduled = 0;
+  const { stub, stop } = manualSignalStub({
+    connectBeforeBootConverge: () => Promise.resolve(true),
+    bootstrapOrchestration: () => Promise.resolve(false),
+    shouldSkipOrchestration: () => false,
+    retryBootConverge: () => {
+      scheduled += 1;
+      return Promise.resolve(false);
+    },
+  });
+  const done = runDaemon(stub.io);
+  await flush();
+  assertEquals(scheduled, 1);
+  stop();
+  await done;
+});
+
+test("a Docker network create event reloads the account wall", async () => {
+  let onCreated: (() => void) | undefined;
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    shouldEnableDockerIntegration: () => true,
+    dockerBinaryPresent: () => Promise.resolve(true),
+    createDockerMonitor: () => ({
+      subscribeReachability: () => {},
+      subscribeNetworkCreated: (cb) => {
+        onCreated = cb;
+      },
+    }),
+    startTunnels: () => {
+      onCreated?.();
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  // start, post-orchestration, and the one network create
+  assertEquals(stub.wallSyncs, 3);
+});
+
+test("a throwing fabric restore does not skip the account wall reload", async () => {
+  const stub = stubIo({
+    initOrchestration: () => Promise.resolve(true),
+    restoreFabricFromPersistedState: () =>
+      Promise.reject(new Error("fabric went away")),
+  });
+  await runDaemon(stub.io).catch(() => {});
+  // start, then the post-orchestration one from the finally block
+  assertEquals(stub.wallSyncs, 2);
 });

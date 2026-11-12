@@ -1,6 +1,7 @@
 #!/bin/sh
 # Self-healing rollback when a daemon self-update leaves turbopaneld down.
-# Invoked by turbopaneld-update-guard.service (OnFailure= + one-shot timer).
+# Invoked by turbopaneld-update-guard.service (OnFailure= and the guard timer:
+# first run 90 s after arming, then every 30 s until the record is consumed).
 set -eu
 
 tp_die() {
@@ -32,10 +33,22 @@ fi
 RUN_DIR="${TURBOPANEL_RUN_DIR:-/run/turbopanel}"
 STATE_DIR="${TURBOPANEL_STATE_DIR:-/var/lib/turbopanel}"
 GUARD_PATH="$RUN_DIR/update-guard.json"
+# What root armed (scripts/run.sh tp_arm_update_guard). <install>/lib is
+# root-owned, so this is the only record the rollback decision is taken from:
+# the daemon owns RUN_DIR and STATE_DIR and could leave or keep a copy there.
+ROOT_RECORD="$INSTALL_ROOT/lib/update-guard-armed"
+# How long after the deadline an armed record still counts. Past it, a record
+# a stopped timer left behind is dropped instead of acted on.
+ROOT_RECORD_MAX_LATE_SEC=3600
 DISARM_PATH="$STATE_DIR/update-guard-disarm.json"
 ROLLBACK_PATH="$STATE_DIR/update-rollback.json"
 DAEMON_SERVICE="turbopaneld.service"
 BIN_DIR="$INSTALL_ROOT/bin"
+# Early rollback of a crash-looping update (see "Early check" below).
+EARLY_RESTARTS="${TURBOPANEL_UPDATE_GUARD_EARLY_RESTARTS:-3}"
+EARLY_STABLE_SEC="${TURBOPANEL_UPDATE_GUARD_EARLY_STABLE_SEC:-30}"
+case "$EARLY_RESTARTS" in ''|*[!0-9]*) EARLY_RESTARTS=3 ;; esac
+case "$EARLY_STABLE_SEC" in ''|*[!0-9]*) EARLY_STABLE_SEC=30 ;; esac
 
 tp_read_json_field() {
   _file="$1"
@@ -105,15 +118,15 @@ tp_daemon_file_group() {
 
 GUARD_TIMER="turbopaneld-update-guard.timer"
 
-# Stop the deadline timer so OnUnitInactiveSec cannot schedule another attempt.
+# Stop the guard timer so OnUnitInactiveSec cannot schedule another attempt.
 tp_stop_guard_timer() {
   if command -v systemctl >/dev/null 2>&1; then
     systemctl stop "$GUARD_TIMER" 2>/dev/null || true
   fi
 }
 
-# One bounded follow-up. The deadline timer is one-shot at first arm; a failed
-# restored restart has to ask for the next run itself.
+# One bounded follow-up after a failed restored restart, sooner than the timer's
+# own next tick can be relied on.
 tp_schedule_guard_followup() {
   _delay="${TURBOPANEL_UPDATE_GUARD_RETRY_SEC:-30}"
   case "$_delay" in
@@ -128,37 +141,107 @@ tp_schedule_guard_followup() {
   tp_write_file "$RUN_DIR/update-guard-followup" "$_stable_guard" 0644 || true
 }
 
-if [ ! -f "$GUARD_PATH" ]; then
+tp_record_field() {
+  sed -n "s/^$1=//p" "$ROOT_RECORD" | head -1
+}
+
+# The record is consumed once: after a rollback, a disarm, a reboot or the
+# attention threshold. Starting the guard again later does nothing.
+tp_forget_armed() {
+  rm -f "$ROOT_RECORD"
+  tp_stop_guard_timer
+}
+
+if [ ! -f "$ROOT_RECORD" ] || [ -L "$ROOT_RECORD" ]; then
+  # Nothing root armed. An update-guard.json without it is not a reason to
+  # move the previous build back.
   tp_stop_guard_timer
   exit 0
 fi
 
-_target="$(tp_read_json_field "$GUARD_PATH" targetCommit)"
-_deadline="$(tp_read_json_field "$GUARD_PATH" deadlineAt)"
-_previous_commit="$(tp_read_json_field "$GUARD_PATH" previousCommit)"
-[ -n "$_target" ] || exit 0
+_target="$(tp_record_field targetCommit)"
+_deadline="$(tp_record_field deadlineAt)"
+_previous_commit="$(tp_record_field previousCommit)"
+_armed_boot="$(tp_record_field bootId)"
+if [ -z "$_target" ] || [ -z "$_deadline" ]; then
+  tp_forget_armed
+  exit 0
+fi
+
+# A reboot forgets an armed guard, as it forgets the timer.
+_boot_now="$(tr -d '[:space:]' < /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+if [ -n "$_armed_boot" ] && [ "$_armed_boot" != "$_boot_now" ]; then
+  tp_forget_armed
+  exit 0
+fi
+
+_now_epoch="$(date -u +%s 2>/dev/null || echo 0)"
+_deadline_epoch="$(date -u -d "$_deadline" +%s 2>/dev/null || echo 0)"
+case "$_deadline_epoch" in ''|*[!0-9]*) _deadline_epoch=0 ;; esac
+if [ "$_deadline_epoch" -le 0 ] ||
+  [ "$_now_epoch" -gt $((_deadline_epoch + ROOT_RECORD_MAX_LATE_SEC)) ]; then
+  tp_forget_armed
+  exit 0
+fi
 
 if [ -f "$DISARM_PATH" ]; then
   _disarm_commit="$(tp_read_json_field "$DISARM_PATH" targetCommit)"
   if [ -n "$_disarm_commit" ] && [ "$_disarm_commit" = "$_target" ]; then
     rm -f "$GUARD_PATH" "$DISARM_PATH"
-    tp_stop_guard_timer
+    tp_forget_armed
     exit 0
   fi
 fi
 
 _should_rollback=false
+_reason="daemon service failed or update guard deadline elapsed"
 if command -v systemctl >/dev/null 2>&1; then
   if systemctl is-failed --quiet "$DAEMON_SERVICE" 2>/dev/null; then
     _should_rollback=true
   fi
 fi
 
-if [ "$_should_rollback" = false ] && [ -n "$_deadline" ]; then
-  _now_epoch="$(date -u +%s 2>/dev/null || echo 0)"
-  _deadline_epoch="$(date -u -d "$_deadline" +%s 2>/dev/null || echo 0)"
-  if [ "$_deadline_epoch" -gt 0 ] && [ "$_now_epoch" -ge "$_deadline_epoch" ]; then
+if [ "$_should_rollback" = false ] && [ "$_now_epoch" -ge "$_deadline_epoch" ]; then
+  _should_rollback=true
+  _reason="daemon service failed or update guard deadline elapsed"
+fi
+
+# Early check. The daemon unit never gives up (no start limit), so a build that
+# crash-loops never reaches `failed` and would wait for the deadline. Roll back
+# early when, since arming, the unit restarted itself at least
+# EARLY_RESTARTS times and is not currently running steadily. The record is
+# still armed and not disarmed here, so a good build (it disarms on attach) and
+# a full disk with no update in flight cannot get here.
+tp_unit_prop() {
+  systemctl show "$DAEMON_SERVICE" -p "$1" --value 2>/dev/null | head -1
+}
+
+tp_unit_running_steadily() {
+  [ "$(tp_unit_prop ActiveState)" = "active" ] || return 1
+  [ "$(tp_unit_prop SubState)" = "running" ] || return 1
+  _enter_us="$(tp_unit_prop ActiveEnterTimestampMonotonic)"
+  case "$_enter_us" in ''|*[!0-9]*) return 1 ;; esac
+  _up_s="$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
+  case "$_up_s" in ''|*[!0-9]*) return 1 ;; esac
+  [ $((_up_s - _enter_us / 1000000)) -ge "$EARLY_STABLE_SEC" ]
+}
+
+if [ "$_should_rollback" = false ] && command -v systemctl >/dev/null 2>&1; then
+  _restarts_now="$(tp_unit_prop NRestarts)"
+  _restarts_base="$(tp_record_field restartsAtArm)"
+  case "$_restarts_now" in ''|*[!0-9]*) _restarts_now=0 ;; esac
+  case "$_restarts_base" in ''|*[!0-9]*) _restarts_base=0 ;; esac
+  # A manual restart of the unit (the update's own, after arming) resets
+  # NRestarts to 0, so a count below the recorded one counts from zero. A host
+  # that already auto-restarted before the update therefore needs a few more
+  # restarts to trip this; the deadline stays the backstop.
+  if [ "$_restarts_now" -lt "$_restarts_base" ]; then
+    _restarts_base=0
+  fi
+  if [ $((_restarts_now - _restarts_base)) -ge "$EARLY_RESTARTS" ] &&
+    ! tp_unit_running_steadily; then
     _should_rollback=true
+    _reason="daemon restarted repeatedly after the update"
   fi
 fi
 
@@ -178,6 +261,18 @@ if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.js.prev" ]; then
 fi
 [ -n "$_to_commit" ] || _to_commit="unknown"
 
+# Move back only the build root recorded as the previous one when it armed.
+if [ -n "$_previous_commit" ] && [ -x "$BIN_DIR/turbopaneld.prev" ]; then
+  _prev_commit_now=""
+  if _prev_out="$("$BIN_DIR/turbopaneld.prev" --version 2>/dev/null)"; then
+    _prev_commit_now="$(tp_parse_daemon_commit_from_version "$_prev_out")"
+  fi
+  if [ -n "$_prev_commit_now" ] && [ "$_prev_commit_now" != "$_previous_commit" ]; then
+    tp_forget_armed
+    tp_die "previous build is $_prev_commit_now, not the $_previous_commit recorded when the update was armed; not rolling back"
+  fi
+fi
+
 if [ -f "$BIN_DIR/turbopaneld.prev" ]; then
   mv -f "$BIN_DIR/turbopaneld.prev" "$BIN_DIR/turbopaneld"
 fi
@@ -189,7 +284,6 @@ if [ -d "$INSTALL_ROOT/share/orchestration.prev" ]; then
   mv "$INSTALL_ROOT/share/orchestration.prev" "$INSTALL_ROOT/share/orchestration"
 fi
 
-_reason="daemon service failed or update guard deadline elapsed"
 _at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 mkdir -p "$STATE_DIR"
 tp_write_file "$ROLLBACK_PATH" \
@@ -209,17 +303,23 @@ fi
 
 if [ "$_restart_ok" = true ]; then
   rm -f "$GUARD_PATH" "$DISARM_PATH"
-  tp_stop_guard_timer
+  tp_forget_armed
   exit 0
 fi
 
 # Restart failed. Keep the guard and schedule one more attempt, up to the
 # attention threshold. A one-shot deadline timer does not do this by itself.
-_attempts="$(tp_read_json_field "$GUARD_PATH" restartAttempts)"
+_attempts="$(tp_record_field restartAttempts)"
 case "$_attempts" in
   ''|*[!0-9]*) _attempts=0 ;;
 esac
 _next=$((_attempts + 1))
+# Root's record keeps the count (and the build already restored); lib is
+# root-owned, so a plain rename is safe here.
+_rr_tmp="$(mktemp "$INSTALL_ROOT/lib/.update-guard-armed.XXXXXX")" &&
+  printf 'targetCommit=%s\npreviousCommit=%s\ndeadlineAt=%s\narmedAt=%s\nbootId=%s\nrestartAttempts=%s\nrestartsAtArm=%s\n' \
+    "$_target" "$_previous_commit" "$_deadline" "$(tp_record_field armedAt)" "$_armed_boot" "$_next" "$(tp_record_field restartsAtArm)" > "$_rr_tmp" &&
+  chmod 0640 "$_rr_tmp" && mv -f "$_rr_tmp" "$ROOT_RECORD" || rm -f "${_rr_tmp:-}"
 tp_write_file "$GUARD_PATH" \
   "$(printf '{"targetCommit":"%s","deadlineAt":"%s","previousCommit":"%s","restartAttempts":"%s"}' \
     "$_target" "$_deadline" "$_to_commit" "$_next")" \
@@ -229,7 +329,7 @@ if [ "$_next" -ge 3 ]; then
     "$(printf '{"needsAttention":true,"targetCommit":"%s","attempts":"%s","at":"%s"}' \
       "$_target" "$_next" "$_at")" \
     0640 "$(tp_daemon_file_group)" || true
-  tp_stop_guard_timer
+  tp_forget_armed
 else
   tp_schedule_guard_followup
 fi

@@ -24,6 +24,11 @@
  *
  * Both files live in the scratch directory and are unlinked in `finally`; the
  * env carries their *paths*, never the material itself.
+ *
+ * **Where it may clone from.** The same rule as a repository read
+ * (`clone-url-guard.ts`): https or ssh to a public git host, checked before the
+ * credential files are written, and every git call pinned to those transports
+ * with `GIT_ALLOW_PROTOCOL`.
  */
 
 import { join } from "@std/path";
@@ -31,6 +36,11 @@ import { pumpLines } from "../../logs/line-stream.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
+import {
+  gitProtocolEnv,
+  PUBLIC_REMOTE,
+  type RepoGitTransport,
+} from "./clone-url-guard.ts";
 
 const GIT_BIN = "git";
 
@@ -96,6 +106,11 @@ export type CheckoutParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Test seam — defaults to spawning real `git`. */
   runGit?: GitRunner;
+  /**
+   * Test seam — defaults to {@link PUBLIC_REMOTE} (https or ssh to a public
+   * host). A test passes a local-path transport to clone a fixture repository.
+   */
+  transport?: RepoGitTransport;
   /**
    * Cancel signal of the deploy. Aborting it kills the running git process and
    * makes the checkout throw `DeployCancelledError`.
@@ -452,12 +467,22 @@ export async function checkoutRelease(
 ): Promise<CheckoutResult> {
   const redactSummary = params.redactSummary ?? defaultSummaryRedactor;
   const runner = params.runGit ?? runGit;
+  const transport = params.transport ?? PUBLIC_REMOTE;
+  // Before the credential files: a refused address never gets one written.
+  transport.checkUrl(params.cloneUrl);
+  const pin = gitProtocolEnv(transport.protocols);
   // Every git call is followed by a cancel check: a cancelled deploy kills the
   // running git (via the signal) and stops here instead of reading its failure
   // as a clone error.
   const git: GitRunner = async (args, cwd, env, onOutput) => {
     throwIfAborted(params.signal, "before the source was fetched");
-    const result = await runner(args, cwd, env, onOutput, params.signal);
+    const result = await runner(
+      args,
+      cwd,
+      { ...env, ...pin },
+      onOutput,
+      params.signal,
+    );
     throwIfAborted(params.signal, "while the source was being fetched");
     return result;
   };

@@ -21,6 +21,12 @@ const PLAIN: Record<InstanceAcmeProblem, string> = {
   "timeout":
     "the certificate request did not finish in time on this server; check that this server can reach the internet and that port 80 is open, then try again",
 };
+
+/** The plain sentence for one known problem (shared with the daemon's own ACME client). */
+export function plainInstanceAcmeProblem(problem: InstanceAcmeProblem): string {
+  return PLAIN[problem];
+}
+
 function errorText(err: unknown): string {
   if (err instanceof Error) return err.message;
   return typeof err === "string" ? err : "unknown error";

@@ -325,7 +325,15 @@ async function runUpdateVerb(
     | "tp_verb_update"
     | "tp_verb_update_instance"
     | "tp_verb_update_colocated" = "tp_verb_update",
-  options: { controlPlaneHost?: boolean; stdin?: string } = {},
+  options: {
+    controlPlaneHost?: boolean;
+    stdin?: string;
+    panelIdentity?: string;
+    /** A run.sh from before the panel key pin: it has no --panel-key flag. */
+    olderRunSh?: boolean;
+    /** A run.sh from before the root daemon build floor. */
+    withoutBuildFloor?: boolean;
+  } = {},
 ): Promise<{ status: number; stdout: string; stderr: string }> {
   const source = await Deno.readTextFile(helperPath);
   const root = await Deno.makeTempDir({ prefix: "tp-orchestrate-update-" });
@@ -339,12 +347,26 @@ async function runUpdateVerb(
     if (pin !== null) {
       await Deno.writeTextFile(join(root, "lib", "update-origin"), pin);
     }
+    if (options.panelIdentity !== undefined) {
+      await Deno.writeTextFile(
+        join(root, "lib", "panel-identity"),
+        options.panelIdentity,
+      );
+    }
     const fakeCurl = [
       "curl() {",
       "  printf 'CURL'; for a in \"$@\"; do printf ' [%s]' \"$a\"; done; printf '\\n'",
       '  _out=""; while [ $# -gt 0 ]; do [ "$1" = -o ] && _out="$2"; shift; done',
       "  cat > \"$_out\" <<'FAKE'",
       "#!/bin/sh",
+      options.olderRunSh ? "# no pin support" : "# supports --panel-key",
+      options.withoutBuildFloor
+        ? "# no build floor"
+        : '# tp_check_daemon_build_floor "$DAEMON_BUILD_FLOOR"',
+      // An older installer rewrites the update origin without panel_key.
+      options.olderRunSh
+        ? `printf 'host=h\\n' > "${root}/lib/update-origin"`
+        : ":",
       "printf 'RUNSH'; for a in \"$@\"; do printf ' [%s]' \"$a\"; done; printf '\\n'",
       "printf 'RUNSH-LICENSE [%s]\\n' \"${TURBOPANEL_LICENSE:-}\"",
       "FAKE",
@@ -366,14 +388,21 @@ async function runUpdateVerb(
       extractShellFunction(source, "tp_pin_field"),
       extractShellFunction(source, "tp_load_update_origin_pin"),
       extractShellFunction(source, "tp_read_update_origin_pin"),
+      extractShellFunction(source, "tp_pinned_host_ok"),
+      extractShellFunction(source, "tp_panel_identity_consistent"),
+      extractShellFunction(source, "tp_restore_panel_key_line"),
       extractShellFunction(source, "tp_colocated_host"),
       extractShellFunction(source, "tp_read_control_plane_pin"),
       extractShellFunction(source, "tp_release_manifest_url_ok"),
       extractShellFunction(source, "tp_installer_host_for_channel"),
       extractShellFunction(source, "tp_fetch_pinned_run_script"),
+      extractShellFunction(source, "tp_require_build_floor_installer"),
       extractShellFunction(source, "tp_verb_update"),
       extractShellFunction(source, "tp_verb_update_instance"),
       extractShellFunction(source, "tp_verb_update_colocated"),
+      options.olderRunSh
+        ? `trap 'printf "ORIGIN:"; cat "${root}/lib/update-origin"' EXIT`
+        : ":",
       `${verb} "$@"`,
     ].join("\n");
     // The daemon writes the license line to the helper's stdin.
@@ -416,6 +445,70 @@ for (
     assertStringIncludes(result.stdout, `[https://${host}]`);
   });
 }
+
+const PANEL_KEY = "k".repeat(43);
+const PINNED_PIN = `${PUBLIC_PIN}panel_key=${PANEL_KEY}\n`;
+const PIN_FILE =
+  `current=${PANEL_KEY}\nnext=\nkeyset=1\nurls=\npinned_by=install\nupdated=x\n`;
+
+test("tp-orchestrate update passes the pinned panel key on to run.sh", async () => {
+  const result = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertStringIncludes(result.stdout, `[--panel-key] [${PANEL_KEY}]`);
+});
+
+test("tp-orchestrate update leaves --panel-key out for an older run.sh and restores the pin line", async () => {
+  const result = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE, olderRunSh: true },
+  );
+  assertEquals(result.status, 0, result.stderr);
+  assertEquals(result.stdout.includes("RUNSH [--host]"), true);
+  assertEquals(result.stdout.includes("[--panel-key]"), false);
+  assertStringIncludes(result.stdout, `panel_key=${PANEL_KEY}`);
+});
+
+test("tp-orchestrate update refuses another panel key, the unsafe flag and a disagreeing pin file", async () => {
+  const other = await runUpdateVerb(
+    ["--license-stdin", "--panel-key", "x".repeat(43), "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE },
+  );
+  assertEquals(other.status, 1);
+  assertStringIncludes(other.stderr, "pinned to another panel key");
+
+  const unsafe = await runUpdateVerb(
+    ["--license-stdin", "--unsafe-no-panel-key", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE },
+  );
+  assertEquals(unsafe.status, 1);
+  assertStringIncludes(unsafe.stderr, "refusing update flag");
+
+  const disagree = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+    "tp_verb_update",
+    { panelIdentity: PIN_FILE.replace("kkkk", "zzzz") },
+  );
+  assertEquals(disagree.status, 1);
+  assertStringIncludes(disagree.stderr, "disagree");
+
+  const missing = await runUpdateVerb(
+    ["--license-stdin", "--no-start"],
+    PINNED_PIN,
+  );
+  assertEquals(missing.status, 1);
+});
 
 test("tp-orchestrate update with no channel keeps the release installer host", async () => {
   const result = await runUpdateVerb(
@@ -494,6 +587,35 @@ test("tp-orchestrate update refuses without a root-pinned origin", async () => {
   const result = await runUpdateVerb(["--license-stdin", "--no-start"], null);
   assertEquals(result.status, 1);
   assertStringIncludes(result.stderr, "update origin pin missing");
+});
+
+test("tp-orchestrate update accepts any pinned control plane address for --host and nothing else", async () => {
+  const pin =
+    "host=https://panel.example.com\nhosts=https://panel.example.com,https://alt.example.com:8443\ndl_base=\ninstance_ca=\n";
+  const accepted = await runUpdateVerb(
+    ["--license-stdin", "--host", "https://alt.example.com:8443", "--no-start"],
+    pin,
+  );
+  assertEquals(accepted.status, 0, accepted.stderr);
+  assertStringIncludes(
+    accepted.stdout,
+    "RUNSH [--host] [https://alt.example.com:8443] [--no-start]",
+  );
+  for (
+    const host of [
+      "https://alt.example.com",
+      "https://*",
+      "https://alt.example.com:8443,https://evil.example",
+      "https://panel.example.com,https://alt.example.com:8443",
+    ]
+  ) {
+    const refused = await runUpdateVerb(
+      ["--license-stdin", "--host", host, "--no-start"],
+      pin,
+    );
+    assertEquals(refused.status, 1, host);
+    assertStringIncludes(refused.stderr, "enrolled with");
+  }
 });
 
 test("tp-orchestrate update refuses origins that differ from the pin", async () => {
@@ -1134,4 +1256,56 @@ test("tp-orchestrate update (remote enrolment) refuses a control-plane pin", asy
   );
   assertEquals(result.status, 1);
   assertStringIncludes(result.stderr, "update-colocated");
+});
+
+// --- daemon build floor ------------------------------------------------------
+
+test("tp-orchestrate update and update-colocated refuse an installer without the root build floor", async () => {
+  const update = await runUpdateVerb(
+    ["--license-stdin", "--channel", "release", "--no-start"],
+    PUBLIC_PIN,
+    "tp_verb_update",
+    { withoutBuildFloor: true },
+  );
+  assertEquals(update.status, 1);
+  assertStringIncludes(update.stderr, "does not check the installed daemon");
+  assertEquals(update.stdout.includes("RUNSH"), false);
+
+  const colocated = await runUpdateVerb(
+    ["--channel", "release", "--no-start"],
+    COLOCATED_PIN,
+    "tp_verb_update_colocated",
+    { controlPlaneHost: true, withoutBuildFloor: true },
+  );
+  assertEquals(colocated.status, 1);
+  assertStringIncludes(colocated.stderr, "does not check the installed daemon");
+  assertEquals(colocated.stdout.includes("RUNSH"), false);
+});
+
+test("tp-orchestrate never carries the downgrade break-glass", async () => {
+  const source = await Deno.readTextFile(helperPath);
+  // Cleared before any verb runs, whatever sudo's environment policy is.
+  const unset = source.indexOf("unset TURBOPANEL_ALLOW_DOWNGRADE");
+  assertEquals(unset >= 0, true);
+  assertEquals(unset < source.indexOf("tp_verb_update() {"), true);
+  for (
+    const verb of [
+      "tp_verb_update",
+      "tp_verb_update_colocated",
+      "tp_verb_update_instance",
+    ] as const
+  ) {
+    const args = verb === "tp_verb_update"
+      ? ["--license-stdin", "--allow-downgrade", "--no-start"]
+      : ["--channel", "canary", "--allow-downgrade", "--no-start"];
+    const result = await runUpdateVerb(
+      args,
+      verb === "tp_verb_update" ? PUBLIC_PIN : COLOCATED_PIN,
+      verb,
+      { controlPlaneHost: verb !== "tp_verb_update" },
+    );
+    assertEquals(result.status, 1, verb);
+    assertStringIncludes(result.stderr, "--allow-downgrade", verb);
+    assertEquals(result.stdout.includes("RUNSH"), false, verb);
+  }
 });

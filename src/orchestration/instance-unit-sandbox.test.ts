@@ -360,6 +360,100 @@ test({
   },
 });
 
+const DEV_SOURCE_VARS = {
+  ...PROD_VARS,
+  instance_user: "dev",
+  turbopanel_dev_user: "dev",
+  turbopanel_instance_run_mode: "source",
+  turbopanel_ui_mode: "dev",
+  turbopanel_instance_dir: "/home/dev/turbopanel/turbopanel",
+  turbopanel_node: "/opt/turbopanel/vendor/node/current/bin/node",
+};
+
+const DEV_MIGRATE_KEYS = [
+  "ExecStartPre",
+  "StartLimitBurst",
+  "TimeoutStartSec",
+];
+
+test({
+  name:
+    "the co-located dev instance migrates its database (backup first) before every start",
+  ignore: !JINJA_PYTHON,
+  fn: async () => {
+    const text = await renderUnit(DEV_SOURCE_VARS);
+    const unit = directives(text);
+    // StartLimit* only works in [Unit]; the rest belong to [Service].
+    const unitSection = text.slice(0, text.indexOf("[Service]"));
+    assert(/^StartLimitBurst=/m.test(unitSection), "StartLimitBurst in [Unit]");
+    assert(
+      /^StartLimitIntervalSec=/m.test(unitSection),
+      "StartLimitIntervalSec in [Unit]",
+    );
+    assert(!/^ExecStartPre=/m.test(unitSection), "ExecStartPre in [Service]");
+    assertEquals(
+      one(unit, "ExecStartPre"),
+      "/bin/sh -c 'test ! -f /home/dev/turbopanel/turbopanel/scripts/dev-migrate-on-start.mjs || exec /opt/turbopanel/vendor/node/current/bin/node /home/dev/turbopanel/turbopanel/scripts/dev-migrate-on-start.mjs'",
+    );
+    assert(
+      (unit.get("Environment") ?? []).includes(
+        "TURBOPANEL_DEV_MIGRATE_BACKUP_DIR=/var/lib/turbopanel/dev-updates/backups",
+      ),
+      "dumps go where the Update and Restart job keeps them",
+    );
+    assert(
+      (unit.get("Environment") ?? []).includes("TURBOPANEL_DEV_SURFACE=1"),
+      "the script only acts with the dev surface flag",
+    );
+    // A refused pre-start must stop, not retry against the database every 2 s.
+    assertEquals(one(unit, "StartLimitBurst"), "10");
+    assertEquals(one(unit, "StartLimitIntervalSec"), "120");
+    // A growing delay would spread the ten tries out past the window.
+    assertEquals(unit.get("RestartSteps"), undefined);
+    assertEquals(one(unit, "TimeoutStartSec"), "20min");
+  },
+});
+
+test({
+  name:
+    "production, compiled, static-UI and workers instance units never migrate on start",
+  ignore: !JINJA_PYTHON,
+  fn: async () => {
+    const variants: Record<string, Record<string, unknown>> = {
+      production: PROD_VARS,
+      "dev, compiled": {
+        ...DEV_SOURCE_VARS,
+        turbopanel_instance_run_mode: "compiled",
+      },
+      "dev, static UI": { ...DEV_SOURCE_VARS, turbopanel_ui_mode: "static" },
+      "dev, workers": {
+        ...DEV_SOURCE_VARS,
+        turbopanel_instance_runtime: "workers",
+      },
+    };
+    for (const [label, vars] of Object.entries(variants)) {
+      const unit = directives(await renderUnit(vars));
+      for (const key of DEV_MIGRATE_KEYS) {
+        assertEquals(
+          unit.get(key),
+          undefined,
+          `${label}: ${key}= must be absent`,
+        );
+      }
+      // No give-up outside the dev migration case, and a growing restart delay.
+      assertEquals(one(unit, "StartLimitIntervalSec"), "0", label);
+      assertEquals(one(unit, "RestartSteps"), "10", label);
+      assertEquals(one(unit, "RestartMaxDelaySec"), "120", label);
+      assert(
+        !(unit.get("Environment") ?? []).some((e) =>
+          e.startsWith("TURBOPANEL_DEV_MIGRATE_BACKUP_DIR=")
+        ),
+        `${label}: no dev backup folder`,
+      );
+    }
+  },
+});
+
 test({
   name: "the instance unit keeps its prompt-kill stop timeout",
   fn: async () => {

@@ -1,0 +1,15 @@
+---
+# Vendor the Valkey server that project caches run (see roles/valkey-runtime).
+# The per-cache units and configs are written by the daemon TypeScript apply
+# path (src/deploy/cache/) through tp-host; only the runtime needs Ansible. The
+# daemon runs this lazily, on the first deploy or cache command that needs a
+# cache on this host, and only when the pinned binary is missing.
+- name: TurboPanel project cache runtime prerequisites (Valkey)
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Vendor Valkey under vendor/valkey/<version>
+      ansible.builtin.include_role:
+        name: valkey-runtime

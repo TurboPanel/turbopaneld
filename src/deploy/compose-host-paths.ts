@@ -298,16 +298,35 @@ function collectTopLevelVolumes(
   }
 }
 
+/**
+ * Daemon-rewritten file sources the host-path scan lets through: a plain set
+ * of names, or a map of name to the exact resolved path the daemon wrote. With
+ * a map the name alone is not enough: a tenant source of that name pointing
+ * anywhere else is still scanned.
+ */
+export type ExemptFileSources =
+  | ReadonlySet<string>
+  | ReadonlyMap<string, string>;
+
+function isExemptFile(
+  exempt: ExemptFileSources,
+  name: string,
+  file: string,
+): boolean {
+  if (exempt instanceof Map) return exempt.get(name) === file;
+  return exempt.has(name);
+}
+
 function collectFileBacked(
   label: "config" | "secret",
   specs: unknown,
-  exempt: ReadonlySet<string>,
+  exempt: ExemptFileSources,
   out: ComposeHostPathScan,
 ): void {
   if (!isRecord(specs)) return;
   for (const [name, spec] of Object.entries(specs)) {
     if (!isRecord(spec) || typeof spec.file !== "string") continue;
-    if (exempt.has(name)) continue;
+    if (isExemptFile(exempt, name, spec.file)) continue;
     out.entries.push({
       what: `${label} ${name} file`,
       path: spec.file,
@@ -321,11 +340,13 @@ function collectFileBacked(
  * Host paths in the model `docker compose config --format json` resolved.
  * Paths there are absolute and lexically cleaned, which is exactly what
  * Compose hands the engine. `exemptSecretNames` are secrets the daemon itself
- * rewrote to its run directory (`rewriteComposeSecretFilePaths`).
+ * rewrote to its run directory (`rewriteComposeSecretFilePaths`);
+ * `exemptConfigNames` likewise for generated config files.
  */
 export function collectResolvedHostPaths(
   document: Record<string, unknown>,
-  exemptSecretNames: ReadonlySet<string> = new Set(),
+  exemptSecretNames: ExemptFileSources = new Set(),
+  exemptConfigNames: ExemptFileSources = new Set(),
 ): ComposeHostPathScan {
   const out: ComposeHostPathScan = { entries: [], findings: [] };
   const services = isRecord(document.services) ? document.services : {};
@@ -335,7 +356,7 @@ export function collectResolvedHostPaths(
     collectBuild(name, service.build, out);
   }
   collectTopLevelVolumes(document.volumes, out);
-  collectFileBacked("config", document.configs, new Set(), out);
+  collectFileBacked("config", document.configs, exemptConfigNames, out);
   collectFileBacked("secret", document.secrets, exemptSecretNames, out);
   return out;
 }

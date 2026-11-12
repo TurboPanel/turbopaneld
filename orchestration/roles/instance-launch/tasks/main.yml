@@ -100,6 +100,18 @@
   ansible.builtin.set_fact:
     turbopanel_legacy_acme_certificate_root: "{{ turbopanel_caddy_runtime_dir }}/share/caddy/certificates"
 
+- name: Check the control-plane TLS folders before root touches them
+  ansible.builtin.include_tasks: "{{ role_path }}/../instance-certs/tasks/tls-folders-check.yml"
+  vars:
+    _tls_folder_checks:
+      - path: "{{ turbopanel_state_dir }}/tls"
+        owner: "{{ turbopanel_dev_user if (turbopanel_dev_user | default('') | length > 0) else 'root' }}"
+        adopt_daemon_owned: true
+      - path: "{{ turbopanel_instance_certs_dir }}"
+        owner: "{{ instance_user }}"
+      - path: "{{ turbopanel_state_dir }}/instance-acme"
+        owner: "{{ caddy_user }}"
+
 - name: Harden Let's Encrypt keys and record hostnames whose files exist
   ansible.builtin.include_tasks: "{{ role_path }}/../instance-certs/tasks/letsencrypt-files.yml"
 
@@ -124,6 +136,12 @@
 
 - name: Cache hashed UI bundles and revalidate the page in the installed Caddyfile
   ansible.builtin.import_tasks: caddyfile-ui-cache.yml
+
+- name: Stop the installed Caddyfile naming the proxy in response headers
+  ansible.builtin.import_tasks: caddyfile-server-headers.yml
+
+- name: Drop installed Caddyfile backups identical to the live file
+  ansible.builtin.import_tasks: caddyfile-stale-backups.yml
 
 - name: Install the control-plane updating page
   when: turbopanel_dev_user | default('') | length == 0
@@ -229,6 +247,10 @@
 # The instance user runs `git` during upgrades but repos are owned by
 # tp:tp — mark them safe (Git 2.35+). Only co-located dev has
 # editable source checkouts; the managed FHS tree has no repos to mark safe.
+# HOME is never a checkout: `git config --global` writes `$HOME/.gitconfig`,
+# and the control plane checkout tracks a `.gitconfig` of its own. The
+# instance user's entries go to the HOME its unit runs with
+# (turbopanel_instance_runtime_dir), the one its own git reads.
 - name: Read existing safe.directory entries for turbopanel user
   when: turbopanel_dev_user | default('') | length > 0
   ansible.builtin.command:
@@ -265,7 +287,7 @@
   become: true
   become_user: "{{ instance_user }}"
   environment:
-    HOME: "{{ turbopanel_instance_dir }}"
+    HOME: "{{ turbopanel_instance_runtime_dir }}"
   register: _git_safe_instance_dirs
   changed_when: false
   failed_when: false
@@ -276,7 +298,7 @@
   become: true
   become_user: "{{ instance_user }}"
   environment:
-    HOME: "{{ turbopanel_instance_dir }}"
+    HOME: "{{ turbopanel_instance_runtime_dir }}"
   loop:
     - "{{ turbopanel_instance_dir }}"
     - "{{ turbopanel_daemon_dir }}"

@@ -832,7 +832,14 @@ export type MetricsSampleMetadata = {
   sampledAt: string;
   intervalSeconds: number;
   sequence: number;
-  topologyGeneration: number;
+  /**
+   * Deprecated: the daemon's own topology change counter. The control plane
+   * no longer reads it (it matches a sample against the stored topology by
+   * the entity ids the sample names), so a daemon stops sending it once the
+   * control plane lists the `topology-generation-optional-v1` wire feature.
+   * Accepted while older daemons still send it.
+   */
+  topologyGeneration?: number;
   bootGeneration: number;
   /**
    * Wire version 8 daemons only. `false` marks a 10 s live-lease sample that feeds the
@@ -1394,10 +1401,12 @@ export function buildMetricsSample(
     input.metadata.intervalSeconds,
   );
   assertFiniteNonNegative("metadata.sequence", input.metadata.sequence);
-  assertFiniteNonNegative(
-    "metadata.topologyGeneration",
-    input.metadata.topologyGeneration,
-  );
+  if (input.metadata.topologyGeneration !== undefined) {
+    assertFiniteNonNegative(
+      "metadata.topologyGeneration",
+      input.metadata.topologyGeneration,
+    );
+  }
   assertFiniteNonNegative(
     "metadata.bootGeneration",
     input.metadata.bootGeneration,

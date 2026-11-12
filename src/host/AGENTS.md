@@ -23,7 +23,15 @@ change-detected heartbeats.
   the driver is `virtio_mem`, or present memory is more than 256 MiB above
   MemTotal, or MemTotal moved more than 32 MiB. hv_balloon debugfs needs root
   and is not read.
-- **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`); the daemon never calls the helper. Commands printed to a person use the absolute path `/opt/turbopanel/share/orchestration/scripts/tp-orchestrate` (`tp-orchestrate` is not on PATH). The installer reboots only on a first install: it records whether `server.id` existed and when the run began, and a reboot needs fresh enrolment files (`server.id`, `server-key-id`, the saved server key). `undo` only removes a line this tool added (marker in `/var/lib/turbopanel-kernel`).
+- **Arm CPU names** — Arm `/proc/cpuinfo` has no `model name`, no `core id`
+  and (on a Raspberry Pi) a trailing board block (`Revision`, `Serial`,
+  `Model`). `src/host/arm-cpu-model.ts` names the core from `CPU implementer`
+  / `CPU part` (`0x41`/`0xd0b` is `Cortex-A76`; an unknown pair stays unnamed)
+  for both the host inventory's `cpus[].name` and the metrics topology's CPU
+  `model`. The topology counts only blocks with a `processor` key and treats a
+  processor without `core id` as its own core. Fixture:
+  `src/host/testdata/raspberry-pi-5-cpuinfo.txt` (serial zeroed).
+- **Kernel features** — `src/host/kernel-features.ts` is the typed registry mirroring `orchestration/scripts/tp-kernel-features` (`pi-4k-pagesize`, `pi-memory-cgroup`); the daemon never calls the helper. Commands printed to a person use the absolute path `/opt/turbopanel/share/orchestration/scripts/tp-orchestrate` (`tp-orchestrate` is not on PATH). `pi-memory-cgroup` (owner decision 2026-11-09: memory limits on for Raspberry Pi hosts): the Pi firmware puts `cgroup_disable=memory` on the kernel command line, so `memory` is missing from `/sys/fs/cgroup/cgroup.controllers` and `MemoryMax=` and container memory limits are not enforced. The feature removes any `cgroup_disable=memory` from the single line of `/boot/firmware/cmdline.txt` and appends `cgroup_enable=memory` (the kernel applies its words in order, so the later word wins; `cgroup_memory=1` is not needed and the kernel calls it unknown). It applies only on a Raspberry Pi whose running `/proc/cmdline` carries the firmware's disable word; a kernel already started with `cgroup_enable=memory` and still without the controller is `blocked` (no restart loop). It is also `blocked` when `cmdline.txt` has more than one line, a control byte other than a tab and one CR at the end of the line (a CR is never deleted from inside the line: words would run together and the Pi would not boot), is empty, has no `root=` word, or when `config.txt` has an active `cmdline=` or `os_prefix=` (the firmware may read another file). A trailing CR and a missing final newline are kept byte for byte. Its marker records the line before and after, so `undo` puts the line back exactly; the backup copy (`cmdline.txt.tp-backup-<time>`) stays. The installer reboots only on a first install: it records whether `server.id` existed and when the run began, and a reboot needs fresh enrolment files (`server.id`, `server-key-id`, the saved server key). It saves every feature that applies and restarts once; `TURBOPANEL_SKIP_KERNEL_SWITCH=1` skips both, `TURBOPANEL_SKIP_MEMORY_LIMITS_SWITCH=1` only the memory one (run.sh keeps both across its sudo re-exec). Before the countdown it waits (first install only, at most 20 minutes) for `/run/turbopanel/boot-converge-done` newer than the install's start marker (written by the daemon when its boot converge passes, `src/orchestration/boot-converge-done.ts`), waits (at most 10 minutes) until no `dpkg`, `apt`, unattended-upgrades or `ansible-playbook` process runs, stops `turbopaneld.service` and checks once more; any wait that runs out means no restart and the manual command. The idle check matches the program, never a substring of the command line: `comm` for the dpkg and apt tools, else the file name of the first argument (or the second when the first is `python*`, `sh`, `dash` or `bash`) equal to `ansible-playbook`, `unattended-upgrade` or starting with `AnsiballZ_`. The JS-mode daemon names `ansible-playbook` in its `--allow-run` list, and the unattended-upgrades service keeps `unattended-upgrade-shutdown --wait-for-signal` running all the time; neither counts (the shutdown helper does without `--wait-for-signal`). From just before the stop on, SIGPIPE is ignored (a closed output makes a write fail and `set -e` reach the EXIT trap; a shell killed by SIGPIPE skips it) and `EXIT HUP INT TERM` traps start the daemon again, before writing anything, on every way out except a restart handed to systemd; a failed stop still gets a start. A playbook the daemon starts in the milliseconds between the last idle check and the stop is the known remaining gap. Every boot-file writer flushes the new file to disk before the rename, so a power cut leaves the old or the new file, never an empty one. `undo` only removes what this tool added (marker in `/var/lib/turbopanel-kernel`).
 - **Time sync** — `src/host/time-sync.ts` (cache-light `timedatectl show`,
   with `timedatectl status` + `/etc/timezone` fallbacks, plus `timesyncd.conf`
   read; carried on hello and change-detected heartbeats with `ips` from
@@ -80,14 +88,30 @@ change-detected heartbeats.
   is off; an enable that uses the bridge again takes it off that list. The daemon owns apply (no Ansible round-trip): it persists the private
   key at `<daemonStateDir>/network/wireguard/private.key` (mode `0600`, via
   `fabricNetworkDir`), writes mode-0600 `tp0.conf` (PSK plaintext inlined, temp
-  `psk/` files deleted after apply), `wg syncconf`, enables `wg-quick@tp0` for
-  reboot durability, writes `/etc/sysctl.d/99-turbopanel-fabric.conf`, creates
+  `psk/` files deleted after apply), `wg syncconf`, then reconciles one main-table
+  kernel route per peer `AllowedIPs` entry on `tp0` (`fabric-routes.ts`:
+  `ip route replace|del <cidr> dev tp0`, read back with `ip -4|-6 route show`;
+  a range another interface already routes, equal or inside a connected
+  subnet, is skipped with a warning; only `dev tp0` routes the daemon could
+  have made are removed; the stamp fast path re-applies when routes drifted),
+  writes `/etc/sysctl.d/99-turbopanel-fabric.conf`, creates
   listed Docker routed-bridge networks, and hangs a `TP-FORWARD` chain off
   `DOCKER-USER`. Reconcile is authoritative over `state.json.networks`: bridges
   present in the previous state but absent from the incoming payload are
   removed (best-effort; missing / active-endpoint errors are logged). Durable
   `tp0.conf` stays in `wg-quick` format (`Address`);
-  `wg syncconf` is fed a stripped `wg setconf` config. Daemon start restores
+  `wg syncconf` is fed a stripped `wg setconf` config. The daemon is the only
+  owner of `tp0`: `wg-quick@tp0` is no longer enabled or fed a config (it
+  raced the daemon at boot and refused to start once `tp0` existed, so no
+  route was ever installed). Live apply and boot restore disable an enabled or
+  running `wg-quick@tp0` before creating `tp0`, and remove the stale
+  `/etc/wireguard/tp0.conf` after a successful sync (boot restore reads its
+  PSKs first). `{ enabled: false, retainKeys: true }` (`fabric-retain-keys-v1`)
+  is a pause: `tp0` (and its routes) goes and the apply stamp is dropped; key,
+  `tp0.conf`, bridges and `TP-FORWARD` stay; `state.json` gets `suspended:
+  true`, so boot restore leaves `tp0` down and reinstalls only the local bridge
+  forwarding rules (no remote peer range is accepted without a tunnel). The
+  next enable reuses the key and clears `suspended`. Daemon start restores
   from `state.json` and re-installs `TP-FORWARD`, **reusing PSK plaintext from
   durable `tp0.conf`** (do not rewrite peers with an empty PSK map).   `TP-FORWARD`
   ACCEPTs same-subnet bridge traffic and bidirectional forwarding between local
@@ -120,7 +144,13 @@ change-detected heartbeats.
   and vendored tenant Node / lsphp series — each area omitted entirely when
   empty, the same discipline `docker` follows. A vendored series is only
   reported once its `current` symlink resolves, so a half-vendored tree is never
-  advertised as runnable. The control plane stores it in `server.metadata.runtimes`
+  advertised as runnable. The PHP entry also carries the installed patch version per
+  series (`versions`), each per-site runtime with the version it runs and
+  whether it is behind (`sites`, at most 256, sorted) and why the last restart
+  pass stopped (`restartError`), all read from a cache the pass fills
+  (`php-patch-cache.ts`, `deploy/site/php-patch-restart.ts`): the snapshot reads
+  no file and starts no process for them, and an older control plane drops the
+  unknown fields. The control plane stores it in `server.metadata.runtimes`
   and gates on it at prepare: an unsupported series is a hard error before
   queueing, a supported-but-absent one is a warning because the deploy installs
   it, and **no report at all means unknown, never absent**.
@@ -150,3 +180,8 @@ change-detected heartbeats.
   is `subnet` (renamed from `bridge`) — the **compose-bridge** subnet
   (`tpn_*` routed bridge per host), not a datacenter routing-domain subnet.
 
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Host facts** | `src/host/AGENTS.md` | Host OS, time sync, docker, machine key, runtime inventory probes (hello + change-detected heartbeats) |

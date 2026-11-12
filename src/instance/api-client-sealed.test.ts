@@ -1,0 +1,566 @@
+import { assert, assertEquals, assertRejects } from "@std/assert";
+import { decodeBase64Url } from "@std/encoding/base64url";
+import {
+  type HpkeEnvelope,
+  isHpkeEnvelope,
+  openFromSender,
+  sealingKid,
+} from "../crypto/hpke.ts";
+import { sharedSecretRedactor } from "../logs/redactor.ts";
+import { createFakeInstanceApi } from "../testing/fake-instance-api.ts";
+import {
+  HPKE_VECTOR,
+  HPKE_VECTOR_AAD,
+  HPKE_VECTOR_PLAINTEXT,
+  HPKE_VECTOR_RECIPIENT_SEED,
+} from "../testing/hpke-vector.ts";
+import {
+  DaemonApiClient,
+  DaemonApiError,
+  type DaemonSealingContext,
+} from "./api-client.ts";
+import type { PanelSealKey } from "./panel-identity-cache.ts";
+import {
+  createSealingRegistration,
+  registerSealingKey,
+  SEALING_REREGISTER_INTERVAL_MS,
+  SEALING_RETRY_INTERVAL_MS,
+} from "./sealing.ts";
+
+const test = Deno.test.bind(Deno);
+
+const DECRYPT_PATH = "/api/daemon/v1/secrets/decrypt";
+const REGISTER_PATH = "/api/daemon/v1/servers/self/sealing-key";
+
+function sealingContext(
+  state: { sealed: boolean; marks: number },
+): DaemonSealingContext {
+  return {
+    open: async (envelope) =>
+      new TextDecoder().decode(
+        await openFromSender(
+          HPKE_VECTOR_RECIPIENT_SEED,
+          HPKE_VECTOR_AAD,
+          envelope,
+        ),
+      ),
+    isTrustSealed: () => Promise.resolve(state.sealed),
+    markTrustSealed: () => {
+      state.sealed = true;
+      state.marks += 1;
+      return Promise.resolve();
+    },
+  };
+}
+
+function clientWith(sealing?: DaemonSealingContext): DaemonApiClient {
+  return new DaemonApiClient({
+    config: {
+      kind: "url",
+      baseUrl: "https://instance.test",
+      wsBaseUrl: "wss://instance.test",
+    },
+    getToken: () => Promise.resolve("tok"),
+    sleep: () => Promise.resolve(),
+    ...(sealing ? { sealing } : {}),
+  });
+}
+
+function answer(body: unknown): () => Response {
+  return () => new Response(JSON.stringify(body), { status: 200 });
+}
+
+/** Run `fn` with Deno's stdout and stderr captured; returns everything written. */
+async function captureOutput(fn: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  const originals = [
+    [Deno.stdout, Deno.stdout.writeSync.bind(Deno.stdout)],
+    [Deno.stderr, Deno.stderr.writeSync.bind(Deno.stderr)],
+  ] as const;
+  for (const [stream] of originals) {
+    stream.writeSync = (data: Uint8Array) => {
+      lines.push(new TextDecoder().decode(data));
+      return data.length;
+    };
+  }
+  try {
+    await fn();
+  } finally {
+    for (const [stream, original] of originals) stream.writeSync = original;
+  }
+  return lines.join("");
+}
+
+test("a sealed answer is opened locally, remembered for redaction and marks the trust level", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    api.script(DECRYPT_PATH, answer({ sealed: [HPKE_VECTOR, null] }));
+    const state = { sealed: false, marks: 0 };
+    const plaintexts = await clientWith(sealingContext(state)).decryptSecrets([
+      "tpdaemon.v1.a",
+      "tpdaemon.v1.b",
+    ]);
+    assertEquals(plaintexts, [HPKE_VECTOR_PLAINTEXT, null]);
+    assertEquals(state, { sealed: true, marks: 1 });
+    assert(
+      !sharedSecretRedactor().redact(`x ${HPKE_VECTOR_PLAINTEXT} y`).includes(
+        HPKE_VECTOR_PLAINTEXT,
+      ),
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("plaintext is accepted until a sealed answer has been seen, then refused", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    api.script(DECRYPT_PATH, answer({ plaintexts: ["plain"] }));
+    const state = { sealed: false, marks: 0 };
+    const client = clientWith(sealingContext(state));
+    assertEquals(await client.decryptSecrets(["tpdaemon.v1.a"]), ["plain"]);
+
+    state.sealed = true;
+    const err = await assertRejects(
+      () => client.decryptSecrets(["tpdaemon.v1.a"]),
+      DaemonApiError,
+    );
+    assertEquals(err.status, 400);
+    assertEquals(err.message, "plaintext secrets refused");
+  } finally {
+    restore();
+  }
+});
+
+test("a malformed sealed answer is refused without marking the trust level", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    const state = { sealed: false, marks: 0 };
+    const client = clientWith(sealingContext(state));
+    const cases: unknown[] = [
+      { sealed: [HPKE_VECTOR], plaintexts: ["plain"] },
+      { sealed: [HPKE_VECTOR, HPKE_VECTOR] },
+      { sealed: ["tpdaemon.v1.x"] },
+      { sealed: [{ ...HPKE_VECTOR, ct: HPKE_VECTOR.ct.slice(1) }] },
+    ];
+    let current: unknown;
+    api.script(DECRYPT_PATH, () => answer(current)());
+    for (const body of cases) {
+      current = body;
+      await assertRejects(
+        () => client.decryptSecrets(["tpdaemon.v1.a"]),
+        DaemonApiError,
+      );
+    }
+    assertEquals(state, { sealed: false, marks: 0 });
+  } finally {
+    restore();
+  }
+});
+
+test("a client without a sealing context cannot take a sealed answer", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    api.script(DECRYPT_PATH, answer({ sealed: [HPKE_VECTOR] }));
+    await assertRejects(
+      () => clientWith().decryptSecrets(["tpdaemon.v1.a"]),
+      DaemonApiError,
+    );
+  } finally {
+    restore();
+  }
+});
+
+test("registerSealingKey posts kid, pub and sig", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    let received: unknown;
+    api.script(REGISTER_PATH, (init) => {
+      received = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    });
+    await clientWith().registerSealingKey({ kid: "k", pub: "p", sig: "s" });
+    assertEquals(received, { kid: "k", pub: "p", sig: "s" });
+  } finally {
+    restore();
+  }
+});
+
+test("a 404 from an older control plane is tolerated and registration is retried later", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    // Nothing is scripted for the path, so the fake answers 404.
+    const client = clientWith();
+    const signing = await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ]) as CryptoKeyPair;
+    const registered = await registerSealingKey({
+      sealing: {
+        key: () =>
+          Promise.resolve({
+            kid: "k".repeat(43),
+            pub: "p".repeat(43),
+            privateRaw: new Uint8Array(32),
+          }),
+      },
+      privateJwk: await crypto.subtle.exportKey("jwk", signing.privateKey),
+      register: (body) => client.registerSealingKey(body),
+    });
+    assertEquals(registered, false);
+  } finally {
+    restore();
+  }
+});
+
+test("opening and registering log no plaintext or private key material", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    api.script(DECRYPT_PATH, answer({ sealed: [HPKE_VECTOR] }));
+    api.script(
+      REGISTER_PATH,
+      () => new Response(JSON.stringify({ ok: false }), { status: 500 }),
+    );
+    const client = clientWith(sealingContext({ sealed: false, marks: 0 }));
+    const privateText = btoa(
+      String.fromCharCode(...HPKE_VECTOR_RECIPIENT_SEED),
+    );
+    const signing = await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
+      "sign",
+      "verify",
+    ]) as CryptoKeyPair;
+    const output = await captureOutput(async () => {
+      await client.decryptSecrets(["tpdaemon.v1.a"]);
+      await registerSealingKey({
+        sealing: {
+          key: () =>
+            Promise.resolve({
+              kid: "k".repeat(43),
+              pub: "p".repeat(43),
+              privateRaw: HPKE_VECTOR_RECIPIENT_SEED,
+            }),
+        },
+        privateJwk: await crypto.subtle.exportKey("jwk", signing.privateKey),
+        register: (body) => client.registerSealingKey(body),
+      });
+    });
+    assert(output.length > 0, "the failed registration should log a warning");
+    assert(!output.includes(HPKE_VECTOR_PLAINTEXT));
+    assert(!output.includes(privateText));
+    assert(!output.includes(HPKE_VECTOR.ct));
+  } finally {
+    restore();
+  }
+});
+
+const ISSUED_PATH = "/api/daemon/v1/tls/issued";
+const KEY_PEM =
+  "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
+
+async function panelKey(): Promise<
+  { seal: PanelSealKey; privateRaw: Uint8Array }
+> {
+  const pair = await crypto.subtle.generateKey({ name: "X25519" }, true, [
+    "deriveBits",
+  ]) as CryptoKeyPair;
+  const pub = decodeBase64Url(
+    (await crypto.subtle.exportKey("jwk", pair.publicKey)).x as string,
+  );
+  const privateRaw = decodeBase64Url(
+    (await crypto.subtle.exportKey("jwk", pair.privateKey)).d as string,
+  );
+  return {
+    seal: { kid: await sealingKid(pub), pub, panelFingerprint: "P".repeat(43) },
+    privateRaw,
+  };
+}
+
+function reportClient(
+  options: { seal: PanelSealKey | null; trustSealed?: boolean },
+): DaemonApiClient {
+  return new DaemonApiClient({
+    config: {
+      kind: "url",
+      baseUrl: "https://instance.test",
+      wsBaseUrl: "wss://instance.test",
+    },
+    getToken: () => Promise.resolve("tok"),
+    sleep: () => Promise.resolve(),
+    panelSealKey: () => Promise.resolve(options.seal),
+    sealing: sealingContext({ sealed: options.trustSealed === true, marks: 0 }),
+  });
+}
+
+async function reportAndCapture(client: DaemonApiClient): Promise<unknown> {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    let sent: unknown;
+    api.script(ISSUED_PATH, (init) => {
+      sent = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ ok: true, stored: true }), {
+        status: 200,
+      });
+    });
+    await client.reportIssuedCertificate({
+      hostname: "shop.example.com",
+      certificatePem: "CERT",
+      privateKeyPem: KEY_PEM,
+    });
+    return sent;
+  } finally {
+    restore();
+  }
+}
+
+test("an issued key is sent as an envelope the panel can open, never as PEM", async () => {
+  const { seal, privateRaw } = await panelKey();
+  const sent = await reportAndCapture(reportClient({ seal })) as Record<
+    string,
+    unknown
+  >;
+  assertEquals("privateKeyPem" in sent, false);
+  assert(isHpkeEnvelope(sent.privateKeyEnvelope));
+  const opened = await openFromSender(
+    privateRaw,
+    seal.panelFingerprint,
+    sent.privateKeyEnvelope as HpkeEnvelope,
+  );
+  assertEquals(new TextDecoder().decode(opened), KEY_PEM);
+  assert(!JSON.stringify(sent).includes("PRIVATE KEY"));
+});
+
+test("without a panel sealing key the key goes as PEM, unless a sealed answer was ever received", async () => {
+  const sent = await reportAndCapture(reportClient({ seal: null })) as Record<
+    string,
+    unknown
+  >;
+  assertEquals(sent.privateKeyPem, KEY_PEM);
+  assertEquals("privateKeyEnvelope" in sent, false);
+
+  const err = await assertRejects(
+    () => reportAndCapture(reportClient({ seal: null, trustSealed: true })),
+    DaemonApiError,
+  );
+  assertEquals(err.status, 503);
+});
+
+/** A client whose plaintext hook counts calls and resolves `registered`. */
+function clientWithHook(
+  state: { sealed: boolean; marks: number },
+  hook: { calls: number; registered: boolean },
+): DaemonApiClient {
+  return new DaemonApiClient({
+    config: {
+      kind: "url",
+      baseUrl: "https://instance.test",
+      wsBaseUrl: "wss://instance.test",
+    },
+    getToken: () => Promise.resolve("tok"),
+    sleep: () => Promise.resolve(),
+    sealing: sealingContext(state),
+    onPlaintextSecretsAnswer: () => {
+      hook.calls += 1;
+      return Promise.resolve(hook.registered);
+    },
+  });
+}
+
+/** Script the decrypt route with one body per request; returns the request count. */
+function scriptDecryptAnswers(
+  api: ReturnType<typeof createFakeInstanceApi>,
+  bodies: unknown[],
+): { requests: number } {
+  const seen = { requests: 0 };
+  api.script(DECRYPT_PATH, () => {
+    seen.requests += 1;
+    return answer(bodies.shift())();
+  });
+  return seen;
+}
+
+test("every plaintext answer tells the client, a sealed one does not", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    const state = { sealed: false, marks: 0 };
+    const hook = { calls: 0, registered: false };
+    const client = clientWithHook(state, hook);
+    scriptDecryptAnswers(api, [
+      { plaintexts: ["plain"] },
+      { sealed: [HPKE_VECTOR] },
+      { plaintexts: ["plain"] },
+    ]);
+    assertEquals(await client.decryptSecrets(["tpdaemon.v1.a"]), ["plain"]);
+    assertEquals(hook.calls, 1);
+
+    await client.decryptSecrets(["tpdaemon.v1.a"]);
+    assertEquals(hook.calls, 1);
+
+    // Refused (a sealed answer was opened before), but the client still
+    // hears that the control plane has no key on file.
+    await assertRejects(() => client.decryptSecrets(["tpdaemon.v1.a"]));
+    assertEquals(hook.calls, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("a refused plaintext answer registers the key again and asks once more", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    const state = { sealed: true, marks: 0 };
+    const hook = { calls: 0, registered: true };
+    const seen = scriptDecryptAnswers(api, [
+      { plaintexts: ["plain"] },
+      { sealed: [HPKE_VECTOR] },
+    ]);
+    const plaintexts = await clientWithHook(state, hook).decryptSecrets([
+      "tpdaemon.v1.a",
+    ]);
+    assertEquals(plaintexts, [HPKE_VECTOR_PLAINTEXT]);
+    assertEquals(hook.calls, 1);
+    assertEquals(seen.requests, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("a second plaintext answer after registering again is refused, with no third request", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    const state = { sealed: true, marks: 0 };
+    const hook = { calls: 0, registered: true };
+    const seen = scriptDecryptAnswers(api, [
+      { plaintexts: ["first"] },
+      { plaintexts: ["second"] },
+      { plaintexts: ["third"] },
+    ]);
+    const err = await assertRejects(
+      () => clientWithHook(state, hook).decryptSecrets(["tpdaemon.v1.a"]),
+      DaemonApiError,
+    );
+    assertEquals(err.status, 400);
+    assertEquals(err.message, "plaintext secrets refused");
+    assertEquals(hook.calls, 1);
+    assertEquals(seen.requests, 2);
+  } finally {
+    restore();
+  }
+});
+
+test("a refused plaintext answer is not asked again when the key could not be registered", async () => {
+  const api = createFakeInstanceApi();
+  const restore = api.install();
+  try {
+    const state = { sealed: true, marks: 0 };
+    const hook = { calls: 0, registered: false };
+    const seen = scriptDecryptAnswers(api, [
+      { plaintexts: ["plain"] },
+      { sealed: [HPKE_VECTOR] },
+    ]);
+    await assertRejects(
+      () => clientWithHook(state, hook).decryptSecrets(["tpdaemon.v1.a"]),
+      DaemonApiError,
+    );
+    assertEquals(hook.calls, 1);
+    assertEquals(seen.requests, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("the sealing key is registered again after a plaintext answer, at most once per interval", async () => {
+  let clock = 1_000_000;
+  const outcomes = [false, false, true];
+  let attempts = 0;
+  const registration = createSealingRegistration({
+    register: () => Promise.resolve(outcomes[attempts++] ?? true),
+    now: () => clock,
+  });
+  // Connect: the older control plane answered 404.
+  await registration.atConnect();
+  assertEquals(attempts, 1);
+  // Plaintext answer right away: still inside the interval.
+  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(attempts, 1);
+  clock += SEALING_RETRY_INTERVAL_MS;
+  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(attempts, 2);
+  assertEquals(registration.isRegistered(), false);
+  clock += SEALING_RETRY_INTERVAL_MS;
+  assertEquals(await registration.afterPlaintextAnswer(), true);
+  assertEquals(attempts, 3);
+  assertEquals(registration.isRegistered(), true);
+  // Registered: a reconnect does not post it again.
+  await registration.atConnect();
+  assertEquals(attempts, 3);
+});
+
+test("a plaintext answer after a registration that worked registers the key again", async () => {
+  let clock = 1_000_000;
+  const outcomes = [true, false, true];
+  let attempts = 0;
+  const registration = createSealingRegistration({
+    register: () => Promise.resolve(outcomes[attempts++] ?? true),
+    now: () => clock,
+  });
+  await registration.atConnect();
+  assertEquals(registration.isRegistered(), true);
+  // Too soon after the registration that worked: nothing is posted.
+  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(attempts, 1);
+  assertEquals(registration.isRegistered(), true);
+  // The key was cleared: the next plaintext answer posts it again. This
+  // attempt fails, so the process no longer counts the key as on file.
+  clock += SEALING_REREGISTER_INTERVAL_MS;
+  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(attempts, 2);
+  assertEquals(registration.isRegistered(), false);
+  // A failed attempt waits the longer retry interval, or for the next connect.
+  clock += SEALING_REREGISTER_INTERVAL_MS;
+  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(attempts, 2);
+  await registration.atConnect();
+  assertEquals(attempts, 3);
+  assertEquals(registration.isRegistered(), true);
+});
+
+test("a registration in flight is not started twice", async () => {
+  let attempts = 0;
+  let finish: (ok: boolean) => void = () => {};
+  const registration = createSealingRegistration({
+    register: () => {
+      attempts += 1;
+      return new Promise<boolean>((resolve) => {
+        finish = resolve;
+      });
+    },
+    now: () => 0,
+  });
+  const first = registration.atConnect();
+  const second = registration.afterPlaintextAnswer();
+  const third = registration.atConnect();
+  const fourth = registration.afterPlaintextAnswer();
+  finish(true);
+  const [, secondOutcome, , fourthOutcome] = await Promise.all([
+    first,
+    second,
+    third,
+    fourth,
+  ]);
+  assertEquals(attempts, 1);
+  assertEquals(registration.isRegistered(), true);
+  // Callers that joined the attempt hear how it went.
+  assertEquals(secondOutcome, true);
+  assertEquals(fourthOutcome, true);
+});

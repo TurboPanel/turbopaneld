@@ -16,6 +16,7 @@ import {
 } from "./variables-runtime.ts";
 import type { RunFn } from "../ensure-principal.ts";
 import { nativeAppEnvStageDir, nativeAppEnvStagePath } from "./unit.ts";
+import { bareSudoArgs } from "../../testing/sudo-argv.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -227,8 +228,9 @@ function fakeTpHost(layout: { configDir: string }, refuse?: string) {
   const seen: Array<{ id: string; text: string; mode: number }> = [];
   const calls: string[][] = [];
   const run: RunFn = async (_command, args) => {
-    calls.push([...args]);
-    const [verb, id] = args.slice(1);
+    const argv = bareSudoArgs(args);
+    calls.push(argv);
+    const [verb, id] = argv.slice(1);
     if (refuse !== undefined && verb === "app-env-install") {
       return { success: false, stdout: "", stderr: refuse };
     }

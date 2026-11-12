@@ -2,6 +2,18 @@
 
 The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy on `:8443` only), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. While the control plane obtains a Let's Encrypt certificate, hosting Caddy forwards only `/.well-known/acme-challenge/*` for those names to the issuer socket (`00-instance-acme-http01.caddy`). That file is written **before** the first `enable --now`: the unit is `Type=simple`, so systemd reports it active before admin `127.0.0.1:2029` exists, and an immediate `systemctl reload` fails with connection refused then rolls the unit back. A first start loads the snippet as the initial config and does not reload; an already-running hosting Caddy still reloads. The file is removed when issuance finishes. Hosting Caddy runs as `tpedge` (not in group `tp`), so each time the socket is bound (preflight listener, then the issuer) the daemon has tp-host add `u:tpedge:rw` to that one socket (`grantInstanceAcmeSocket`); the hosting-caddy role grants traverse on the run directory. Hosting Caddy does not terminate panel HTTPS.
 
+**Proof forwarding for central certificate issuance (`acme-issue-v1`, `acme-proof-forward.ts`).** When the control plane has one server place a certificate order, every other serving server in the name's DNS answers the HTTP-proof path by forwarding it to the issuing server's public address, keeping the `Host` header. The handler goes inside each site's own `http://<host>` block, never a second block for the same host (that is a duplicate-site error): the block imports `<config>/hosting/proof/<host>/*.proof` (a glob, so a missing file is a no-op and only logs a warning; one folder per host with the host spelled out, because a flat `<host>.proof*` glob would also match a longer lookalike name's file, which another organization may own), written ahead of the redirect, and the redirect sits in a `handle { }` so the imported `handle` for the proof path wins (`redir` would otherwise run first whatever the written order). A site written by an older daemon has no import line: the forward is answered `acme-proof-forward-failed` ("deploy it again") rather than patched in place. Only a name with no site block yet gets a reserved site (`00-tenant-acme-proof-<request>.caddy`, listed as reserved so sweeps keep it; a deploy that brings its own block for the name removes it first). Every snippet starts with a `# tp-proof-forward request=<id> expires=<iso>` line, so the file is its own record: the end message, an expiry timer and the sweep at attach all find it from the file alone. The target must be a real, non-loopback, non-link-local address that is not one of this server's own.
+
+**Certificate orders for hosted names (`acme-issue-v1`, `acme-issue-one-cert-v1`, `tenant-acme-issue.ts`, `instance/acme-issue-handler.ts`).** `acme-issue-request` makes this server place one order from its own addresses over the HTTP proof with the daemon's own ACME client (`acme/`), which gets one certificate covering every name of the request. It is deliberately not the hosting web server's built-in client, which retries and renews on its own schedule: the control plane owns the schedule. Steps, under the one window lock: route the proof path for the names to the request's socket inside each site's own block (same mechanism as the helper forward, `applyProofRoutes`), answer a nonce on the per-request socket (`<run>/tenant-acme-<id>.sock`, opened to the hosting Caddy by `tp-host setfacl`, which accepts exactly that name shape) and fetch it through this server and through every helper's address with the right `Host` header (Deno's `fetch` ignores a custom `Host`, so `rawProofGet` speaks the request itself; a helper that does not pass it on is left out, a server that does not answer its own check fails the order before the authority is asked), place the order with the answers served on the same socket (`issueCertificateOverHttp01`), then `POST /api/daemon/v1/tls/issued` once per name with the request id and the same pair (the control plane notes a repeat for a name the stored pair covers as served), and finally withdraw the routes. The certificate and key are never written to disk. The account is this server's one per contact address under `<state>/tenant-acme/account/`. `acme-issue-one-cert-v1` tells the control plane it may send a request with several names (apex and www, or more); an older daemon got one certificate per name and so was sent only single-name rows. Events: `acme-issue-event` `started`, then `issued` (with the certificate's expiry) or `failed` with the client's plain reason; nothing logs or sends the pair except the capture call.
+
+**Only names this server hosts (`instance/acme-names-guard.ts`).** Before an `acme-issue-request` is started or an `acme-proof-forward` is written, every requested name must be one a tenant site block on this server answers on (`readHostedSiteNames` in `ingress.ts`: the live `hosting/sites/*.caddy` snippets, minus the daemon's reserved sites, so the control plane's own names, the tunnel site and proof-forward sites never count; exact match after folding, so `*.a.com` does not host `x.a.com`). Any other name answers `failed` with a plain sentence ("x.com is not served by this server, so no certificate was ordered") and nothing is ordered or written; unreadable sites fail closed. The forward checks under the sites lock. A consequence: a hosting assigned to a server but not yet deployed there gets no order from that server until its first deploy writes the site; the order is retried on the control plane's schedule.
+
+**The daemon's own ACME client (`acme/`).** A port of the control plane's client lives in `acme/` with its own guide (`acme/AGENTS.md`): one certificate for several names over the same proof socket and routes, the account under `<state>/tenant-acme/account/`. Server-placed orders use it (`runOrder` calls `issueCertificateOverHttp01`).
+
+Restart safety of an order: the order runs inside the daemon with one 3-minute deadline, below the 15 minutes the local proof routes live. At start-up, before any request is taken, `sweepTenantAcme` still stops every `turbopanel-tenant-acme@*` unit an older release left running (the template unit stays installed by the `hosting-caddy` role and is never started now) and deletes the per-request folders, any certificates that issuer stored and leftover sockets; the accounts (`account/`, and the old issuer's `caddy/acme`) are kept. A re-send of a request the handler is still running is ignored (`AcmeIssueHandler` keeps the open request ids). A `started` event the link could not carry begins nothing. A rate-limit failure is reported in the words "rate limited" because the control plane's one-hour wait keys on them.
+
+**Certificate folder cleanup (`tls-cleanup.ts`).** `materializeTlsCertificates` only ever wrote `<tlsDir>/<tlsId>/`, so a pin that moved or an environment that was torn down left its key on the server. After a site is live (deploy) and after an environment's site is removed and hosting Caddy reloaded, `removeUnreferencedTlsFolders` deletes a folder only when its name is a certificate UUID, no file of any name in `hosting/sites` (environment, reserved, tunnel, quarantined) mentions the id, and nothing in it is newer than ten minutes (a deploy materializes before it writes the site). If the sites folder cannot be read, nothing is removed. Both calls run inside the hosting sites lock. `scripts/purge.sh` needed no change for the issuer and the proof handlers: they sit in trees it removes whole (`/etc/turbopanel/hosting/proof`, `/var/lib/turbopanel/tenant-acme`, `/run/turbopanel/tenant-acme-*.sock`) and its `turbopanel*` unit patterns already stop the issuer instances and remove the template unit (tests added).
+
 **Managed engines are a separate path** (`../managed/AGENTS.md`): platform-owned
 compose + config under `<stateDir>/managed/<managedId>/`, native ports only, no
 hosting Caddy, no tenant Traefik / hosting-ingress network, no user compose merge,
@@ -130,14 +142,40 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 6. Decrypt `variableMaterial[]` via `POST /api/daemon/v1/secrets/decrypt` and
    write Compose standalone secret files under
    `<runDir>/deployments/<projectId>/<environmentId>/secrets/` (`secret-runtime.ts`,
-   mode `0600`, dir `0700`). Files are only written before `up`. Once the new release is up (and its
+   mode `0444`, dir `0700`: any user inside the one container a file is bound
+   into can read it, so images with a fixed non-root user work, while the
+   private folder stops host accounts; a tool that refuses a world-readable key
+   file needs a per-service owner, which is not done yet). Files are only
+   written before `up`. Once the new release is up (and its
    post-deploy hooks passed; for a sequential deploy, after the health gate),
    `pruneStaleSecretFiles` removes every file in that directory that is not in
    the deploy's secret plan (a detached binding's old password, a removed
    variable, a half-written `.tmp`), and an empty plan removes the whole
    directory. A failed, cancelled or reverted deploy never prunes: the release
    still running, or the one restored, may point at those files. Rehydrate never
-   prunes. Write the payload `.env` (non-secrets only, `0640`)
+   prunes.
+   **Generated config files** (`config-files.ts`): `configFiles[]` on the
+   payload (feature `deploy-config-files-v1`) is a list of files, each with
+   ordered `parts` of literal text or a `secretKey`. The daemon decrypts the
+   named keys from `variableMaterial[]` through the same `decryptEnvelopes`
+   seam as secret files (so `captureDecryptedSecrets` puts every value in the
+   deny-set), joins the parts, and writes
+   `<runDir>/deployments/<p>/<e>/configs/<relativePath>` (`0444`, folder `0700`,
+   daemon-owned, on the `/run` tmpfs; never a state folder, so no state leaf).
+   A deploy whose `secretKey` has no material is refused before any config file
+   is written (`requireAll`); rehydrate (`requireAll: false`) skips a file that
+   lacks any value and never writes one with a gap. A text-only file needs no
+   decrypt and no control-plane answer. Error text names the file and key,
+   never content. The parts (no values) are kept in `deployment.json`
+   `configFiles` so a boot rebuilds the files; the missing-file guards at boot,
+   `start` and `restart` count them (a deployment with config files and no
+   secret plan is covered). The prune rule is the secrets' (after the release
+   is up; an empty list removes `configs/`), and `environment.stop` removes the
+   folder. The target and its `.tmp` must be absent or regular files, and the
+   `.tmp` is opened with `createNew` (`O_EXCL`). Parser limits
+   (`parseConfigFiles`): names match the secret plan rule, are unique and do not end in `.tmp`, text
+   has no NUL, 64 KiB of text per file, 16 files per service, 256 KiB of text
+   per deploy, UTF-8 bytes counted. Write the payload `.env` (non-secrets only, `0640`)
    next to staged `compose.yaml`. Overlay mounts from each entry's **`mounts[]`**
    (`apply-storage-volumes.ts`) — docker volumes emit
    `volumes.<name> = { name, external: true }` so Compose mounts the
@@ -223,8 +261,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    with a `Caddyfile.next` that imports it, and `tpedge` runs the pinned
    `caddy validate --adapter caddyfile --config …/Caddyfile.next` (sudoers
    `TP_HOSTING_CADDY_VALIDATE`; the candidate keeps its throwaway CA under
-   `/var/lib/turbopanel-hosting-caddy/validate` because the account has no
-   home). A set Caddy refuses (the same hostname in two environments, a bad
+   `<state>/hosting-caddy/validate`, inside the unit's `StateDirectory=`, which
+   systemd makes the first time the unit starts, because the account has no
+   home; an empty candidate on a host whose unit has never started is not
+   validated, since nothing is hosted yet and the folder is not there to
+   write). A set Caddy refuses (the same hostname in two environments, a bad
    line, a certificate file that is missing or unreadable) fails the deploy
    with Caddy's message and changes nothing. A validated snippet goes in through
    `<env>.caddy.tpnew` and an atomic rename, with the old one kept as
@@ -306,7 +347,9 @@ The control plane names one Compose project per **environment** (it used to be o
 ## Git-backed releases
 
 Moved to [`release/AGENTS.md`](./release/AGENTS.md) — clone/fetch flow, release
-directories, deploy keys, build/run hooks.
+directories, deploy keys, build/run hooks. The image-built lane takes
+`build.kind: image` (the old value is still accepted) and reports
+`builderFrontendVersion` / `builderPlanVersion` on its release records.
 
 ## Streamed transcript capture (execution logs)
 
@@ -380,6 +423,31 @@ unchanged — the transcript is a **separate, never load-bearing** channel.
   (`running` → `failed` / `skipped`, `pending` → `skipped`) goes out before
   `command-outcome`. The planner only runs when the router supplied a sender;
   hermetic callers get the no-op reporter and never probe the host.
+  Step titles are book title case ("Set Up Certificates", "Check Service
+  Health"); detail lines are sentence case. The health step ends under the
+  title of its result, sent as a renamed step with the same id (receivers
+  keep showing a title they do not know): *Service Is Healthy* only when
+  Docker reported `healthy` ("Healthy after 12 s"), *Service Is Running* when
+  no health check is configured and the container stayed up for the stable
+  window, *Service Is Reachable* for a native app that answered an HTTP
+  request, *Service Health Not Checked* when nothing in the deploy reports
+  health (only finished one-shot jobs, or no containers), and
+  *Service Did Not Become Healthy* / *Service Did Not Answer* on a timeout.
+  The in-place strategy waits for health too (same gate, right after `up -d`,
+  before the post-deploy hooks); a failure fails the deploy with "The
+  containers started but …" and rolls nothing back, since the old version was
+  replaced in place and the new containers stay up for inspection.
+  Cost: a service with no health check adds at least the stable window (30 s)
+  to every in-place deploy, and a wait that never ends is capped by
+  `healthTimeoutSeconds` (default 120 s), which cannot be cancelled once the
+  deploy is past its commit point. The gate judges only the services
+  `compose config --services` lists (profile services that are off are not
+  there), ignores `compose run` leftovers, and skips the wait entirely when no
+  service is enabled. A stack that passed before can now fail: a job that
+  exits non-zero, a restart loop, or a health check that only passes after a
+  post-deploy hook (the gate runs before the hooks, as on sequential).
+  While waiting it shows one updating line ("Attempt 4, 6 s of up to 120 s");
+  the transcript gets a line only when the waiting reason changes.
 - **Wire format** — the ingest contract counts **chunks**, not lines: `seq` is
   zero-based and gap-free per command (the first upload is always `seq = 0`),
   and `bytes` is standard base64 of the chunk's raw UTF-8 transcript bytes.
@@ -440,7 +508,7 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `docker compose config --format json`, before the overlay, publish, hooks or
   `up`, every host path the tenant document mounts or reads is checked on the
   host: bind volumes, bind-type `driver_opts` devices, `configs`/`secrets`
-  `file:` (except the secrets the daemon rewrote to its run dir), build
+  `file:` (except the secrets and configs the daemon rewrote to its run dir), build
   contexts / Dockerfiles / additional contexts, and — from the staged YAML,
   because `config` inlines or cannot render them — `env_file`, `label_file`
   and build SSH keys. Each source is mapped from `.staging` to the live
@@ -467,7 +535,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `secrets` whose top-level `file` is outside the dir (daemon-rewritten
   secrets pass), `extra_hosts` to `host-gateway`, loopback, link-local,
   unspecified, multicast or metadata addresses, and remote contexts on a
-  non-public IP, numeric, single-label or reserved host. A `RUN` step is root
+  non-public IP, numeric, single-label or reserved host (local network
+  endings such as `.lan` included). A `RUN` step is root
   on the engine until builds leave it (unprivileged-builds phase 2), and anyone
   who can deploy may define one. The control plane runs the same rules
   (`src/features/compose/build-policy.ts`).
@@ -504,7 +573,7 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `.env` (non-secrets, `0640`) +
   `deployment.json` (`DEPLOYMENT_MANIFEST_FILENAME`, version 3 — version 2 is still read: project /
   environment / server ids, generation, project name, compose sha256, replica
-  counts, optional `secrets[]` plan, optional `serviceIds` map — compose service
+  counts, optional `secrets[]` plan, optional `configFiles[]` (parts, no values), optional `serviceIds` map — compose service
   name → service UUID, which is what lets the on-demand log tail check container
   ownership from deployment state instead of live container labels — and optional
   `releases[]`, one row per applied `sourceMaterial[]` entry
@@ -536,7 +605,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
 - **Secrets:** durable `compose.yaml` must not be the long-term secret store.
   Compiled YAML references Compose standalone `secrets.file` paths under
   `/run/turbopanel/deployments/<projectId>/<environmentId>/secrets/` (mode
-  `0600`). Values arrive as `tpdaemon` envelopes in `variableMaterial[]`.
+  `0444` in a `0700` folder, see step 6). Values arrive as `tpdaemon`
+  envelopes in `variableMaterial[]`.
   After JWT session, `rehydrateLocalDeployments` (`rehydrate-deployments.ts`)
   calls `POST /api/daemon/v1/deployments/secrets/rehydrate`, decrypts via
   `/secrets/decrypt`, rewrites files, then `docker compose up -d` (first
@@ -545,6 +615,15 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   `deployment.desiredGeneration`; the daemon also refuses to materialize or
   `compose up` when the returned generation differs from the local manifest.
   Lifecycle `start`/`restart` rehydrate first when files are absent.
+  The request names every local deployment, secrets or not; the answer's
+  `gone[]` lists those whose environment the control plane no longer has (a
+  deleted project or environment), and boot does not `compose up` them. A
+  failed request or an older control plane (no `gone`) starts everything as
+  before. Nothing is deleted on that signal. `environment.stop` removes the
+  daemon's own files (manifest, compose files) right after the containers are
+  down, before the remaining cleanup, so a later failure cannot leave a stopped
+  stack that the next start brings back; relative-bind data stays unless the stop is a
+  delete (`removeDeploymentDir`).
   `environment.stop` deletes the `/run` tree. Build secrets belong on Compose
   `build.secrets`, not `build.args`.
 - **`-f` argv:** `composeFileArgs(projectName, paths)` builds
@@ -555,8 +634,8 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   call `resolveEnvironmentDeploymentDir` then `resolveDeployedComposePaths`,
   which reads the compiled `compose.yaml`.
   Lifecycle `start`/`restart` call `ensureDeploymentSecretFiles` when
-  `deployment.json` lists `secrets[]`. Stop also `rm -rf`s the matching
-  `/run/.../secrets` tree.
+  `deployment.json` lists `secrets[]` or `configFiles[]`. Stop also `rm -rf`s the
+  matching `/run/.../secrets` and `/run/.../configs` trees.
 - **Local service preflight is tag-aware:** `composeHasContainerServices` /
   `composeFilesHaveContainerServices` parse `!reset` / `!override` so the
   container-services gate before Docker does not fail solely because of
@@ -633,7 +712,21 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 
 1. `docker compose -p <projectName> -f compose.yaml down --remove-orphans --volumes`
    against `resolveDeployedComposePaths` (the compiled `compose.yaml`, and nothing
-   else) — idempotent no-op when no compose file exists.
+   else) — idempotent no-op when no compose file exists. `--volumes` removes
+   only volumes Compose made itself (anonymous ones, or ones whose compose entry
+   sets its own `name:`). Every registered volume is mounted `external: true`
+   by the overlay (`buildStorageVolumesFragment`), so it stays.
+   - Only when the payload carries `removeVolumes` (the Destroy dialog's
+     "Also Delete the Data Volumes", wire feature
+     `environment-stop-remove-volumes-v1`): after the stack and any containers
+     under an earlier project name are down, each named volume is removed by
+     its exact name (`src/commands/stop-environment-volumes.ts`). Names are
+     storage ids (the parser refuses anything else); a volume any container
+     still uses is kept, removal is `docker volume rm` without `-f`, and
+     nothing throws. Each volume comes back in `volumes[]` as `removed`,
+     `absent`, `kept` or `failed` (with a reason), and in the transcript. It
+     also runs when the compose file is already gone, so data an earlier
+     Destroy kept can still be deleted.
 2. Best-effort `docker network rm` for payload `fabricNetworks[]` (`tpn_*`)
    then prune those names from `state.json` so boot re-reconcile does not
    recreate them. Missing / active-endpoint errors must not fail the stop.
@@ -966,19 +1059,46 @@ Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next service
 Moved to [`site/AGENTS.md`](./site/AGENTS.md) — engine drivers, vhost
 materialization, PHP-FPM wiring, managed-directory sites.
 
-## Hiding web server names (`hideWebServerNames`)
+## Hiding web server names (`hideWebServerNames`) and Via (`sendViaHeader`)
 
 `environment.deploy` carries an optional `hideWebServerNames` (absent = off, so
 an older control plane changes nothing; the control plane sends the effective
 per-server value, on by default). When true: every hosting Caddy site block
-(HTTP, HTTPS, `www` redirects) gets `header { -Server -Via -X-Powered-By defer }`
-(`siteSnippet`; `defer` so the removal runs after the proxy copied the
-upstream's headers, which also covers Traefik-routed containers); each nginx
-vhost gets `server_tokens off`; each Apache vhost gets `ServerSignature Off`
-and `ServerTokens Prod` (server-wide, so written beside the `Listen` lines,
-outside the block). OpenLiteSpeed already runs with `showVersionNumber 0`.
-It applies on the environment's next deploy; there is no fan-out command.
-PHP's `expose_php` stays off in the runtime config; nothing here edits it.
+(HTTP, HTTPS, `www` redirects) and the catch-all delete `Server` and
+`X-Powered-By` in a deferred `header` block (`siteSnippet`,
+`hostingFallbackSnippet`; `defer` so the removal runs after the proxy copied
+the upstream's headers, which also covers Traefik-routed containers); each
+nginx vhost gets `server_tokens off`; each Apache vhost gets
+`ServerSignature Off` and `ServerTokens Prod` (server-wide, so written beside
+the `Listen` lines, outside the block). OpenLiteSpeed already runs with
+`showVersionNumber 0`. PHP's `expose_php` stays off in the runtime config;
+nothing here edits it.
+
+`sendViaHeader` (feature `hosting-via-header-v1`, Send Via Header, off by
+default, resolved per server by the control plane) alone decides Caddy's
+`Via: 1.1 Caddy`: true keeps it, false adds `-Via` to the same block. Absent
+follows `hideWebServerNames` (Via goes with the names), which is what an older
+control plane always got, so Via does not change until a control plane sends
+the field (the site files still gain the `handle_errors` below when names are
+hidden). The control plane's own Caddy is separate and always strips both.
+
+Whenever the block deletes anything, a site block also gets `handle_errors`
+with the same deferred block: Caddy's own error responses (a 502 when the
+upstream is down) skip the site-level block and would otherwise still send
+`Server: Caddy`. It writes no response itself, so the status and empty body
+stay as Caddy sends them (`caddy-hosting-headers.test.ts` checks this against
+the pinned Caddy). The catch-all never gets `handle_errors`: its `http://` and
+`https://` blocks match every host, so their error routes would become the
+fallback for every other site's errors and impose the last deploy's choices on
+sites that delete nothing. Its `respond` never raises an error, so nothing is
+lost.
+
+Both apply on the environment's next deploy; there is no fan-out command. The
+catch-all (`00-fallback.caddy`) is shared by every environment on the server,
+so it carries the choices of the last deploy; at daemon start a missing one is
+re-derived from the written sites (`lastKnownHeaderChoices`: any site deletes
+`Server`, names hidden; Via kept only when no site deletes it; no readable
+site, names hidden and Via stripped).
 
 ## The PHP shell dispatcher
 
@@ -1009,7 +1129,9 @@ failing at `execve`. Ordering uses `sort -V`, so 8.10 comes after 8.4.
 ## Scheduled jobs
 
 Moved to [`cron/AGENTS.md`](./cron/AGENTS.md) — per-service scheduled command
-units.
+units. A PHP site's post-deploy commands, background workers and PHP patch
+restarts are in [`site/AGENTS.md`](./site/AGENTS.md); they share the cron
+unit's sandbox (`principalHardeningLines`, `quoteExecArg`).
 
 ## SSH access
 
@@ -1065,6 +1187,18 @@ own reader and is not loaded by any engine.
 - Transition: while a running container still routes HTTP (`traefik.http.*` labels) without the routed label, the shared Traefik is rendered without the constraint (`legacyHttpContainersPresent`), so no site goes dark; the render after the last such container is redeployed turns the constraint on. Both the legacy docker.sock file and the socket-proxy shape go through the same `traefikCompose`.
 - The resolved-model policy also refuses, without host-level approval, published host ports inside the platform's bands (`RESERVED_HOST_PORT_RANGES`) and `gpus` / `group_add` / device reservations (the control plane gates `gpus` and `group_add` the same way); it always refuses an authored network that is the hosting-ingress or managed network. Not checkable in the daemon: a volume's `name:` / `external:` pointing at another project's volume — the control plane rewrites its own storage volumes to external named volumes, so only its host-access gate can tell. The legacy-container check lists stopped containers too (`docker ps -a`).
 
+## Project caches and helper ports (`project-cache-v1`)
+
+`environment.deploy` may carry `caches` and `helperReach`, applied right after
+`ensureDeployPrincipals` and before the sites: helper ports first (the deploy
+fails if the walls cannot be rebuilt), then the caches (a cache that fails is a
+warning and a per-cache result). `environment.stop` removes the caches by the
+host index and closes the helper ports before accounts are retired; data goes
+only when the destroy sent `removeVolumes`. `assertComposePolicy` exempts exactly
+the injected `127.0.0.1:<hostPort>:<containerPort>` publish of a service named in
+`helperReach` and refuses a `helperReach` entry with no such publish. Detail:
+`cache/AGENTS.md`, `reach/reach-ports.ts`.
+
 ## Cancelling a running deploy (`deploy-cancel.ts`)
 
 The control plane sends the cell message `deploy-cancel { id, commandId }`
@@ -1080,14 +1214,14 @@ depends on has changed.** The first step that changes what is serving calls
 `token.commit(where)` (synchronous, atomic with the abort check). After it the
 deploy runs to its normal end and a cancel answers `too_late`. Commit points, in
 the order they occur: the first release switch inside `applySourceReleases`
-(native promote, rollback / re-cut-over; a Railpack image record is not a switch);
+(native promote, rollback / re-cut-over; an image-build record is not a switch);
 the host-native phase (reclaim of removed release trees, sites, native apps, the
 cron sweep) when the deploy has any of that to do (`hostNativeCutoverPending`;
 any doubt counts as yes); retiring an earlier compose project or the zero-service
 removal; pre-deploy hooks; the sequential engine's `commit` step (before the old
 version is stopped); and right before `compose up` on the in-place path. Before
 the first of them everything is cancellable: ingress and principals, git clone,
-the source build (sandbox unit), the Railpack image build, `docker compose
+the source build (sandbox unit), the image build, `docker compose
 build` / `pull`.
 
 On a cancel the deploy throws `DeployCancelledError`, whose message always starts
@@ -1099,7 +1233,7 @@ path), `revertPublishedCompose` puts `previous/` back, or removes the published
 files on a first deploy.
 
 Children are stopped through an `AbortSignal` (`AbortSignal.any` with each tool's
-own timeout): git, the unsandboxed build shell, the Railpack tools and every
+own timeout): git, the unsandboxed build shell, the image-build tools and every
 streamed docker call. A sandboxed build is stopped the way its timeout stops it
 (kill the `sudo` client, then `systemctl stop` the build unit, then take the work
 tree back). A cancel for a command that has not started yet answers
@@ -1115,3 +1249,110 @@ slot frees.
 ## Hostname takeover (`takeoverHostnames`)
 
 `environment.deploy` may carry `takeoverHostnames[]` (`{ hostname, fromEnvironmentId }`). Without it a hostname already served by another environment's snippet in `hosting/sites/` refuses the deploy ("already served by another environment"). With it, `assertHostingNamesFree` takes a name only from the snippet file of the environment named for that name, and refuses if any other snippet also holds it or if a file that mentions the name has an address line `caddy-snippet.ts` cannot read. Names are compared lowercase and as punycode (`hostname-fold.ts`). All files are planned first, written through `.tpnew`, hosting Caddy reloads once, and every file and ACME manifest is put back if the reload is refused. A file left with no site block and nothing else is removed; a file that still has an import, global block or snippet definition is kept. An older control plane sends nothing.
+
+## Tunnel forwarding (`server.tunnel.routes`)
+
+A tunnel connector reaches hosting Caddy on `https://localhost`; Caddy decides.
+Names that run here are locked (`hostings[].tunnel`, `siteSnippet`): only
+loopback and the listed peer addresses are answered, everyone else is dropped.
+Names that run on other servers have forward blocks in the reserved
+`sites/10-tunnels.caddy` (`tunnel-caddy.ts`), written by `tunnel-apply.ts` from
+the whole-server table and re-rendered by every environment deploy and removal
+(`tunnel-state.ts`, table in `hosting/tunnel-routes.json`), which drops any name
+now served here so Caddy never sees a name twice. The hop uses the
+organization's certificate: material under `hosting/peer/<id>/`, trusted only for
+the fixed name `tp-peer.internal`, which a small reserved site loads on the
+receiving server (Caddy picks a certificate by the connecting name). That site
+has no `bind`: Caddy makes one server per set of listen addresses, so a bound
+peer site would be a server of its own holding only that name, and a forwarded
+request for a real hostname arriving on the bound address would get an empty
+answer. It shares the everywhere-listening server instead, and its `remote_ip`
+check lets only the listed peers in (`listenAddresses` is still accepted on the
+wire and changes nothing). A site that binds to one address (`bindAddress`)
+listens on its own address set, so a peer reaching it needs that set to include
+the peer-facing address (`extraBind`); the peer name is not served there yet.
+Visitor
+addresses are trusted per `reverse_proxy` (loopback and peers), never
+server-wide. A tunnel block never asks for a public certificate. All files are
+under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
+
+**The lock follows the table** (feature `tunnel-lock-follow-v1`). The table may
+carry `inbound`: every tunnel name whose site runs here, with the exact
+addresses of the other servers that carry it (empty when none does). The
+daemon stores it with the table and `tunnel-lock.ts` rewrites, in the HTTPS
+block of each listed name, only the lines it wrote itself: the
+`@tp_outside not remote_ip` lock and every `trusted_proxies` line get exactly
+those peers (loopback always first), so a new carrier is let in and a removed
+one is shut out without a site deploy. A block with no lock gets one only
+when its `inbound` entry says `lock: true` (feature `tunnel-lock-add-v1`, sent
+by the control plane for a local-only name): `tunnel-lock.ts` then turns the
+block into what a deploy with a lock renders, byte for byte (the lock lines
+after the `tls` line, `trusted_proxies` on every `reverse_proxy`, loopback in a
+`bind`, the plain-HTTP redirect block of that name removed). A block with no
+`tls` line (an automatic certificate) or no `reverse_proxy` (a `www` redirect
+name) is left alone. Only a table apply adds a lock: the deploy's relock
+(`relockForDeploy`) never does, so a name removed from its tunnel that is still
+in the stored table stays public when its site is deployed again. An entry
+without `lock: true` never adds a lock, and nothing is ever opened: an absent
+or empty `inbound` leaves the deployed lock as it is. The deploy-render test in
+`tunnel-lock.test.ts` fails if the deploy's block shape changes without this
+module following. A bound site (`bind` holding loopback) also gets this server's
+own `listenAddresses` added once it has peers, as a deploy would; nothing is
+taken out of a `bind`. `tunnel-apply.ts` judges the changed site files together
+with the forward file in one candidate set and reloads once; a refusal leaves
+every file and the stored table as they were. When the forward file alone
+would load, the refusal is about the site files, and the error names them. A table that lists only
+`inbound` names is kept, not treated as empty. A deploy takes the stored peers
+for its tunnel names too (`relockWithStoredPeers`), so a deploy prepared before
+a placement change never puts the old peers back; the same table resent after
+a deploy is checked against the site files, not only the forward file. Site
+files written by an older daemon have the same lines, so they follow the first
+table that carries `inbound` with no deploy.
+
+**Newest table wins (feature `tunnel-table-generation-v1`).** A table and a
+deploy can cross, so a deploy could apply older stored peers and let a removed
+carrier back in until the next table. The control plane may send a `generation`
+(a non-negative safe integer, one counter for the organization's whole table,
+not per tunnel) on `server.tunnel.routes` and in each `hostings[].tunnel` of a
+deploy. The contract: it sends `max(previous + 1, current Unix time in
+milliseconds)`, so the counter survives a restore from backup or a wipe.
+Two records exist. The applied table's own generation is stored inside the
+stored table (`TunnelState.generation`, written with it). The high-water file
+`hosting/tunnel-generation.json` (`tunnel-state.ts`) holds the highest generation
+seen, from a table or a deploy, and outlives an emptied table. A table lower than
+the higher of the two is not applied (answer: not applied, with a warning); equal
+or higher applies. A deploy whose highest generation is above the stored table's
+own keeps its own peers, however many deploys at that generation come before
+the table does, and raises the high-water file; otherwise it takes the stored
+peers. With no stored table the high-water file is the comparison. Without a
+generation nothing changes (older control plane), and a table with no generation
+clears the high-water file: only a downgraded or reset control plane sends one.
+Manual recovery if a counter ever drops under the record: delete
+`hosting/tunnel-generation.json` and resend the table (purge removes it). A
+failure to write the high-water file is logged and never fails a table or deploy.
+A deploy at or below the record with no stored `inbound` cannot be corrected
+here; the next table does it.
+A stored table without a generation reads as -1, so any deploy with a generation
+keeps its own peers (the old behaviour). A deploy below the record but above the
+stored table's own generation (for example at 6 after a deploy at 7, with the
+table at 5) also keeps its own peers until the next table. A table resent with
+the same content but a different generation is applied in full, so the stored
+table's generation always follows the table last accepted.
+
+## Deploy Hooks
+
+- **Deploy hooks** — `preDeployCommand` / `postDeployCommand` run **inside the
+  service container** (`docker compose run --rm --no-deps -T --entrypoint sh`
+  before `up`, `compose exec -T … sh -c` after), never via a host shell; the
+  contract requires `confinement: "compose-service"` on any command-bearing
+  hook and `deploy-environment.ts` refuses hooks naming a service the deploy
+  does not run (`assertHooksConfined`). The control plane only emits hooks
+  when the organization's owner enabled `deployHooksEnabled`
+  (`PUT /organizations/:id/deploy-hooks`; `parseServiceOptions` drops the
+  command fields otherwise).
+
+## Scope Summary (Former Root Index Entry)
+
+| Subsystem | Read before editing | Covers |
+|---|---|---|
+| **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH), `src/deploy/acme/AGENTS.md` (the daemon's own ACME client) |

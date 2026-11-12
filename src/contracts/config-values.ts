@@ -188,3 +188,29 @@ export function safeConfigToken(field: string, value: string): SafeConfigToken {
   }
   return value as SafeConfigToken;
 }
+
+/** An absolute folder path a vhost names (see {@link safeConfigPath}). */
+export type SafeConfigPath = Brand<string, "SafeConfigPath">;
+
+const CONFIG_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
+
+/**
+ * An absolute folder path for a vhost: `/` plus clean segments from a closed
+ * character set (no space, quote, backslash, glob, `$` or control), no empty,
+ * `.` or `..` segment and no trailing `/`. The path is built from the owner's
+ * folder, but it ends up inside a quoted directive of a root-loaded config, so
+ * it is checked at the sink like every other value there.
+ */
+export function safeConfigPath(field: string, value: string): SafeConfigPath {
+  const segments = value.split("/").slice(1);
+  if (
+    !CONFIG_PATH_RE.test(value) || value.length > 4096 ||
+    segments.some((part) => part === "" || part === "." || part === "..")
+  ) {
+    throw new ConfigValueError(
+      field,
+      "must be an absolute path of letters, digits and . _ - segments",
+    );
+  }
+  return value as SafeConfigPath;
+}

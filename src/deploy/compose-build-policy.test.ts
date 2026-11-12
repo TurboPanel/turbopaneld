@@ -320,6 +320,29 @@ test("ipScope classifies literals and rejects non-literals", () => {
   assertEquals(ipScope("ff02::1"), "internal");
   assertEquals(ipScope("255.255.255.255"), "internal");
   assertEquals(ipScope("2001:db8::1"), "public");
+  for (
+    const [address, scope] of [
+      // 6to4 (`2002::/16`): the IPv4 address sits in bytes 2 to 5.
+      ["2002:7f00:1::1", "internal"],
+      ["2002:a9fe:a9fe::", "internal"],
+      ["2002:c0a8:101::1", "private"],
+      ["2002:808:808::1", "public"],
+      // The old IPv4-compatible form (`::a.b.c.d`).
+      ["::127.0.0.1", "internal"],
+      ["::7f00:1", "internal"],
+      ["::10.0.0.5", "private"],
+      ["::8.8.8.8", "public"],
+      ["::1", "internal"],
+      // Teredo (`2001::/32`): the server, then the client inverted.
+      ["2001:0:a00:5::f7f7:f7f7", "private"],
+      ["2001:0:808:808::f5ff:fffe", "private"],
+      ["2001:0:808:808::f7f7:f7f7", "public"],
+      // Local-use NAT64 (`64:ff9b:1::/48`).
+      ["64:ff9b:1::808:808", "private"],
+    ] as const
+  ) {
+    assertEquals(ipScope(address), scope, address);
+  }
   for (const bad of ["example.com", "1.2.3", "1.2.3.256", "1::2::3", "g::1"]) {
     assertEquals(ipScope(bad), null, bad);
   }

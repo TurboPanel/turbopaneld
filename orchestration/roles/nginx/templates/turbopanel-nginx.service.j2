@@ -3,6 +3,9 @@ Description=TurboPanel nginx (site hosting)
 After=network.target
 # Prefer the vendored unit over any leftover distro nginx package unit.
 Conflicts=nginx.service
+# Never give up retrying: a start limit left this unit failed after a burst of
+# failed starts (a full disk, for example) until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=forking
@@ -19,6 +22,8 @@ ExecReload={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel
 ExecStop={{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx -c {{ turbopanel_config_dir }}/nginx/nginx.conf -s quit
 Restart=on-failure
 RestartSec=5
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

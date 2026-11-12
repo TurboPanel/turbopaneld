@@ -66,7 +66,8 @@ const DOCKER_SOCKETS = [
 /**
  * Vendor subtrees the daemon process itself writes at runtime: uv's download
  * cache and the cloudflared connector it vendors on demand for its own
- * tunnels (run as the daemon, never as root). Everything else under the
+ * tunnels (the daemon downloads and verifies it; each connector then runs
+ * as its own service under a throwaway account, never as the daemon or root). Everything else under the
  * install root is root-owned and immutable to the daemon
  * (`orchestration/roles/turbopanel-user`, mirrored as
  * `turbopanel_daemon_vendor_cache_dirs`), so a compromised daemon cannot
@@ -159,6 +160,11 @@ export const DAEMON_READ_PATHS: readonly string[] = [
   "/etc/systemd",
   "/etc/docker",
   "/etc/php",
+  // The installed PHP patch versions, and whether a package run is still
+  // under way (`updates/` holds files until dpkg finishes), for the restart
+  // pass after a PHP package update. Never anything else under /var/lib/dpkg.
+  "/var/lib/dpkg/status",
+  "/var/lib/dpkg/updates",
   "/etc/apache2",
   "/etc/nginx",
   "/etc/caddy",
@@ -305,7 +311,8 @@ export const DAEMON_DENY_NET: readonly string[] = [
  * other permission may be unscoped on a production path.
  *
  * - `net`: the control-plane origin is operator configuration, ACME probes
- *   dial tenant domains, metrics scrape container addresses, and ProxySQL
+ *   dial tenant domains, the daemon's own ACME client reaches the Let's
+ *   Encrypt directory host (kept to that host in code, `deploy/acme/client.ts`), metrics scrape container addresses, and ProxySQL
  *   listens on a configured bind — Deno has no wildcard or CIDR host grant,
  *   so a static list cannot express it. `--deny-net` closes the metadata
  *   endpoints instead.

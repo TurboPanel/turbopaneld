@@ -69,7 +69,7 @@ Pair daemon builds with a compatible control plane channel. See [compatibility m
 Obtain a license from your TurboPanel organization, then run the official installer:
 
 ```sh
-curl -fsSL turbopanel.sh | TURBOPANEL_LICENSE=<base64url-license> sh
+curl -fsSL https://turbopanel.sh | TURBOPANEL_LICENSE=<base64url-license> sh
 ```
 
 For self-hosted control planes, add `TURBOPANEL_HOST=https://<instance-host>:8443`.
@@ -113,7 +113,7 @@ dev/console
 
 That boots the Vagrant guest with sibling checkouts mounted, runs the daemon from source via Deno, and converges the dev overlay. Details: [Local development](https://turbopanel.io/docs/getting-started/development?utm_source=github-daemon-readme).
 
-Maintainer conventions and path model: [AGENTS.md](./AGENTS.md). Pull requests are accepted under the [Contributor License Agreement](https://github.com/TurboPanel/.github/blob/trunk/CLA.md).
+Maintainer conventions: [AGENTS.md](./AGENTS.md) (index of the per-directory guides); path model: [src/paths/AGENTS.md](./src/paths/AGENTS.md). Pull requests are accepted under the [Contributor License Agreement](https://github.com/TurboPanel/.github/blob/trunk/CLA.md).
 
 ## License
 

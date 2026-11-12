@@ -3,7 +3,10 @@ import { join } from "@std/path";
 import { DAEMON_ROOT } from "./assets.ts";
 import {
   checkKey,
+  exitCodeFor,
   type KeyMeta,
+  type KeyReport,
+  renderIssueBody,
   runKeyChecks,
 } from "../../scripts/check-repo-keys.ts";
 import { readPgpKey, sha256Hex } from "../../scripts/lib/pgp-key.ts";
@@ -177,6 +180,8 @@ test("runKeyChecks passes when the live key matches and flags a missing or chang
     assertEquals(report.problems.length, 1);
     assertStringIncludes(report.problems[0]!, "could not fetch");
   }
+  assertEquals(exitCodeFor(same), 0);
+  assertEquals(exitCodeFor(offline), 2);
 
   const other = syntheticKey(1_700_000_000, null);
   const changed = await runKeyChecks(
@@ -187,6 +192,33 @@ test("runKeyChecks passes when the live key matches and flags a missing or chang
   for (const report of changed) {
     assertStringIncludes(report.problems.join("\n"), "live key fingerprint");
   }
+  assertEquals(exitCodeFor(changed), 1);
+  assertEquals(exitCodeFor([...offline, ...changed]), 1);
+  const body = renderIssueBody(changed);
+  assertStringIncludes(body, "### docker");
+  assertStringIncludes(body, "live key fingerprint");
+  assertEquals(renderIssueBody(same).includes("###"), false);
+  const expiring: KeyReport[] = [
+    { name: "docker", problems: ["key expires in 12 days (x)"], notes: [] },
+  ];
+  assertEquals(exitCodeFor(expiring), 3);
+  assertStringIncludes(renderIssueBody(expiring), "expires soon");
+  assertEquals(
+    exitCodeFor([...expiring, {
+      name: "b",
+      problems: ["could not fetch u"],
+      notes: [],
+    }]),
+    3,
+  );
+  assertEquals(
+    exitCodeFor([...expiring, {
+      name: "c",
+      problems: ["live key fingerprint x"],
+      notes: [],
+    }]),
+    1,
+  );
 });
 
 test("the key reader handles old-format, long and five-byte packet lengths", async () => {

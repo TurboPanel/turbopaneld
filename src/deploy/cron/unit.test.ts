@@ -3,6 +3,7 @@ import { resolveLayout } from "../../paths/layout.ts";
 import {
   CRON_RANDOMIZED_DELAY_SEC,
   CRON_UNIT_PREFIX,
+  cronRandomizedDelaySec,
   cronServiceContent,
   cronServicePath,
   cronTimerContent,
@@ -88,10 +89,8 @@ test("cronServiceContent quotes argv and hardens the oneshot service", () => {
 test("cronTimerContent wires OnCalendar and randomized delay", () => {
   const content = cronTimerContent(baseOpts);
   assertStringIncludes(content, "OnCalendar=*-*-* *:0/5:00");
-  assertStringIncludes(
-    content,
-    `RandomizedDelaySec=${CRON_RANDOMIZED_DELAY_SEC}`,
-  );
+  // Every five minutes spreads by a quarter of the step again, not the default.
+  assertStringIncludes(content, "RandomizedDelaySec=75");
   assertStringIncludes(content, "Persistent=false");
   assertStringIncludes(
     content,
@@ -122,4 +121,35 @@ test("cronTimerContent carries a timezone the control plane appended", () => {
     job: { ...baseOpts.job, schedule: "*-*-* 03:00:00 America/New_York" },
   });
   assertStringIncludes(content, "OnCalendar=*-*-* 03:00:00 America/New_York");
+});
+
+test("cronRandomizedDelaySec gives a per-minute job no spread and keeps the default for slow ones", () => {
+  assertEquals(cronRandomizedDelaySec("*-*-* *:*:00"), 0);
+  assertEquals(cronRandomizedDelaySec("*-*-* *:0/5:00"), 75);
+  assertEquals(cronRandomizedDelaySec("*-*-* *:0/30:00"), 120);
+  assertEquals(
+    cronRandomizedDelaySec("*-*-* 03:00:00"),
+    CRON_RANDOMIZED_DELAY_SEC,
+  );
+  assertEquals(
+    cronRandomizedDelaySec("Mon *-*-* 03:00:00 Europe/Berlin"),
+    CRON_RANDOMIZED_DELAY_SEC,
+  );
+  assertEquals(cronRandomizedDelaySec("hourly"), CRON_RANDOMIZED_DELAY_SEC);
+});
+
+test("cronServiceContent loads the site environment file and pins the PHP series only when given", () => {
+  const plain = cronServiceContent(baseOpts);
+  assertEquals(plain.includes("EnvironmentFile="), false);
+  assertEquals(plain.includes("TURBOPANEL_PHP"), false);
+  const site = cronServiceContent({
+    ...baseOpts,
+    environmentFile: "/etc/turbopanel/site-env/alice/web-0123456789ab.env",
+    phpSeries: "8.4",
+  });
+  assertStringIncludes(
+    site,
+    "EnvironmentFile=/etc/turbopanel/site-env/alice/web-0123456789ab.env",
+  );
+  assertStringIncludes(site, "Environment=TURBOPANEL_PHP=8.4");
 });

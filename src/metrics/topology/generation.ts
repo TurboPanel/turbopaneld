@@ -28,7 +28,7 @@
 import { join } from "@std/path";
 
 import { resolveLayout } from "../../paths/layout.ts";
-import { writeTextFileAtomic } from "../atomic-write.ts";
+import { writeTextFileAtomicOrSkipWhenFull } from "../atomic-write.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import type {
   SlotMapping,
@@ -92,6 +92,23 @@ let sizesNegotiated = false;
 /** Set from the control-plane attach: `true` once it advertises `metrics-v8-sizes`. */
 export function setTopologySizesNegotiated(value: boolean): void {
   sizesNegotiated = value;
+}
+
+let generationOptional = false;
+
+/**
+ * Set from the control-plane attach (and cleared on close): `true` once it
+ * lists `topology-generation-optional-v1`. The generation is still tracked;
+ * it just stays off the wire (samples, `topology-report`, the
+ * `topology_generation_changed` event).
+ */
+export function setTopologyGenerationOptional(value: boolean): void {
+  generationOptional = value;
+}
+
+/** `true` while the attached control plane no longer needs the generation numbers. */
+export function topologyGenerationOptional(): boolean {
+  return generationOptional;
 }
 
 export type TopologyGenerationState = {
@@ -224,7 +241,7 @@ async function writePersistedState(
   path: string,
   state: TopologyGenerationState,
 ): Promise<void> {
-  await writeTextFileAtomic(path, JSON.stringify(state));
+  await writeTextFileAtomicOrSkipWhenFull(path, JSON.stringify(state));
 }
 
 export type ResolveTopologyGenerationDeps = {

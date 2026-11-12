@@ -61,6 +61,9 @@ const INSTANCE_COMMAND_TYPES = [
   "server.backups.reconcile",
   "server.backups.test-target",
   "server.folders.remove",
+  "server.tunnel.routes",
+  "server.tunnel.connectors",
+  "server.tunnel.status",
   "environment.deploy",
   "environment.lifecycle",
   "environment.stop",
@@ -76,6 +79,7 @@ const INSTANCE_COMMAND_TYPES = [
   "storage.backup",
   "storage.restore",
   "system.reconcile",
+  "cache.apply",
 ] as const;
 
 test("COMMAND_TYPES matches instance canonical order", () => {

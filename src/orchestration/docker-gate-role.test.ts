@@ -767,6 +767,8 @@ test("atomic deploy: staged load check, snapshot, probes, and a rollback that en
   const order = [
     "Stage the new gate source",
     "Load-check the staged gate",
+    "Run queued handlers (a pending Docker restart) before waiting for the engine",
+    "Wait for the Docker engine to answer before swapping the gate",
     "Look for a running gate before the swap",
     "Snapshot them",
     "Swap in the staged gate",
@@ -828,4 +830,33 @@ test("the gate's load check exits 0 on good source and fails on bad configuratio
       TP_DOCKER_GATE_MODE: "refuse-all",
     }) !== 0,
   );
+});
+
+test("the gate deploy waits for the engine itself, bounded, and names the engine when it never answers", async () => {
+  const deploy = await read("tasks/deploy.yml");
+  const wait = deploy.slice(
+    deploy.indexOf("Wait for the Docker engine"),
+    deploy.indexOf("Look for a running gate before the swap"),
+  );
+  // A queued Docker restart runs before the wait, not inside the gate probe.
+  const flushAt = deploy.indexOf("meta: flush_handlers");
+  assert(flushAt > 0 && flushAt < deploy.indexOf("Wait for the Docker engine"));
+  // Probes the engine's own socket, not the gate's.
+  assertStringIncludes(
+    wait,
+    'unix_socket: "{{ docker_gate_upstream_socket }}"',
+  );
+  assertFalse(wait.includes("docker_gate_socket }}"));
+  assertStringIncludes(wait, "until: _docker_gate_engine.status");
+  assertStringIncludes(wait, "failed_when: false");
+  assertStringIncludes(wait, "The Docker engine did not answer");
+  const defaults = await read("defaults/main.yml");
+  const retries = Number(
+    /docker_gate_engine_wait_retries: (\d+)/.exec(defaults)?.[1],
+  );
+  const delay = Number(
+    /docker_gate_engine_wait_delay: (\d+)/.exec(defaults)?.[1],
+  );
+  // More than the old 35 s gate probe, and still bounded.
+  assert(retries * delay >= 60 && retries * delay <= 180);
 });
