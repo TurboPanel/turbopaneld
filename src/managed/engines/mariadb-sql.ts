@@ -122,6 +122,9 @@ export const {
   grantDatabaseSql,
   revokePlainDatabaseGrantSql,
   grantBackupSql,
+  listGrantRowsSql,
+  revokeRowsSql,
+  listConnectionsSql,
 } = grantSqlFor(
   {
     quoteIdentifier,

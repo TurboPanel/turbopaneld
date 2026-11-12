@@ -82,9 +82,10 @@ test("applyCredentials connects as the stable platform admin even for a suffixed
   const applied = await engine.applyCredentials(ctx, [suffixedRootCredential]);
   assertEquals(applied, ["postgres_a1b2c3d4"]);
 
-  // The role statement first, then the lock-down; nothing per database since
-  // the superuser holds no database grants.
-  assertEquals(calls.length, 2);
+  // The role statement first, then the lock-down and the end of sessions that
+  // lost CONNECT; nothing per database since the superuser holds no database
+  // grants.
+  assertEquals(calls.length, 3);
   const [call] = calls;
   // Connection identity is the stable admin, not the suffixed credential.
   assertEquals(call!.argv.includes("-U"), true);

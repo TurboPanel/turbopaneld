@@ -57,6 +57,7 @@ import {
   rewritePrimaryConninfo,
   standbyReplicationStatusSql,
   strongestPrivilege,
+  terminateSessionsWithoutConnectSql,
 } from "./postgres-sql.ts";
 import {
   countObjectsToReassignSql,
@@ -556,6 +557,8 @@ async function reconcileDatabaseAccess(
 
   // After the explicit grants, so no login that holds one is ever without it.
   await runPsql(ctx, revokePublicDatabaseAccessSql());
+  // Sessions opened before a revoke (the proxy's pooled ones too) end now.
+  await runPsql(ctx, terminateSessionsWithoutConnectSql());
 
   const databases = [
     ...new Set(

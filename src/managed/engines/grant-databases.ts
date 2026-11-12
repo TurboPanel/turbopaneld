@@ -1,5 +1,10 @@
 import { forEachSequential } from "../../util/sequential.ts";
-import { hasGrantWildcard } from "./grant-pattern.ts";
+import {
+  hasGrantWildcard,
+  parseDatabaseGrantRows,
+  type StoredGrantRow,
+  unlistedGrantRows,
+} from "./grant-pattern.ts";
 import type { ManagedDatabasePrivilege } from "./mysql-sql.ts";
 
 function asPrivilege(value: string): ManagedDatabasePrivilege | null {
@@ -95,6 +100,72 @@ export function grantDatabasePrivileges(options: {
       ].join("\n"),
     );
   });
+}
+
+/**
+ * Whether the panel owns this login's database grants: every login but one the
+ * site owner manages by hand (the Database admin login is always the panel's).
+ */
+export function panelManagesGrants(credential: {
+  privileges?: readonly string[];
+  grantMode?: string;
+}): boolean {
+  return credential.grantMode !== "self" ||
+    (credential.privileges ?? []).includes("admin");
+}
+
+/** Connection ids from the batch output of the processlist query. */
+export function parseConnectionIds(stdout: string): string[] {
+  return stdout.split("\n").map((line) => line.trim()).filter((line) =>
+    /^\d+$/.test(line)
+  );
+}
+
+function isUnknownThread(err: unknown): boolean {
+  return err instanceof Error &&
+    /unknown thread id|\b1094\b/i.test(err.message);
+}
+
+/**
+ * Take back what a login no longer lists, after the grants it keeps are in
+ * place. A `GRANT` only adds, so a database taken off the login, a switch from
+ * All Databases to picks, or a wildcard row would otherwise stay for good.
+ * Reads the login's grant rows, revokes every row on an unlisted schema and,
+ * only when it revoked something, flushes and ends that login's open
+ * connections: a session keeps the rights of its current database until it
+ * runs `USE`, and the shared proxy's pooled backend connections are such
+ * sessions. A login whose access did not shrink loses no connection. Returns
+ * how many rows it revoked.
+ */
+export async function revokeUnlistedGrants(options: {
+  username: string;
+  listed: readonly string[];
+  listRowsSql: (username: string) => string;
+  revokeRowsSql: (username: string, rows: readonly StoredGrantRow[]) => string;
+  listConnectionsSql: (username: string) => string;
+  query: (sql: string) => Promise<string>;
+  run: (sql: string) => Promise<unknown>;
+}): Promise<number> {
+  const { username, run, query } = options;
+  const rows = unlistedGrantRows(
+    parseDatabaseGrantRows(await query(options.listRowsSql(username))),
+    options.listed,
+  );
+  if (rows.length === 0) return 0;
+  await run(options.revokeRowsSql(username, rows));
+  await run("FLUSH PRIVILEGES;");
+  const ids = parseConnectionIds(
+    await query(options.listConnectionsSql(username)),
+  );
+  await forEachSequential(ids, async (id) => {
+    try {
+      await run(`KILL CONNECTION ${id};`);
+    } catch (err) {
+      // The session ended by itself between the read and the kill.
+      if (!isUnknownThread(err)) throw err;
+    }
+  });
+  return rows.length;
 }
 
 /**
