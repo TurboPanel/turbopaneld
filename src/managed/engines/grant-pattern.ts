@@ -33,6 +33,12 @@ export type GrantQuoting = {
    * logical dump of rows, views, triggers, events and routine definitions.
    */
   backupPrivileges: readonly string[];
+  /**
+   * The table that lists open connections (`ID`, `USER`). MySQL reads
+   * `performance_schema.processlist` (the information_schema table is
+   * deprecated there); MariaDB keeps `information_schema.PROCESSLIST`.
+   */
+  processlistTable: string;
 };
 
 /** The database name as a schema in a grant: exact, wildcards escaped. */
@@ -110,6 +116,9 @@ function revokePlainPatternGrantSql(
 /** One database-level grant row of an account, as `mysql.db` stores it. */
 export type StoredGrantRow = { host: string; db: string };
 
+// deno-lint-ignore no-control-regex -- intentional control-char reject
+const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
+
 /** Schemas the platform's own accounts need; never revoked from a login. */
 const SYSTEM_SCHEMAS = new Set([
   "mysql",
@@ -146,7 +155,10 @@ export function parseDatabaseGrantRows(stdout: string): StoredGrantRow[] {
   for (const line of stdout.split("\n")) {
     const match = /^([0-9A-Fa-f]*)\t([0-9A-Fa-f]+)\s*$/.exec(line);
     if (match && match[1].length % 2 === 0 && match[2].length % 2 === 0) {
-      rows.push({ host: unhex(match[1]), db: unhex(match[2]) });
+      const row = { host: unhex(match[1]), db: unhex(match[2]) };
+      // A name that cannot be quoted cannot be revoked either; leave it out
+      // rather than fail every apply of the login.
+      if (!CONTROL_CHAR_RE.test(row.db + row.host)) rows.push(row);
     }
   }
   return rows;
@@ -172,8 +184,7 @@ export function unlistedGrantRows(
 
 /** Backtick-quote a stored schema name (backslashes stay: they are the escape). */
 function quoteStoredSchema(storedDb: string): string {
-  // deno-lint-ignore no-control-regex -- intentional control-char reject
-  if (storedDb.length === 0 || /[\u0000-\u001F\u007F]/.test(storedDb)) {
+  if (storedDb.length === 0 || CONTROL_CHAR_RE.test(storedDb)) {
     throw new Error("grant schema holds control characters");
   }
   return `\`${storedDb.replaceAll("`", "``")}\``;
@@ -185,23 +196,28 @@ export function revokeStoredRowsSql(
   username: string,
   rows: readonly StoredGrantRow[],
 ): string {
-  return rows.map((row) =>
-    revokeStoredRowSql(
-      quoting,
-      row.db,
-      quoteStoredSchema(row.db),
-      username,
-      row.host,
-    )
-  ).join("\n");
+  // The `mysql` client of the official MySQL images connects as latin1, which
+  // would send a non-ASCII schema name as other bytes than the row holds.
+  return [
+    "SET NAMES utf8mb4;",
+    ...rows.map((row) =>
+      revokeStoredRowSql(
+        quoting,
+        row.db,
+        quoteStoredSchema(row.db),
+        username,
+        row.host,
+      )
+    ),
+  ].join("\n");
 }
 
-/** One `KILL` per open connection id. */
+/** The open connection ids of the account (one `KILL` each); never this session's. */
 export function listLoginConnectionsSql(
   quoting: GrantQuoting,
   username: string,
 ): string {
-  return `SELECT ID FROM information_schema.PROCESSLIST WHERE USER = ${
+  return `SELECT ID FROM ${quoting.processlistTable} WHERE USER = ${
     quoting.quoteLiteral(username)
   } AND ID <> CONNECTION_ID();`;
 }

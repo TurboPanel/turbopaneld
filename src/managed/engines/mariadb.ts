@@ -492,6 +492,7 @@ async function applyOneCredential(
       listRowsSql: listGrantRowsSql,
       revokeRowsSql,
       listConnectionsSql,
+      sessionEnds: ctx.sessionEnds,
       query: (sql) => runMariadbQuery(ctx, sql),
       run: (sql) => runMariadb(ctx, sql),
     });

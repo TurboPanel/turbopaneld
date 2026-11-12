@@ -132,12 +132,19 @@ function isUnknownThread(err: unknown): boolean {
  * Take back what a login no longer lists, after the grants it keeps are in
  * place. A `GRANT` only adds, so a database taken off the login, a switch from
  * All Databases to picks, or a wildcard row would otherwise stay for good.
- * Reads the login's grant rows, revokes every row on an unlisted schema and,
- * only when it revoked something, flushes and ends that login's open
- * connections: a session keeps the rights of its current database until it
- * runs `USE`, and the shared proxy's pooled backend connections are such
- * sessions. A login whose access did not shrink loses no connection. Returns
- * how many rows it revoked.
+ *
+ * Reads the login's grant rows and revokes every row on an unlisted schema,
+ * then reads them again and fails the apply if a planned row is still there.
+ * Only when rows really went (or a marker from an earlier failed apply is
+ * set) does it flush and end the login's open connections: a session keeps the
+ * rights of its current database until it runs `USE`, and the shared proxy's
+ * pooled backend connections are such sessions. A login whose access did not
+ * shrink loses no connection.
+ *
+ * The login is recorded in `sessionEnds` before the revoke and cleared only
+ * after its connections are gone, so a failure in between (the processlist
+ * read, a `KILL`) is finished by the next apply, which would find no row left
+ * to revoke. Returns how many rows went.
  */
 export async function revokeUnlistedGrants(options: {
   username: string;
@@ -147,27 +154,64 @@ export async function revokeUnlistedGrants(options: {
   listConnectionsSql: (username: string) => string;
   query: (sql: string) => Promise<string>;
   run: (sql: string) => Promise<unknown>;
+  sessionEnds?: {
+    pending(): Promise<readonly string[]>;
+    add(username: string): Promise<void>;
+    done(username: string): Promise<void>;
+  };
 }): Promise<number> {
-  const { username, run, query } = options;
-  const rows = unlistedGrantRows(
-    parseDatabaseGrantRows(await query(options.listRowsSql(username))),
-    options.listed,
-  );
-  if (rows.length === 0) return 0;
-  await run(options.revokeRowsSql(username, rows));
-  await run(FLUSH_SQL);
+  const { username, run, query, sessionEnds } = options;
+  const plan = async () =>
+    unlistedGrantRows(
+      parseDatabaseGrantRows(await query(options.listRowsSql(username))),
+      options.listed,
+    );
+  const rows = await plan();
+  const owed = sessionEnds
+    ? (await sessionEnds.pending()).includes(username)
+    : false;
+  if (rows.length === 0 && !owed) return 0;
+  let went = 0;
+  let remaining = 0;
+  if (rows.length > 0) {
+    await sessionEnds?.add(username);
+    await run(options.revokeRowsSql(username, rows));
+    remaining = (await plan()).length;
+    went = rows.length - remaining;
+  }
+  if (went > 0 || owed) {
+    await run(FLUSH_SQL);
+    await endConnections(options);
+  }
+  // Nothing went and nothing was owed: do not leave the record this apply
+  // made, or every later apply would end the login's connections for nothing.
+  // (Connections are gone after a kill, so a record ends there too.)
+  await sessionEnds?.done(username);
+  if (remaining > 0) {
+    throw new Error(
+      `${remaining} grant row(s) of ${username} could not be revoked`,
+    );
+  }
+  return went;
+}
+
+async function endConnections(options: {
+  username: string;
+  listConnectionsSql: (username: string) => string;
+  query: (sql: string) => Promise<string>;
+  run: (sql: string) => Promise<unknown>;
+}): Promise<void> {
   const ids = parseConnectionIds(
-    await query(options.listConnectionsSql(username)),
+    await options.query(options.listConnectionsSql(options.username)),
   );
   await forEachSequential(ids, async (id) => {
     try {
-      await run(`KILL CONNECTION ${id};`);
+      await options.run(`KILL CONNECTION ${id};`);
     } catch (err) {
       // The session ended by itself between the read and the kill.
       if (!isUnknownThread(err)) throw err;
     }
   });
-  return rows.length;
 }
 
 /**

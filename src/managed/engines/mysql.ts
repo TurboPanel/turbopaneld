@@ -448,6 +448,7 @@ async function applyOneCredential(
       listRowsSql: listGrantRowsSql,
       revokeRowsSql,
       listConnectionsSql,
+      sessionEnds: ctx.sessionEnds,
       query: (sql) => runMysqlQuery(ctx, sql),
       run: (sql) => runMysql(ctx, sql),
     });

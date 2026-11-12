@@ -130,6 +130,7 @@ export const {
     quoteIdentifier,
     quoteLiteral,
     accountAt,
+    processlistTable: "information_schema.PROCESSLIST",
     extraPrivileges: [
       ["DELETE HISTORY", "Delete_history_priv"],
       ["SHOW CREATE ROUTINE", "Show_create_routine_priv"],

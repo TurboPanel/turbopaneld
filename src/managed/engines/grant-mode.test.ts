@@ -34,7 +34,7 @@ const GOLDEN: Record<string, string> = {
     "cc3abf515ab524bb436c03240f82c83ddc6424f99c349dc63ce76efd5fb86692",
   __MYSQL__: "20778d26f78e11c6d70929d12c14273916ce803b6d4bcc06b2039f515bd4ec13",
   __POSTGRES__:
-    "16092e5254b3d323af1d4a0307a1d449549ea3279bc6936530428b6d6333dda3",
+    "e83c555b70160a33acc4f877e8f74de5cedfe2f05ed36d18c855c66940b772cb",
 };
 
 const engines: Array<[string, ManagedEngineRuntime, string]> = [
