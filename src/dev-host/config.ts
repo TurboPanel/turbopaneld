@@ -77,7 +77,7 @@ export function devHostParts(
         "app.config.js",
         "metro.config.js",
         "babel.config.js",
-        "tamagui.config.ts",
+        "global.css",
       ],
     },
     {
