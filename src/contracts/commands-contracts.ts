@@ -14,6 +14,7 @@ import {
   MAX_HELPER_REACH_PER_DEPLOY,
   MIN_CACHE_MEMORY_MB,
 } from "../deploy/cache/limits.ts";
+import { type BuildLimits, parseBuildLimits } from "./build-limits.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 import {
   type FolderRefParts,
@@ -1540,6 +1541,13 @@ export type EnvironmentDeploySource = {
   credentialUsername?: string;
   releaseId: string;
   /**
+   * The most CPU cores and memory this entry's build may use: the smallest limit set
+   * among the organization, the server and this service
+   * (`build-limits-v1`), in full. Absent: the defaults (half the server's
+   * cores; its RAM less 1 GiB).
+   */
+  buildLimits?: BuildLimits;
+  /**
    * Promote an **already-published** release instead of building a new one.
    *
    * A rollback is not a second command type: it rides the ordinary
@@ -1725,6 +1733,13 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * carrying `x-turbopanel.source`.
    */
   sourceMaterial?: EnvironmentDeploySource[];
+  /**
+   * The most CPU cores and memory the project-wide Compose build may use: the
+   * smallest of the organization, server and every service's limits
+   * (`build-limits-v1`). Source entries carry their own, in full. Absent: the
+   * defaults (half the server's cores; its RAM less 1 GiB).
+   */
+  buildLimits?: BuildLimits;
   /**
    * Per-service Traefik projects for services that publish at least one
    * `tcp`/`udp` port. HTTP hostings never appear here.
@@ -6773,6 +6788,10 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
     credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
     rollbackToReleaseId: parseRollbackToReleaseId(value.rollbackToReleaseId),
     principal: parseSitePrincipal(value.principal) ?? undefined,
+    buildLimits: parseBuildLimits(
+      value.buildLimits,
+      "sourceMaterial buildLimits",
+    ),
   });
 }
 
@@ -7415,6 +7434,7 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      buildLimits: parseBuildLimits(value.buildLimits),
       hostingsOnly: parseOptionalBoolean(value.hostingsOnly, "hostingsOnly"),
       hideWebServerNames: parseOptionalBoolean(
         value.hideWebServerNames,
