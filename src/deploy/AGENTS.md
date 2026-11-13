@@ -223,7 +223,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
    (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
    catch-all `http://` and `https://` blocks that answer names nobody hosts
-   with an empty 200, no redirect, and the same hide-names header block as
+   with a 404 and a small self-contained default page (`no-store`, no
+   redirect; it never echoes the requested name, because Caddy does not
+   HTML-escape placeholders in a `respond` body, and every `{` in the inline
+   CSS is written `\{` so Caddy keeps it; its "Hosted with TurboPanel" footer is
+   left out when hide-names is on), and the same hide-names header block as
    hosted sites when the setting is on. The file is shared by every
    environment on the server, so the hide-names choice is that of whichever
    deployed last. HTTPS shows one fixed internal certificate for the reserved
@@ -232,9 +236,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    deploys refuse that name as a hosting hostname). The daemon also writes
    the file and the Caddyfile at start (`ensureHostingFallback`, after the
    guard) when hosting Caddy is set up and running but has no current copy, so
-   an updated host answers unhosted names before any deploy: it keeps a file a
-   deploy wrote, otherwise takes hide-names from the written sites (hidden when
-   unknown), validates first, and leaves live files alone if Caddy refuses)
+   an updated host answers unhosted names before any deploy: a file a deploy
+   wrote keeps its own hide-names and Via choices (read back from its header
+   deletions) and is rewritten when its content differs from the current
+   page, so an older blank-200 file is replaced at the next start and a second
+   run changes nothing and reloads nothing; with no file it takes hide-names
+   from the written sites (hidden when unknown); it validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved

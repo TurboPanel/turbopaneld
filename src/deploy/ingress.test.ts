@@ -718,6 +718,54 @@ test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides name
   assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 3);
 });
 
+test("hostingFallbackSnippet serves the default page as a 404 on all three blocks", () => {
+  const plain = hostingFallbackSnippet(false);
+  assertEquals(plain.split("respond <<HTML").length - 1, 3);
+  assertEquals(plain.split("    HTML 404\n").length - 1, 3);
+  assertEquals(plain.includes('respond "" 200'), false);
+  assertEquals(
+    plain.split('header Content-Type "text/html; charset=utf-8"').length - 1,
+    3,
+  );
+  assertEquals(plain.split('header Cache-Control "no-store"').length - 1, 3);
+  assertStringIncludes(plain, "This site isn't live yet.");
+  assertStringIncludes(
+    plain,
+    "If you own this site, deploy it from your TurboPanel control plane.",
+  );
+  // Self-contained: no external fonts, scripts or images.
+  assertEquals(/<script|<img|<link|@import|url\(|src=/.test(plain), false);
+  assertStringIncludes(plain, "prefers-color-scheme:dark");
+  assertStringIncludes(plain, 'name="viewport"');
+});
+
+test("hostingFallbackSnippet leaves the footer out only when names are hidden", () => {
+  const link = '<a href="https://turbopanel.io">TurboPanel</a>';
+  for (
+    const shown of [
+      hostingFallbackSnippet(false),
+      hostingFallbackSnippet(undefined),
+    ]
+  ) {
+    assertEquals(shown.split(`Hosted with ${link}`).length - 1, 3);
+  }
+  assertEquals(hostingFallbackSnippet(true).includes("Hosted with"), false);
+  assertEquals(hostingFallbackSnippet(true).includes("turbopanel.io"), false);
+});
+
+test("hostingFallbackSnippet reflects no request data and escapes every CSS brace", () => {
+  const snippet = hostingFallbackSnippet(false, true);
+  // A placeholder would let a visitor-chosen Host reach the page unescaped.
+  assertEquals(/\{http\./.test(snippet), false);
+  assertEquals(snippet.includes("{{"), false);
+  // Every opening brace in the page body is escaped so Caddy keeps the CSS.
+  const body = snippet.slice(
+    snippet.indexOf("respond <<HTML"),
+    snippet.indexOf("    HTML 404"),
+  );
+  assertEquals(/(^|[^\\])\{/.test(body), false);
+});
+
 test("the Caddyfile hands every unmatched name the one fixed fallback certificate", () => {
   const config = caddyfile(CONFIG_DIR);
   assertStringIncludes(config, "default_sni unconfigured.invalid");
@@ -5474,6 +5522,61 @@ test("ensureHostingFallback keeps a fallback a deploy wrote and takes the choice
   } finally {
     restore();
     await cleanup();
+  }
+});
+
+test("ensureHostingFallback replaces an older blank-200 fallback, keeps its choices, then is idempotent", async () => {
+  for (
+    const [hide, via] of [[true, false], [false, true], [false, false]] as const
+  ) {
+    const { layout, cleanup } = await makeTestLayout();
+    const calls: string[][] = [];
+    const restore = setIngressHostCommandForTest(fakeHostRun(layout, calls));
+    try {
+      const hostingDir = await startedHostingHost(layout);
+      const fallbackPath = join(hostingDir, "sites", "00-fallback.caddy");
+      const deletions = [
+        ...(hide ? ["-Server", "-X-Powered-By"] : []),
+        ...(via ? [] : ["-Via"]),
+      ].map((line) => `  ${line}\n`).join("");
+      const blank = `# Names nobody hosts. Rewritten on every deploy.
+http:// {
+${deletions}  respond "" 200
+}
+
+https:// {
+${deletions}  respond "" 200
+}
+
+unconfigured.invalid {
+  tls internal
+${deletions}  respond "" 200
+}
+`;
+      await Deno.writeTextFile(fallbackPath, blank);
+      await Deno.writeTextFile(
+        join(hostingDir, "Caddyfile"),
+        caddyfile(layout.configDir),
+      );
+      const where = JSON.stringify({ hide, via });
+      assertEquals(await ensureHostingFallback(layout, noGrant), true, where);
+      const next = await Deno.readTextFile(fallbackPath);
+      assertEquals(next, hostingFallbackSnippet(hide, via), where);
+      assertEquals(next.includes('respond "" 200'), false, where);
+      const reloads = calls.filter((a) => a.includes("reload")).length;
+      assertEquals(reloads, 1, where);
+
+      assertEquals(await ensureHostingFallback(layout, noGrant), false, where);
+      assertEquals(await Deno.readTextFile(fallbackPath), next, where);
+      assertEquals(
+        calls.filter((a) => a.includes("reload")).length,
+        reloads,
+        where,
+      );
+    } finally {
+      restore();
+      await cleanup();
+    }
   }
 });
 
