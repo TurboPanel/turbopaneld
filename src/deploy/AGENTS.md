@@ -223,7 +223,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
    (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
    catch-all `http://` and `https://` blocks that answer names nobody hosts
-   with an empty 200, no redirect, and the same hide-names header block as
+   with a 404 and a small self-contained default page (`no-store`, no
+   redirect; it never echoes the requested name, because Caddy does not
+   HTML-escape placeholders in a `respond` body, and every `{` in the inline
+   CSS is written `\{` so Caddy keeps it; its "Hosted with TurboPanel" footer is
+   left out when hide-names is on), and the same hide-names header block as
    hosted sites when the setting is on. The file is shared by every
    environment on the server, so the hide-names choice is that of whichever
    deployed last. HTTPS shows one fixed internal certificate for the reserved

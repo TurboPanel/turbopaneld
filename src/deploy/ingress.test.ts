@@ -718,6 +718,54 @@ test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides name
   assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 3);
 });
 
+test("hostingFallbackSnippet serves the default page as a 404 on all three blocks", () => {
+  const plain = hostingFallbackSnippet(false);
+  assertEquals(plain.split("respond <<HTML").length - 1, 3);
+  assertEquals(plain.split("    HTML 404\n").length - 1, 3);
+  assertEquals(plain.includes('respond "" 200'), false);
+  assertEquals(
+    plain.split('header Content-Type "text/html; charset=utf-8"').length - 1,
+    3,
+  );
+  assertEquals(plain.split('header Cache-Control "no-store"').length - 1, 3);
+  assertStringIncludes(plain, "This site isn't live yet.");
+  assertStringIncludes(
+    plain,
+    "If you own this site, deploy it from your TurboPanel control plane.",
+  );
+  // Self-contained: no external fonts, scripts or images.
+  assertEquals(/<script|<img|<link|@import|url\(|src=/.test(plain), false);
+  assertStringIncludes(plain, "prefers-color-scheme:dark");
+  assertStringIncludes(plain, 'name="viewport"');
+});
+
+test("hostingFallbackSnippet leaves the footer out only when names are hidden", () => {
+  const link = '<a href="https://turbopanel.io">TurboPanel</a>';
+  for (
+    const shown of [
+      hostingFallbackSnippet(false),
+      hostingFallbackSnippet(undefined),
+    ]
+  ) {
+    assertEquals(shown.split(`Hosted with ${link}`).length - 1, 3);
+  }
+  assertEquals(hostingFallbackSnippet(true).includes("Hosted with"), false);
+  assertEquals(hostingFallbackSnippet(true).includes("turbopanel.io"), false);
+});
+
+test("hostingFallbackSnippet reflects no request data and escapes every CSS brace", () => {
+  const snippet = hostingFallbackSnippet(false, true);
+  // A placeholder would let a visitor-chosen Host reach the page unescaped.
+  assertEquals(/\{http\./.test(snippet), false);
+  assertEquals(snippet.includes("{{"), false);
+  // Every opening brace in the page body is escaped so Caddy keeps the CSS.
+  const body = snippet.slice(
+    snippet.indexOf("respond <<HTML"),
+    snippet.indexOf("    HTML 404"),
+  );
+  assertEquals(/(^|[^\\])\{/.test(body), false);
+});
+
 test("the Caddyfile hands every unmatched name the one fixed fallback certificate", () => {
   const config = caddyfile(CONFIG_DIR);
   assertStringIncludes(config, "default_sni unconfigured.invalid");
