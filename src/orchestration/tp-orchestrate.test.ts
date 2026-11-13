@@ -732,8 +732,8 @@ test("tp-orchestrate update refuses traversal and other packages' rails as the d
   for (
     const url of [
       // the retired CDN host is off the rail for every channel
-      "https://dl.trbp.nl/channels/trunk/manifest.json",
-      "https://dl.trbp.nl/channels/release/manifest.json",
+      "https://dl.example.net/channels/trunk/manifest.json",
+      "https://dl.example.net/channels/release/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/%2e%2e/%2e%2e/attacker/manifest.json",
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
@@ -812,7 +812,7 @@ test("tp-orchestrate update-instance forwards a UI pin and refuses other rails",
   for (
     const refused of [
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
-      "https://dl.trbp.nl/channels/release/manifest.json",
+      "https://dl.example.net/channels/release/manifest.json",
     ]
   ) {
     const denied = await runUpdateVerb(
@@ -873,7 +873,7 @@ test("tp-orchestrate update-instance refuses trunk, missing flags, and daemon en
         "--channel",
         "release",
         "--manifest-url",
-        "https://dl.trbp.nl/channels/release/manifest.json",
+        "https://dl.example.net/channels/release/manifest.json",
         "--no-start",
       ],
       "not a TurboPanel release rail",

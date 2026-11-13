@@ -3,15 +3,15 @@
   "cases": [
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/trunk/manifest.json",
+      "url": "https://dl.example.net/channels/trunk/manifest.json",
       "allow": false,
-      "why": "the retired trunk CDN drop: dl.trbp.nl is no longer on the rail"
+      "why": "the retired trunk CDN drop: its old download host is not on the rail"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/release/manifest.json",
+      "url": "https://dl.example.net/channels/release/manifest.json",
       "allow": false,
-      "why": "dl.trbp.nl is no longer on the rail, so it is not a manual-override pin either"
+      "why": "the old download host is not on the rail, so it is not a manual-override pin either"
     },
     {
       "kind": "daemon",
@@ -447,9 +447,9 @@
     },
     {
       "kind": "instance",
-      "url": "https://dl.trbp.nl/channels/release/manifest.json",
+      "url": "https://dl.example.net/channels/release/manifest.json",
       "allow": false,
-      "why": "dl.trbp.nl is off the rail for every kind"
+      "why": "the old download host is off the rail for every kind"
     },
     {
       "kind": "ui",
@@ -459,9 +459,9 @@
     },
     {
       "kind": "ui",
-      "url": "https://dl.trbp.nl/channels/release/manifest.json",
+      "url": "https://dl.example.net/channels/release/manifest.json",
       "allow": false,
-      "why": "dl.trbp.nl is off the rail for every kind"
+      "why": "the old download host is off the rail for every kind"
     },
     {
       "kind": "daemon",
@@ -477,31 +477,31 @@
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/../evil/manifest.json",
+      "url": "https://dl.example.net/channels/../evil/manifest.json",
       "allow": false,
       "why": "CDN traversal"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/other/manifest.json",
+      "url": "https://dl.example.net/other/manifest.json",
       "allow": false,
       "why": "CDN outside channels/"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/manifest.json",
+      "url": "https://dl.example.net/channels/manifest.json",
       "allow": false,
       "why": "CDN missing channel segment"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/trunk/daemon/b1/manifest.json",
+      "url": "https://dl.example.net/channels/trunk/daemon/b1/manifest.json",
       "allow": false,
       "why": "CDN nested path"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl.attacker.example/channels/trunk/manifest.json",
+      "url": "https://dl.example.net.attacker.example/channels/trunk/manifest.json",
       "allow": false,
       "why": "CDN host suffix"
     },
@@ -741,37 +741,37 @@
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl:443/channels/trunk/manifest.json",
+      "url": "https://dl.example.net:443/channels/trunk/manifest.json",
       "allow": false,
       "why": "CDN host with an explicit default port"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl./channels/trunk/manifest.json",
+      "url": "https://dl.example.net./channels/trunk/manifest.json",
       "allow": false,
       "why": "CDN host with a trailing dot"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl@attacker.example/channels/trunk/manifest.json",
+      "url": "https://dl.example.net@attacker.example/channels/trunk/manifest.json",
       "allow": false,
       "why": "CDN userinfo trick"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/trunk/manifest.json%2f..%2f..%2fx",
+      "url": "https://dl.example.net/channels/trunk/manifest.json%2f..%2f..%2fx",
       "allow": false,
       "why": "CDN encoded traversal after the file name"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/trunk/extra/manifest.json",
+      "url": "https://dl.example.net/channels/trunk/extra/manifest.json",
       "allow": false,
       "why": "CDN extra path segment"
     },
     {
       "kind": "daemon",
-      "url": "https://dl.trbp.nl/channels/%2e%2e/evil/manifest.json",
+      "url": "https://dl.example.net/channels/%2e%2e/evil/manifest.json",
       "allow": false,
       "why": "CDN encoded dot segments"
     },

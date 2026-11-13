@@ -129,8 +129,7 @@ const RELEASE_MANIFEST_FILE = /^manifest(?:-[A-Za-z0-9._~+-]+)?\.json$/;
  * the raw string before anything parses or normalises it:
  *
  * `https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json`
- * or `…/releases/latest/download/manifest*.json`, `<repo>` fixed by kind. The
- * former CDN host (dl.trbp.nl) is off the rail since the trunk drop retired.
+ * or `…/releases/latest/download/manifest*.json`, `<repo>` fixed by kind.
  *
  * Exact host, no empty / `.` / `..` segment, closed character set. A URL
  * that a client would normalise onto another path can therefore never match.
