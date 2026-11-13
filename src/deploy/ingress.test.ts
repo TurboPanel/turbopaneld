@@ -5525,6 +5525,61 @@ test("ensureHostingFallback keeps a fallback a deploy wrote and takes the choice
   }
 });
 
+test("ensureHostingFallback replaces an older blank-200 fallback, keeps its choices, then is idempotent", async () => {
+  for (
+    const [hide, via] of [[true, false], [false, true], [false, false]] as const
+  ) {
+    const { layout, cleanup } = await makeTestLayout();
+    const calls: string[][] = [];
+    const restore = setIngressHostCommandForTest(fakeHostRun(layout, calls));
+    try {
+      const hostingDir = await startedHostingHost(layout);
+      const fallbackPath = join(hostingDir, "sites", "00-fallback.caddy");
+      const deletions = [
+        ...(hide ? ["-Server", "-X-Powered-By"] : []),
+        ...(via ? [] : ["-Via"]),
+      ].map((line) => `  ${line}\n`).join("");
+      const blank = `# Names nobody hosts. Rewritten on every deploy.
+http:// {
+${deletions}  respond "" 200
+}
+
+https:// {
+${deletions}  respond "" 200
+}
+
+unconfigured.invalid {
+  tls internal
+${deletions}  respond "" 200
+}
+`;
+      await Deno.writeTextFile(fallbackPath, blank);
+      await Deno.writeTextFile(
+        join(hostingDir, "Caddyfile"),
+        caddyfile(layout.configDir),
+      );
+      const where = JSON.stringify({ hide, via });
+      assertEquals(await ensureHostingFallback(layout, noGrant), true, where);
+      const next = await Deno.readTextFile(fallbackPath);
+      assertEquals(next, hostingFallbackSnippet(hide, via), where);
+      assertEquals(next.includes('respond "" 200'), false, where);
+      const reloads = calls.filter((a) => a.includes("reload")).length;
+      assertEquals(reloads, 1, where);
+
+      assertEquals(await ensureHostingFallback(layout, noGrant), false, where);
+      assertEquals(await Deno.readTextFile(fallbackPath), next, where);
+      assertEquals(
+        calls.filter((a) => a.includes("reload")).length,
+        reloads,
+        where,
+      );
+    } finally {
+      restore();
+      await cleanup();
+    }
+  }
+});
+
 test("ensureHostingFallback takes the Via choice from written sites", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest(fakeHostRun(layout));

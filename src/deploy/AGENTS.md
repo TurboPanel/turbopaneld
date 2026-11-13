@@ -236,9 +236,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    deploys refuse that name as a hosting hostname). The daemon also writes
    the file and the Caddyfile at start (`ensureHostingFallback`, after the
    guard) when hosting Caddy is set up and running but has no current copy, so
-   an updated host answers unhosted names before any deploy: it keeps a file a
-   deploy wrote, otherwise takes hide-names from the written sites (hidden when
-   unknown), validates first, and leaves live files alone if Caddy refuses)
+   an updated host answers unhosted names before any deploy: a file a deploy
+   wrote keeps its own hide-names and Via choices (read back from its header
+   deletions) and is rewritten when its content differs from the current
+   page, so an older blank-200 file is replaced at the next start and a second
+   run changes nothing and reloads nothing; with no file it takes hide-names
+   from the written sites (hidden when unknown); it validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved

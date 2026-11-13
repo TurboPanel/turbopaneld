@@ -3412,16 +3412,21 @@ async function ensureHostingFallbackLocked(
   });
   const fallbackPath = join(sitesDir, HOSTING_FALLBACK_SITE);
   const liveFallback = await readTextIfPresent(fallbackPath);
-  if (liveFallback !== undefined && liveCaddyfile === wantCaddyfile) {
+  // A live file keeps the hide-names and Via choices of the deploy that wrote
+  // it; only its content is brought up to date (an older daemon wrote an empty
+  // 200 here).
+  const choices: HostingHeaderChoices = liveFallback !== undefined
+    ? {
+      hideWebServerNames: deletesHeader(liveFallback, "Server"),
+      sendViaHeader: !deletesHeader(liveFallback, "Via"),
+    }
+    : await lastKnownHeaderChoices(sitesDir, names);
+  const fallback = hostingFallbackSnippet(
+    choices.hideWebServerNames,
+    choices.sendViaHeader,
+  );
+  if (liveFallback === fallback && liveCaddyfile === wantCaddyfile) {
     return false;
-  }
-  let fallback = liveFallback;
-  if (fallback === undefined) {
-    const known = await lastKnownHeaderChoices(sitesDir, names);
-    fallback = hostingFallbackSnippet(
-      known.hideWebServerNames,
-      known.sendViaHeader,
-    );
   }
 
   const candidate = await openHostingCandidate(layout, hostingDir);
