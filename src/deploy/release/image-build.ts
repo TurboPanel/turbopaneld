@@ -898,6 +898,18 @@ async function ensureFrontendImage(
   }
 }
 
+/**
+ * The build limits hold for the prepare step (it runs in the build sandbox).
+ * The image's own build steps run in the Docker Engine's builder (cgroup driver
+ * systemd), driven by `docker buildx build`, which takes no CPU or memory
+ * option for them apart from `--cgroup-parent`. That option is a Dockerfile
+ * front end setting; whether the pinned image builder front end passes it on
+ * is not verified, and a parent cgroup with a quota would need a new root
+ * helper verb, so no limit is set there. The transcript says so.
+ */
+export const DOCKER_BUILDER_LIMITS_NOTICE =
+  "Build limits apply to the prepare step; the image build steps run in Docker's builder, which this server does not limit per build";
+
 /** `docker buildx build` argv for one image build (Engine builder, `--load`). */
 export function imageBuildBuildxArgs(
   params: Pick<
@@ -1083,6 +1095,8 @@ export async function runImageBuildBuild(
       { ...toolOptions, label: "railpack prepare" },
     );
   }
+
+  if (params.sandbox) params.onOutput?.("stdout", DOCKER_BUILDER_LIMITS_NOTICE);
 
   await ensureFrontendImage(
     params,

@@ -70,9 +70,9 @@ tasks carry no secret and stay readable.
 `src/orchestration/queue-first-boot.test.ts` pins all of this.
 
 **Labels:** every service in the Compose file carries **only**
-`com.turbopanel.system.component: <database|queue>` and
-`turbopanel.role: turbopanel` — never `com.turbopanel.service`, `traefik.enable`, or
-`com.turbopanel.raw-port` (those identify *tenant* deploy containers; see
+`io.turbopanel.system.component: <database|queue>` and
+`turbopanel.role: turbopanel` — never `io.turbopanel.service`, `traefik.enable`, or
+`io.turbopanel.raw-port` (those identify *tenant* deploy containers; see
 `../src/deploy/system-component.ts` / `../src/deploy/labels.ts`).
 
 | Path / resource                                             | Purpose                                                                                                                                                                                    |

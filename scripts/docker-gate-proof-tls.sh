@@ -79,7 +79,7 @@ start_app() {
   _app_net=$3
   docker run -d --name "$_app_name" --network "$_app_net" \
     --label traefik.enable=true \
-    --label com.turbopanel.system.routed=true \
+    --label io.turbopanel.system.routed=true \
     --label "traefik.docker.network=$_app_net" \
     --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
     --label "traefik.http.routers.$_app_name.entrypoints=web,websecure" \
@@ -125,7 +125,7 @@ if systemctl is-active --quiet "$GATE_UNIT"; then pass "gate unit is active"; el
 _ping=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --unix-socket "$RO_SOCKET" localhost/_ping)
 if [[ "$_ping" == 200 ]]; then pass "read-only socket answers /_ping"; else fail "read-only socket /_ping answered '$_ping'"; fi
 if [[ -f "$INGRESS_SWITCH" ]]; then pass "ingress switch file is present"; else fail "ingress switch file is absent ($INGRESS_SWITCH)"; fi
-SHARED_TRAEFIK=$(docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress | sed -n 1p)
+SHARED_TRAEFIK=$({ docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress; docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress; } | sed -n 1p)
 SHARED_NET=""
 if [[ -z "$SHARED_TRAEFIK" ]]; then
   fail "no shared Traefik is running (deploy an HTTP app once with the switch on)"

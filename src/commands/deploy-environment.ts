@@ -1895,6 +1895,25 @@ type LineHandler = (
   event: { stream: "stdout" | "stderr"; line: string },
 ) => void;
 
+/**
+ * Compose image builds run in Docker's builder, which has no per-build core
+ * or memory limit here: when a limit was set, say so rather than let it look enforced.
+ */
+export function noteComposeBuildLimits(
+  payload: Pick<EnvironmentDeployPayload, "sourceMaterial">,
+  onLine: LineHandler,
+): void {
+  // The control plane sends limits on each source entry, not deploy-wide.
+  const limited = payload.sourceMaterial?.some((entry) =>
+    entry.buildLimits !== undefined
+  );
+  if (!limited) return;
+  onLine({ stream: "stdout", line: COMPOSE_BUILD_LIMITS_NOTICE });
+}
+
+export const COMPOSE_BUILD_LIMITS_NOTICE =
+  "Build limits are set, but Docker Compose image builds run in Docker's builder, which this server does not limit per build";
+
 /** `docker compose build --no-cache --pull` for the whole project. */
 async function runComposeBuild(
   input: DeployContainerServicesInput,
@@ -1907,6 +1926,7 @@ async function runComposeBuild(
     `cacheless rebuild for compose project ${parsedPayload.projectName}`,
   );
   logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+  noteComposeBuildLimits(parsedPayload, onLine);
   const build = await runStreamed([
     ...composeFileArgs(parsedPayload.projectName, chain),
     "build",
@@ -2140,6 +2160,7 @@ async function prepareSequentialDeploy(
   if (parsedPayload.noCache === true) {
     await runComposeBuild(input, chain, onLine);
   } else {
+    noteComposeBuildLimits(parsedPayload, onLine);
     const build = await runStreamed([
       ...composeFileArgs(parsedPayload.projectName, chain),
       "build",

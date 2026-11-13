@@ -296,7 +296,7 @@ rail's signed manifests protect what the script then installs.
 installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
 (persisted in `daemon.env`) and must **never** fall back to the public rail.
 A configured `TURBOPANEL_DL_BASE` that is not https is refused
-(`InsecureOverlayBaseError`); only an absent base selects the public rail. `trunk` has no built-in location (the per-merge CDN drop and the `dl.trbp.nl` host left the rail with it): it is only the channel name this overlay catalog uses, and a host without an overlay that still follows it is refused with `preflight_manifest` and told to pick canary, rc or release.
+(`InsecureOverlayBaseError`); only an absent base selects the public rail. `trunk` has no built-in location (the per-merge CDN drop and its download host left the rail with it): it is only the channel name this overlay catalog uses, and a host without an overlay that still follows it is refused with `preflight_manifest` and told to pick canary, rc or release.
 Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
 same files work behind LAN HTTPS on `:8443` and a Cloudflare tunnel.
 `run.sh --insecure-tls` still only relaxes the platform-CA instance legs;

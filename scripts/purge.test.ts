@@ -356,7 +356,7 @@ const OWNED_PATHS = [
   "/etc/turbopanel/tunnel-env",
   "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
   "/opt/turbopanel/vendor/cloudflared",
-  "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.11.0/cloudflared",
   "/var/lib/turbopanel/cloudflared/tunnels",
   // The daemon's sealing key and secrets trust mark live loose in the state
   // root; the purge removes them with the tree.
@@ -1617,6 +1617,8 @@ test("container removal merges the pre-purge inventory and removes every name", 
       '    if [ "$2" = "-a" ]; then',
       '      printf "%s\\n" "turbopanel-database|turbopanel.role|database|-|-|-|-"',
       `      printf "%s\\\\n" "${TP_TEST_UUID}-ha|-|managed-ha|-|-|-|-"`,
+      // A container made under the new label prefix (columns 8 and 9).
+      '      printf "%s\\n" "queuebox|-|-|-|-|-|-|queue|-"',
       "    fi",
       "    ;;",
       '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
@@ -1652,6 +1654,8 @@ test("container removal merges the pre-purge inventory and removes every name", 
   assertEquals(lines, [
     `rm:${TP_TEST_UUID}-ha`,
     `rm:${TP_TEST_UUID}-ha`,
+    "rm:queuebox",
+    "rm:queuebox",
     "rm:turbopanel-database",
     "rm:turbopanel-database",
   ]);

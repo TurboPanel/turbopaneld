@@ -760,6 +760,54 @@ test({
 
 test({
   name:
+    "a token under the old label prefix still verifies; both labels at once cover nothing",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withApprovals(async (h, keys) => {
+      const token = await signToken(
+        keys,
+        payloadFor(NOW, {
+          features: ["privileged", "docker-socket"],
+          bodyDigest: await privilegedDigest(),
+        }),
+      );
+      const forged = "v2.Zm9yZ2Vk.Zm9yZ2Vk";
+      const create = (labels: Record<string, string>) => ({
+        ...privilegedCreate(""),
+        Labels: { "com.docker.compose.project": "tenantapp", ...labels },
+      });
+      // Old label only: accepted, both findings covered.
+      await sendCreate(h, create({ "com.turbopanel.approval": token }));
+      assertEquals(wouldDeny(h.logs), []);
+      assertEquals(approvalLogs(h.logs).at(-1)?.result, "accepted");
+      // A valid token under one prefix and a forged one under the other:
+      // refused whichever way round, and the findings stand.
+      for (
+        const labels of [
+          {
+            "io.turbopanel.approval": token,
+            "com.turbopanel.approval": forged,
+          },
+          {
+            "com.turbopanel.approval": token,
+            "io.turbopanel.approval": forged,
+          },
+          { "io.turbopanel.approval": token, "com.turbopanel.approval": token },
+        ]
+      ) {
+        h.logs.length = 0;
+        await sendCreate(h, create(labels));
+        assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
+        const [line] = approvalLogs(h.logs);
+        assertEquals(line.result, "rejected");
+        assertEquals(line.reason, "ambiguous-approval");
+      }
+    }),
+});
+
+test({
+  name:
     "an approval for another project, an expired one and a forged one cover nothing",
   sanitizeOps: false,
   sanitizeResources: false,
@@ -899,7 +947,7 @@ e2e(
   async (h) => {
     await sendCreate(h, {
       Image: "alpine",
-      Labels: { "io.turbopanel.owner": "x" },
+      Labels: { "org.example.owner": "x" },
       HostConfig: {},
     });
     assertEquals(wouldDeny(h.logs), ["unlabeled-create"]);

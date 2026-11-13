@@ -142,7 +142,7 @@ test("normalizeContainer formats inspect NetworkSettings ports", () => {
       RestartCount: 2,
       Config: {
         Image: "api:1",
-        Labels: { "com.turbopanel.project": "p2" },
+        Labels: { "io.turbopanel.project": "p2" },
       },
       NetworkSettings: {
         Ports: {

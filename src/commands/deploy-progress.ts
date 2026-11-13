@@ -227,6 +227,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
   readonly #commandId: string;
   readonly #send: (message: CommandProgressMessage) => boolean;
   readonly #now: () => Date;
+  #lastStampMs = 0;
   readonly #setTimer: (fn: () => void, ms: number) => unknown;
   readonly #clearTimer: (handle: unknown) => void;
   #steps: CommandProgressStep[] = [];
@@ -279,7 +280,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
       this.#find(id)?.state === "pending"
     );
     if (started.length === 0) return;
-    const at = this.#now().toISOString();
+    const at = this.#stepStamp();
     if (options.nested) {
       // The enclosing step keeps running; `current` comes back to it.
       if (this.#current !== null && !started.includes(this.#current)) {
@@ -346,7 +347,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
   finish(outcome: DeployProgressOutcome): void {
     this.#stopWaitingBeat();
     this.#stopKeepalive();
-    const at = this.#now().toISOString();
+    const at = this.#stepStamp();
     const running = RUNNING_AT_FINISH[outcome];
     let changed = false;
     for (const step of this.#steps) {
@@ -421,6 +422,16 @@ class DeployStepReporterImpl implements DeployStepReporter {
     });
   }
 
+  /**
+   * The time a step starts or ends, as ISO 8601 UTC. Never earlier than the
+   * previous stamp, so a clock that steps back cannot give a step a finish
+   * before its start or a negative elapsed time.
+   */
+  #stepStamp(): string {
+    this.#lastStampMs = Math.max(this.#lastStampMs, this.#now().getTime());
+    return new Date(this.#lastStampMs).toISOString();
+  }
+
   #find(id: string): CommandProgressStep | undefined {
     return this.#steps.find((step) => step.id === id);
   }
@@ -451,7 +462,7 @@ class DeployStepReporterImpl implements DeployStepReporter {
     state: "done" | "failed",
     result: StepResultOptions = {},
   ): void {
-    const at = this.#now().toISOString();
+    const at = this.#stepStamp();
     let changed = false;
     for (const id of idList(ids)) {
       const step = this.#find(id);

@@ -11,6 +11,7 @@ import {
   LABEL_RAW_PORT,
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
+  legacyLabelKey,
 } from "./labels.ts";
 
 const ROUTER_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -335,9 +336,20 @@ export function buildHostingLabelsFragment(input: {
       // The shared Traefik only routes containers that carry this label.
       addLabel(labels, LABEL_ROUTED, "true");
     }
-    addLabel(labels, LABEL_PROJECT, payload.projectId);
-    addLabel(labels, LABEL_ENVIRONMENT, payload.environmentId);
-    addLabel(labels, LABEL_SERVICE_ID, hosting.serviceId);
+    // Identity labels go out under both prefixes with the same value, so a
+    // tenant- or control-plane-set old-prefix label can never differ from the
+    // new one on a hosted container (the per-service Traefik constraint
+    // accepts either prefix). The old prefix is dropped in a later release.
+    for (
+      const [key, value] of [
+        [LABEL_PROJECT, payload.projectId],
+        [LABEL_ENVIRONMENT, payload.environmentId],
+        [LABEL_SERVICE_ID, hosting.serviceId],
+      ]
+    ) {
+      addLabel(labels, key, value);
+      addLabel(labels, legacyLabelKey(key), value);
+    }
 
     services[name] = {
       ...services[name],

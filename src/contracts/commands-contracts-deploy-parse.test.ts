@@ -1963,3 +1963,45 @@ test("parseEnvironmentDeployPayload refuses config names ending in .tmp", () => 
     "Invalid environment deploy configFiles name",
   );
 });
+
+test("parseEnvironmentDeployPayload carries optional build limits, deploy-wide and per source entry", () => {
+  const GIB = 1024 ** 3;
+  const plain = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [SOURCE_ENTRY],
+  });
+  assertEquals(plain.buildLimits, undefined);
+  assertEquals(plain.sourceMaterial?.[0]?.buildLimits, undefined);
+
+  const limited = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    buildLimits: { cores: { cores: 2, source: "organization" } },
+    sourceMaterial: [{
+      ...SOURCE_ENTRY,
+      buildLimits: {
+        cores: { cores: 1.5, source: "service" },
+        memory: { bytes: 2 * GIB, source: "server" },
+      },
+    }],
+  });
+  assertEquals(limited.buildLimits, {
+    cores: { cores: 2, source: "organization" },
+  });
+  assertEquals(
+    limited.sourceMaterial?.[0]?.buildLimits?.memory?.bytes,
+    2 * GIB,
+  );
+  rejectDeploy(
+    { buildLimits: { cores: { cores: 0, source: "server" } } },
+    "Invalid buildLimits cores",
+  );
+  rejectDeploy(
+    {
+      sourceMaterial: [{
+        ...SOURCE_ENTRY,
+        buildLimits: { memory: { bytes: 5, source: "server" } },
+      }],
+    },
+    "Invalid sourceMaterial buildLimits memory",
+  );
+});

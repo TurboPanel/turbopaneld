@@ -2,6 +2,7 @@ import { assert, assertEquals } from "@std/assert";
 import {
   ACME_ISSUE_FEATURE,
   BACKUP_S3_COPY_FEATURE,
+  BUILD_LIMITS_FEATURE,
   COMMAND_RECOVERY_FEATURE,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_FEATURE_MIN_VERSIONS,
@@ -591,11 +592,20 @@ test("project-cache-v1 is advertised, right after site-db-url-ca-v1", () => {
   );
 });
 
-test("tunnel-lock-add-v1 is advertised, and is the last entry", () => {
+test("tunnel-lock-add-v1 is advertised, right after project-cache-v1", () => {
   assertEquals(TUNNEL_LOCK_ADD_FEATURE, "tunnel-lock-add-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_LOCK_ADD_FEATURE);
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(TUNNEL_LOCK_ADD_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(PROJECT_CACHE_FEATURE) + 1,
   );
+});
+
+test("build-limits-v1 is advertised, is the last entry and raised no floor", () => {
+  assertEquals(BUILD_LIMITS_FEATURE, "build-limits-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), BUILD_LIMITS_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(BUILD_LIMITS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_LOCK_ADD_FEATURE) + 1,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

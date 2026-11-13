@@ -255,13 +255,14 @@ test({
       keys,
       payloadFor(now, { project: "other", features: ["host-paths"] }),
     );
-    const run = (label: string) =>
+    const run = (label: string) => runWith({ [APPROVAL_LABEL]: label });
+    const runWith = (approval: Record<string, string>) =>
       withInspect(
         {
           Config: {
             Labels: {
               "com.docker.compose.project": "app",
-              [APPROVAL_LABEL]: label,
+              ...approval,
             },
           },
           HostConfig: { Binds: ["/mnt/shared:/s", "/root:/r"] },
@@ -289,6 +290,18 @@ test({
       );
     // `host-paths` covers the outside-roots bind, never the denied tree.
     assertEquals(await run(token), ["start-bind-forbidden-path"]);
+    // A token under the old label prefix is still read for an old container.
+    assertEquals(await runWith({ "com.turbopanel.approval": token }), [
+      "start-bind-forbidden-path",
+    ]);
+    // Both labels at once relax nothing.
+    assertEquals(
+      await runWith({
+        [APPROVAL_LABEL]: token,
+        "com.turbopanel.approval": token,
+      }),
+      ["start-bind-outside-roots", "start-bind-forbidden-path"],
+    );
     assertEquals(await run(forged), [
       "start-bind-outside-roots",
       "start-bind-forbidden-path",

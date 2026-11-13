@@ -98,6 +98,10 @@ export async function makeHost(): Promise<Host> {
         env: {
           PATH: "/usr/bin:/bin",
           TP_HOST_TEST_PREFIX: prefix,
+          // The host's core count, so the default build core limit is the
+          // same on every machine running the suite.
+          TP_TEST_CORES: "8",
+          TP_TEST_MEM_KB: "8388608",
           ...extraEnv,
         },
         stdin: stdin === undefined ? "null" : "piped",

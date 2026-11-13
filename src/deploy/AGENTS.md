@@ -1,5 +1,7 @@
 # Tenant deploy & hosting ingress — AGENTS.md
 
+
+**Label prefix.** The daemon writes every label under `io.turbopanel.` (`labels.ts`). The old `com.turbopanel.` prefix is read only: containers made by the previous release still carry it, so every reader goes through `readLabel` (new label first, old one as the fallback), Traefik provider constraints match either prefix (`traefikLabelConstraint`), the reserved-label check for tenant compose files refuses both, and `scripts/purge.sh` and the Docker gate read both. This read-only support is temporary and is removed in a later release once no container carries the old prefix.
 The `environment.deploy` / `environment.lifecycle` / `environment.stop` command handlers: Docker Compose bring-up with Traefik labels, hosting Caddy (`:80`/`:443`, distinct from control-plane Caddy on `:8443` only), org TLS materialization from `tpdaemon` envelopes, non-destructive start/stop/restart, and best-effort container reporting. While the control plane obtains a Let's Encrypt certificate, hosting Caddy forwards only `/.well-known/acme-challenge/*` for those names to the issuer socket (`00-instance-acme-http01.caddy`). That file is written **before** the first `enable --now`: the unit is `Type=simple`, so systemd reports it active before admin `127.0.0.1:2029` exists, and an immediate `systemctl reload` fails with connection refused then rolls the unit back. A first start loads the snippet as the initial config and does not reload; an already-running hosting Caddy still reloads. The file is removed when issuance finishes. Hosting Caddy runs as `tpedge` (not in group `tp`), so each time the socket is bound (preflight listener, then the issuer) the daemon has tp-host add `u:tpedge:rw` to that one socket (`grantInstanceAcmeSocket`); the hosting-caddy role grants traverse on the run directory. Hosting Caddy does not terminate panel HTTPS.
 
 **Proof forwarding for central certificate issuance (`acme-issue-v1`, `acme-proof-forward.ts`).** When the control plane has one server place a certificate order, every other serving server in the name's DNS answers the HTTP-proof path by forwarding it to the issuing server's public address, keeping the `Host` header. The handler goes inside each site's own `http://<host>` block, never a second block for the same host (that is a duplicate-site error): the block imports `<config>/hosting/proof/<host>/*.proof` (a glob, so a missing file is a no-op and only logs a warning; one folder per host with the host spelled out, because a flat `<host>.proof*` glob would also match a longer lookalike name's file, which another organization may own), written ahead of the redirect, and the redirect sits in a `handle { }` so the imported `handle` for the proof path wins (`redir` would otherwise run first whatever the written order). A site written by an older daemon has no import line: the forward is answered `acme-proof-forward-failed` ("deploy it again") rather than patched in place. Only a name with no site block yet gets a reserved site (`00-tenant-acme-proof-<request>.caddy`, listed as reserved so sweeps keep it; a deploy that brings its own block for the name removes it first). Every snippet starts with a `# tp-proof-forward request=<id> expires=<iso>` line, so the file is its own record: the end message, an expiry timer and the sweep at attach all find it from the file alone. The target must be a real, non-loopback, non-link-local address that is not one of this server's own.
@@ -221,7 +223,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 11. Refresh hosting Caddy config under `/etc/turbopanel/hosting/`
    (every deploy also rewrites the reserved `sites/00-fallback.caddy`: the
    catch-all `http://` and `https://` blocks that answer names nobody hosts
-   with an empty 200, no redirect, and the same hide-names header block as
+   with a 404 and a small self-contained default page (`no-store`, no
+   redirect; it never echoes the requested name, because Caddy does not
+   HTML-escape placeholders in a `respond` body, and every `{` in the inline
+   CSS is written `\{` so Caddy keeps it; its "Hosted with TurboPanel" footer is
+   left out when hide-names is on), and the same hide-names header block as
    hosted sites when the setting is on. The file is shared by every
    environment on the server, so the hide-names choice is that of whichever
    deployed last. HTTPS shows one fixed internal certificate for the reserved
@@ -230,9 +236,12 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    deploys refuse that name as a hosting hostname). The daemon also writes
    the file and the Caddyfile at start (`ensureHostingFallback`, after the
    guard) when hosting Caddy is set up and running but has no current copy, so
-   an updated host answers unhosted names before any deploy: it keeps a file a
-   deploy wrote, otherwise takes hide-names from the written sites (hidden when
-   unknown), validates first, and leaves live files alone if Caddy refuses)
+   an updated host answers unhosted names before any deploy: a file a deploy
+   wrote keeps its own hide-names and Via choices (read back from its header
+   deletions) and is rewritten when its content differs from the current
+   page, so an older blank-200 file is replaced at the next start and a second
+   run changes nothing and reloads nothing; with no file it takes hide-names
+   from the written sites (hidden when unknown); it validates first, and leaves live files alone if Caddy refuses)
    (`auto_https disable_redirects` — site snippets own the HTTP→HTTPS
    redirect so `:80` stays open for HTTP-01). Per-hostname site blocks use
    one of three TLS states: `tls <fullchain> <privkey>` when a resolved
@@ -342,7 +351,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
 
 ## Compose project per environment (upgrade note)
 
-The control plane names one Compose project per **environment** (it used to be one per project, so two environments of a project on one server replaced each other's containers). On an environment's first deploy under the new name, `retire-previous-projects.ts` removes **that environment's** containers still running under a name recorded in its `deployment.json` (`docker rm -f`, volumes kept). It never uses a whole-project `compose down`: the old name was shared with sibling environments, so containers are matched by the `com.turbopanel.environment` label or, for older containers, by `com.docker.compose.project.working_dir` equal to this environment's deployment directory. A deploy with zero container services clears the environment's containers the same way. Stop/teardown and start/restart/stop (lifecycle) of an environment whose recorded names do not include the command's name act the same way on this environment's own containers only (`docker rm -f` / `stop` / `start` / `restart` on their ids), never as a whole-project Compose command on the old name; a stop with the compose files gone still removes them. Images are pulled (best effort) before the old containers are removed, and a deploy that then fails says the earlier containers were already removed and to deploy again. Named volumes the control plane registers are pinned by `name:` (storage id), so they no longer depend on the project name; data in a stack's old `<project>_<id>` volumes is kept on the host but not reused by the first deploy after this change.
+The control plane names one Compose project per **environment** (it used to be one per project, so two environments of a project on one server replaced each other's containers). On an environment's first deploy under the new name, `retire-previous-projects.ts` removes **that environment's** containers still running under a name recorded in its `deployment.json` (`docker rm -f`, volumes kept). It never uses a whole-project `compose down`: the old name was shared with sibling environments, so containers are matched by the `io.turbopanel.environment` label or, for older containers, by `com.docker.compose.project.working_dir` equal to this environment's deployment directory. A deploy with zero container services clears the environment's containers the same way. Stop/teardown and start/restart/stop (lifecycle) of an environment whose recorded names do not include the command's name act the same way on this environment's own containers only (`docker rm -f` / `stop` / `start` / `restart` on their ids), never as a whole-project Compose command on the old name; a stop with the compose files gone still removes them. Images are pulled (best effort) before the old containers are removed, and a deploy that then fails says the earlier containers were already removed and to deploy again. Named volumes the control plane registers are pinned by `name:` (storage id), so they no longer depend on the project name; data in a stack's old `<project>_<id>` volumes is kept on the host but not reused by the first deploy after this change.
 
 ## Git-backed releases
 
@@ -663,7 +672,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
 
 - **Compose labels** (`compose-labels.ts` `applyTcpUdpHostingLabels`): one
   `traefik.tcp.routers.<hostingId>-<published>` / `traefik.udp.routers…` pair
-  per published port, plus `com.turbopanel.service=<serviceId>` (from
+  per published port, plus `io.turbopanel.service=<serviceId>` (from
   `injectHostingLabels`). TCP routers get a catch-all `HostSNI(\`*\`)` rule;
   UDP routers take no rule label. Both get a `…loadbalancer.server.port`
   label targeting the container port.
@@ -675,7 +684,7 @@ get a per-service Traefik project or an `ingressServices[]` entry.
   `container_name: <serviceId>-in`,
   `x-turbopanel: { kind: ingress, serviceId, containerName }`, joined to
   the shared hosting-ingress network, and
-  ``--providers.docker.constraints=Label(`com.turbopanel.service`,`<serviceId>`)``.
+  ``--providers.docker.constraints=Label(`io.turbopanel.service`,`<serviceId>`)``.
   Static config is regenerated (not hot-reloaded): one quoted
   ``--entrypoints.<protocol><port>.address=:<port>[/udp]`` arg and one quoted
   ``"<bind>:<port>:<port>/<protocol>"`` `ports:` line per entry (bind defaults
@@ -927,11 +936,11 @@ Traefik and from managed-engine ProxySQL:
    Ansible role. `system.reconcile` only inspects (`selfHeal: none`).
 
 Adoption for hosting-ingress and system-stack rows requires the documented
-labels (`turbopanel.role`, `com.turbopanel.system.component`, …) — see below.
-ProxySQL uses `role: ingress` + `com.turbopanel.system.component=managed-ingress`
+labels (`turbopanel.role`, `io.turbopanel.system.component`, …) — see below.
+ProxySQL uses `role: ingress` + `io.turbopanel.system.component=managed-ingress`
 when identity is stamped. Shared HTTP Traefik and ProxySQL now stamp the **same**
 `turbopanel.role` value, so the distinguishing adoption key is
-`com.turbopanel.system.component` (`hosting-ingress` vs `managed-ingress`) —
+`io.turbopanel.system.component` (`hosting-ingress` vs `managed-ingress`) —
 never the role label alone.
 
 Descriptor path: `<stateDir>/system/hosting-ingress.json`
@@ -939,9 +948,9 @@ Descriptor path: `<stateDir>/system/hosting-ingress.json`
 must stay `traefik`, `containerName` = `<serviceId>-in`). When present,
 `traefikCompose(identity)` emits `container_name`,
 `x-turbopanel: { kind: system, component: hosting-ingress, … }`, and labels
-`turbopanel.role=ingress`, `com.turbopanel.system.component=hosting-ingress`,
-`com.turbopanel.service=<serviceId>` — **never** `traefik.enable`, HTTP router
-labels, or `com.turbopanel.raw-port` (so tenant Traefik providers stay blind to
+`turbopanel.role=ingress`, `io.turbopanel.system.component=hosting-ingress`,
+`io.turbopanel.service=<serviceId>` — **never** `traefik.enable`, HTTP router
+labels, or `io.turbopanel.raw-port` (so tenant Traefik providers stay blind to
 it). `ensureHostingIngress` reads the descriptor on every deploy. HTTP tenant
 deploys write it from `hostingIngress` before that call when the payload
 includes identity; a missing file remains the fallback for older payloads
@@ -953,8 +962,8 @@ absence returns `null`. A missing compose file is authoritative absence
 (`null`), not a collection failure. Observed rows must match the allocated
 `container_name` **and** compose service **and** carry allowlisted platform
 labels (`turbopanel.role=ingress`,
-`com.turbopanel.system.component=hosting-ingress`,
-`com.turbopanel.service=<serviceId>`) — anonymous pre-provision
+`io.turbopanel.system.component=hosting-ingress`,
+`io.turbopanel.service=<serviceId>`) — anonymous pre-provision
 legacy `<project>-traefik-1` rows (no platform labels) are ignored.
 Production writer: the `system.reconcile` handler always calls
 `writeSystemComponentDescriptor`, then self-heals via `ensureDocker` +
@@ -986,8 +995,8 @@ Host dirs and the `turbopanel-proxysql-stack` unit are Ansible-owned
 `inspectSystemStackContainer` (`src/deploy/system-stack.ts`) reports
 `docker compose ps` identity/status (`selfHealAllowed: false` for
 `database` / `queue` / `analytics`). Adoption requires labels
-`turbopanel.role=turbopanel` + `com.turbopanel.system.component=<database|queue|analytics>`
-— **never** `com.turbopanel.service` (tenant/system Traefik identity) and
+`turbopanel.role=turbopanel` + `io.turbopanel.system.component=<database|queue|analytics>`
+— **never** `io.turbopanel.service` (tenant/system Traefik identity) and
 **never** `traefik.enable`. A missing `turbopanel-system` compose file is
 authoritative absence (`null`).
 
@@ -1183,7 +1192,7 @@ own reader and is not loaded by any engine.
 ## Compose policy on the resolved model, and routing labels
 
 - `compose-final-policy.ts` (`assertComposePolicy`) judges `docker compose config` output, after merge keys, anchors and `extends` are expanded: host-level service fields, volume mount options other than a sized tmpfs or a bind (host paths are confined separately) and bridge options on networks need `hostLevelApproved`; a built service may not take a platform image name (`PLATFORM_IMAGE_REPOSITORIES`, kept in step with the image constants by a test).
-- `traefik.*` labels and `com.turbopanel.raw-port` are reserved owner labels: routing is generated by the daemon only. HTTP-hosted containers get `com.turbopanel.system.routed=true`; the shared Traefik carries `--providers.docker.constraints` on it.
+- `traefik.*` labels and `io.turbopanel.raw-port` are reserved owner labels: routing is generated by the daemon only. HTTP-hosted containers get `io.turbopanel.system.routed=true`; the shared Traefik carries `--providers.docker.constraints` on it.
 - Transition: while a running container still routes HTTP (`traefik.http.*` labels) without the routed label, the shared Traefik is rendered without the constraint (`legacyHttpContainersPresent`), so no site goes dark; the render after the last such container is redeployed turns the constraint on. Both the legacy docker.sock file and the socket-proxy shape go through the same `traefikCompose`.
 - The resolved-model policy also refuses, without host-level approval, published host ports inside the platform's bands (`RESERVED_HOST_PORT_RANGES`) and `gpus` / `group_add` / device reservations (the control plane gates `gpus` and `group_add` the same way); it always refuses an authored network that is the hosting-ingress or managed network. Not checkable in the daemon: a volume's `name:` / `external:` pointing at another project's volume — the control plane rewrites its own storage volumes to external named volumes, so only its host-access gate can tell. The legacy-container check lists stopped containers too (`docker ps -a`).
 

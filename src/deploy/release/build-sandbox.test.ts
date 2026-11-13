@@ -17,6 +17,7 @@ import {
   removeBuildTree,
   removeBuildWork,
   renderBuildSpec,
+  resetBuildHelperProbe,
   resolveBuildWork,
   runSandboxedBuild,
   type SandboxSpawn,
@@ -31,6 +32,13 @@ import {
 const test = Deno.test.bind(Deno);
 
 const RUNNER = join(DAEMON_ROOT, "orchestration/scripts/tp-build-runner");
+/** Every build here runs against a helper that takes the limit arguments. */
+const run = (params: Parameters<typeof runSandboxedBuild>[0]) =>
+  runSandboxedBuild({ probeHelper: () => Promise.resolve(true), ...params });
+
+const GIB = 1024 ** 3;
+/** An 8-core host with 8 GiB of RAM. */
+const HOST = { cores: 8, memoryBytes: 8 * GIB };
 const PROJECT = "01a0e39d-0418-7852-bc47-bc2f8422d404";
 const TP_HOST = "/opt/turbopanel/lib/tp-host";
 
@@ -265,18 +273,24 @@ test("a build is the fixed build-run argv with the spec on stdin, then build-ret
   const child = fakeChild({ code: 0, stdout: "built\n" });
   const { runFn, calls } = recordingRunFn();
   const lines: string[] = [];
-  await runSandboxedBuild({
+  await run({
     work: target,
     spec: "tp-build-spec 1\nrun dHJ1ZQ==\nend\n",
     spawn: child.spawn,
     runFn,
+    host: HOST,
     onOutput: (_stream, line) => lines.push(line),
   });
+  // No limit set anywhere: tp-host applies its defaults (half the cores, the
+  // RAM less 1 GiB); the log line says what they come to.
   assertEquals(child.argv, [
-    managed("build-run", target.buildId, PROJECT, "alice"),
+    managed("build-run", target.buildId, PROJECT, "alice", "-", "-", "-"),
   ]);
   assertEquals(child.stdin(), "tp-build-spec 1\nrun dHJ1ZQ==\nend\n");
-  assertEquals(lines, ["built"]);
+  assertEquals(lines, [
+    "Build limited to 4 cores (default) and 7 GB memory (default)",
+    "built",
+  ]);
   assertEquals(calls, [managed("build-return", target.buildId)]);
 });
 
@@ -289,8 +303,7 @@ test("a failed build reports its own stderr, and the tree still comes back", asy
   });
   const { runFn, calls } = recordingRunFn();
   await assertRejects(
-    () =>
-      runSandboxedBuild({ work: target, spec: "", spawn: child.spawn, runFn }),
+    () => run({ work: target, spec: "", spawn: child.spawn, runFn }),
     Error,
     "missing script: build",
   );
@@ -305,8 +318,7 @@ test("a spec the runner refuses is reported as the sandbox's refusal", async () 
   });
   const { runFn } = recordingRunFn();
   await assertRejects(
-    () =>
-      runSandboxedBuild({ work: target, spec: "", spawn: child.spawn, runFn }),
+    () => run({ work: target, spec: "", spawn: child.spawn, runFn }),
     Error,
     "the build sandbox refused the build spec (exit 65)",
   );
@@ -328,7 +340,7 @@ test("a timed-out build stops its unit before the tree is taken back", async () 
   };
   await assertRejects(
     () =>
-      runSandboxedBuild({
+      run({
         work: target,
         spec: "",
         spawn: child.spawn,
@@ -366,7 +378,7 @@ test("losing the client stops the unit and kills the client", async () => {
       kill: (signal: string) => killed.push(signal),
     }) as unknown as Deno.ChildProcess;
   await assertRejects(
-    () => runSandboxedBuild({ work: target, spec: "", spawn, runFn }),
+    () => run({ work: target, spec: "", spawn, runFn }),
     Error,
     "stream torn",
   );
@@ -381,8 +393,7 @@ test("a tree that cannot be taken back fails an otherwise good build", async () 
     "build-return": "turbopanel-build-x.service is still active",
   });
   await assertRejects(
-    () =>
-      runSandboxedBuild({ work: target, spec: "", spawn: child.spawn, runFn }),
+    () => run({ work: target, spec: "", spawn: child.spawn, runFn }),
     Error,
     "could not take the build tree back: turbopanel-build-x.service is still active",
   );
@@ -397,7 +408,7 @@ test("builds on one host run one at a time, and a waiting one says so", async ()
   const order: string[] = [];
   const lines: string[] = [];
   const { runFn } = recordingRunFn();
-  const one = runSandboxedBuild({
+  const one = run({
     work: first,
     spec: "",
     runFn,
@@ -411,10 +422,11 @@ test("builds on one host run one at a time, and a waiting one says so", async ()
       ).spawn(args);
     },
   });
-  const two = runSandboxedBuild({
+  const two = run({
     work: first,
     spec: "",
     runFn,
+    host: HOST,
     onOutput: (_stream, line) => lines.push(line),
     spawn: (args) => {
       order.push("start-2");
@@ -426,7 +438,10 @@ test("builds on one host run one at a time, and a waiting one says so", async ()
   finishFirst();
   await Promise.all([one, two]);
   assertEquals(order, ["start-1", "end-1", "start-2"]);
-  assertEquals(lines, ["waiting for another build on this host to finish"]);
+  assertEquals(lines, [
+    "waiting for another build on this host to finish",
+    "Build limited to 4 cores (default) and 7 GB memory (default)",
+  ]);
 });
 
 test("the work tree is created fresh, a stale one is taken back first, and a missing root names the role", async () => {
@@ -657,7 +672,7 @@ test("a build that floods its output is stopped and does not buffer it", async (
   const { runFn } = recordingRunFn();
   await assertRejects(
     () =>
-      runSandboxedBuild({
+      run({
         work: target,
         spec: "",
         spawn,
@@ -714,4 +729,206 @@ test("a deploy cancelled while it waits for the build slot leaves the queue", as
   open();
   await Promise.all([first, next]);
   assertEquals(ran, ["next"]);
+});
+
+test("a build runs with the limits the control plane resolved, and the log line names their levels", async () => {
+  const target = {
+    ...await work(),
+    buildLimits: {
+      cores: { cores: 1.5, source: "server" as const },
+      memory: { bytes: 2 * GIB, source: "service" as const },
+      swap: { allowed: true, source: "organization" as const },
+    },
+  };
+  const child = fakeChild({ code: 0 });
+  const { runFn } = recordingRunFn();
+  const lines: string[] = [];
+  await run({
+    work: target,
+    spec: "",
+    spawn: child.spawn,
+    runFn,
+    host: HOST,
+    onOutput: (_stream, line) => lines.push(line),
+  });
+  assertEquals(child.argv, [
+    managed(
+      "build-run",
+      target.buildId,
+      PROJECT,
+      "alice",
+      "1.5",
+      "2147483648",
+      "on",
+    ),
+  ]);
+  assertEquals(lines, [
+    "Build limited to 1.5 cores (server limit) and 2 GB memory (service limit), swap allowed up to 2 GB",
+  ]);
+});
+
+test("a build killed for memory says so plainly, with the limit", async () => {
+  const target = await work();
+  const { runFn } = recordingRunFn();
+  for (
+    const result of [
+      { code: 137, stderr: "" },
+      {
+        code: 1,
+        stderr:
+          "npm ERR! something\ntp-build-runner: step 1 of 1 failed (exit 137)\n",
+      },
+    ]
+  ) {
+    const child = fakeChild(result);
+    await assertRejects(
+      () =>
+        run({
+          work: target,
+          spec: "",
+          spawn: child.spawn,
+          runFn,
+          host: HOST,
+        }),
+      Error,
+      "The build ran out of memory (limit 7 GB). Raise Build Memory or reduce the build's memory use.",
+    );
+  }
+});
+
+test("output a build prints itself never makes it an out-of-memory failure", async () => {
+  const target = await work();
+  const { runFn } = recordingRunFn();
+  for (
+    const stderr of [
+      "sh: 1: Killed\n",
+      "oom-kill\n",
+      "tp-build-runner: step 1 of 1 failed (exit 137)\nmore output after it\n",
+    ]
+  ) {
+    const child = fakeChild({ code: 1, stderr });
+    const err = await assertRejects(() =>
+      run({ work: target, spec: "", spawn: child.spawn, runFn, host: HOST })
+    );
+    assert(!String((err as Error).message).includes("ran out of memory"));
+  }
+});
+
+test("a build that failed for another reason is not called out of memory", async () => {
+  const target = await work();
+  const child = fakeChild({ code: 1, stderr: "npm ERR! missing script\n" });
+  const { runFn } = recordingRunFn();
+  const err = await assertRejects(() =>
+    run({
+      work: target,
+      spec: "",
+      spawn: child.spawn,
+      runFn,
+      host: HOST,
+    })
+  );
+  assert(!String((err as Error).message).includes("ran out of memory"));
+});
+
+test("a host helper older than the daemon is found out before the build, which then runs once without limits", async () => {
+  resetBuildHelperProbe();
+  const target = await work();
+  const child = fakeChild({ code: 0 });
+  const { runFn } = recordingRunFn();
+  const lines: string[] = [];
+  await runSandboxedBuild({
+    work: target,
+    spec: "",
+    spawn: child.spawn,
+    runFn,
+    host: HOST,
+    probeHelper: () => Promise.resolve(false),
+    onOutput: (stream, line) => lines.push(`${stream}: ${line}`),
+  });
+  assertEquals(child.argv, [
+    managed("build-run", target.buildId, PROJECT, "alice"),
+  ]);
+  assert(lines.some((l) => l.includes("older than this daemon")));
+  assert(!lines.some((l) => l.includes("Build limited to")));
+  resetBuildHelperProbe();
+});
+
+test("a build that prints the old helper's refusal is never run again", async () => {
+  resetBuildHelperProbe();
+  const target = await work();
+  const child = fakeChild({
+    code: 1,
+    stderr: "tp-host: build-run: only build-run BUILD-ID PROJECT-ID OWNER\n",
+  });
+  const { runFn } = recordingRunFn();
+  await assertRejects(
+    () =>
+      runSandboxedBuild({
+        work: target,
+        spec: "",
+        spawn: child.spawn,
+        runFn,
+        host: HOST,
+        probeHelper: () => Promise.resolve(true),
+      }),
+    Error,
+    "only build-run",
+  );
+  assertEquals(child.argv.length, 1);
+  resetBuildHelperProbe();
+});
+
+test("the helper probe tells an old helper from a current one by its answer, and only a yes is kept", async () => {
+  resetBuildHelperProbe();
+  const target = await work();
+  const answers = [
+    "tp-host: build-run: only build-run BUILD-ID PROJECT-ID OWNER",
+    "tp-host: build-run: refusing build id -probe",
+    "tp-host: build-run: only build-run BUILD-ID PROJECT-ID OWNER",
+  ];
+  const probes: string[][] = [];
+  const probeRunFn: RunFn = (_command, args) => {
+    if (!args.includes("build-run")) {
+      return Promise.resolve({ success: true, stdout: "", stderr: "" });
+    }
+    probes.push(args);
+    return Promise.resolve({
+      success: false,
+      stdout: "",
+      stderr: answers[probes.length - 1] ?? "",
+    });
+  };
+  const spawned: string[][] = [];
+  const once = async () => {
+    const child = fakeChild({ code: 0 });
+    await runSandboxedBuild({
+      work: target,
+      spec: "",
+      spawn: (args) => {
+        spawned.push(args);
+        return child.spawn(args);
+      },
+      runFn: probeRunFn,
+      host: HOST,
+    });
+  };
+  await once();
+  assertEquals(
+    spawned[0],
+    managed("build-run", target.buildId, PROJECT, "alice"),
+  );
+  await once();
+  assertEquals(
+    spawned[1].length,
+    managed("build-run", "x", "y", "z", "-", "-", "-").length,
+  );
+  // A yes is remembered: no third probe.
+  const before = probes.length;
+  await once();
+  assertEquals(probes.length, before);
+  assertEquals(
+    probes[0],
+    managed("build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"),
+  );
+  resetBuildHelperProbe();
 });

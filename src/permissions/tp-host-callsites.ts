@@ -179,7 +179,7 @@ const TUNNEL_UNIT_B = tunnelUnitName(TUNNEL_ID, "b");
 const TUNNEL_TOKEN = "dGVzdA".repeat(8);
 const TUNNEL_UNIT_TEXT = renderTunnelUnit({
   id: TUNNEL_ID,
-  binary: `${VENDOR}/cloudflared/2026.10.7/cloudflared`,
+  binary: `${VENDOR}/cloudflared/2026.11.0/cloudflared`,
   port: 20300,
   envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
 });
@@ -1638,10 +1638,32 @@ const SITES: CallSite[] = [
   // --- release promotion ----------------------------------------------------
   // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner],MANAGED',
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner,...(withLimits?[buildCoresArg(resolved),buildMemoryArg(resolved),buildSwapArg(resolved)]:[])],MANAGED',
     {
       argv: ["build-run", BUILD_ID, PROJECT_ID, "alice"],
       stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
+      setup: BUILD_TREE,
+    },
+    {
+      argv: [
+        "build-run",
+        BUILD_ID,
+        PROJECT_ID,
+        "alice",
+        "1.5",
+        "2147483648",
+        "on",
+      ],
+      stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
+      setup: BUILD_TREE,
+    },
+  ),
+  // The helper probe: a build id tp-host refuses on purpose (see KNOWN_BUGS
+  // below, where the refusal is the expected answer, not a bug).
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","build-run","-probe","-probe","tpbuild","-","-","-"],MANAGED',
+    {
+      argv: ["build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"],
       setup: BUILD_TREE,
     },
   ),
@@ -2965,7 +2987,15 @@ export type KnownBug =
   | { why: string; refusal: string }
   | { why: string; pending: string };
 
-const KNOWN_BUGS: Record<string, KnownBug> = {};
+const KNOWN_BUGS: Record<string, KnownBug> = {
+  // Intended: the daemon asks the helper whether it takes limit arguments with a
+  // build id the helper refuses, so no unit ever starts.
+  'src/deploy/release/build-sandbox.ts|["-n","build-run","-probe","-probe","tpbuild","-","-","-"],MANAGED':
+    {
+      why: "the helper probe asks with a build id tp-host refuses on purpose",
+      refusal: "refusing build id",
+    },
+};
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
   KNOWN_BUGS[site.key] === undefined

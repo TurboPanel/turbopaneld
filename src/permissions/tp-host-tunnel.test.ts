@@ -42,7 +42,7 @@ function unitFor(
   return renderTunnelUnit({
     id,
     binary: host.path(
-      "opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
+      "opt/turbopanel/vendor/cloudflared/2026.11.0/cloudflared",
     ),
     port,
     envFile: host.path(`${COPY_DIR}/${id}.env`),
@@ -201,8 +201,8 @@ test("every one-line change to the unit is refused", async () => {
       ],
       ["no run word", good.replace(" run\n", "\n")],
       ["an argument after run", good.replace(" run\n", " run --token abc\n")],
-      ["a version with a path in it", good.replace("/2026.10.7/", "/../x/")],
-      ["an empty version", good.replace("/2026.10.7/", "//")],
+      ["a version with a path in it", good.replace("/2026.11.0/", "/../x/")],
+      ["an empty version", good.replace("/2026.11.0/", "//")],
     );
     for (const [label, text] of changes) {
       try {

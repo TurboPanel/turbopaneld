@@ -52,6 +52,12 @@ test("labelled HTTP containers and TCP-only containers do not", async () => {
     })),
     false,
   );
+  assertEquals(
+    await legacyHttpContainersPresent(fakeDocker({
+      c1: { ...HTTP, "io.turbopanel.system.routed": "true" },
+    })),
+    false,
+  );
   assertEquals(await legacyHttpContainersPresent(fakeDocker({})), false);
 });
 
@@ -73,6 +79,11 @@ test("the shared Traefik renders the constraint only when asked", () => {
     false,
   );
   assertStringIncludes(on, "providers.docker.constraints=");
+  // Containers of the previous release carry the old prefix and stay routed.
+  assertStringIncludes(
+    on,
+    "(Label(`io.turbopanel.system.routed`,`true`) || Label(`com.turbopanel.system.routed`,`true`))",
+  );
   assertEquals(off.includes("providers.docker.constraints"), false);
 });
 

@@ -6,7 +6,7 @@
 #   sudo bash docker-gate-proof-udp.sh
 #
 # It mirrors what the daemon renders for a `udp` hosting (a per-service
-# Traefik restricted by `com.turbopanel.service` + `com.turbopanel.raw-port`
+# Traefik restricted by `io.turbopanel.service` + `io.turbopanel.raw-port`
 # labels, one `udp<port>` entrypoint, a published loopback port) and proves:
 #   1. the read-only socket is up and the switch file is on;
 #   2. a Traefik started against that socket (and not docker.sock) discovers a
@@ -77,9 +77,9 @@ start_backend() {
   _be_name=$1
   docker run -d --name "$_be_name" --network "$NET" \
     --label traefik.enable=true \
-    --label com.turbopanel.system.routed=true \
-    --label "com.turbopanel.service=$PROOF_SERVICE" \
-    --label com.turbopanel.raw-port=true \
+    --label io.turbopanel.system.routed=true \
+    --label "io.turbopanel.service=$PROOF_SERVICE" \
+    --label io.turbopanel.raw-port=true \
     --label "traefik.udp.routers.$PROOF_SERVICE.entrypoints=udp$PORT" \
     --label "traefik.udp.services.$PROOF_SERVICE.loadbalancer.server.port=$BACKEND_PORT" \
     "$IMAGE" sh -c "nc -u -l -p $BACKEND_PORT >/got; sleep 600" >/dev/null 2>&1
@@ -133,7 +133,7 @@ docker run -d --name "$TRAEFIK" --network "$NET" \
   --providers.docker.endpoint=unix:///var/run/turbopanel-gate/docker.sock \
   --providers.docker.exposedbydefault=false \
   "--providers.docker.network=$NET" \
-  "--providers.docker.constraints=Label(\`com.turbopanel.service\`,\`$PROOF_SERVICE\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)" \
+  "--providers.docker.constraints=Label(\`io.turbopanel.service\`,\`$PROOF_SERVICE\`) && Label(\`io.turbopanel.raw-port\`,\`true\`)" \
   "--entrypoints.udp$PORT.address=:$PORT/udp" >/dev/null 2>&1 || check_ok=false
 if [[ "$check_ok" == true ]]; then pass "Traefik started on the read-only socket"; else fail "could not start the proof's network or Traefik"; fi
 if docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$TRAEFIK" 2>/dev/null | grep -q 'docker\.sock'; then

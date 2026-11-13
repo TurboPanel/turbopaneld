@@ -10,7 +10,7 @@
  * private key anywhere in this tree.
  *
  * Wire format (a container label, because Compose cannot add HTTP headers):
- *   `com.turbopanel.approval` = `v2.<base64url(payload JSON)>.<base64url(signature)>`
+ *   `io.turbopanel.approval` = `v2.<base64url(payload JSON)>.<base64url(signature)>`
  * The signature covers `DOMAIN + <base64url(payload)>` (the exact text, so no
  * re-serialisation question). Payload:
  *   { deployId, project, composeDigest, bodyDigest, containerName, jti, features[], iat, exp }  (seconds)
@@ -21,7 +21,7 @@
  * SHA-256 of the RFC 8785 (JCS) canonical JSON of the create body AS THE
  * CLIENT SENT IT (a plain JSON.parse of the payload: field names exactly as
  * written, never the strict parser's canonical spelling, so no gate version
- * changes it) with the `com.turbopanel.approval` label removed (the token
+ * changes it) with the approval label (either prefix) removed (the token
  * cannot cover itself). `jti` makes a token single-use: the gate remembers
  * every accepted one until its `exp` and refuses it again as `replayed` (the
  * memory is per gate process: a gate restart forgets, bounded by `exp`).
@@ -35,7 +35,29 @@
 
 import type { Violation } from "./policy.ts";
 
-export const APPROVAL_LABEL = "com.turbopanel.approval";
+export const APPROVAL_LABEL = "io.turbopanel.approval";
+/**
+ * The old-prefix spelling. Nothing signs a token under it today; it is
+ * recognised only so it can never be used to sneak past the gate (see
+ * {@link approvalTokenOf}). Removed together with the old label prefix.
+ */
+export const LEGACY_APPROVAL_LABEL = "com.turbopanel.approval";
+
+/**
+ * The approval token of a container's labels. Exactly one of the two labels
+ * present gives its value; both present is `ambiguous` (the caller refuses on
+ * create and relaxes nothing on start): the gate never picks one, so a forged
+ * second label can neither hide behind nor replace a signed one.
+ */
+export function approvalTokenOf(
+  labels: Readonly<Record<string, string>>,
+): { token: string } | { ambiguous: true } | undefined {
+  const current = labels[APPROVAL_LABEL];
+  const legacy = labels[LEGACY_APPROVAL_LABEL];
+  if (current !== undefined && legacy !== undefined) return { ambiguous: true };
+  const token = current ?? legacy;
+  return token === undefined ? undefined : { token };
+}
 export const APPROVAL_VERSION = "v2";
 /** Domain separation: a signature over anything else never verifies here. */
 export const APPROVAL_DOMAIN = "turbopanel-docker-gate-approval-v2\n";
@@ -119,6 +141,7 @@ export async function approvalBodyDigest(body: unknown): Promise<string> {
     const labels = (copy as Record<string, unknown>).Labels;
     if (typeof labels === "object" && labels !== null) {
       delete (labels as Record<string, unknown>)[APPROVAL_LABEL];
+      delete (labels as Record<string, unknown>)[LEGACY_APPROVAL_LABEL];
     }
   }
   const bytes = new TextEncoder().encode(canonicalJson(copy));

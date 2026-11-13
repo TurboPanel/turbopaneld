@@ -480,7 +480,7 @@ test("isExactBuildManifestUrl: channel pointers and off-rail URLs float", () => 
   assertEquals(
     isExactBuildManifestUrl(
       "daemon",
-      "https://dl.trbp.nl/channels/trunk/manifest.json",
+      "https://dl.example.net/channels/trunk/manifest.json",
     ),
     false,
   );

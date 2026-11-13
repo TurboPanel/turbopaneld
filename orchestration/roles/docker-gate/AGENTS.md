@@ -4,6 +4,10 @@ Root context: `../../../src/permissions/AGENTS.md` → **Managed-host privilege 
 ("Docker" is the first of the three root-equivalent routes of the daemon
 account `tp`). This role is **stage 3 of 5** of closing it.
 
+## Label prefix (`io.turbopanel.`)
+
+The gate reads labels under `io.turbopanel.`; the old `com.turbopanel.` prefix is read only, for containers the previous release made, and goes away in a later release. `platform.ts` `componentOf` takes the new component label first and the old one as the fallback. For the signed approval, `approvalTokenOf` accepts exactly one of the two approval labels; a container carrying both is refused on create (`ambiguous-approval`) and relaxes nothing on start or restart, and the body digest removes both labels, so a forged second label can neither hide behind nor replace a signed one.
+
 ## What exists today (stages 1-3: observe mode, plus Traefik's read-only socket)
 
 A root-owned systemd service, `turbopanel-docker-gate.service`, runs the
@@ -151,7 +155,7 @@ containers are labelled, see below).
 
 **Platform allowance** (`platform.ts`). A create is `platform` when it carries
 `turbopanel.role` in {`turbopanel`, `ingress`} plus a known
-`com.turbopanel.system.component` (`hosting-ingress`, `managed-ingress`,
+`io.turbopanel.system.component` (`hosting-ingress`, `managed-ingress`,
 `managed-ha`), or `tp.managed.engine`. Such a container may bind, after symlink
 resolution: config trees read-only (`<config>/proxysql`, `<config>/orchestrator`,
 `TP_DOCKER_GATE_PLATFORM_RO_ROOTS`) and state trees in any mode
@@ -171,7 +175,7 @@ until the stage-3 switch is on.
 
 **Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
 restore swap, managed-file ownership, engine volume bootstrap) stamps
-`turbopanel.role=turbopanel` + `com.turbopanel.system.component=<backup-copy |
+`turbopanel.role=turbopanel` + `io.turbopanel.system.component=<backup-copy |
 backup-restore | managed-files | volume-copy>` through `helperLabelArgs` in
 `src/deploy/labels.ts`; `platform.ts` lists those components, and `/backup`
 (the restore archive, read-only only) is a platform read-only root. A test in
@@ -190,13 +194,13 @@ an `owner-unknown` finding.
 **Signed approvals** (`approval.ts`). Host-level Compose features cannot rest on
 the daemon's own `hostLevelApproved` flag (the daemon account sets it). The
 control plane signs, the gate verifies with a public key. Token = container
-label `com.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
+label `io.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
 signature covers `turbopanel-docker-gate-approval-v2\n` + the payload text.
 Payload: `deployId`, `project`, `composeDigest` (audit only: the gate never sees
 the compose file), `bodyDigest`, `containerName` (the create's `?name=` query, which the body does not hold: another name is `rejected: wrong-name`), `features[]`, `iat`, `exp` (seconds). `bodyDigest`
 binds the token to ONE create body: base64url SHA-256 of the RFC 8785 canonical JSON of the body AS THE CLIENT SENT IT
 (a plain `JSON.parse` of the payload: field names as written, never the strict parser's canonical spelling, so no gate
-version shifts it), with the `com.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1
+version shifts it), with the `io.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1
 token (no binding) is `unsupported-version`. `jti` makes a token single-use: an accepted id is remembered until its
 `exp` and a second use is `rejected: replayed` (memory is per gate process; at most 10 000 ids, beyond which new tokens
 are refused). The signer therefore has to sign the final create body Compose sends; the signer is not built, so that is
@@ -376,7 +380,7 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   as Tecnativa did: redacting it needs response rewriting (a separate change).
 - The `ingress-socket` allowance trusts `turbopanel.role=ingress`, a label the
   daemon (and possibly tenant Compose) can set; enforcement needs tenant
-  Compose to be refused `turbopanel.*` / `com.turbopanel.*` labels.
+  Compose to be refused `turbopanel.*` / `io.turbopanel.*` / `com.turbopanel.*` labels.
 
 ## Lockouts to expect when enforcement arrives (stage 4; none bite in stage 2)
 
@@ -399,7 +403,7 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 `unowned-container` / `unowned-volume` / `unowned-network` only say that a target carries none of a Compose project,
 a TurboPanel label or `tp.managed.engine`; a target whose labels cannot be read (gone, engine error, odd name) is
 `owner-unknown` (fail closed). A tenant deploy may not set the platform's owner labels at all (`turbopanel.role`,
-`com.turbopanel.system.*`, `tp.*`, the approval label): `src/deploy/compose-reserved-labels.ts` refuses the deploy
+`io.turbopanel.system.*`, `tp.*`, the approval label): `src/deploy/compose-reserved-labels.ts` refuses the deploy
 before `compose up`. They are observations, not a boundary: any caller can add a compose-project
 label, and the gate cannot tell which tenant or project the daemon is acting for (the daemon account is the only client).
 Checked routes: container start/stop/restart/kill/pause/unpause/rename/update/exec/attach/archive/wait/resize/export and

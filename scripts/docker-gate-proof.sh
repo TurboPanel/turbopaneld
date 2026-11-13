@@ -117,7 +117,7 @@ start_route_app() {
   _app_net=$3
   docker run -d --name "$_app_name" --network "$_app_net" \
     --label traefik.enable=true \
-    --label com.turbopanel.system.routed=true \
+    --label io.turbopanel.system.routed=true \
     --label "traefik.docker.network=$_app_net" \
     --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
     --label "traefik.http.routers.$_app_name.entrypoints=web" \
@@ -212,7 +212,7 @@ if gate_docker run --rm --network none --cap-add SYS_ADMIN "$IMAGE" true >/dev/n
 gate_docker run -d --name tpgate-proof-human --network none "$IMAGE" sleep 120 >/dev/null 2>&1
 if gate_docker stop -t 1 tpgate-proof-human >/dev/null 2>&1; then pass "stop of an unlabeled container ran (observe)"; else fail "stop of an unlabeled container did not run"; fi
 gate_docker rm -f tpgate-proof-human >/dev/null 2>&1
-if gate_docker run --rm --privileged --network none --label com.turbopanel.approval=v2.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
+if gate_docker run --rm --privileged --network none --label io.turbopanel.approval=v2.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
 
 sleep 1
 _log=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null)
@@ -283,7 +283,7 @@ if docker ps --format '{{.Image}}' | grep -q 'docker-socket-proxy'; then PROXY_R
 if [[ -f "$INGRESS_SWITCH" ]]; then
   if docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "$RO_DIR"; then pass "a Traefik mounts $RO_DIR (switch on)"; else fail "switch on but no container mounts $RO_DIR (deploy once to re-render ingress)"; fi
   if [[ "$PROXY_RUNNING" == true ]]; then echo "NOTE  the socket-proxy is still running: a TCP/UDP service Traefik rendered before the switch still uses it (redeploy that service)"; else pass "no socket-proxy container is running"; fi
-  SHARED_TRAEFIK=$(docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress | sed -n 1p)
+  SHARED_TRAEFIK=$({ docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress; docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress; } | sed -n 1p)
   if [[ -n "$SHARED_TRAEFIK" ]] && docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$SHARED_TRAEFIK" | grep -q "$RO_DIR"; then
     SHARED_NET=$(docker inspect --format '{{range $net, $cfg := .NetworkSettings.Networks}}{{$net}} {{end}}' "$SHARED_TRAEFIK" | awk '{print $1}')
   else

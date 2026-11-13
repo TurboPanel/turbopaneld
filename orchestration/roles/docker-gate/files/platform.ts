@@ -15,7 +15,7 @@ export type Labels = Record<string, string>;
 
 /** `turbopanel.role` values the platform's own system containers carry. */
 export const PLATFORM_ROLES: readonly string[] = ["turbopanel", "ingress"];
-/** `com.turbopanel.system.component` values of the platform's system stacks. */
+/** `io.turbopanel.system.component` values of the platform's system stacks. */
 export const PLATFORM_COMPONENTS: readonly string[] = [
   "hosting-ingress",
   "managed-ingress",
@@ -31,7 +31,15 @@ export const PLATFORM_COMPONENTS: readonly string[] = [
   "volume-copy",
 ];
 export const LABEL_ROLE = "turbopanel.role";
-export const LABEL_SYSTEM_COMPONENT = "com.turbopanel.system.component";
+export const LABEL_SYSTEM_COMPONENT = "io.turbopanel.system.component";
+/** Old prefix, read only until a later release removes it (see `src/deploy/labels.ts`). */
+export const LEGACY_LABEL_SYSTEM_COMPONENT = "com.turbopanel.system.component";
+
+/** Component of a container: the new label wins, the old one is the fallback. */
+export function componentOf(labels: Labels): string {
+  return labels[LABEL_SYSTEM_COMPONENT] ??
+    labels[LEGACY_LABEL_SYSTEM_COMPONENT] ?? "";
+}
 export const LABEL_MANAGED_ENGINE = "tp.managed.engine";
 export const LABEL_COMPOSE_PROJECT = "com.docker.compose.project";
 
@@ -96,12 +104,13 @@ export function isIngressContainer(labels: Labels): boolean {
 export function isPlatformContainer(labels: Labels): boolean {
   if ((labels[LABEL_MANAGED_ENGINE] ?? "") !== "") return true;
   return PLATFORM_ROLES.includes(labels[LABEL_ROLE] ?? "") &&
-    PLATFORM_COMPONENTS.includes(labels[LABEL_SYSTEM_COMPONENT] ?? "");
+    PLATFORM_COMPONENTS.includes(componentOf(labels));
 }
 
 function hasTurbopanelLabel(labels: Labels): boolean {
   return Object.keys(labels).some((key) =>
-    key.startsWith("com.turbopanel.") || key === LABEL_ROLE
+    key.startsWith("io.turbopanel.") || key.startsWith("com.turbopanel.") ||
+    key === LABEL_ROLE
   );
 }
 
@@ -211,7 +220,7 @@ function allowanceMatches(
 ): boolean {
   const same = allowance.engine === true
     ? (labels[LABEL_MANAGED_ENGINE] ?? "") !== ""
-    : labels[LABEL_SYSTEM_COMPONENT] === allowance.component;
+    : componentOf(labels) === allowance.component;
   if (!same) return false;
   return allowance.commands === undefined ||
     (command !== undefined && allowance.commands.includes(command));
@@ -234,9 +243,7 @@ export function platformAccessRule(
   // the daemon does needs it.
   if (kind === "export") return "platform-export";
   if (kind !== "exec") {
-    return PLATFORM_ATTACH_ALLOWLIST.includes(
-        labels[LABEL_SYSTEM_COMPONENT] ?? "",
-      )
+    return PLATFORM_ATTACH_ALLOWLIST.includes(componentOf(labels))
       ? undefined
       : "platform-attach";
   }

@@ -1016,7 +1016,7 @@ control plane, the contract check fails a control plane that lists a feature
 this daemon lacks, and an older control plane ignores names it does not know) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `deploy-config-files-v1` gates the `configFiles` field of
+ignored by a peer that does not list the feature. `build-limits-v1` gates the optional `buildLimits` field of `environment.deploy` (deploy-wide and per `sourceMaterial[]` entry: the most CPU cores and memory one build may use, with the level that set each); an older daemon ignores it, an older control plane omits it and the daemon uses its defaults; no floor moved (`src/deploy/release/AGENTS.md`, Build limits). `deploy-config-files-v1` gates the `configFiles` field of
 `environment.deploy`: the control plane sends it only when every target daemon
 lists it, because an older daemon would drop the field. `command-progress` (the
 deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too

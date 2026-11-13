@@ -76,6 +76,9 @@ import {
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
+  legacyLabelKey,
+  readLabel,
+  traefikLabelConstraint,
 } from "./labels.ts";
 import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
 import {
@@ -605,7 +608,7 @@ export function parseIngressNetworkGateways(
  *
  * With `identity`, emits allocated `container_name`, an `x-turbopanel` block
  * (`kind: system`), and canonical role / system-component / service labels —
- * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
+ * never `traefik.enable`, HTTP router labels, or `io.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
  *
@@ -672,7 +675,9 @@ export function traefikCompose(
       ? [
         `      - ${
           quoteYamlScalar(
-            `--providers.docker.constraints=Label(\`${LABEL_ROUTED}\`,\`true\`)`,
+            `--providers.docker.constraints=${
+              traefikLabelConstraint(LABEL_ROUTED, "true")
+            }`,
           )
         }`,
       ]
@@ -816,7 +821,7 @@ export function serviceIngressComposePath(
  * Joins `ingressNetwork` (the `hosting-ingress` component's allocated
  * `serviceId`, supplied by the caller from the deploy payload's
  * `hostingIngressNetwork`), constrains the Docker provider to
- * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
+ * `io.turbopanel.service=<serviceId>` **and** `io.turbopanel.raw-port=true` (either prefix)
  * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
@@ -837,8 +842,9 @@ export function serviceTraefikCompose(
   assertSafeComposeProjectName(project);
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
-  const constraint =
-    `Label(\`${LABEL_SERVICE_ID}\`,\`${identity.serviceId}\`) && Label(\`${LABEL_RAW_PORT}\`,\`true\`)`;
+  const constraint = `${
+    traefikLabelConstraint(LABEL_SERVICE_ID, identity.serviceId)
+  } && ${traefikLabelConstraint(LABEL_RAW_PORT, "true")}`;
   const lines = [
     `name: ${project}`,
     "",
@@ -868,6 +874,9 @@ export function serviceTraefikCompose(
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
+    `      ${legacyLabelKey(LABEL_SERVICE_ID)}: ${
+      quoteYamlScalar(identity.serviceId)
+    }`,
     ...gateVolumeLines(docker),
     "    networks:",
     `      - ${ingressNetwork}`,
@@ -1291,7 +1300,9 @@ export async function legacyHttpContainersPresent(
   if (!inspect.success) return true;
   return inspect.stdout.split("\n").some((line) => {
     const labels = parseLabelsLine(line);
-    if (labels === undefined || labels[LABEL_ROUTED] === "true") return false;
+    if (labels === undefined || readLabel(labels, LABEL_ROUTED) === "true") {
+      return false;
+    }
     return Object.keys(labels).some((k) => k.startsWith("traefik.http."));
   });
 }
@@ -1573,8 +1584,8 @@ export async function ensureHostingIngress(
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
  * the shared hosting-ingress Traefik (`turbopanel.role=ingress`,
- * `com.turbopanel.system.component=hosting-ingress`, and
- * `com.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
+ * `io.turbopanel.system.component=hosting-ingress`, and
+ * `io.turbopanel.service=<serviceId>`, either prefix). Unlabelled / legacy rows fail.
  */
 function hasHostingIngressLabels(
   entry: Record<string, unknown>,
@@ -1583,8 +1594,9 @@ function hasHostingIngressLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_HOSTING_INGRESS_COMPONENT &&
-    labels[LABEL_SERVICE_ID] === serviceId
+    readLabel(labels, LABEL_SYSTEM_COMPONENT) ===
+      SYSTEM_HOSTING_INGRESS_COMPONENT &&
+    readLabel(labels, LABEL_SERVICE_ID) === serviceId
   );
 }
 
@@ -2101,14 +2113,80 @@ function deletesHeader(text: string, name: string): boolean {
 }
 
 /**
+ * The page shown for a name that reaches a server but has no deployed site.
+ * Self-contained: inline CSS, no external fonts, scripts or images, light and
+ * dark through `prefers-color-scheme`. It never reflects the requested name:
+ * Caddy's `respond` expands placeholders without HTML escaping, so echoing the
+ * Host would hand a visitor-controlled string to the page. It holds no other
+ * request data and no placeholder; {@link hostingDefaultPageResponse} escapes
+ * the CSS braces for Caddy.
+ */
+function hostingDefaultPageHtml(
+  hideWebServerNames: boolean | undefined,
+): string {
+  const footer = hideWebServerNames === true
+    ? ""
+    : `<footer>Hosted with <a href="https://turbopanel.io">TurboPanel</a></footer>\n`;
+  const css = [
+    ":root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1c2330;--muted:#5b6575;--link:#0b5cd5}",
+    "@media (prefers-color-scheme:dark){:root{--bg:#10141b;--fg:#e8ecf3;--muted:#98a3b5;--link:#7db2ff}}",
+    "*{box-sizing:border-box}",
+    'body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;text-align:center}',
+    "main{max-width:32rem}",
+    "h1{margin:0 0 12px;font-size:1.75rem;font-weight:600}",
+    "p{margin:0;color:var(--muted)}",
+    "footer{margin-top:40px;font-size:.875rem;color:var(--muted)}",
+    "a{color:var(--link)}",
+  ].join("\n");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Site Not Live Yet</title>
+<style>
+${css}
+</style>
+</head>
+<body>
+<main>
+<h1>This site isn't live yet.</h1>
+<p>If you own this site, deploy it from your TurboPanel control plane.</p>
+</main>
+${footer}</body>
+</html>
+`;
+}
+
+/** One `respond` handler serving {@link hostingDefaultPageHtml} as a 404. */
+function hostingDefaultPageResponse(
+  hideWebServerNames: boolean | undefined,
+): string {
+  // Caddy reads an unescaped `{` as a placeholder, so the CSS rules need `\{`.
+  const html = hostingDefaultPageHtml(hideWebServerNames)
+    .replaceAll("{", String.raw`\{`)
+    .split("\n")
+    .map((line) => (line === "" ? "" : `    ${line}`))
+    .join("\n");
+  return `  header Content-Type "text/html; charset=utf-8"
+  header Cache-Control "no-store"
+  respond <<HTML
+${html}    HTML 404
+`;
+}
+
+/**
  * The hosting web server's answer for a name nobody hosts, on :80 and :443.
- * Ports 80/443 are for hosting, so an unconfigured name is answered here (an
- * empty 200, no redirect) rather than refused. The HTTPS side shows one fixed
- * self-signed certificate, made for {@link HOSTING_FALLBACK_HOSTNAME} and handed
- * to every other name by the Caddyfile's `default_sni` / `fallback_sni`, so the
- * number of certificates never depends on what clients send. Hosted names keep
- * their own site blocks, which always win. The panel's own address is a
- * different listener and is not affected.
+ * Ports 80/443 are for hosting, so an unconfigured name is answered here (a
+ * 404 with a small default page, no redirect) rather than refused. The 404 keeps
+ * the name out of search indexes and lets a monitor see the site is not up. The
+ * HTTPS side shows one fixed self-signed certificate, made for
+ * {@link HOSTING_FALLBACK_HOSTNAME} and handed to every other name by the
+ * Caddyfile's `default_sni` / `fallback_sni`, so the number of certificates
+ * never depends on what clients send. Hosted names keep their own site blocks,
+ * which always win. The panel's own address is a different listener and is not
+ * affected. The page's "Hosted with" footer is left out when names are hidden.
  *
  * This one file is shared by every environment on the server: each hosting
  * deploy rewrites it, so the hide-names and Via choices in force are those of
@@ -2123,19 +2201,17 @@ export function hostingFallbackSnippet(
   // errors and impose this deploy's choices on sites that delete nothing.
   // `respond` never raises an error, so nothing is lost.
   const hide = headerDeletions({ hideWebServerNames, sendViaHeader }, false);
+  const page = hostingDefaultPageResponse(hideWebServerNames);
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
-${hide}  respond "" 200
-}
+${hide}${page}}
 
 https:// {
-${hide}  respond "" 200
-}
+${hide}${page}}
 
 ${HOSTING_FALLBACK_HOSTNAME} {
   tls internal
-${hide}  respond "" 200
-}
+${hide}${page}}
 `;
 }
 
@@ -3336,16 +3412,21 @@ async function ensureHostingFallbackLocked(
   });
   const fallbackPath = join(sitesDir, HOSTING_FALLBACK_SITE);
   const liveFallback = await readTextIfPresent(fallbackPath);
-  if (liveFallback !== undefined && liveCaddyfile === wantCaddyfile) {
+  // A live file keeps the hide-names and Via choices of the deploy that wrote
+  // it; only its content is brought up to date (an older daemon wrote an empty
+  // 200 here).
+  const choices: HostingHeaderChoices = liveFallback !== undefined
+    ? {
+      hideWebServerNames: deletesHeader(liveFallback, "Server"),
+      sendViaHeader: !deletesHeader(liveFallback, "Via"),
+    }
+    : await lastKnownHeaderChoices(sitesDir, names);
+  const fallback = hostingFallbackSnippet(
+    choices.hideWebServerNames,
+    choices.sendViaHeader,
+  );
+  if (liveFallback === fallback && liveCaddyfile === wantCaddyfile) {
     return false;
-  }
-  let fallback = liveFallback;
-  if (fallback === undefined) {
-    const known = await lastKnownHeaderChoices(sitesDir, names);
-    fallback = hostingFallbackSnippet(
-      known.hideWebServerNames,
-      known.sendViaHeader,
-    );
   }
 
   const candidate = await openHostingCandidate(layout, hostingDir);
