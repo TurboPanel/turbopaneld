@@ -97,6 +97,17 @@ test("plan sends the whole payload with ready and pending steps", () => {
   });
 });
 
+test("step times never run backwards when the clock steps back", () => {
+  const h = harness();
+  h.reporter.plan(PLAN);
+  h.reporter.start("install-php:8.3");
+  h.advance(-60_000);
+  h.reporter.done("install-php:8.3");
+  const step = h.last().steps.find((s) => s.id === "install-php:8.3");
+  assertEquals(step?.startedAt, new Date(1_000_000).toISOString());
+  assertEquals(step?.finishedAt, new Date(1_000_000).toISOString());
+});
+
 test("start / done stamp times, set current and leave ready steps alone", () => {
   const h = harness();
   h.reporter.plan(PLAN);
