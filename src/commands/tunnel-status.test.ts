@@ -31,7 +31,7 @@ test("the status answer lists each connector with its version and the pinned ver
     const io: ConnectorIo = {
       layout: { configDir: join(dir, "etc") },
       workDir: dir,
-      version: "2026.10.7",
+      version: "2026.11.0",
       ensureBinary: () => Promise.resolve("/unused"),
       probe: () => Promise.resolve({ kind: "ready", connections: 4 }),
       readHostnames: () => Promise.resolve(["panel.example.com"]),
@@ -40,7 +40,7 @@ test("the status answer lists each connector with its version and the pinned ver
     };
     const result = await handleTunnelStatus(new Date().toISOString(), { io });
     assertEquals(result, {
-      pinnedVersion: "2026.10.7",
+      pinnedVersion: "2026.11.0",
       connectors: [
         {
           tunnelId: ID,
