@@ -2397,7 +2397,6 @@ tp_pinned_channel_manifest_url() {
 # segment, and one exact rail shape per kind (daemon, instance, ui):
 #   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
 #             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
-# (dl.trbp.nl is no longer on the rail: the trunk CDN drop was retired.)
 # Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
 # src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
 # src/testing/release-manifest-url-corpus.json pins all three together.

@@ -8,7 +8,7 @@
 # Missing SONAR_TOKEN fails verify on trunk (publish `needs: verify`). The
 # `canary` environment also carries TURBOPANEL_RELEASE_SIGNING_KEY, which signs
 # the canary manifest. There is no CDN upload any more: the per-merge `trunk`
-# drop on dl.trbp.nl was retired (owner decision 2026-10-05), so the old
+# drop on the old download host was retired (owner decision 2026-10-05), so the old
 # DL_S3_* variables and secrets are gone and nothing here needs them.
 #
 # Code quality gates live in .github/workflows/verify.yml and must pass before
@@ -20,7 +20,7 @@
 # (`canary` channel): the tarballs under versioned names
 # (turbopaneld-<X.Y.Z>-canary.<N>-<arch>.tar.zst) on the rolling `canary`
 # pre-release, published by TurboPanel/dev's gh-canary.yml — what a self-hosted
-# canary install follows. The former CDN drop (`trunk` channel on dl.trbp.nl)
+# canary install follows. The former CDN drop (`trunk` channel)
 # is retired.
 #
 # The tags work out what the version should be (TurboPanel/dev's Version From
