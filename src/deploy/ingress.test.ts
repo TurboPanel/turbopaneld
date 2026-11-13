@@ -319,14 +319,14 @@ test("traefikCompose with identity emits container_name, system x-turbopanel, an
   assertStringIncludes(compose, "turbopanel.role: ingress");
   assertStringIncludes(
     compose,
-    'com.turbopanel.system.component: "hosting-ingress"',
+    'io.turbopanel.system.component: "hosting-ingress"',
   );
   assertStringIncludes(
     compose,
-    `com.turbopanel.service: "${SYSTEM_INGRESS_IDENTITY.serviceId}"`,
+    `io.turbopanel.service: "${SYSTEM_INGRESS_IDENTITY.serviceId}"`,
   );
   assertEquals(compose.includes("traefik.enable"), false);
-  assertEquals(compose.includes("com.turbopanel.raw-port"), false);
+  assertEquals(compose.includes("io.turbopanel.raw-port"), false);
   // Loopback / PROXY / TLS / socket / network unchanged vs anonymous shape.
   assertStringIncludes(compose, "127.0.0.1:7080:7080");
   assertStringIncludes(compose, "127.0.0.1:7443:7443");
@@ -1155,7 +1155,7 @@ test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel",
   );
   assertStringIncludes(
     compose,
-    `Label(\`com.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)`,
+    `(Label(\`io.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) || Label(\`com.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`)) && (Label(\`io.turbopanel.raw-port\`,\`true\`) || Label(\`com.turbopanel.raw-port\`,\`true\`))`,
   );
   assertStringIncludes(compose, HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("entrypoints.web"), false);
@@ -4152,6 +4152,11 @@ test("gate mode: a service Traefik mounts the read-only socket directory and kee
   assertStringIncludes(yaml, GATE_ENDPOINT);
   assertStringIncludes(yaml, `      - ${GATE_MOUNT}`);
   assertStringIncludes(yaml, "--providers.docker.constraints=");
+  // Containers of the previous release carry the old prefix and stay routed.
+  assertStringIncludes(
+    yaml,
+    "(Label(`io.turbopanel.raw-port`,`true`) || Label(`com.turbopanel.raw-port`,`true`))",
+  );
   assertEquals(yaml.includes("docker-socket-proxy"), false);
 });
 

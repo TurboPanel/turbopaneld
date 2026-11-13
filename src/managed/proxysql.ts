@@ -20,6 +20,7 @@ import {
   LABEL_ROLE,
   LABEL_ROLE_INGRESS,
   LABEL_SYSTEM_COMPONENT,
+  readLabel,
 } from "../deploy/labels.ts";
 import {
   PROXYSQL_COMPOSE_SERVICE_NAME,
@@ -792,7 +793,7 @@ function renderProxySqlTopLevelNetworks(
  * project without `-p` — which is what lets the Ansible stack unit stop
  * templating a project name it cannot know at converge time. Distinction from
  * tenant Traefik (same container suffix) is that compose project plus the
- * `com.turbopanel.system.component` label — not the suffix. Bare-uuid names
+ * `io.turbopanel.system.component` label — not the suffix. Bare-uuid names
  * remain for system-stack rows (`database` / `queue`).
  *
  * `bindAddresses` controls only the **host publish** of the client
@@ -1986,7 +1987,8 @@ function hasProxySqlLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_MANAGED_INGRESS_COMPONENT
+    readLabel(labels, LABEL_SYSTEM_COMPONENT) ===
+      SYSTEM_MANAGED_INGRESS_COMPONENT
   );
 }
 

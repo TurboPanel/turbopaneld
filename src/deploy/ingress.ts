@@ -76,6 +76,9 @@ import {
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
+  legacyLabelKey,
+  readLabel,
+  traefikLabelConstraint,
 } from "./labels.ts";
 import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
 import {
@@ -605,7 +608,7 @@ export function parseIngressNetworkGateways(
  *
  * With `identity`, emits allocated `container_name`, an `x-turbopanel` block
  * (`kind: system`), and canonical role / system-component / service labels —
- * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
+ * never `traefik.enable`, HTTP router labels, or `io.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
  *
@@ -672,7 +675,9 @@ export function traefikCompose(
       ? [
         `      - ${
           quoteYamlScalar(
-            `--providers.docker.constraints=Label(\`${LABEL_ROUTED}\`,\`true\`)`,
+            `--providers.docker.constraints=${
+              traefikLabelConstraint(LABEL_ROUTED, "true")
+            }`,
           )
         }`,
       ]
@@ -816,7 +821,7 @@ export function serviceIngressComposePath(
  * Joins `ingressNetwork` (the `hosting-ingress` component's allocated
  * `serviceId`, supplied by the caller from the deploy payload's
  * `hostingIngressNetwork`), constrains the Docker provider to
- * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
+ * `io.turbopanel.service=<serviceId>` **and** `io.turbopanel.raw-port=true` (either prefix)
  * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
@@ -837,8 +842,9 @@ export function serviceTraefikCompose(
   assertSafeComposeProjectName(project);
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
-  const constraint =
-    `Label(\`${LABEL_SERVICE_ID}\`,\`${identity.serviceId}\`) && Label(\`${LABEL_RAW_PORT}\`,\`true\`)`;
+  const constraint = `${
+    traefikLabelConstraint(LABEL_SERVICE_ID, identity.serviceId)
+  } && ${traefikLabelConstraint(LABEL_RAW_PORT, "true")}`;
   const lines = [
     `name: ${project}`,
     "",
@@ -868,6 +874,9 @@ export function serviceTraefikCompose(
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
+    `      ${legacyLabelKey(LABEL_SERVICE_ID)}: ${
+      quoteYamlScalar(identity.serviceId)
+    }`,
     ...gateVolumeLines(docker),
     "    networks:",
     `      - ${ingressNetwork}`,
@@ -1291,7 +1300,9 @@ export async function legacyHttpContainersPresent(
   if (!inspect.success) return true;
   return inspect.stdout.split("\n").some((line) => {
     const labels = parseLabelsLine(line);
-    if (labels === undefined || labels[LABEL_ROUTED] === "true") return false;
+    if (labels === undefined || readLabel(labels, LABEL_ROUTED) === "true") {
+      return false;
+    }
     return Object.keys(labels).some((k) => k.startsWith("traefik.http."));
   });
 }
@@ -1573,8 +1584,8 @@ export async function ensureHostingIngress(
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
  * the shared hosting-ingress Traefik (`turbopanel.role=ingress`,
- * `com.turbopanel.system.component=hosting-ingress`, and
- * `com.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
+ * `io.turbopanel.system.component=hosting-ingress`, and
+ * `io.turbopanel.service=<serviceId>`, either prefix). Unlabelled / legacy rows fail.
  */
 function hasHostingIngressLabels(
   entry: Record<string, unknown>,
@@ -1583,8 +1594,9 @@ function hasHostingIngressLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_HOSTING_INGRESS_COMPONENT &&
-    labels[LABEL_SERVICE_ID] === serviceId
+    readLabel(labels, LABEL_SYSTEM_COMPONENT) ===
+      SYSTEM_HOSTING_INGRESS_COMPONENT &&
+    readLabel(labels, LABEL_SERVICE_ID) === serviceId
   );
 }
 

@@ -124,3 +124,17 @@ test("readPreviousProjects reads the recorded project names, with no compose fil
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+test("a container of the previous release is matched by its old-prefix environment label", async () => {
+  // Columns: id, new-prefix environment, working dir, old-prefix environment.
+  const r = recorder(ok([
+    "o1\t\t/d/elsewhere\tenv-1",
+    "o2\t\t/d/elsewhere\tenv-2",
+    "n1\tenv-1\t/d/elsewhere\t",
+  ].join("\n")));
+  await retirePreviousProjects(previous, "env-1", r.run, scope);
+  assertEquals(r.calls[1], ["rm", "-f", "o1", "n1"]);
+  const format = r.calls[0][r.calls[0].indexOf("--format") + 1];
+  assertEquals(format.includes("io.turbopanel.environment"), true);
+  assertEquals(format.includes("com.turbopanel.environment"), true);
+});

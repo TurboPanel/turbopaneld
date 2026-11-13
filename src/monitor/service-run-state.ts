@@ -27,6 +27,7 @@ import {
   LABEL_ROLE_INGRESS,
   LABEL_ROLE_SYSTEM,
   LABEL_SERVICE_ID,
+  readLabel,
 } from "../deploy/labels.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { lastLogReason } from "../managed/container-stability.ts";
@@ -179,7 +180,7 @@ export function deriveServiceRunStates(
 export function serviceIdForContainer(
   labels: Record<string, string> | undefined,
 ): string | undefined {
-  const serviceId = labels?.[LABEL_SERVICE_ID];
+  const serviceId = readLabel(labels, LABEL_SERVICE_ID);
   if (!serviceId) return undefined;
   const role = labels?.[LABEL_ROLE];
   if (role === LABEL_ROLE_INGRESS || role === LABEL_ROLE_SYSTEM) {

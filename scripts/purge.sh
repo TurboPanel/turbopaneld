@@ -1322,13 +1322,14 @@ tp_docker_collect() {
   : > "$TP_TMP/work.volumes"
   : > "$TP_TMP/work.cpmarkers"
   _dc_rows=$TP_TMP/docker.rows
-  _dc_fmt='{{.Names}}|{{.Label "turbopanel.role"}}|{{.Label "com.turbopanel.system.component"}}|{{.Label "com.turbopanel.service"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "com.docker.compose.project"}}'
+  _dc_fmt='{{.Names}}|{{.Label "turbopanel.role"}}|{{.Label "com.turbopanel.system.component"}}|{{.Label "com.turbopanel.service"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "com.docker.compose.project"}}|{{.Label "io.turbopanel.system.component"}}|{{.Label "io.turbopanel.service"}}'
   if docker ps -a --format "$_dc_fmt" > "$_dc_rows" 2>>"$TP_LOG_FILE"; then
     awk -F '|' '{
       name = $1
       role = ($2 == "" ? "-" : $2)
-      component = ($3 == "" ? "-" : $3)
-      service = ($4 == "" ? "-" : $4)
+      # io.turbopanel.* is current; com.turbopanel.* is read only (containers of the previous release)
+      component = ($8 != "" ? $8 : ($3 == "" ? "-" : $3))
+      service = ($9 != "" ? $9 : ($4 == "" ? "-" : $4))
       work = ($5 == "" ? "-" : $5)
       config = ($6 == "" ? "-" : $6)
       project = ($7 == "" ? "-" : $7)

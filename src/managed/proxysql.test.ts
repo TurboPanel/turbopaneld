@@ -148,7 +148,7 @@ test("proxysqlCompose with descriptor emits identity + system labels", () => {
   assertStringIncludes(compose, "component: managed-ingress");
   assertStringIncludes(
     compose,
-    'com.turbopanel.system.component: "managed-ingress"',
+    'io.turbopanel.system.component: "managed-ingress"',
   );
   assertStringIncludes(compose, "turbopanel.role: ingress");
   // The compose project rides the document itself, so the stack unit and the
@@ -1977,7 +1977,7 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
         State: "running",
         Labels: {
           "turbopanel.role": "ingress",
-          "com.turbopanel.system.component": "managed-ingress",
+          "io.turbopanel.system.component": "managed-ingress",
         },
       },
     ]);
