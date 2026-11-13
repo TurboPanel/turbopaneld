@@ -12,28 +12,40 @@
  * hosting records, never read from the compose file.
  *
  * The control plane's identity labels on tenant services
- * (`com.turbopanel.service`, `com.turbopanel.environment`) are not owner
- * labels and stay allowed.
+ * (`io.turbopanel.service`, `io.turbopanel.environment`, and the same under the
+ * old `com.turbopanel.` prefix) are not owner labels and stay allowed.
+ *
+ * Both prefixes are refused for the owner labels: the old `com.turbopanel.`
+ * prefix is read only (containers of the previous release still carry it, and
+ * the Docker gate and the Traefik constraints still honour it), so a tenant
+ * must not be able to write it either.
  */
 
 import {
+  LABEL_PREFIX,
   LABEL_RAW_PORT,
   LABEL_ROLE,
   LABEL_SYSTEM_COMPONENT,
+  LEGACY_LABEL_PREFIX,
+  legacyLabelKey,
 } from "./labels.ts";
 
 /** Keys that make a container (or volume, network) the platform's. */
 const RESERVED_KEYS = new Set([
   LABEL_ROLE,
   LABEL_SYSTEM_COMPONENT,
+  legacyLabelKey(LABEL_SYSTEM_COMPONENT),
   "tp.managed.engine",
-  "com.turbopanel.approval",
+  `${LABEL_PREFIX}approval`,
+  `${LEGACY_LABEL_PREFIX}approval`,
   LABEL_RAW_PORT,
+  legacyLabelKey(LABEL_RAW_PORT),
 ]);
 /** Whole namespaces no tenant writes into. */
 const RESERVED_PREFIXES = [
   "turbopanel.",
-  "com.turbopanel.system.",
+  `${LABEL_PREFIX}system.`,
+  `${LEGACY_LABEL_PREFIX}system.`,
   "tp.",
   // The platform generates every routing rule itself; a site owner's own
   // router, service or middleware label could otherwise claim another site's

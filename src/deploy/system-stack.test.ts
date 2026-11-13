@@ -43,7 +43,7 @@ function labelledRow(overrides?: Partial<Record<string, unknown>>) {
     State: "running",
     Labels: {
       "turbopanel.role": "turbopanel",
-      "com.turbopanel.system.component": "database",
+      "io.turbopanel.system.component": "database",
     },
     ...overrides,
   };
@@ -130,7 +130,7 @@ test("inspectSystemStackContainer ignores a row whose label names another compon
                   labelledRow({
                     Labels: {
                       "turbopanel.role": "turbopanel",
-                      "com.turbopanel.system.component": "queue",
+                      "io.turbopanel.system.component": "queue",
                     },
                   }),
                 ]),

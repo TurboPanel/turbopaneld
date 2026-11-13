@@ -100,6 +100,15 @@ test("ownerOf separates platform, compose / TurboPanel workloads and the rest", 
   assertEquals(ownerOf({ [LABEL_MANAGED_ENGINE]: "postgres" }), "platform");
   assertEquals(ownerOf({ [LABEL_COMPOSE_PROJECT]: "app" }), "tenant");
   assertEquals(ownerOf({ "com.turbopanel.service": "x" }), "tenant");
+  assertEquals(ownerOf({ "io.turbopanel.service": "x" }), "tenant");
+  // The old component label still identifies the platform (previous release).
+  assertEquals(
+    ownerOf({
+      "turbopanel.role": "turbopanel",
+      "com.turbopanel.system.component": "database",
+    }),
+    "platform",
+  );
   // A role without a known component is not platform.
   assertEquals(ownerOf({ "turbopanel.role": "turbopanel" }), "tenant");
   assertEquals(
@@ -110,7 +119,7 @@ test("ownerOf separates platform, compose / TurboPanel workloads and the rest", 
     false,
   );
   assertEquals(ownerOf({}), "unlabeled");
-  assertEquals(ownerOf({ "io.turbopanel.owner": "x" }), "unlabeled");
+  assertEquals(ownerOf({ "org.example.owner": "x" }), "unlabeled");
 });
 
 test("platformBindVerdict: config trees read-only, state trees any mode, nothing else", () => {
@@ -428,7 +437,7 @@ test("the system-compose template stamps the platform labels the gate reads", as
   );
   const text = await Deno.readTextFile(path);
   const components = [
-    ...text.matchAll(/com\.turbopanel\.system\.component: (\w+)/g),
+    ...text.matchAll(/io\.turbopanel\.system\.component: (\w+)/g),
   ].map((m) => m[1]);
   assertEquals(components.sort(), ["database", "queue"]);
   assertEquals(text.match(/^\s+turbopanel\.role: turbopanel$/gm)?.length, 2);

@@ -21,6 +21,13 @@ test("a tenant compose may not claim the labels that make a container the platfo
       { "com.turbopanel.system.component": "managed-ha" },
       { "tp.managed.engine": "postgres" },
       { "com.turbopanel.approval": "v2.a.b" },
+      { "io.turbopanel.approval": "v2.a.b" },
+      { "io.turbopanel.system.component": "managed-ha" },
+      { "io.turbopanel.system.routed": "true" },
+      { "com.turbopanel.system.routed": "true" },
+      { "io.turbopanel.raw-port": "true" },
+      { "com.turbopanel.raw-port": "true" },
+      ["IO.turbopanel.approval=x"],
       ["turbopanel.role=ingress"],
     ]
   ) {
@@ -49,6 +56,8 @@ test("the control plane's identity labels and anything else stay allowed", () =>
         labels: {
           "com.turbopanel.service": "web",
           "com.turbopanel.environment": "e1",
+          "io.turbopanel.service": "web",
+          "io.turbopanel.environment": "e1",
           "com.example": "keep",
         },
       },

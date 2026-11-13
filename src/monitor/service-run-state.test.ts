@@ -207,6 +207,15 @@ test("ingress and platform containers do not count as services", () => {
     }),
     undefined,
   );
+  // New prefix, and the old one for containers of the previous release.
+  assertEquals(serviceIdForContainer({ "io.turbopanel.service": "s" }), "s");
+  assertEquals(
+    serviceIdForContainer({
+      "io.turbopanel.service": "s",
+      "turbopanel.role": "ingress",
+    }),
+    undefined,
+  );
   assertEquals(serviceIdForContainer({}), undefined);
   assertEquals(serviceIdForContainer(undefined), undefined);
 });

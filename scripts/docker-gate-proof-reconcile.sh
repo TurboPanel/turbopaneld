@@ -81,7 +81,7 @@ start_app() {
   _app_net=$3
   docker run -d --name "$_app_name" --network "$_app_net" \
     --label traefik.enable=true \
-    --label com.turbopanel.system.routed=true \
+    --label io.turbopanel.system.routed=true \
     --label "traefik.docker.network=$_app_net" \
     --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
     --label "traefik.http.routers.$_app_name.entrypoints=web,websecure" \
@@ -117,7 +117,7 @@ routed() {
 }
 
 traefik_id() {
-  docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress | sed -n 1p
+  { docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress; docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress; } | sed -n 1p
   return 0
 }
 

@@ -22,7 +22,7 @@ import type { RunDockerFn } from "./docker-cli.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { allProjects } from "./deployment-generations.ts";
 import { readDeploymentManifest } from "./compose-files.ts";
-import { LABEL_ENVIRONMENT } from "./labels.ts";
+import { LABEL_ENVIRONMENT, legacyLabelKey } from "./labels.ts";
 
 const LABEL_COMPOSE_WORKING_DIR = "com.docker.compose.project.working_dir";
 
@@ -59,7 +59,9 @@ async function ownContainerIds(
     "--filter",
     `label=com.docker.compose.project=${project}`,
     "--format",
-    `{{.ID}}\t{{.Label "${LABEL_ENVIRONMENT}"}}\t{{.Label "${LABEL_COMPOSE_WORKING_DIR}"}}`,
+    `{{.ID}}\t{{.Label "${LABEL_ENVIRONMENT}"}}\t{{.Label "${LABEL_COMPOSE_WORKING_DIR}"}}\t{{.Label "${
+      legacyLabelKey(LABEL_ENVIRONMENT)
+    }"}}`,
   ]);
   if (!listed.success) {
     throw new Error(
@@ -68,7 +70,9 @@ async function ownContainerIds(
     );
   }
   return listed.stdout.split("\n").flatMap((line) => {
-    const [id, environment, workingDir] = line.split("\t");
+    const [id, newEnvironment, workingDir, oldEnvironment] = line.split("\t");
+    // The old prefix is read only, for containers the previous release made.
+    const environment = newEnvironment || oldEnvironment;
     if (!id) return [];
     const mine = environment === scope.environmentId ||
       workingDir === scope.deploymentDir;

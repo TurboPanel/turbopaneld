@@ -181,7 +181,7 @@ test("custom bridge options on a network are refused without approval", () => {
 
 test("the shared Traefik only reads containers the daemon marked as routed", () => {
   const compose = traefikCompose("net", ["172.18.0.1"]);
-  if (!compose.includes("com.turbopanel.system.routed")) {
+  if (!compose.includes("io.turbopanel.system.routed")) {
     throw new TypeError("shared Traefik has no provider constraint");
   }
 });

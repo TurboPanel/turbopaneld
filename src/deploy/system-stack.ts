@@ -27,6 +27,7 @@ import {
   LABEL_ROLE,
   LABEL_ROLE_SYSTEM,
   LABEL_SYSTEM_COMPONENT,
+  readLabel,
 } from "./labels.ts";
 import {
   SYSTEM_STACK_PROJECT,
@@ -62,7 +63,7 @@ function hasSystemStackLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_SYSTEM &&
-    labels[LABEL_SYSTEM_COMPONENT] === component
+    readLabel(labels, LABEL_SYSTEM_COMPONENT) === component
   );
 }
 

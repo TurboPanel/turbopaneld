@@ -83,10 +83,10 @@ test("buildHostingLabelsFragment configures Traefik and ingress network", () => 
     labels["traefik.http.services.hosting_123.loadbalancer.server.port"],
     "3000",
   );
-  assertEquals(labels["com.turbopanel.project"], "project_123");
-  assertEquals(labels["com.turbopanel.raw-port"], undefined);
+  assertEquals(labels["io.turbopanel.project"], "project_123");
+  assertEquals(labels["io.turbopanel.raw-port"], undefined);
   // The shared Traefik's provider constraint reads this label.
-  assertEquals(labels["com.turbopanel.system.routed"], "true");
+  assertEquals(labels["io.turbopanel.system.routed"], "true");
   assertEquals(fragment.services?.app?.networks, [HOSTING_INGRESS_NETWORK]);
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
@@ -158,9 +158,9 @@ test("buildHostingLabelsFragment configures a tcp router+service per published p
     "5432",
   );
   assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
-  assertEquals(labels["com.turbopanel.raw-port"], "true");
+  assertEquals(labels["io.turbopanel.raw-port"], "true");
   // TCP/UDP is served by the per-service Traefik, never the shared one.
-  assertEquals(labels["com.turbopanel.system.routed"], undefined);
+  assertEquals(labels["io.turbopanel.system.routed"], undefined);
   assertEquals(fragment.services?.db?.networks, [HOSTING_INGRESS_NETWORK]);
 });
 
@@ -257,8 +257,8 @@ test("buildHostingLabelsFragment stamps raw-port on tcp/udp and pins HTTP entryp
   });
   const labels = fragment.services?.app?.labels as Record<string, string>;
 
-  assertEquals(labels["com.turbopanel.raw-port"], "true");
-  assertEquals(labels["com.turbopanel.service"], "service_mixed");
+  assertEquals(labels["io.turbopanel.raw-port"], "true");
+  assertEquals(labels["io.turbopanel.service"], "service_mixed");
   assertEquals(
     labels["traefik.http.routers.hosting_http.entrypoints"],
     "web,websecure",
@@ -284,7 +284,7 @@ test("buildHostingLabelsFragment does not stamp raw-port on HTTP-only services",
     resolved: appResolved,
   });
   const labels = fragment.services?.app?.labels as Record<string, string>;
-  assertEquals(labels["com.turbopanel.raw-port"], undefined);
+  assertEquals(labels["io.turbopanel.raw-port"], undefined);
   assertEquals(
     labels["traefik.http.routers.hosting_123.entrypoints"],
     "web,websecure",

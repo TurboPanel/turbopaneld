@@ -76,6 +76,8 @@ import {
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
+  readLabel,
+  traefikLabelConstraint,
 } from "./labels.ts";
 import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
 import {
@@ -672,7 +674,9 @@ export function traefikCompose(
       ? [
         `      - ${
           quoteYamlScalar(
-            `--providers.docker.constraints=Label(\`${LABEL_ROUTED}\`,\`true\`)`,
+            `--providers.docker.constraints=${
+              traefikLabelConstraint(LABEL_ROUTED, "true")
+            }`,
           )
         }`,
       ]
@@ -837,8 +841,9 @@ export function serviceTraefikCompose(
   assertSafeComposeProjectName(project);
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
-  const constraint =
-    `Label(\`${LABEL_SERVICE_ID}\`,\`${identity.serviceId}\`) && Label(\`${LABEL_RAW_PORT}\`,\`true\`)`;
+  const constraint = `${
+    traefikLabelConstraint(LABEL_SERVICE_ID, identity.serviceId)
+  } && ${traefikLabelConstraint(LABEL_RAW_PORT, "true")}`;
   const lines = [
     `name: ${project}`,
     "",
@@ -1291,7 +1296,9 @@ export async function legacyHttpContainersPresent(
   if (!inspect.success) return true;
   return inspect.stdout.split("\n").some((line) => {
     const labels = parseLabelsLine(line);
-    if (labels === undefined || labels[LABEL_ROUTED] === "true") return false;
+    if (labels === undefined || readLabel(labels, LABEL_ROUTED) === "true") {
+      return false;
+    }
     return Object.keys(labels).some((k) => k.startsWith("traefik.http."));
   });
 }
@@ -1583,8 +1590,9 @@ function hasHostingIngressLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_HOSTING_INGRESS_COMPONENT &&
-    labels[LABEL_SERVICE_ID] === serviceId
+    readLabel(labels, LABEL_SYSTEM_COMPONENT) ===
+      SYSTEM_HOSTING_INGRESS_COMPONENT &&
+    readLabel(labels, LABEL_SERVICE_ID) === serviceId
   );
 }
 

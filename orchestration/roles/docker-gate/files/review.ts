@@ -12,9 +12,9 @@
 
 import {
   APPROVABLE_RULES,
-  APPROVAL_LABEL,
   approvalBodyDigest,
   type ApprovalResult,
+  approvalTokenOf,
   ReplayCache,
   splitApproved,
   startApprovalFeatures,
@@ -121,8 +121,13 @@ async function applyApproval(
   violations: Violation[],
   deps: ReviewDeps,
 ): Promise<Violation[]> {
-  const token = labels[APPROVAL_LABEL];
-  if (token === undefined) return violations;
+  const found = approvalTokenOf(labels);
+  if (found === undefined) return violations;
+  if ("ambiguous" in found) {
+    logApproval(deps, { ok: false, reason: "ambiguous-approval" }, []);
+    return violations;
+  }
+  const token = found.token;
   const nowSec = (deps.nowSec ?? defaultNowSec)();
   const verified = await verifyApproval(
     token,
@@ -199,8 +204,12 @@ async function applyStartApproval(
   found: readonly Violation[],
   deps: ReviewDeps,
 ): Promise<Violation[]> {
-  const token = doc.labels[APPROVAL_LABEL];
-  if (found.length === 0 || token === undefined) return [...found];
+  const label = approvalTokenOf(doc.labels);
+  // Both labels present relaxes nothing.
+  if (found.length === 0 || label === undefined || "ambiguous" in label) {
+    return [...found];
+  }
+  const token = label.token;
   const features = await startApprovalFeatures(
     token,
     deps.approvalKeys ?? [],
