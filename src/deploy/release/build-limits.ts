@@ -184,25 +184,26 @@ export function describeBuildLimits(
   resolved: ResolvedBuildLimits,
   host: HostCapacity,
 ): string {
-  const cores = `${coresText(resolved.cores)} (${
-    why(resolved.coresInfo, `the server's ${coresText(host.cores)}`)
-  })`;
+  const coresWhy = why(
+    resolved.coresInfo,
+    "the server's " + coresText(host.cores),
+  );
+  const memoryWhy = why(
+    resolved.memoryInfo,
+    "the server's " + formatBuildMemory(host.memoryBytes),
+  );
+  const cores = `${coresText(resolved.cores)} (${coresWhy})`;
   const amount = resolved.memoryBytes > 0
     ? `${formatBuildMemory(resolved.memoryBytes)} memory`
     : "the default memory";
-  const memory = `${amount} (${
-    why(
-      resolved.memoryInfo,
-      `the server's ${formatBuildMemory(host.memoryBytes)}`,
-    )
-  })`;
+  const memory = `${amount} (${memoryWhy})`;
   return `Build limited to ${cores} and ${memory}`;
 }
 
 /** The out-of-memory message for a build that hit its limit. */
 export function buildOutOfMemoryMessage(memoryBytes: number): string {
   const limit = memoryBytes > 0
-    ? ` (limit ${formatBuildMemory(memoryBytes)})`
+    ? " (limit " + formatBuildMemory(memoryBytes) + ")"
     : "";
   return `The build ran out of memory${limit}. Raise Build Memory or reduce the build's memory use.`;
 }
