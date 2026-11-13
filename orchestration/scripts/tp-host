@@ -4781,7 +4781,7 @@ tp_build_host_mem_kb() {
   if [ -n "$TP_TEST" ] && [ -n "${TP_TEST_MEM_KB:-}" ]; then
     _hm="$TP_TEST_MEM_KB"
   else
-    _hm="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+    _hm="$(LC_ALL=C awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
   fi
   case "$_hm" in ''|*[!0-9]*|0) _hm="$BUILD_MEMORY_MIN_KB" ;; esac
   printf '%s\n' "$_hm"
@@ -4800,7 +4800,7 @@ tp_build_memory_ok() {
 # 1 GiB, at most the RAM). $1 is a validated request or empty.
 tp_build_memory_max() {
   _bm_kb="$(tp_build_host_mem_kb)"
-  awk -v req="$1" -v kb="$_bm_kb" -v rsv="$BUILD_SYSTEM_RESERVED_KB" -v min="$BUILD_MEMORY_MIN_KB" 'BEGIN {
+  LC_ALL=C awk -v req="$1" -v kb="$_bm_kb" -v rsv="$BUILD_SYSTEM_RESERVED_KB" -v min="$BUILD_MEMORY_MIN_KB" 'BEGIN {
     total = kb * 1024
     if (req == "") { n = total - rsv * 1024 } else { n = req + 0 }
     if (n < min * 1024) n = min * 1024
@@ -4809,17 +4809,18 @@ tp_build_memory_max() {
   }'
 }
 
-# A requested core limit: 1 to 3 digits, then optionally a dot and 1 or 2
-# digits ("2", "1.5", "0.25"). Anything else is refused, never trimmed.
+# A requested core limit: 1 to 999, no leading zero (so no 0, 000 or 0.5), then
+# optionally a dot and 1 or 2 digits ("2", "1.5", "1.25"). Anything else is
+# refused, never trimmed.
 tp_build_cores_ok() {
   case "$1" in
     ''|*[!0-9.]*|.*|*.|*.*.*) return 1 ;;
   esac
   case "$1" in
-    [0-9]|[0-9][0-9]|[0-9][0-9][0-9]) return 0 ;;
-    [0-9].[0-9]|[0-9].[0-9][0-9]) return 0 ;;
-    [0-9][0-9].[0-9]|[0-9][0-9].[0-9][0-9]) return 0 ;;
-    [0-9][0-9][0-9].[0-9]|[0-9][0-9][0-9].[0-9][0-9]) return 0 ;;
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) return 0 ;;
+    [1-9].[0-9]|[1-9].[0-9][0-9]) return 0 ;;
+    [1-9][0-9].[0-9]|[1-9][0-9].[0-9][0-9]) return 0 ;;
+    [1-9][0-9][0-9].[0-9]|[1-9][0-9][0-9].[0-9][0-9]) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -4829,7 +4830,7 @@ tp_build_cores_ok() {
 # (at least 1). $1 is a validated request or empty.
 tp_build_cpu_quota() {
   _bq_host="$(tp_build_host_cores)"
-  awk -v req="$1" -v host="$_bq_host" 'BEGIN {
+  LC_ALL=C awk -v req="$1" -v host="$_bq_host" 'BEGIN {
     if (req == "") { n = int(host / 2); if (n < 1) n = 1 }
     else { n = req + 0 }
     if (n > host) n = host

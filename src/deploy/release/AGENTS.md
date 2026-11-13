@@ -391,7 +391,7 @@ least 1); the server's RAM less 1 GiB (at least 1 GiB, at most the RAM).
 Limits above the host are capped to it. `build-limits.ts` resolves and words
 the transcript line ("Build limited to 2 cores (server limit) and 2.8 GB
 memory (default)"); `build-run` takes the numbers as arguments 4 and 5 and
-clamps them again. A build killed for memory (exit 137, "Killed", oom-kill)
+clamps them again. A build killed for memory (the unit exits 137, or the runner's own last line says a step exited 137; text the build prints never counts)
 ends with "The build ran out of memory (limit X). Raise Build Memory or reduce
 the build's memory use." There is no opt-out on a managed
 host. A development install runs the commands as the developer with `clearEnv` and an explicit

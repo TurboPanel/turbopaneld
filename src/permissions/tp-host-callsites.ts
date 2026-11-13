@@ -1658,6 +1658,15 @@ const SITES: CallSite[] = [
       setup: BUILD_TREE,
     },
   ),
+  // The helper probe: a build id tp-host refuses on purpose (see KNOWN_BUGS
+  // below, where the refusal is the expected answer, not a bug).
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","build-run","-probe","-probe","tpbuild","-","-","-"],MANAGED',
+    {
+      argv: ["build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"],
+      setup: BUILD_TREE,
+    },
+  ),
   tpHost(
     'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',
     { argv: ["build-return", BUILD_ID], setup: BUILD_TREE },
@@ -2978,7 +2987,15 @@ export type KnownBug =
   | { why: string; refusal: string }
   | { why: string; pending: string };
 
-const KNOWN_BUGS: Record<string, KnownBug> = {};
+const KNOWN_BUGS: Record<string, KnownBug> = {
+  // Intended: the daemon asks the helper whether it takes limit arguments with a
+  // build id the helper refuses, so no unit ever starts.
+  'src/deploy/release/build-sandbox.ts|["-n","build-run","-probe","-probe","tpbuild","-","-","-"],MANAGED':
+    {
+      why: "the helper probe asks with a build id tp-host refuses on purpose",
+      refusal: "refusing build id",
+    },
+};
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
   KNOWN_BUGS[site.key] === undefined

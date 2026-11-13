@@ -488,6 +488,8 @@ export type SandboxedBuildParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Privileged runner for `systemctl stop` and `build-return`. */
   runFn?: RunFn;
+  /** Test seam: asks the helper whether it takes limit arguments. */
+  probeHelper?: HelperProbe;
   /** Test seam: the host's size the limits are clamped to. */
   host?: HostCapacity;
   spawn?: SandboxSpawn;
@@ -631,31 +633,79 @@ function failureMessage(
 }
 
 /**
- * What an older `tp-host` says to a fourth `build-run` argument; it predates
- * the build limits and runs the build at its fixed 2 cores and 4G.
+ * Whether the host helper takes the limit arguments of `build-run`, asked
+ * BEFORE the build starts and never from the build's own output (a tenant
+ * build can print anything). `build-run` is called with a build id it refuses
+ * and the three limit arguments: a helper that predates them answers with its
+ * argument-count message, a current one refuses the id. No unit starts either
+ * way. Only a positive answer is kept, so a helper updated later is noticed.
+ * Anything else (sudo trouble, an unknown answer) counts as current: the
+ * limits are sent and the build fails loudly rather than run unlimited.
  */
-const OLD_BUILD_RUN_REFUSAL = "only build-run BUILD-ID PROJECT-ID OWNER";
+let helperTakesLimits = false;
+
+export type HelperProbe = (runFn: RunFn) => Promise<boolean>;
+
+const probeHelperTakesLimits: HelperProbe = async (runFn) => {
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(
+      ["-n", "build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"],
+      MANAGED,
+    ),
+  );
+  const text = result.stderr;
+  return !(text.includes("only build-run BUILD-ID PROJECT-ID OWNER") &&
+    !text.includes("[CORES"));
+};
+
+/** Test seam: forget the cached answer. */
+export function resetBuildHelperProbe(): void {
+  helperTakesLimits = false;
+}
+
+async function helperAcceptsLimits(
+  runFn: RunFn,
+  probe: HelperProbe,
+): Promise<boolean> {
+  if (helperTakesLimits) return true;
+  let accepts: boolean;
+  try {
+    accepts = await probe(runFn);
+  } catch {
+    accepts = true;
+  }
+  if (accepts) helperTakesLimits = true;
+  return accepts;
+}
 
 /**
- * A build the kernel killed for going over its memory limit: exit 137 (SIGKILL),
- * the shell's "Killed", or systemd's own `oom-kill` result.
+ * A build the kernel killed for going over its memory limit: the unit's exit
+ * 137 (SIGKILL), or the runner's own last line saying a step exited 137. Text
+ * the build itself prints ("Killed") is never trusted for this.
  */
-export function looksOutOfMemory(
-  code: number,
-  stdout: string,
-  stderr: string,
-): boolean {
+export function looksOutOfMemory(code: number, stderr: string): boolean {
   if (code === 137) return true;
-  const text = `${tail(stderr)}\n${tail(stdout)}`;
-  return /\(exit 137\)|(^|\s)Killed\s*$|oom-kill/m.test(text);
+  const lines = stderr.trimEnd().split("\n");
+  const last = lines.at(-1) ?? "";
+  return /^tp-build-runner: step \d+ of \d+ failed \(exit 137\)$/.test(last);
 }
 
 async function runBuildUnit(
   params: SandboxedBuildParams,
   runFn: RunFn,
-  withLimits = true,
 ): Promise<void> {
   const { work, onOutput } = params;
+  const withLimits = await helperAcceptsLimits(
+    runFn,
+    params.probeHelper ?? probeHelperTakesLimits,
+  );
+  if (!withLimits) {
+    onOutput?.(
+      "stderr",
+      "the host helper is older than this daemon and cannot set build limits; the build runs with its fixed limit (finish the update on this host)",
+    );
+  }
   const host = params.host ?? await readHostCapacity();
   const highestTotal = noteServerMemoryTotal(host.memoryBytes);
   const resolved = resolveBuildLimits(work.buildLimits, host);
@@ -724,7 +774,7 @@ async function runBuildUnit(
     throw new Error(`${abortReason}; the build unit was stopped`);
   }
   if (!status.success) {
-    if (withLimits && looksOutOfMemory(status.code, stdout, stderr)) {
+    if (withLimits && looksOutOfMemory(status.code, stderr)) {
       throw new Error(
         buildOutOfMemoryMessage(
           resolved.memoryBytes,
@@ -734,32 +784,6 @@ async function runBuildUnit(
       );
     }
     throw new Error(failureMessage(status.code, stdout, stderr, redact));
-  }
-}
-
-/**
- * The host helper can be older than this daemon (the update lands in two
- * steps): it refuses the core limit before it starts anything, so the build is
- * run again without it and the transcript says so.
- */
-async function runBuildUnitWithFallback(
-  params: SandboxedBuildParams,
-  runFn: RunFn,
-): Promise<void> {
-  try {
-    await runBuildUnit(params, runFn);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (
-      !message.includes(OLD_BUILD_RUN_REFUSAL) || message.includes("[CORES")
-    ) {
-      throw err;
-    }
-    params.onOutput?.(
-      "stderr",
-      "the host helper is older than this daemon and cannot set build limits; the build runs with its fixed limit (finish the update on this host)",
-    );
-    await runBuildUnit(params, runFn, false);
   }
 }
 
@@ -793,7 +817,7 @@ export async function runSandboxedBuild(
       try {
         // A deploy cancelled while it waited for the build slot never starts one.
         throwIfAborted(params.signal, "before the build started");
-        await runBuildUnitWithFallback(params, runFn);
+        await runBuildUnit(params, runFn);
       } catch (err) {
         failure = err;
       }

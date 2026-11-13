@@ -1,5 +1,5 @@
 /**
- * The wire shape of a build's resource limits (`build-core-limits-v1`), shared
+ * The wire shape of a build's resource limits (`build-limits-v1`), shared
  * by the deploy contract and the build code. Semantics:
  * `../deploy/release/build-limits.ts`.
  */

@@ -602,9 +602,6 @@ test("build-run's CPU limit is the requested cores, clamped to 1..the host's cor
       // Above the host's cores: the host's cores.
       [["b1", "p1", "alice", "64"], {}, "800%"],
       [["b1", "p1", "alice", "999.99"], { TP_TEST_CORES: "3" }, "300%"],
-      // Below one core: one core.
-      [["b1", "p1", "alice", "0.5"], {}, "100%"],
-      [["b1", "p1", "alice", "0"], {}, "100%"],
     ];
     await forEachSequential(cases, async ([args, env, quota]) => {
       const result = await host.run(["build-run", ...args], "spec\n", env);
@@ -733,6 +730,12 @@ test("build-run refuses a core limit that is not a plain number, never trimming 
     await forEachSequential(
       [
         "",
+        "0",
+        "0.5",
+        "000",
+        "007",
+        "01",
+        "1.0.0",
         "-1",
         "+2",
         "1e3",
