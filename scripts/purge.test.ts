@@ -356,7 +356,7 @@ const OWNED_PATHS = [
   "/etc/turbopanel/tunnel-env",
   "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
   "/opt/turbopanel/vendor/cloudflared",
-  "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.11.0/cloudflared",
   "/var/lib/turbopanel/cloudflared/tunnels",
   // The daemon's sealing key and secrets trust mark live loose in the state
   // root; the purge removes them with the tree.

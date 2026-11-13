@@ -32,7 +32,7 @@ async function withTunnelsDir(
   const io: ConnectorIo = {
     layout: { configDir: join(dir, "etc") },
     workDir: dir,
-    version: "2026.10.7",
+    version: "2026.11.0",
     ensureBinary: opts.ensureBinary ??
       (() =>
         Promise.resolve("/opt/turbopanel/vendor/cloudflared/x/cloudflared")),
