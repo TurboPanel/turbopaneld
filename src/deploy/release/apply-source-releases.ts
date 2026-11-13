@@ -1235,12 +1235,16 @@ async function prepareBuildWork(
     runFn: deps.runFn,
     onOutput: (stream, line) => deps.logSink.onLine(stream, line),
   });
+  // The entry carries its full resolved value (organization, server and its
+  // service); the deploy-wide one is for the project-wide Compose build only.
+  const buildLimits = entry.buildLimits;
   const work = await resolveBuildWork(
     {
       serviceId,
       releaseId: entry.releaseId,
       projectId: payload.projectId,
       owner,
+      ...(buildLimits === undefined ? {} : { buildLimits }),
     },
     deps.buildSandboxRoot,
   );

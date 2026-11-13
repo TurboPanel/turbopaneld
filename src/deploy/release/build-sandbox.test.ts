@@ -31,6 +31,9 @@ import {
 const test = Deno.test.bind(Deno);
 
 const RUNNER = join(DAEMON_ROOT, "orchestration/scripts/tp-build-runner");
+const GIB = 1024 ** 3;
+/** An 8-core host with 8 GiB of RAM. */
+const HOST = { cores: 8, memoryBytes: 8 * GIB };
 const PROJECT = "01a0e39d-0418-7852-bc47-bc2f8422d404";
 const TP_HOST = "/opt/turbopanel/lib/tp-host";
 
@@ -270,13 +273,19 @@ test("a build is the fixed build-run argv with the spec on stdin, then build-ret
     spec: "tp-build-spec 1\nrun dHJ1ZQ==\nend\n",
     spawn: child.spawn,
     runFn,
+    host: HOST,
     onOutput: (_stream, line) => lines.push(line),
   });
+  // No limit set anywhere: tp-host applies its defaults (half the cores, the
+  // RAM less 1 GiB); the log line says what they come to.
   assertEquals(child.argv, [
-    managed("build-run", target.buildId, PROJECT, "alice"),
+    managed("build-run", target.buildId, PROJECT, "alice", "-", "-"),
   ]);
   assertEquals(child.stdin(), "tp-build-spec 1\nrun dHJ1ZQ==\nend\n");
-  assertEquals(lines, ["built"]);
+  assertEquals(lines, [
+    "Build limited to 4 cores (default) and 7 GB memory (default)",
+    "built",
+  ]);
   assertEquals(calls, [managed("build-return", target.buildId)]);
 });
 
@@ -415,6 +424,7 @@ test("builds on one host run one at a time, and a waiting one says so", async ()
     work: first,
     spec: "",
     runFn,
+    host: HOST,
     onOutput: (_stream, line) => lines.push(line),
     spawn: (args) => {
       order.push("start-2");
@@ -426,7 +436,10 @@ test("builds on one host run one at a time, and a waiting one says so", async ()
   finishFirst();
   await Promise.all([one, two]);
   assertEquals(order, ["start-1", "end-1", "start-2"]);
-  assertEquals(lines, ["waiting for another build on this host to finish"]);
+  assertEquals(lines, [
+    "waiting for another build on this host to finish",
+    "Build limited to 4 cores (default) and 7 GB memory (default)",
+  ]);
 });
 
 test("the work tree is created fresh, a stale one is taken back first, and a missing root names the role", async () => {
@@ -714,4 +727,128 @@ test("a deploy cancelled while it waits for the build slot leaves the queue", as
   open();
   await Promise.all([first, next]);
   assertEquals(ran, ["next"]);
+});
+
+test("a build runs with the limits the control plane resolved, and the log line names their levels", async () => {
+  const target = {
+    ...await work(),
+    buildLimits: {
+      cores: { cores: 1.5, source: "server" as const },
+      memory: { bytes: 2 * GIB, source: "service" as const },
+    },
+  };
+  const child = fakeChild({ code: 0 });
+  const { runFn } = recordingRunFn();
+  const lines: string[] = [];
+  await runSandboxedBuild({
+    work: target,
+    spec: "",
+    spawn: child.spawn,
+    runFn,
+    host: HOST,
+    onOutput: (_stream, line) => lines.push(line),
+  });
+  assertEquals(child.argv, [
+    managed("build-run", target.buildId, PROJECT, "alice", "1.5", "2147483648"),
+  ]);
+  assertEquals(lines, [
+    "Build limited to 1.5 cores (server limit) and 2 GB memory (service limit)",
+  ]);
+});
+
+test("a build killed for memory says so plainly, with the limit", async () => {
+  const target = await work();
+  const { runFn } = recordingRunFn();
+  for (
+    const result of [
+      { code: 137, stderr: "" },
+      {
+        code: 1,
+        stderr:
+          "sh: 1: Killed\ntp-build-runner: step 1 of 1 failed (exit 137)\n",
+      },
+    ]
+  ) {
+    const child = fakeChild(result);
+    await assertRejects(
+      () =>
+        runSandboxedBuild({
+          work: target,
+          spec: "",
+          spawn: child.spawn,
+          runFn,
+          host: HOST,
+        }),
+      Error,
+      "The build ran out of memory (limit 7 GB). Raise Build Memory or reduce the build's memory use.",
+    );
+  }
+});
+
+test("a build that failed for another reason is not called out of memory", async () => {
+  const target = await work();
+  const child = fakeChild({ code: 1, stderr: "npm ERR! missing script\n" });
+  const { runFn } = recordingRunFn();
+  const err = await assertRejects(() =>
+    runSandboxedBuild({
+      work: target,
+      spec: "",
+      spawn: child.spawn,
+      runFn,
+      host: HOST,
+    })
+  );
+  assert(!String((err as Error).message).includes("ran out of memory"));
+});
+
+test("a host helper older than the daemon gets the build again without the limits, and the log says so", async () => {
+  const target = await work();
+  let calls = 0;
+  const old = fakeChild({
+    code: 1,
+    stderr: "tp-host: build-run: only build-run BUILD-ID PROJECT-ID OWNER\n",
+  });
+  const fresh = fakeChild({ code: 0 });
+  const argv: string[][] = [];
+  const spawn: SandboxSpawn = (args) => {
+    argv.push(args);
+    calls++;
+    return (calls === 1 ? old : fresh).spawn(args);
+  };
+  const { runFn } = recordingRunFn();
+  const lines: string[] = [];
+  await runSandboxedBuild({
+    work: target,
+    spec: "",
+    spawn,
+    runFn,
+    host: HOST,
+    onOutput: (stream, line) => lines.push(`${stream}: ${line}`),
+  });
+  assertEquals(argv.length, 2);
+  assertEquals(argv[1], managed("build-run", target.buildId, PROJECT, "alice"));
+  assert(lines.some((l) => l.includes("older than this daemon")));
+});
+
+test("the new helper's refusal is not mistaken for an old helper", async () => {
+  const target = await work();
+  const refused = fakeChild({
+    code: 1,
+    stderr:
+      "tp-host: build-run: only build-run BUILD-ID PROJECT-ID OWNER [CORES [MEMORY-BYTES]]\n",
+  });
+  const { runFn } = recordingRunFn();
+  await assertRejects(
+    () =>
+      runSandboxedBuild({
+        work: target,
+        spec: "",
+        spawn: refused.spawn,
+        runFn,
+        host: HOST,
+      }),
+    Error,
+    "only build-run",
+  );
+  assertEquals(refused.argv.length, 1);
 });

@@ -358,7 +358,7 @@ account, never in docker or tp), inside the site owner's
 sandbox: daemon trees and sockets inaccessible, only this build's work tree and
 its owner's project cache visible under `/var/lib/turbopanel-build`,
 private-range / metadata egress denied, loopback platform ports refused for the
-unit's cgroup, 4G memory, 2 CPUs, 1024 tasks, 30 minutes, one build per host
+unit's cgroup, CPU core and memory limits (see below), 1024 tasks, 30 minutes, one build per host
 (the daemon also queues its own builds and says so in the transcript). Output streams back line by line. On any abort (the
 daemon-side ceiling, a lost client) the daemon runs `tp-host systemctl stop
 turbopanel-build-<id>.service`; then, success or not, `tp-host build-return
@@ -372,7 +372,28 @@ copies the vendored tool into `work/<id>/tools/`, the spec runs it, and the
 plan comes back as one regular file checked on its open handle); with no site
 owner the build runs in `turbopanel-tpbuild.slice`. The image build itself
 (`docker buildx`, Compose `build:`) stays on the Docker lane: the Engine's
-BuildKit, driven by `tp`, with no per-site-owner limits yet. There is no opt-out on a managed
+BuildKit, driven by `tp`, with no per-build core or memory limit. Not
+verified, only reasoned: `docker buildx build` has no CPU option for the build
+steps except `--cgroup-parent` (a Dockerfile front end setting; whether the
+pinned image builder front end passes it on was not tested), and `docker
+compose build` has only `--memory`, none for CPU. A parent cgroup with a quota
+would also need a new root helper verb. The image lane's transcript always
+says the limits cover the prepare step only; a Compose build says so when
+limits are set.
+
+**Build limits (`build-limits-v1`).** The control plane sends the smallest
+core limit and the smallest memory limit set among the organization (per
+build), the server and the service as `buildLimits` (`{ cores?: { cores,
+source }, memory?: { bytes, source } }`) on a `sourceMaterial[]` entry and
+deploy-wide; unknown to an older daemon (ignored), absent from an older
+control plane (defaults). Defaults: half the server's cores (rounded down, at
+least 1); the server's RAM less 1 GiB (at least 1 GiB, at most the RAM).
+Limits above the host are capped to it. `build-limits.ts` resolves and words
+the transcript line ("Build limited to 2 cores (server limit) and 2.8 GB
+memory (default)"); `build-run` takes the numbers as arguments 4 and 5 and
+clamps them again. A build killed for memory (exit 137, "Killed", oom-kill)
+ends with "The build ran out of memory (limit X). Raise Build Memory or reduce
+the build's memory use." There is no opt-out on a managed
 host. A development install runs the commands as the developer with `clearEnv` and an explicit
 allow-list, and no resource caps.
 

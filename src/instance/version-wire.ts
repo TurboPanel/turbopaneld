@@ -134,6 +134,7 @@ export const DAEMON_WIRE_FEATURES = [
   "site-db-url-ca-v1",
   "project-cache-v1",
   "tunnel-lock-add-v1",
+  "build-limits-v1",
 ] as const;
 
 /**
@@ -835,3 +836,10 @@ export const PROJECT_CACHE_FEATURE: DaemonWireFeature = "project-cache-v1";
  * control plane leaves such a name to the site's next deploy and warns.
  */
 export const TUNNEL_LOCK_ADD_FEATURE: DaemonWireFeature = "tunnel-lock-add-v1";
+
+/**
+ * `environment.deploy` may carry `buildLimits` (deploy-wide and per source
+ * entry): the most CPU cores and memory one build may use. A daemon without it ignores the
+ * field and builds with its fixed limit. Additive; no floor moved.
+ */
+export const BUILD_LIMITS_FEATURE: DaemonWireFeature = "build-limits-v1";

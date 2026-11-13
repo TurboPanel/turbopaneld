@@ -1638,9 +1638,14 @@ const SITES: CallSite[] = [
   // --- release promotion ----------------------------------------------------
   // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner],MANAGED',
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner,...(withLimits?[buildCoresArg(resolved),buildMemoryArg(resolved)]:[])],MANAGED',
     {
       argv: ["build-run", BUILD_ID, PROJECT_ID, "alice"],
+      stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
+      setup: BUILD_TREE,
+    },
+    {
+      argv: ["build-run", BUILD_ID, PROJECT_ID, "alice", "1.5", "2147483648"],
       stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
       setup: BUILD_TREE,
     },

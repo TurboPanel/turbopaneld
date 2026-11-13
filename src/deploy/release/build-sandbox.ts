@@ -11,7 +11,9 @@
  * creates for that one run (`DynamicUser=yes`, never a host account, never in
  * docker or tp), inside the site owner's own resource group
  * (`turbopanel-<owner>-build.slice`), with daemon trees and sockets hidden,
- * private-range and metadata egress denied, 4G memory, 2 CPUs, 30 minutes.
+ * private-range and metadata egress denied, CPU core and memory limits (the
+ * smallest set for the build, else defaults from the host's size;
+ * `./build-limits.ts`), 30 minutes.
  * The unit hands the tree to its user as it starts; `build-return` gives it
  * back only once that unit is gone, and only then does the daemon read it
  * (`./safe-copy.ts`, contained in `work/<id>`). Package caches live in
@@ -31,6 +33,16 @@ import { redactCommandSummary } from "../../logs/redactor.ts";
 import { BUILD_SIBLING_DIR, PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import {
+  buildCoresArg,
+  type BuildLimits,
+  buildMemoryArg,
+  buildOutOfMemoryMessage,
+  describeBuildLimits,
+  type HostCapacity,
+  readHostCapacity,
+  resolveBuildLimits,
+} from "./build-limits.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -91,6 +103,12 @@ export type BuildWork = {
   checkoutDir: string;
   /** `caches/<owner>/<projectKey>`, bound into the build unit at the same path. */
   cacheDir: string;
+  /**
+   * The core and memory limits the control plane resolved for this build.
+   * Absent (an older control plane): the defaults, half the host's cores and
+   * its RAM less 1 GiB.
+   */
+  buildLimits?: BuildLimits;
 };
 
 /** Root-owned facts that mark a host whose builds must be sandboxed. */
@@ -145,6 +163,7 @@ export async function resolveBuildWork(
     projectId: string;
     /** The site owner's Linux user. */
     owner: string;
+    buildLimits?: BuildLimits;
   },
   root: string = BUILD_SANDBOX_ROOT,
 ): Promise<BuildWork> {
@@ -171,6 +190,9 @@ export async function resolveBuildWork(
     workDir,
     checkoutDir: join(workDir, "source"),
     cacheDir: join(root, "caches", params.owner, params.projectId),
+    ...(params.buildLimits === undefined
+      ? {}
+      : { buildLimits: params.buildLimits }),
   };
 }
 
@@ -464,6 +486,8 @@ export type SandboxedBuildParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Privileged runner for `systemctl stop` and `build-return`. */
   runFn?: RunFn;
+  /** Test seam: the host's size the limits are clamped to. */
+  host?: HostCapacity;
   spawn?: SandboxSpawn;
   timeoutMs?: number;
   /** Stop the build once it has printed this many characters. */
@@ -604,17 +628,50 @@ function failureMessage(
     `build failed in the build sandbox (exit ${code})`;
 }
 
+/**
+ * What an older `tp-host` says to a fourth `build-run` argument; it predates
+ * the build limits and runs the build at its fixed 2 cores and 4G.
+ */
+const OLD_BUILD_RUN_REFUSAL = "only build-run BUILD-ID PROJECT-ID OWNER";
+
+/**
+ * A build the kernel killed for going over its memory limit: exit 137 (SIGKILL),
+ * the shell's "Killed", or systemd's own `oom-kill` result.
+ */
+export function looksOutOfMemory(
+  code: number,
+  stdout: string,
+  stderr: string,
+): boolean {
+  if (code === 137) return true;
+  const text = `${tail(stderr)}\n${tail(stdout)}`;
+  return /\(exit 137\)|(^|\s)Killed\s*$|oom-kill/m.test(text);
+}
+
 async function runBuildUnit(
   params: SandboxedBuildParams,
   runFn: RunFn,
+  withLimits = true,
 ): Promise<void> {
   const { work, onOutput } = params;
+  const host = params.host ?? await readHostCapacity();
+  const resolved = resolveBuildLimits(work.buildLimits, host);
+  if (withLimits) onOutput?.("stdout", describeBuildLimits(resolved, host));
   const redact = params.redactSummary ??
     ((text: string) => redactCommandSummary(text));
   const timeoutMs = params.timeoutMs ?? SANDBOX_BUILD_TIMEOUT_MS;
   const child = (params.spawn ?? spawnSudo)(
     hostSudoArgs(
-      ["-n", "build-run", work.buildId, work.projectKey, work.owner],
+      [
+        "-n",
+        "build-run",
+        work.buildId,
+        work.projectKey,
+        work.owner,
+        ...(withLimits
+          ? [buildCoresArg(resolved), buildMemoryArg(resolved)]
+          : []),
+      ],
       MANAGED,
     ),
   );
@@ -660,7 +717,36 @@ async function runBuildUnit(
     throw new Error(`${abortReason}; the build unit was stopped`);
   }
   if (!status.success) {
+    if (withLimits && looksOutOfMemory(status.code, stdout, stderr)) {
+      throw new Error(buildOutOfMemoryMessage(resolved.memoryBytes));
+    }
     throw new Error(failureMessage(status.code, stdout, stderr, redact));
+  }
+}
+
+/**
+ * The host helper can be older than this daemon (the update lands in two
+ * steps): it refuses the core limit before it starts anything, so the build is
+ * run again without it and the transcript says so.
+ */
+async function runBuildUnitWithFallback(
+  params: SandboxedBuildParams,
+  runFn: RunFn,
+): Promise<void> {
+  try {
+    await runBuildUnit(params, runFn);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (
+      !message.includes(OLD_BUILD_RUN_REFUSAL) || message.includes("[CORES")
+    ) {
+      throw err;
+    }
+    params.onOutput?.(
+      "stderr",
+      "the host helper is older than this daemon and cannot set build limits; the build runs with its fixed limit (finish the update on this host)",
+    );
+    await runBuildUnit(params, runFn, false);
   }
 }
 
@@ -694,7 +780,7 @@ export async function runSandboxedBuild(
       try {
         // A deploy cancelled while it waited for the build slot never starts one.
         throwIfAborted(params.signal, "before the build started");
-        await runBuildUnit(params, runFn);
+        await runBuildUnitWithFallback(params, runFn);
       } catch (err) {
         failure = err;
       }

@@ -4455,9 +4455,13 @@ BUILD_LOCK="$P/run/tpbuild.lock"
 # which /bin/sh then runs: the build's user never reaches /opt/turbopanel.
 BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
 BUILD_LOCK_WAIT_SEC=2100
-# Owner decision: the same limits for every plan.
-BUILD_MEMORY_MAX=4G
-BUILD_CPU_QUOTA=200%
+# The CPU and memory limits are the smallest limits set for the build
+# (organization, server, service), which the daemon passes as build-run's
+# optional fourth (cores) and fifth (memory bytes) arguments; with none set,
+# half the host's cores and its RAM less BUILD_SYSTEM_RESERVED_KB (see
+# tp_build_cpu_quota and tp_build_memory_max). Swap stays off (MemorySwapMax=0).
+BUILD_SYSTEM_RESERVED_KB=1048576
+BUILD_MEMORY_MIN_KB=1048576
 BUILD_RUNTIME_MAX_SEC=1800
 # Disk: the work tree (which also holds the runner's TMPDIR), the project cache
 # and systemd's private /tmp and /var/tmp are watched while the build runs
@@ -4757,8 +4761,93 @@ tp_build_lock() {
     tp_die "build-run: fs.protected_hardlinks must be 1 before handing a tree over"
 }
 
+# The host's core count; tests name theirs (never read from the environment
+# outside test mode).
+tp_build_host_cores() {
+  if [ -n "$TP_TEST" ] && [ -n "${TP_TEST_CORES:-}" ]; then
+    _hc="$TP_TEST_CORES"
+  else
+    _hc="$(nproc 2>/dev/null || true)"
+  fi
+  case "$_hc" in ''|*[!0-9]*|0) _hc=1 ;; esac
+  printf '%s\n' "$_hc"
+}
+
+# The host's RAM in KiB (MemTotal); tests name theirs.
+tp_build_host_mem_kb() {
+  if [ -n "$TP_TEST" ] && [ -n "${TP_TEST_MEM_KB:-}" ]; then
+    _hm="$TP_TEST_MEM_KB"
+  else
+    _hm="$(awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+  fi
+  case "$_hm" in ''|*[!0-9]*|0) _hm="$BUILD_MEMORY_MIN_KB" ;; esac
+  printf '%s\n' "$_hm"
+}
+
+# A requested memory limit in bytes: 1 to 13 plain digits, no leading zero.
+tp_build_memory_ok() {
+  case "$1" in
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 13 ]
+}
+
+# The MemoryMax= value in bytes for a build: the requested bytes, at least 1 GiB
+# and at most the host's RAM; with no request the RAM less 1 GiB (at least
+# 1 GiB, at most the RAM). $1 is a validated request or empty.
+tp_build_memory_max() {
+  _bm_kb="$(tp_build_host_mem_kb)"
+  awk -v req="$1" -v kb="$_bm_kb" -v rsv="$BUILD_SYSTEM_RESERVED_KB" -v min="$BUILD_MEMORY_MIN_KB" 'BEGIN {
+    total = kb * 1024
+    if (req == "") { n = total - rsv * 1024 } else { n = req + 0 }
+    if (n < min * 1024) n = min * 1024
+    if (n > total) n = total
+    printf "%.0f\n", n
+  }'
+}
+
+# A requested core limit: 1 to 3 digits, then optionally a dot and 1 or 2
+# digits ("2", "1.5", "0.25"). Anything else is refused, never trimmed.
+tp_build_cores_ok() {
+  case "$1" in
+    ''|*[!0-9.]*|.*|*.|*.*.*) return 1 ;;
+  esac
+  case "$1" in
+    [0-9]|[0-9][0-9]|[0-9][0-9][0-9]) return 0 ;;
+    [0-9].[0-9]|[0-9].[0-9][0-9]) return 0 ;;
+    [0-9][0-9].[0-9]|[0-9][0-9].[0-9][0-9]) return 0 ;;
+    [0-9][0-9][0-9].[0-9]|[0-9][0-9][0-9].[0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The CPUQuota= value (whole percent) for a build: the requested cores clamped
+# to 1..the host's cores; with no request, half the host's cores rounded down
+# (at least 1). $1 is a validated request or empty.
+tp_build_cpu_quota() {
+  _bq_host="$(tp_build_host_cores)"
+  awk -v req="$1" -v host="$_bq_host" 'BEGIN {
+    if (req == "") { n = int(host / 2); if (n < 1) n = 1 }
+    else { n = req + 0 }
+    if (n > host) n = host
+    if (n < 1) n = 1
+    printf "%d%%\n", int(n * 100 + 0.5)
+  }'
+}
+
 tp_verb_build_run() {
-  [ $# -eq 3 ] || tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER"
+  { [ $# -eq 3 ] || [ $# -eq 4 ] || [ $# -eq 5 ]; } ||
+    tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER [CORES [MEMORY-BYTES]]"
+  _br_cores=""
+  _br_mem=""
+  if [ $# -ge 4 ] && [ "$4" != "-" ]; then
+    tp_build_cores_ok "$4" || tp_die "build-run: refusing core limit $4"
+    _br_cores="$4"
+  fi
+  if [ $# -eq 5 ] && [ "$5" != "-" ]; then
+    tp_build_memory_ok "$5" || tp_die "build-run: refusing memory limit $5"
+    _br_mem="$5"
+  fi
   tp_build_id_ok "$1" || tp_die "build-run: refusing build id $1"
   tp_build_id_ok "$2" || tp_die "build-run: refusing project id $2"
   tp_build_owner_ok "$3" || tp_die "build-run: refusing site owner $3 (not a site owner's Linux user)"
@@ -4770,6 +4859,16 @@ tp_verb_build_run() {
   case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
+  # Fail closed: an empty or odd value would mean no limit at all.
+  _br_cpuquota="$(tp_build_cpu_quota "$_br_cores")"
+  case "$_br_cpuquota" in
+    [1-9]*%) ;;
+    *) tp_die "build-run: cannot work out the CPU limit" ;;
+  esac
+  _br_memmax="$(tp_build_memory_max "$_br_mem")"
+  case "$_br_memmax" in
+    ''|0*|*[!0-9]*) tp_die "build-run: cannot work out the memory limit" ;;
+  esac
   tp_build_lock
   # Checked again under the lock: with nss-systemd a running build's own
   # throwaway user resolves too, and the lock is what guarantees none is left.
@@ -4856,8 +4955,8 @@ tp_verb_build_run() {
     -p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id $_br_owner" \
     -p ExecStartPre="+/usr/bin/env SUDO_UID=$CALLER_UID SUDO_GID=$CALLER_GID $_self_dir/tp-host build-handover $_br_id $_br_project $_br_owner"
   _br_slice="$(tp_build_slice "$_br_owner")" || tp_die "build-run: no build slice for $_br_owner"
-  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
-    -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
+  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$_br_memmax" -p MemorySwapMax=0 \
+    -p CPUQuota="$_br_cpuquota" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
     -- /bin/sh '${CREDENTIALS_DIRECTORY}/tp-build-runner' "$_br_work"

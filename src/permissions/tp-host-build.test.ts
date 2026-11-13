@@ -160,6 +160,10 @@ function expectedSystemdRun(
     privatePids?: boolean;
     bindDeny?: boolean;
     hostDeny?: string;
+    /** The `CPUQuota=` value; the fixture's 8 cores give half of them. */
+    cpuQuota?: string;
+    /** The `MemoryMax=` value in bytes; the fixture's 8 GiB less 1 GiB. */
+    memoryMax?: string;
   } = {},
 ): string[] {
   const build = `${prefix}/var/lib/turbopanel-build`;
@@ -246,9 +250,9 @@ function expectedSystemdRun(
       `ExecStartPre=+${prefix}/opt/turbopanel/lib/tp-build-loopback sync b1 alice`,
       `ExecStartPre=+/usr/bin/env SUDO_UID=${Deno.uid()} SUDO_GID=${Deno.gid()} ${prefix}/opt/turbopanel/lib/tp-host build-handover b1 p1 alice`,
       "Slice=turbopanel-alice-build.slice",
-      "MemoryMax=4G",
+      `MemoryMax=${tier.memoryMax ?? "7516192768"}`,
       "MemorySwapMax=0",
-      "CPUQuota=200%",
+      `CPUQuota=${tier.cpuQuota ?? "400%"}`,
       "TasksMax=1024",
       "IOWeight=50",
       "LimitFSIZE=4G",
@@ -577,6 +581,149 @@ test("build-run keeps the build unprivileged below the OS floor, with a warning"
   });
 });
 
+/** The `CPUQuota=` property of a build-run's systemd-run line. */
+function cpuQuotaOf(stdout: string): string {
+  const match = /\[CPUQuota=([^\]]*)\]/.exec(stdout);
+  return match?.[1] ?? "";
+}
+
+test("build-run's CPU limit is the requested cores, clamped to 1..the host's cores, else half of them", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    const cases: Array<[string[], Record<string, string>, string]> = [
+      // Nothing requested: half of 8 cores.
+      [["b1", "p1", "alice"], {}, "400%"],
+      [["b1", "p1", "alice"], { TP_TEST_CORES: "5" }, "200%"],
+      [["b1", "p1", "alice"], { TP_TEST_CORES: "1" }, "100%"],
+      [["b1", "p1", "alice"], { TP_TEST_CORES: "2" }, "100%"],
+      [["b1", "p1", "alice", "2"], {}, "200%"],
+      [["b1", "p1", "alice", "1.5"], {}, "150%"],
+      [["b1", "p1", "alice", "1.25"], {}, "125%"],
+      // Above the host's cores: the host's cores.
+      [["b1", "p1", "alice", "64"], {}, "800%"],
+      [["b1", "p1", "alice", "999.99"], { TP_TEST_CORES: "3" }, "300%"],
+      // Below one core: one core.
+      [["b1", "p1", "alice", "0.5"], {}, "100%"],
+      [["b1", "p1", "alice", "0"], {}, "100%"],
+    ];
+    await forEachSequential(cases, async ([args, env, quota]) => {
+      const result = await host.run(["build-run", ...args], "spec\n", env);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(cpuQuotaOf(result.stdout), quota, args.join(" "));
+    });
+  });
+});
+
+/** The `MemoryMax=` property of a build-run's systemd-run line. */
+function memoryMaxOf(stdout: string): string {
+  return /\[MemoryMax=([^\]]*)\]/.exec(stdout)?.[1] ?? "";
+}
+
+const GIB = 1024 ** 3;
+
+test("build-run's memory limit is the requested bytes, clamped to 1 GiB..the host's RAM, else the RAM less 1 GiB", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    const cases: Array<[string[], Record<string, string>, number]> = [
+      // Nothing requested: 8 GiB less 1 GiB.
+      [["b1", "p1", "alice"], {}, 7 * GIB],
+      [["b1", "p1", "alice", "-", "-"], {}, 7 * GIB],
+      // 3.8 GB host: the RAM less 1 GiB, not a fixed 4G above the RAM.
+      [
+        ["b1", "p1", "alice"],
+        { TP_TEST_MEM_KB: "3984588" },
+        3984588 * 1024 - GIB,
+      ],
+      // 1.5 GiB host: at least 1 GiB.
+      [["b1", "p1", "alice"], { TP_TEST_MEM_KB: "1572864" }, GIB],
+      // 512 MiB host: never above the RAM.
+      [["b1", "p1", "alice"], { TP_TEST_MEM_KB: "524288" }, 512 * 1024 * 1024],
+      [["b1", "p1", "alice", "2", String(2 * GIB)], {}, 2 * GIB],
+      [["b1", "p1", "alice", "-", String(3 * GIB)], {}, 3 * GIB],
+      // Below 1 GiB: 1 GiB. Above the RAM: the RAM.
+      [["b1", "p1", "alice", "2", "1000"], {}, GIB],
+      [["b1", "p1", "alice", "2", String(64 * GIB)], {}, 8 * GIB],
+    ];
+    await forEachSequential(cases, async ([args, env, bytes]) => {
+      const result = await host.run(["build-run", ...args], "spec\n", env);
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(memoryMaxOf(result.stdout), String(bytes), args.join(" "));
+      // Swap stays off.
+      assertStringIncludes(result.stdout, "[MemorySwapMax=0]");
+    });
+  });
+});
+
+test("build-run refuses a memory limit that is not plain whole bytes", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    await forEachSequential(
+      [
+        "",
+        "0",
+        "-5",
+        "1.5",
+        "2G",
+        "1e9",
+        "007",
+        "12345678901234",
+        "$(id)",
+        " 5",
+      ],
+      async (bytes) => {
+        assertStringIncludes(
+          await refused(host, ["build-run", "b1", "p1", "alice", "2", bytes]),
+          "refusing memory limit",
+        );
+      },
+    );
+  });
+});
+
+test("build-run refuses a core limit that is not a plain number, never trimming it", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    await forEachSequential(
+      [
+        "",
+        "-1",
+        "+2",
+        "1e3",
+        "1,5",
+        ".5",
+        "2.",
+        "1.2.3",
+        "1.234",
+        "1000",
+        "0x4",
+        " 2",
+        "2 ",
+        "2;id",
+        "$(id)",
+        "all",
+        "50%",
+      ],
+      async (cores) => {
+        assertStringIncludes(
+          await refused(host, ["build-run", "b1", "p1", "alice", cores]),
+          "refusing core limit",
+        );
+      },
+    );
+  });
+});
+
+test("build-run reads the host's core count from nothing but the host outside test mode", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../../orchestration/scripts/tp-host", import.meta.url),
+  );
+  // The test seam is behind the test-mode guard.
+  assertStringIncludes(
+    source,
+    'if [ -n "$TP_TEST" ] && [ -n "${TP_TEST_CORES:-}" ]; then',
+  );
+});
+
 test("build-run takes two well-formed ids and an owner, and nothing else", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host);
@@ -585,6 +732,7 @@ test("build-run takes two well-formed ids and an owner, and nothing else", async
         ["build-run"],
         ["build-run", "b1"],
         ["build-run", "b1", "p1"],
+        ["build-run", "b1", "p1", "alice", "2", "4294967296", "extra"],
         ["build-run", "b1", "p1", "alice", "extra"],
         ["build-run", "B1", "p1", "alice"],
         ["build-run", "b1", "P1", "alice"],

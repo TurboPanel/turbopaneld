@@ -234,7 +234,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
   - starts tenant builds only through
-    `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
+    `build-run <build-id> <project-id> <owner> [cores [memory-bytes]]` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid
     in 15001-60000 and a plain name with no `--`, never another `tp*` name,
     or `tpbuild` for a build nobody owns; checked again under the build lock;
@@ -266,7 +266,16 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     unit's first `ExecStartPre=+ … sync <id> <owner>`, which refuses unless
     its own cgroup is exactly the one systemd builds for that owner's build
     slice; no `nft` or a load failure means the build does not start), 4G
-    memory, 200% CPU, 1800 s). The unit's second `ExecStartPre=+` is
+    memory and CPU limits, 1800 s). The limits are the optional fourth and
+    fifth `build-run` arguments (cores, as `2` or `1.5`; memory, whole bytes;
+    `-` for unset), validated strictly (never trimmed): cores clamped to 1..the
+    host's cores, memory to 1 GiB..the host's RAM; unset means half the cores
+    and the RAM less 1 GiB. Swap stays off. The host's figures come from
+    `nproc` and `/proc/meminfo`; only test mode reads `TP_TEST_CORES` /
+    `TP_TEST_MEM_KB`. The daemon sends the smallest limit set among the
+    organization, server and service (`src/deploy/release/build-limits.ts`);
+    a helper that predates them refuses the extra arguments and the daemon
+    reruns the build without them. The unit's second `ExecStartPre=+` is
     `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
     is exactly that unit's, it reads the throwaway uid from the unit's
     `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd
