@@ -76,6 +76,7 @@ import {
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
+  legacyLabelKey,
   readLabel,
   traefikLabelConstraint,
 } from "./labels.ts";
@@ -607,7 +608,7 @@ export function parseIngressNetworkGateways(
  *
  * With `identity`, emits allocated `container_name`, an `x-turbopanel` block
  * (`kind: system`), and canonical role / system-component / service labels —
- * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
+ * never `traefik.enable`, HTTP router labels, or `io.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
  *
@@ -820,7 +821,7 @@ export function serviceIngressComposePath(
  * Joins `ingressNetwork` (the `hosting-ingress` component's allocated
  * `serviceId`, supplied by the caller from the deploy payload's
  * `hostingIngressNetwork`), constrains the Docker provider to
- * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
+ * `io.turbopanel.service=<serviceId>` **and** `io.turbopanel.raw-port=true` (either prefix)
  * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
@@ -873,6 +874,9 @@ export function serviceTraefikCompose(
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
+    `      ${legacyLabelKey(LABEL_SERVICE_ID)}: ${
+      quoteYamlScalar(identity.serviceId)
+    }`,
     ...gateVolumeLines(docker),
     "    networks:",
     `      - ${ingressNetwork}`,
@@ -1580,8 +1584,8 @@ export async function ensureHostingIngress(
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
  * the shared hosting-ingress Traefik (`turbopanel.role=ingress`,
- * `com.turbopanel.system.component=hosting-ingress`, and
- * `com.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
+ * `io.turbopanel.system.component=hosting-ingress`, and
+ * `io.turbopanel.service=<serviceId>`, either prefix). Unlabelled / legacy rows fail.
  */
 function hasHostingIngressLabels(
   entry: Record<string, unknown>,

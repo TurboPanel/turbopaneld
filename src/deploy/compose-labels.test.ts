@@ -593,3 +593,23 @@ test("buildHostingLabelsFragment routes the names a www mode serves", () => {
     "Host(`example.test`) || Host(`www.example.test`)",
   );
 });
+
+test("identity labels are stamped under both prefixes with equal values, over a tenant's own old-prefix label", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: resolvedFromServices({
+      app: {
+        image: "nginx:alpine",
+        labels: { "com.turbopanel.service": "someone-else" },
+      },
+    }),
+  });
+  const labels = fragment.services?.app?.labels as Record<string, string>;
+  assertEquals(labels["io.turbopanel.service"], "service_123");
+  assertEquals(labels["com.turbopanel.service"], "service_123");
+  assertEquals(labels["io.turbopanel.project"], "project_123");
+  assertEquals(labels["com.turbopanel.project"], "project_123");
+  assertEquals(labels["io.turbopanel.environment"], "env_123");
+  assertEquals(labels["com.turbopanel.environment"], "env_123");
+});

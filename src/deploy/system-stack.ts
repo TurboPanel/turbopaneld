@@ -53,7 +53,7 @@ export type InspectSystemStackDeps = {
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
  * this system component (`turbopanel.role=turbopanel`,
- * `com.turbopanel.system.component=<component>`). Unlabelled / legacy rows
+ * `io.turbopanel.system.component=<component>`). Unlabelled / legacy rows
  * fail — the daemon never adopts a system container by name heuristic alone.
  */
 function hasSystemStackLabels(
@@ -89,7 +89,7 @@ async function systemStackComposeFileExists(
  * descriptor's compose service name and the expected platform labels.
  * Never throws; never scans Docker broadly — only the canonical
  * `turbopanel-system` compose project is queried, and adoption requires the
- * `com.turbopanel.system.component` label to match exactly (unlabelled
+ * `io.turbopanel.system.component` label to match exactly (unlabelled
  * legacy containers are never adopted by name).
  */
 export async function inspectSystemStackContainer(
