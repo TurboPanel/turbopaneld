@@ -763,7 +763,7 @@ test("a build runs with the limits the control plane resolved, and the log line 
     ),
   ]);
   assertEquals(lines, [
-    "Build limited to 1.5 cores (server limit) and 2 GB memory (service limit), swap allowed",
+    "Build limited to 1.5 cores (server limit) and 2 GB memory (service limit), swap allowed up to 2 GB",
   ]);
 });
 

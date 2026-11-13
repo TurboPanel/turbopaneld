@@ -156,7 +156,7 @@ test("swap is off unless a level opted in, and the log line says when it is allo
   assertEquals([on.swapAllowed, buildSwapArg(on)], [true, "on"]);
   assertEquals(
     describeBuildLimits(on, HOST),
-    "Build limited to 4 cores (default) and 7 GB memory (default), swap allowed",
+    "Build limited to 4 cores (default) and 7 GB memory (default), swap allowed up to 7 GB",
   );
 });
 

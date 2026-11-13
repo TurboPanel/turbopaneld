@@ -280,7 +280,9 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     argument-count message, a current one refuses the id; no unit starts) and
     the build then runs once without the arguments; a build is never rerun
     and its own output never decides this. The sixth argument is `on`, `off` or `-`:
-    swap stays off (`MemorySwapMax=0`) unless it says `on`. The host's RAM is
+    swap stays off (`MemorySwapMax=0`) unless it says `on`, which sets
+    `MemorySwapMax` to the unit's own `MemoryMax` (swap up to the size of the
+    memory limit, never unlimited). The host's RAM is
     read afresh at every build start (a ballooned virtual machine's total
     changes), never cached. The unit's second `ExecStartPre=+` is
     `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup

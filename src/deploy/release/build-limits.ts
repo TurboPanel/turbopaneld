@@ -209,7 +209,12 @@ export function describeBuildLimits(
     ? `${formatBuildMemory(resolved.memoryBytes)} memory`
     : "the default memory";
   const memory = `${amount} (${memoryWhy})`;
-  const swap = resolved.swapAllowed ? ", swap allowed" : "";
+  let swap = "";
+  if (resolved.swapAllowed) {
+    swap = resolved.memoryBytes > 0
+      ? ", swap allowed up to " + formatBuildMemory(resolved.memoryBytes)
+      : ", swap allowed up to its memory limit";
+  }
   return `Build limited to ${cores} and ${memory}${swap}`;
 }
 

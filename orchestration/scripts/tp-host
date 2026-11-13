@@ -4460,8 +4460,9 @@ BUILD_LOCK_WAIT_SEC=2100
 # optional fourth (cores) and fifth (memory bytes) arguments; with none set,
 # half the host's cores and its RAM less BUILD_SYSTEM_RESERVED_KB (see
 # tp_build_cpu_quota and tp_build_memory_max). Swap stays off (MemorySwapMax=0)
-# unless the sixth argument says `on` (owner opt-in at organization, server or
-# service level), which leaves the unit's swap unlimited. The host's RAM is read
+# unless the sixth argument says `on` (the control plane resolves it: on only
+# when a level opts in and none says off), which caps the unit's swap at its
+# memory limit (MemorySwapMax equal to MemoryMax), never unlimited. The host's RAM is read
 # afresh at every build start: a ballooned virtual machine's total changes.
 BUILD_SYSTEM_RESERVED_KB=1048576
 BUILD_MEMORY_MIN_KB=1048576
@@ -4882,7 +4883,7 @@ tp_verb_build_run() {
     ''|0*|*[!0-9]*) tp_die "build-run: cannot work out the memory limit" ;;
   esac
   _br_swap_prop=MemorySwapMax=0
-  [ "$_br_swap" != on ] || _br_swap_prop=
+  [ "$_br_swap" != on ] || _br_swap_prop="MemorySwapMax=$_br_memmax"
   tp_build_lock
   # Checked again under the lock: with nss-systemd a running build's own
   # throwaway user resolves too, and the lock is what guarantees none is left.

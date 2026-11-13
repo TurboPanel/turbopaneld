@@ -616,6 +616,11 @@ function memoryMaxOf(stdout: string): string {
   return /\[MemoryMax=([^\]]*)\]/.exec(stdout)?.[1] ?? "";
 }
 
+/** The `MemorySwapMax=` property of a build-run's systemd-run line. */
+function swapMaxOf(stdout: string): string {
+  return /\[MemorySwapMax=([^\]]*)\]/.exec(stdout)?.[1] ?? "";
+}
+
 const GIB = 1024 ** 3;
 
 test("build-run's memory limit is the requested bytes, clamped to 1 GiB..the host's RAM, else the RAM less 1 GiB", async () => {
@@ -651,26 +656,39 @@ test("build-run's memory limit is the requested bytes, clamped to 1 GiB..the hos
   });
 });
 
-test("build-run keeps swap off unless asked, and then leaves it unlimited", async () => {
+test("build-run keeps swap off unless asked, and then caps it at the memory limit", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host);
-    await forEachSequential(
-      [
-        [["b1", "p1", "alice"], true],
-        [["b1", "p1", "alice", "-", "-", "-"], true],
-        [["b1", "p1", "alice", "-", "-", "off"], true],
-        [["b1", "p1", "alice", "-", "-", "on"], false],
-      ] as Array<[string[], boolean]>,
-      async ([args, off]) => {
-        const result = await host.run(["build-run", ...args], "spec\n");
-        assertEquals(result.code, 0, result.stderr);
-        assertEquals(
-          result.stdout.includes("[MemorySwapMax=0]"),
-          off,
-          args.join(" "),
-        );
-      },
+    // Off by default, and for `off` or `-`: no swap at all.
+    for (
+      const args of [
+        ["b1", "p1", "alice"],
+        ["b1", "p1", "alice", "-", "-", "-"],
+        ["b1", "p1", "alice", "-", "-", "off"],
+      ]
+    ) {
+      const result = await host.run(["build-run", ...args], "spec\n");
+      assertEquals(result.code, 0, result.stderr);
+      assertEquals(swapMaxOf(result.stdout), "0", args.join(" "));
+    }
+    // On: swap up to the build's own memory limit, never unlimited.
+    const defaultMemory = await host.run(
+      ["build-run", "b1", "p1", "alice", "-", "-", "on"],
+      "spec\n",
     );
+    assertEquals(swapMaxOf(defaultMemory.stdout), String(7 * GIB));
+    const setMemory = await host.run(
+      ["build-run", "b1", "p1", "alice", "-", String(3 * GIB), "on"],
+      "spec\n",
+    );
+    assertEquals(swapMaxOf(setMemory.stdout), String(3 * GIB));
+    assertEquals(memoryMaxOf(setMemory.stdout), String(3 * GIB));
+    // The cap follows the clamped memory limit, not the request.
+    const clamped = await host.run(
+      ["build-run", "b1", "p1", "alice", "-", String(64 * GIB), "on"],
+      "spec\n",
+    );
+    assertEquals(swapMaxOf(clamped.stdout), String(8 * GIB));
     await forEachSequential(["yes", "ON", "1", "", "on;id"], async (swap) => {
       assertStringIncludes(
         await refused(host, ["build-run", "b1", "p1", "alice", "-", "-", swap]),
