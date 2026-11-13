@@ -13,10 +13,14 @@ export type BuildCoreLimit = { cores: number; source: BuildLimitSource };
 /** The most memory one build may use, in bytes. */
 export type BuildMemoryLimit = { bytes: number; source: BuildLimitSource };
 
-/** What the control plane resolved for one build; either part may be absent. */
+/** Whether a build may use swap (off unless a level opts in). */
+export type BuildSwapLimit = { allowed: boolean; source: BuildLimitSource };
+
+/** What the control plane resolved for one build; any part may be absent. */
 export type BuildLimits = {
   cores?: BuildCoreLimit;
   memory?: BuildMemoryLimit;
+  swap?: BuildSwapLimit;
 };
 
 const SOURCES: ReadonlySet<string> = new Set([
@@ -80,6 +84,15 @@ function parseMemory(
   return { bytes, source: parseSource(source, field) };
 }
 
+function parseSwap(value: unknown, field: string): BuildSwapLimit | undefined {
+  if (value === undefined) return undefined;
+  const { allowed, source } = asRecord(value, `${field} swap`);
+  if (typeof allowed !== "boolean") {
+    throw new TypeError(`Invalid ${field} swap`);
+  }
+  return { allowed, source: parseSource(source, field) };
+}
+
 /** Parse the wire value; `undefined` when missing, a TypeError when malformed. */
 export function parseBuildLimits(
   value: unknown,
@@ -89,9 +102,13 @@ export function parseBuildLimits(
   const record = asRecord(value, field);
   const cores = parseCores(record.cores, field);
   const memory = parseMemory(record.memory, field);
-  if (cores === undefined && memory === undefined) return undefined;
+  const swap = parseSwap(record.swap, field);
+  if (cores === undefined && memory === undefined && swap === undefined) {
+    return undefined;
+  }
   return {
     ...(cores === undefined ? {} : { cores }),
     ...(memory === undefined ? {} : { memory }),
+    ...(swap === undefined ? {} : { swap }),
   };
 }

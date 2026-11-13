@@ -384,9 +384,9 @@ limits are set.
 **Build limits (`build-limits-v1`).** The control plane sends the smallest
 core limit and the smallest memory limit set among the organization (per
 build), the server and the service as `buildLimits` (`{ cores?: { cores,
-source }, memory?: { bytes, source } }`) on a `sourceMaterial[]` entry and
+source }, memory?: { bytes, source }, swap?: { allowed, source } }`) on a `sourceMaterial[]` entry and
 deploy-wide; unknown to an older daemon (ignored), absent from an older
-control plane (defaults). Defaults: half the server's cores (rounded down, at
+control plane (defaults). Swap is off unless a level opts in (service, else server, else organization; `buildLimits.swap`), shown as "swap allowed" in the log line. The server's RAM is read at every build start, and a build killed for memory on a server whose total was then below the largest the daemon has seen since it started adds "This server's memory may be ballooned down; it had X when the build started." Defaults: half the server's cores (rounded down, at
 least 1); the server's RAM less 1 GiB (at least 1 GiB, at most the RAM).
 Limits above the host are capped to it. `build-limits.ts` resolves and words
 the transcript line ("Build limited to 2 cores (server limit) and 2.8 GB

@@ -53,6 +53,10 @@ export type ResolvedBuildLimits = {
   memoryInfo: ResolvedLimit;
   /** Whether a memory limit is passed to `tp-host` (else it uses its default). */
   memorySet: boolean;
+  /** Swap is allowed for this build (off unless a level opted in). */
+  swapAllowed: boolean;
+  /** Whether a swap setting is passed to `tp-host` (else it keeps swap off). */
+  swapSet: boolean;
 };
 
 /** `MemTotal` of `/proc/meminfo` text in bytes, or 0. */
@@ -126,6 +130,8 @@ export function resolveBuildLimits(
       capped: memory.capped,
     },
     memorySet: memoryLimit !== undefined,
+    swapAllowed: limits?.swap?.allowed === true,
+    swapSet: limits?.swap !== undefined,
   };
 }
 
@@ -156,6 +162,12 @@ export function buildCoresArg(resolved: ResolvedBuildLimits): string {
 /** The fifth argument: whole bytes, or `-` when no memory limit was set. */
 export function buildMemoryArg(resolved: ResolvedBuildLimits): string {
   return resolved.memorySet ? String(Math.floor(resolved.memoryBytes)) : "-";
+}
+
+/** The sixth argument: `on` or `off`, or `-` when no level set it (swap stays off). */
+export function buildSwapArg(resolved: ResolvedBuildLimits): string {
+  if (!resolved.swapSet) return "-";
+  return resolved.swapAllowed ? "on" : "off";
 }
 
 function coresText(cores: number): string {
@@ -197,13 +209,37 @@ export function describeBuildLimits(
     ? `${formatBuildMemory(resolved.memoryBytes)} memory`
     : "the default memory";
   const memory = `${amount} (${memoryWhy})`;
-  return `Build limited to ${cores} and ${memory}`;
+  const swap = resolved.swapAllowed ? ", swap allowed" : "";
+  return `Build limited to ${cores} and ${memory}${swap}`;
 }
 
 /** The out-of-memory message for a build that hit its limit. */
-export function buildOutOfMemoryMessage(memoryBytes: number): string {
+export function buildOutOfMemoryMessage(
+  memoryBytes: number,
+  startTotalBytes = 0,
+  highestTotalBytes = 0,
+): string {
   const limit = memoryBytes > 0
     ? " (limit " + formatBuildMemory(memoryBytes) + ")"
     : "";
-  return `The build ran out of memory${limit}. Raise Build Memory or reduce the build's memory use.`;
+  const base =
+    `The build ran out of memory${limit}. Raise Build Memory or reduce the build's memory use.`;
+  if (startTotalBytes > 0 && startTotalBytes < highestTotalBytes) {
+    return `${base} This server's memory may be ballooned down; it had ${
+      formatBuildMemory(startTotalBytes)
+    } when the build started.`;
+  }
+  return base;
+}
+
+let highestTotalBytes = 0;
+
+/**
+ * Remember the server's total memory as read at a build start and return the
+ * largest total seen since the daemon started. A ballooned virtual machine's
+ * total changes over time, so it is read afresh for every build.
+ */
+export function noteServerMemoryTotal(totalBytes: number): number {
+  if (totalBytes > highestTotalBytes) highestTotalBytes = totalBytes;
+  return highestTotalBytes;
 }

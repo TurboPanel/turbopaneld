@@ -4,9 +4,11 @@ import {
   buildCoresArg,
   buildMemoryArg,
   buildOutOfMemoryMessage,
+  buildSwapArg,
   defaultBuildMemoryBytes,
   describeBuildLimits,
   formatBuildMemory,
+  noteServerMemoryTotal,
   parseMemTotalBytes,
   resolveBuildLimits,
 } from "./build-limits.ts";
@@ -139,6 +141,40 @@ test("an unreadable RAM leaves the memory part to tp-host and the log line plain
   );
 });
 
+test("swap is off unless a level opted in, and the log line says when it is allowed", () => {
+  const off = resolveBuildLimits(undefined, HOST);
+  assertEquals([off.swapAllowed, buildSwapArg(off)], [false, "-"]);
+  const no = resolveBuildLimits(
+    { swap: { allowed: false, source: "server" } },
+    HOST,
+  );
+  assertEquals([no.swapAllowed, buildSwapArg(no)], [false, "off"]);
+  const on = resolveBuildLimits(
+    { swap: { allowed: true, source: "service" } },
+    HOST,
+  );
+  assertEquals([on.swapAllowed, buildSwapArg(on)], [true, "on"]);
+  assertEquals(
+    describeBuildLimits(on, HOST),
+    "Build limited to 4 cores (default) and 7 GB memory (default), swap allowed",
+  );
+});
+
+test("a server whose memory was ballooned down says so when a build runs out of memory", () => {
+  assertEquals(noteServerMemoryTotal(8 * GIB), 8 * GIB);
+  // A later build starts with less: the largest total stays.
+  assertEquals(noteServerMemoryTotal(4 * GIB), 8 * GIB);
+  assertEquals(
+    buildOutOfMemoryMessage(3 * GIB, 4 * GIB, 8 * GIB),
+    "The build ran out of memory (limit 3 GB). Raise Build Memory or reduce the build's memory use. This server's memory may be ballooned down; it had 4 GB when the build started.",
+  );
+  // At its largest total, no note.
+  assertEquals(
+    buildOutOfMemoryMessage(3 * GIB, 8 * GIB, 8 * GIB).includes("ballooned"),
+    false,
+  );
+});
+
 test("MemTotal is read from /proc/meminfo text, else 0", () => {
   assertEquals(
     parseMemTotalBytes("MemTotal:  8388608 kB\nMemFree: 1 kB\n"),
@@ -154,10 +190,12 @@ test("the wire value is optional, strict and per part", () => {
     parseBuildLimits({
       cores: { cores: 1.234, source: "server" },
       memory: { bytes: GIB, source: "organization" },
+      swap: { allowed: true, source: "service" },
     }),
     {
       cores: { cores: 1.23, source: "server" },
       memory: { bytes: GIB, source: "organization" },
+      swap: { allowed: true, source: "service" },
     },
   );
   for (
@@ -174,6 +212,9 @@ test("the wire value is optional, strict and per part", () => {
       { memory: { bytes: 1.5 * GIB + 0.5, source: "server" } },
       { memory: { bytes: 2 * 1024 ** 4, source: "server" } },
       { memory: { bytes: GIB } },
+      { swap: { allowed: "yes", source: "server" } },
+      { swap: { allowed: true, source: "default" } },
+      { swap: { allowed: true } },
     ]
   ) {
     assertThrows(() => parseBuildLimits(bad), TypeError);

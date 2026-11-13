@@ -654,6 +654,53 @@ test("build-run's memory limit is the requested bytes, clamped to 1 GiB..the hos
   });
 });
 
+test("build-run keeps swap off unless asked, and then leaves it unlimited", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    await forEachSequential(
+      [
+        [["b1", "p1", "alice"], true],
+        [["b1", "p1", "alice", "-", "-", "-"], true],
+        [["b1", "p1", "alice", "-", "-", "off"], true],
+        [["b1", "p1", "alice", "-", "-", "on"], false],
+      ] as Array<[string[], boolean]>,
+      async ([args, off]) => {
+        const result = await host.run(["build-run", ...args], "spec\n");
+        assertEquals(result.code, 0, result.stderr);
+        assertEquals(
+          result.stdout.includes("[MemorySwapMax=0]"),
+          off,
+          args.join(" "),
+        );
+      },
+    );
+    await forEachSequential(["yes", "ON", "1", "", "on;id"], async (swap) => {
+      assertStringIncludes(
+        await refused(host, ["build-run", "b1", "p1", "alice", "-", "-", swap]),
+        "refusing swap setting",
+      );
+    });
+  });
+});
+
+test("build-run reads the host's RAM at every build start, so a ballooned machine follows", async () => {
+  await withHost(async (host) => {
+    await setUpBuildHost(host);
+    const first = await host.run(["build-run", "b1", "p1", "alice"], "spec\n", {
+      TP_TEST_MEM_KB: "8388608",
+    });
+    const second = await host.run(
+      ["build-run", "b1", "p1", "alice"],
+      "spec\n",
+      {
+        TP_TEST_MEM_KB: "4194304",
+      },
+    );
+    assertEquals(memoryMaxOf(first.stdout), String(7 * GIB));
+    assertEquals(memoryMaxOf(second.stdout), String(3 * GIB));
+  });
+});
+
 test("build-run refuses a memory limit that is not plain whole bytes", async () => {
   await withHost(async (host) => {
     await setUpBuildHost(host);
@@ -732,7 +779,7 @@ test("build-run takes two well-formed ids and an owner, and nothing else", async
         ["build-run"],
         ["build-run", "b1"],
         ["build-run", "b1", "p1"],
-        ["build-run", "b1", "p1", "alice", "2", "4294967296", "extra"],
+        ["build-run", "b1", "p1", "alice", "2", "4294967296", "on", "extra"],
         ["build-run", "b1", "p1", "alice", "extra"],
         ["build-run", "B1", "p1", "alice"],
         ["build-run", "b1", "P1", "alice"],

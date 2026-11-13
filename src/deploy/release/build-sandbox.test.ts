@@ -279,7 +279,7 @@ test("a build is the fixed build-run argv with the spec on stdin, then build-ret
   // No limit set anywhere: tp-host applies its defaults (half the cores, the
   // RAM less 1 GiB); the log line says what they come to.
   assertEquals(child.argv, [
-    managed("build-run", target.buildId, PROJECT, "alice", "-", "-"),
+    managed("build-run", target.buildId, PROJECT, "alice", "-", "-", "-"),
   ]);
   assertEquals(child.stdin(), "tp-build-spec 1\nrun dHJ1ZQ==\nend\n");
   assertEquals(lines, [
@@ -735,6 +735,7 @@ test("a build runs with the limits the control plane resolved, and the log line 
     buildLimits: {
       cores: { cores: 1.5, source: "server" as const },
       memory: { bytes: 2 * GIB, source: "service" as const },
+      swap: { allowed: true, source: "organization" as const },
     },
   };
   const child = fakeChild({ code: 0 });
@@ -749,10 +750,18 @@ test("a build runs with the limits the control plane resolved, and the log line 
     onOutput: (_stream, line) => lines.push(line),
   });
   assertEquals(child.argv, [
-    managed("build-run", target.buildId, PROJECT, "alice", "1.5", "2147483648"),
+    managed(
+      "build-run",
+      target.buildId,
+      PROJECT,
+      "alice",
+      "1.5",
+      "2147483648",
+      "on",
+    ),
   ]);
   assertEquals(lines, [
-    "Build limited to 1.5 cores (server limit) and 2 GB memory (service limit)",
+    "Build limited to 1.5 cores (server limit) and 2 GB memory (service limit), swap allowed",
   ]);
 });
 

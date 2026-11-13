@@ -234,7 +234,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
   - starts tenant builds only through
-    `build-run <build-id> <project-id> <owner> [cores [memory-bytes]]` (ids `[a-z0-9-]{1,64}`; the
+    `build-run <build-id> <project-id> <owner> [cores [memory-bytes [swap]]]` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid
     in 15001-60000 and a plain name with no `--`, never another `tp*` name,
     or `tpbuild` for a build nobody owns; checked again under the build lock;
@@ -275,7 +275,10 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `TP_TEST_MEM_KB`. The daemon sends the smallest limit set among the
     organization, server and service (`src/deploy/release/build-limits.ts`);
     a helper that predates them refuses the extra arguments and the daemon
-    reruns the build without them. The unit's second `ExecStartPre=+` is
+    reruns the build without them. The sixth argument is `on`, `off` or `-`:
+    swap stays off (`MemorySwapMax=0`) unless it says `on`. The host's RAM is
+    read afresh at every build start (a ballooned virtual machine's total
+    changes), never cached. The unit's second `ExecStartPre=+` is
     `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
     is exactly that unit's, it reads the throwaway uid from the unit's
     `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd

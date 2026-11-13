@@ -4459,7 +4459,10 @@ BUILD_LOCK_WAIT_SEC=2100
 # (organization, server, service), which the daemon passes as build-run's
 # optional fourth (cores) and fifth (memory bytes) arguments; with none set,
 # half the host's cores and its RAM less BUILD_SYSTEM_RESERVED_KB (see
-# tp_build_cpu_quota and tp_build_memory_max). Swap stays off (MemorySwapMax=0).
+# tp_build_cpu_quota and tp_build_memory_max). Swap stays off (MemorySwapMax=0)
+# unless the sixth argument says `on` (owner opt-in at organization, server or
+# service level), which leaves the unit's swap unlimited. The host's RAM is read
+# afresh at every build start: a ballooned virtual machine's total changes.
 BUILD_SYSTEM_RESERVED_KB=1048576
 BUILD_MEMORY_MIN_KB=1048576
 BUILD_RUNTIME_MAX_SEC=1800
@@ -4836,15 +4839,23 @@ tp_build_cpu_quota() {
 }
 
 tp_verb_build_run() {
-  { [ $# -eq 3 ] || [ $# -eq 4 ] || [ $# -eq 5 ]; } ||
-    tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER [CORES [MEMORY-BYTES]]"
+  { [ $# -ge 3 ] && [ $# -le 6 ]; } ||
+    tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER [CORES [MEMORY-BYTES [SWAP]]]"
   _br_cores=""
   _br_mem=""
   if [ $# -ge 4 ] && [ "$4" != "-" ]; then
     tp_build_cores_ok "$4" || tp_die "build-run: refusing core limit $4"
     _br_cores="$4"
   fi
-  if [ $# -eq 5 ] && [ "$5" != "-" ]; then
+  _br_swap=off
+  if [ $# -eq 6 ]; then
+    case "$6" in
+      on|off) _br_swap="$6" ;;
+      -) ;;
+      *) tp_die "build-run: refusing swap setting $6" ;;
+    esac
+  fi
+  if [ $# -ge 5 ] && [ "$5" != "-" ]; then
     tp_build_memory_ok "$5" || tp_die "build-run: refusing memory limit $5"
     _br_mem="$5"
   fi
@@ -4869,6 +4880,8 @@ tp_verb_build_run() {
   case "$_br_memmax" in
     ''|0*|*[!0-9]*) tp_die "build-run: cannot work out the memory limit" ;;
   esac
+  _br_swap_prop=MemorySwapMax=0
+  [ "$_br_swap" != on ] || _br_swap_prop=
   tp_build_lock
   # Checked again under the lock: with nss-systemd a running build's own
   # throwaway user resolves too, and the lock is what guarantees none is left.
@@ -4955,7 +4968,7 @@ tp_verb_build_run() {
     -p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id $_br_owner" \
     -p ExecStartPre="+/usr/bin/env SUDO_UID=$CALLER_UID SUDO_GID=$CALLER_GID $_self_dir/tp-host build-handover $_br_id $_br_project $_br_owner"
   _br_slice="$(tp_build_slice "$_br_owner")" || tp_die "build-run: no build slice for $_br_owner"
-  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$_br_memmax" -p MemorySwapMax=0 \
+  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$_br_memmax" ${_br_swap_prop:+-p "$_br_swap_prop"} \
     -p CPUQuota="$_br_cpuquota" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \

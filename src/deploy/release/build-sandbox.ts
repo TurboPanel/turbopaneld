@@ -38,8 +38,10 @@ import {
   type BuildLimits,
   buildMemoryArg,
   buildOutOfMemoryMessage,
+  buildSwapArg,
   describeBuildLimits,
   type HostCapacity,
+  noteServerMemoryTotal,
   readHostCapacity,
   resolveBuildLimits,
 } from "./build-limits.ts";
@@ -655,6 +657,7 @@ async function runBuildUnit(
 ): Promise<void> {
   const { work, onOutput } = params;
   const host = params.host ?? await readHostCapacity();
+  const highestTotal = noteServerMemoryTotal(host.memoryBytes);
   const resolved = resolveBuildLimits(work.buildLimits, host);
   if (withLimits) onOutput?.("stdout", describeBuildLimits(resolved, host));
   const redact = params.redactSummary ??
@@ -669,7 +672,11 @@ async function runBuildUnit(
         work.projectKey,
         work.owner,
         ...(withLimits
-          ? [buildCoresArg(resolved), buildMemoryArg(resolved)]
+          ? [
+            buildCoresArg(resolved),
+            buildMemoryArg(resolved),
+            buildSwapArg(resolved),
+          ]
           : []),
       ],
       MANAGED,
@@ -718,7 +725,13 @@ async function runBuildUnit(
   }
   if (!status.success) {
     if (withLimits && looksOutOfMemory(status.code, stdout, stderr)) {
-      throw new Error(buildOutOfMemoryMessage(resolved.memoryBytes));
+      throw new Error(
+        buildOutOfMemoryMessage(
+          resolved.memoryBytes,
+          host.memoryBytes,
+          highestTotal,
+        ),
+      );
     }
     throw new Error(failureMessage(status.code, stdout, stderr, redact));
   }
