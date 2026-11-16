@@ -106,7 +106,7 @@ built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
 (`policy.ts` `isGeneratedFileBind`, allowance `generated-file-bind`). Both ids
 are UUIDs, `<name>` is one segment of the deploy's plan-name rule
 (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`, not `.tmp`), and the authored source
-must already be the resolved one, so a symlink never qualifies. Anything else
+must already be the resolved one, so a symlink never qualifies. The two ids must also equal the container's own `io.turbopanel.project` and `io.turbopanel.environment` labels exactly (old `com.turbopanel.` prefix as the fallback, new one first); a container missing either label is refused. The daemon stamps both on every service of a deploy (`buildHostingLabelsFragment`), overriding tenant-written values. Anything else
 under `/run` stays `bind-forbidden-path`. `runDir` is the policy config's
 `/run/turbopanel` (the layout's `PROD_RUN_DIR_DEFAULT`, repeated because the
 gate imports nothing).
@@ -413,6 +413,10 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - The label-less helpers (managed-file normalisation, **backup and restore**)
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
+
+- Before enforcement every environment must be redeployed: rehydrate re-runs
+  stored pre-#825 compose files, and older containers may lack the project
+  labels or carry tenant-written ones.
 
 ## Ownership scope
 

@@ -40,6 +40,18 @@ export function componentOf(labels: Labels): string {
   return labels[LABEL_SYSTEM_COMPONENT] ??
     labels[LEGACY_LABEL_SYSTEM_COMPONENT] ?? "";
 }
+/** Project and environment a deploy stamps on every service (`src/deploy/labels.ts`; a test pins them). */
+export const LABEL_PROJECT = "io.turbopanel.project";
+export const LABEL_ENVIRONMENT = "io.turbopanel.environment";
+
+/** An identity label by its new key: the new label wins, the old `com.turbopanel.` one is the fallback (`readLabel`). */
+export function readIdentityLabel(
+  labels: Labels,
+  key: string,
+): string | undefined {
+  return labels[key] ??
+    labels[key.replace("io.turbopanel.", "com.turbopanel.")];
+}
 export const LABEL_MANAGED_ENGINE = "tp.managed.engine";
 export const LABEL_COMPOSE_PROJECT = "com.docker.compose.project";
 

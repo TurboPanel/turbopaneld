@@ -62,13 +62,54 @@ function mergeValues(left: unknown, right: unknown): unknown {
   return right;
 }
 
+/**
+ * Text of one list-form label entry. Entries should be strings; numbers and
+ * booleans keep their plain form, and anything else (an object or array) is
+ * written out as JSON, so it can never read as a `turbopanel` label key.
+ */
+function labelEntryText(item: unknown): string {
+  if (typeof item === "string") return item;
+  if (
+    typeof item === "number" || typeof item === "boolean" ||
+    typeof item === "bigint"
+  ) return `${item}`;
+  if (item === null) return "null";
+  if (item === undefined) return "undefined";
+  return JSON.stringify(item) ?? "";
+}
+
+/** Compose allows `labels` as a map or as a list of `key=value` / bare `key`. */
+function labelsToMap(value: unknown[] | Record<string, unknown>) {
+  if (!Array.isArray(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const item of value) {
+    const text = labelEntryText(item);
+    const eq = text.indexOf("=");
+    if (eq < 0) out[text] = "";
+    else out[text.slice(0, eq)] = text.slice(eq + 1);
+  }
+  return out;
+}
+
 function mergeRecords(
   left: Record<string, unknown>,
   right: Record<string, unknown>,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...left };
   for (const [key, value] of Object.entries(right)) {
-    if (key in out) {
+    if (
+      key === "labels" && key in out &&
+      (Array.isArray(out[key]) || isPlainObject(out[key])) &&
+      (Array.isArray(value) || isPlainObject(value)) &&
+      Array.isArray(out[key]) !== Array.isArray(value)
+    ) {
+      // List-form tenant labels against a map overlay: merge by key, overlay
+      // wins, instead of the map replacing the whole list.
+      out[key] = {
+        ...labelsToMap(out[key] as unknown[]),
+        ...labelsToMap(value as Record<string, unknown>),
+      };
+    } else if (key in out) {
       out[key] = mergeValues(out[key], value);
     } else {
       out[key] = value;

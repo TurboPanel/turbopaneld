@@ -291,13 +291,14 @@ test("buildHostingLabelsFragment does not stamp raw-port on HTTP-only services",
   );
 });
 
-test("buildHostingLabelsFragment without hostings leaves services free of ingress network", () => {
+test("buildHostingLabelsFragment without hostings adds identity labels but no ingress network", () => {
   const fragment = buildHostingLabelsFragment({
     payload,
     hostings: [],
     resolved: appResolved,
   });
-  assertEquals(fragment.services, undefined);
+  assertEquals(Object.keys(fragment.services ?? {}), ["app"]);
+  assertEquals(fragment.services?.app?.networks, undefined);
   assertEquals(fragment.networks, undefined);
 });
 
@@ -612,4 +613,52 @@ test("identity labels are stamped under both prefixes with equal values, over a 
   assertEquals(labels["com.turbopanel.project"], "project_123");
   assertEquals(labels["io.turbopanel.environment"], "env_123");
   assertEquals(labels["com.turbopanel.environment"], "env_123");
+});
+
+test("buildHostingLabelsFragment stamps project and environment on every service, overriding the tenant's", () => {
+  const resolved = resolvedFromServices({
+    app: { image: "nginx:alpine" },
+    worker: {
+      image: "busybox",
+      labels: {
+        "io.turbopanel.project": "victim_project",
+        "io.turbopanel.environment": "victim_env",
+        "com.turbopanel.project": "victim_project",
+        "com.turbopanel.environment": "victim_env",
+      },
+    },
+  });
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved,
+  });
+  for (const name of ["app", "worker"]) {
+    const labels = fragment.services?.[name]?.labels as Record<string, string>;
+    assertEquals(labels["io.turbopanel.project"], "project_123", name);
+    assertEquals(labels["io.turbopanel.environment"], "env_123", name);
+    assertEquals(labels["com.turbopanel.project"], "project_123", name);
+    assertEquals(labels["com.turbopanel.environment"], "env_123", name);
+  }
+  // A non-hosted service gets identity only: no routing, no service id.
+  const worker = fragment.services?.worker?.labels as Record<string, string>;
+  assertEquals(Object.keys(worker).sort(), [
+    "com.turbopanel.environment",
+    "com.turbopanel.project",
+    "io.turbopanel.environment",
+    "io.turbopanel.project",
+  ]);
+  // With no hostings at all the identity is still stamped.
+  const bare = buildHostingLabelsFragment({
+    payload,
+    hostings: [],
+    resolved,
+  });
+  assertEquals(
+    (bare.services?.worker?.labels as Record<string, string>)[
+      "io.turbopanel.project"
+    ],
+    "project_123",
+  );
+  assertEquals(bare.networks, undefined);
 });

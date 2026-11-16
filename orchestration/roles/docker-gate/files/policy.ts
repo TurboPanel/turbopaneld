@@ -16,10 +16,14 @@ import {
   DEFAULT_PLATFORM_ROOTS,
   isIngressContainer,
   isPlatformContainer,
+  LABEL_ENVIRONMENT,
+  LABEL_PROJECT,
+  type Labels,
   labelsOf,
   ownerOf,
   platformBindVerdict,
   type PlatformRoots,
+  readIdentityLabel,
 } from "./platform.ts";
 
 export type Violation = {
@@ -435,6 +439,8 @@ type BindContext = {
   ingress: boolean;
   /** A tenant workload (see `ownerOf`): the only kind that may bind generated files. */
   tenant: boolean;
+  /** The container's labels: a generated-file bind must match its project and environment. */
+  labels: Labels;
 };
 
 /** A Traefik binding exactly the read-only listener's directory, read-only. */
@@ -481,8 +487,15 @@ function isGeneratedFileBind(
   const [project, environment, kind, name, ...rest] = resolved
     .slice(prefix.length).split("/");
   const id = new RegExp(`^${UUID}$`);
+  // The ids must be this container's own (labels the daemon stamps on every
+  // service of a deploy), so one tenant cannot bind another's files. A missing
+  // label refuses; the old prefix is the fallback (`readLabel` rule).
+  const ownProject = readIdentityLabel(ctx.labels, LABEL_PROJECT);
+  const ownEnvironment = readIdentityLabel(ctx.labels, LABEL_ENVIRONMENT);
   return rest.length === 0 && id.test(project ?? "") &&
-    id.test(environment ?? "") && (kind === "secrets" || kind === "configs") &&
+    id.test(environment ?? "") && ownProject === project &&
+    ownEnvironment === environment &&
+    (kind === "secrets" || kind === "configs") &&
     name !== undefined && GENERATED_FILE_NAME.test(name) &&
     !name.includes("..") && !name.endsWith(".tmp") &&
     ctx.isRegularFile(resolved);
@@ -634,6 +647,7 @@ async function checkVolumeDevice(
         platform: false,
         ingress: false,
         tenant: false,
+        labels: {},
       },
     );
     const verdict = outcome.violation;
@@ -1072,6 +1086,7 @@ async function evaluateContainerCreate(
     platform,
     ingress: isIngressContainer(labels),
     tenant: ownerOf(labels) === "tenant",
+    labels,
   });
   return {
     violations: [
@@ -1116,6 +1131,7 @@ export async function evaluateStartBinds(
     platform: isPlatformContainer(doc.labels),
     ingress: isIngressContainer(doc.labels),
     tenant: ownerOf(doc.labels) === "tenant",
+    labels: doc.labels,
   });
   const seen = new Set<string>();
   const violations: Violation[] = [];
