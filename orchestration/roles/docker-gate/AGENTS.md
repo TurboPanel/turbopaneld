@@ -130,7 +130,12 @@ tenant-writable allowed source (`data/`, `tmp/`, `shared/`) can still be
 swapped for a symlink in the window between the gate's inspect and the engine's
 own resolution at start; the check narrows that window, it does not close it.
 Closing it fully needs the engine to mount by file descriptor or the sources to
-be root-owned.
+be root-owned. The generated-file allowance has the same race:
+`/run/turbopanel/deployments` is tp-writable, so before enforcement the
+generated files must become root-owned (written through tp-host) or be mounted
+by file descriptor. Until then the gate only checks, at inspect time, that the
+source is a regular file (lstat) and not a symlink, and it fails closed when
+symlink resolution errors.
 
 ## Paths and bodies as the engine reads them
 

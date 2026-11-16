@@ -81,6 +81,21 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
 /** Resolve symlinks of the deepest existing ancestor (injected so tests need no disk). */
 export type ResolvePath = (path: string) => Promise<string>;
 
+/**
+ * Whether a path exists and is a regular file per lstat (a link, a directory
+ * and a missing path are all `false`, and so is any error). Injected so tests
+ * need no disk; production uses `Deno.lstatSync`.
+ */
+export type IsRegularFile = (path: string) => boolean;
+
+export const denoIsRegularFile: IsRegularFile = (path) => {
+  try {
+    return Deno.lstatSync(path).isFile;
+  } catch {
+    return false;
+  }
+};
+
 export type RequestFacts = {
   method: string;
   /** Percent-decoded path as the engine's router sees it. */
@@ -400,7 +415,12 @@ function bindViolation(
 }
 
 /** One bind as authored: its source and whether it was asked read-only. */
-type BindEntry = { source: string; readOnly: boolean };
+type BindEntry = {
+  source: string;
+  readOnly: boolean;
+  /** The comma-separated options of a `Binds` string (none for `Mounts`). */
+  options?: readonly string[];
+};
 
 /** What one bind source came to: a finding, an allowance that applied, or neither. */
 type BindOutcome = { violation?: Violation; allowance?: string };
@@ -409,6 +429,7 @@ type BindOutcome = { violation?: Violation; allowance?: string };
 type BindContext = {
   config: PolicyConfig;
   resolvePath: ResolvePath;
+  isRegularFile: IsRegularFile;
   platform: boolean;
   /** A Traefik: the only kind of container that may bind the read-only socket. */
   ingress: boolean;
@@ -434,28 +455,37 @@ const GENERATED_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * The files the daemon writes for Compose `secrets:` and `configs:`: exactly
  * `<runDir>/deployments/<projectId>/<environmentId>/(secrets|configs)/<name>`,
  * both ids UUIDs and the name one plain segment (no `..`, no `.tmp` temp file).
- * Read-only, tenant containers only, and only when the authored source is
- * already the resolved one, so a symlink never qualifies (the deploy writes
- * regular files; a link there is someone else's doing).
+ * Read-only (no `z`/`Z` relabel), tenant containers only, only when symlink
+ * resolution succeeded and the authored source is already the resolved one, so
+ * a symlink never qualifies (the deploy writes regular files; a link there is
+ * someone else's doing), and only when the source is an existing regular file.
  */
 function isGeneratedFileBind(
   source: string,
   resolved: string,
+  resolveOk: boolean,
   entry: BindEntry,
   ctx: BindContext,
 ): boolean {
-  if (!ctx.tenant || !entry.readOnly || source !== resolved) return false;
+  if (!ctx.tenant || !entry.readOnly || !resolveOk || source !== resolved) {
+    return false;
+  }
+  // SELinux relabelling would rewrite the label of the host file itself.
+  if (entry.options?.some((option) => option === "z" || option === "Z")) {
+    return false;
+  }
   let runDir = ctx.config.runDir;
   while (runDir.endsWith("/")) runDir = runDir.slice(0, -1);
   const prefix = `${runDir}/deployments/`;
   if (!resolved.startsWith(prefix)) return false;
   const [project, environment, kind, name, ...rest] = resolved
     .slice(prefix.length).split("/");
-  const id = new RegExp(`^${UUID}$`, "i");
+  const id = new RegExp(`^${UUID}$`);
   return rest.length === 0 && id.test(project ?? "") &&
     id.test(environment ?? "") && (kind === "secrets" || kind === "configs") &&
     name !== undefined && GENERATED_FILE_NAME.test(name) &&
-    !name.includes("..") && !name.endsWith(".tmp");
+    !name.includes("..") && !name.endsWith(".tmp") &&
+    ctx.isRegularFile(resolved);
 }
 
 function platformOutcome(
@@ -481,11 +511,11 @@ function platformOutcome(
 async function resolvedSource(
   source: string,
   resolvePath: ResolvePath,
-): Promise<string> {
+): Promise<{ path: string; ok: boolean }> {
   try {
-    return normalizeAbsolute(await resolvePath(source));
+    return { path: normalizeAbsolute(await resolvePath(source)), ok: true };
   } catch {
-    return normalizeAbsolute(source);
+    return { path: normalizeAbsolute(source), ok: false };
   }
 }
 
@@ -503,11 +533,14 @@ async function checkBindSource(
       },
     };
   }
-  const resolved = await resolvedSource(source, ctx.resolvePath);
+  const { path: resolved, ok: resolveOk } = await resolvedSource(
+    source,
+    ctx.resolvePath,
+  );
   if (isIngressSocketBind(resolved, entry, ctx)) {
     return { allowance: "ingress-socket" };
   }
-  if (isGeneratedFileBind(source, resolved, entry, ctx)) {
+  if (isGeneratedFileBind(source, resolved, resolveOk, entry, ctx)) {
     return { allowance: "generated-file-bind" };
   }
   const platform = platformOutcome(resolved, entry, ctx);
@@ -528,6 +561,7 @@ function bindEntries(hostConfig: Record<string, unknown>): BindEntry[] {
     entries.push({
       source: bind.split(":")[0],
       readOnly: bindIsReadOnly(bind),
+      options: (bind.split(":")[2] ?? "").split(","),
     });
   }
   if (Array.isArray(hostConfig.Mounts)) {
@@ -593,7 +627,14 @@ async function checkVolumeDevice(
   if (mount.bind && mount.device.startsWith("/")) {
     const outcome = await checkBindSource(
       { source: mount.device, readOnly: false },
-      { config, resolvePath, platform: false, ingress: false, tenant: false },
+      {
+        config,
+        resolvePath,
+        isRegularFile: () => false,
+        platform: false,
+        ingress: false,
+        tenant: false,
+      },
     );
     const verdict = outcome.violation;
     if (!verdict) return [];
@@ -1016,6 +1057,7 @@ async function evaluateContainerCreate(
   body: unknown,
   config: PolicyConfig,
   resolvePath: ResolvePath,
+  isRegularFile: IsRegularFile,
 ): Promise<Verdict> {
   if (!isRecord(body)) {
     return { violations: [{ rule: "body-unparseable" }], allowances: [] };
@@ -1026,6 +1068,7 @@ async function evaluateContainerCreate(
   const mounts = await checkMounts(hostConfig, {
     config,
     resolvePath,
+    isRegularFile,
     platform,
     ingress: isIngressContainer(labels),
     tenant: ownerOf(labels) === "tenant",
@@ -1060,6 +1103,7 @@ export async function evaluateStartBinds(
   doc: StartDoc,
   config: PolicyConfig,
   resolvePath: ResolvePath,
+  isRegularFile: IsRegularFile = denoIsRegularFile,
 ): Promise<Verdict> {
   const specs = Array.isArray(doc.hostConfig.Mounts)
     ? doc.hostConfig.Mounts
@@ -1068,6 +1112,7 @@ export async function evaluateStartBinds(
   const result = await checkMounts(hostConfig, {
     config,
     resolvePath,
+    isRegularFile,
     platform: isPlatformContainer(doc.labels),
     ingress: isIngressContainer(doc.labels),
     tenant: ownerOf(doc.labels) === "tenant",
@@ -1127,10 +1172,16 @@ async function evaluateByRoute(
   facts: RequestFacts,
   config: PolicyConfig,
   resolvePath: ResolvePath,
+  isRegularFile: IsRegularFile,
 ): Promise<Verdict> {
   switch (route) {
     case "containers.create":
-      return await evaluateContainerCreate(facts.body, config, resolvePath);
+      return await evaluateContainerCreate(
+        facts.body,
+        config,
+        resolvePath,
+        isRegularFile,
+      );
     case "containers.exec.create":
       return plain(evaluateExecCreate(facts.body));
     case "networks.create":
@@ -1167,6 +1218,7 @@ export async function evaluateDetailed(
   facts: RequestFacts,
   config: PolicyConfig,
   resolvePath: ResolvePath,
+  isRegularFile: IsRegularFile = denoIsRegularFile,
 ): Promise<Verdict> {
   const out: Violation[] = [];
   if (!pathIsCanonical(facts.path)) {
@@ -1181,7 +1233,13 @@ export async function evaluateDetailed(
     return { violations: out, allowances: [] };
   }
   const { route } = classifyRoute(facts.method, facts.path);
-  const found = await evaluateByRoute(route, facts, config, resolvePath);
+  const found = await evaluateByRoute(
+    route,
+    facts,
+    config,
+    resolvePath,
+    isRegularFile,
+  );
   out.push(...found.violations);
   return { violations: out, allowances: found.allowances };
 }
@@ -1191,6 +1249,8 @@ export async function evaluateRequest(
   facts: RequestFacts,
   config: PolicyConfig,
   resolvePath: ResolvePath,
+  isRegularFile: IsRegularFile = denoIsRegularFile,
 ): Promise<Violation[]> {
-  return (await evaluateDetailed(facts, config, resolvePath)).violations;
+  return (await evaluateDetailed(facts, config, resolvePath, isRegularFile))
+    .violations;
 }
