@@ -218,6 +218,39 @@ test("each account reaches its own native app ports and no one else's", async ()
   assert(own >= 0 && own < loopbackRefusal);
 });
 
+test("a native app's port (check copy included) takes no new connection from any interface but loopback", async () => {
+  const out = await render();
+  assertEquals(setElements(out.stdout, "app_listen"), [
+    "3000",
+    "3001",
+    "41234",
+  ]);
+  assertStringIncludes(
+    out.stdout,
+    "type filter hook input priority -150; policy accept;",
+  );
+  assertStringIncludes(
+    out.stdout,
+    'iifname != "lo" tcp dport @app_listen drop',
+  );
+  // Inbound only: no rule on the output chain mentions the app set, so the
+  // app's own outbound connections (databases, APIs, the fabric) are untouched.
+  const outputChain = out.stdout.slice(
+    out.stdout.indexOf("chain output"),
+    out.stdout.indexOf("chain input"),
+  );
+  assert(!outputChain.includes("@app_listen"));
+});
+
+test("no native apps means no app_listen set and no input chain", async () => {
+  await withTree({}, async (run) => {
+    const out = await run();
+    assertEquals(out.code, 0, out.stderr);
+    assert(!out.stdout.includes("app_listen"));
+    assert(!out.stdout.includes("chain input"));
+  });
+});
+
 test("the database proxy ports and the resolvers are open to every account; all other loopback is refused", async () => {
   const lines = rules((await render()).stdout);
   const firstRefusal = lines.findIndex((l) => l.includes(" reject"));

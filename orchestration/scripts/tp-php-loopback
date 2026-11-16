@@ -47,6 +47,13 @@
 # and no helper container gets the same rules as before. Ports outside the
 # band, and lines that do not fit, are skipped.
 #
+# Inbound: new connections to a native app's port (the same ports as above) from
+# any interface but `lo` are dropped by an input hook (chain `input`, set
+# `app_listen`), so an app that binds *:<port> (express ignores HOST) is not
+# on the network; the host firewall stays the outer layer. Only inbound to
+# those ports: outbound calls of the app are not touched (a systemd
+# IPAddressDeny= would cut those too).
+#
 # Container networks: new connections are refused
 #
 #   - that leave through a container bridge (docker0, br-<id>), matched on the
@@ -399,9 +406,38 @@ guarded_set() {
 SET
 }
 
-# ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP6 FOREIGN_BR GUARDED
+# One set of the native apps' listen ports, or nothing when there is no app.
+app_listen_set() {
+  [ -n "$1" ] || return 0
+  _as=""
+  for _a in $1; do _as="${_as:+$_as, }$_a"; done
+  cat <<SET
+  set app_listen {
+    type inet_service
+    elements = { $_as }
+  }
+SET
+}
+
+# The input chain: a native app's port takes no new connection from any
+# interface but loopback, so an app that binds every address anyway (express
+# ignores HOST) is still not reachable from the network. Only the app's
+# ports and only inbound are matched: the app's own outbound connections are
+# the output chain's, and loopback (the hosting proxy, probes) is untouched.
+app_input_chain() {
+  [ -n "$1" ] || return 0
+  cat <<CHAIN
+  chain input {
+    type filter hook input priority -150; policy accept;
+    iifname != "lo" tcp dport @app_listen drop
+  }
+CHAIN
+}
+
+# ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP6 FOREIGN_BR GUARDED APP_PORTS
 ruleset() {
   _guarded="${10}"
+  _appports="${11}"
   _own=""
   while IFS= read -r _pair; do
     [ -n "$_pair" ] && _own="${_own:+$_own, }$_pair"
@@ -422,6 +458,7 @@ table inet turbopanel_php {
 ${_own:+    elements = { $_own \}}
   }
 $(guarded_set "$_guarded")
+$(app_listen_set "$_appports")
 $(range_set bridge4 ipv4_addr "$4")
 $(range_set bridge6 ipv6_addr "$5")
 $(range_set pool4 ipv4_addr "$6")
@@ -451,6 +488,7 @@ $([ -z "$8" ] || [ -z "$7" ] || printf '    meta skuid %s ip6 daddr @keep6 accep
 $([ -z "$6" ] || refuse "ip daddr @pool4")
 $([ -z "$7" ] || refuse "ip6 daddr @pool6")
   }
+$(app_input_chain "$_appports")
 }
 RULES
 }
@@ -481,6 +519,7 @@ _cache="$(cache_pairs)"
 _reach="$(reach_pairs)"
 _pairs="$(printf '%s\n%s\n%s\n' "$(app_pairs)" "$_cache" "$_reach" | grep -v '^$' | sort -u || :)"
 _guarded="$(printf '%s\n%s\n' "$_cache" "$_reach" | sed -n 's/^[0-9]* \. //p' | sort -n -u)"
+_app_ports="$(app_pairs | sed -n 's/^[0-9]* \. //p' | sort -n -u | tr '\n' ' ' | sed 's/ $//')"
 _own="$(shared_ports_dropped "$_pairs" "$_guarded")"
 _res="$(loopback_resolvers)"
 _res4="$(printf '%s\n' "$_res" | grep -v ':' | sed 's|$|/32|' | valid_cidrs 4 32 |
@@ -499,7 +538,7 @@ _rules="$(ruleset "$_own" "$_res4" "$_res6" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 4)" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 6)" \
   "$_pools4" "$_pools6" "$_routes6" \
-  "$(foreign_br_links "$_link")" "$_guarded")"
+  "$(foreign_br_links "$_link")" "$_guarded" "$_app_ports")"
 _rules="$(printf '%s\n' "$_rules" | grep -v '^[[:space:]]*$')"
 
 if [ -n "$TP_TEST" ]; then

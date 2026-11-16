@@ -267,11 +267,20 @@ wherever the daemon runs Next itself it passes `--hostname` and `--port` on
 argv. A start script that runs `next start` inside other commands
 (`cross-env … next start`) runs as written, and the build log warns that it
 needs `--hostname 127.0.0.1`; any other start script gets a note that it must
-listen on 127.0.0.1 and `$PORT`. No unit setting forces this: systemd's
+listen on 127.0.0.1 and `$PORT`. No unit setting forces the bind itself: systemd's
 `SocketBindAllow=`/`SocketBindDeny=` filter ports, not addresses, and
 `IPAddressDeny=` / `RestrictNetworkInterfaces=` filter traffic in both
 directions, so they would also cut the app off from every outside service it
 calls.
+
+**Inbound backstop.** An app that binds every address anyway (express ignores
+`HOST`) is still kept off the network: `lib/tp-php-loopback` adds an `input`
+chain (hook priority -150) to its table, `iifname != "lo" tcp dport
+@app_listen drop`, where `app_listen` holds the `PORT=` of every
+`turbopanel-app-*.service`, check copies (`-new`) included. It matches inbound
+connections to those ports only, so the app's outbound calls (other hosts,
+private network, TurboFabric) are untouched, and loopback (the hosting proxy,
+the probe) is untouched. It rides the same sync calls as the account walls.
 
 **Account walls.** The app runs as its account, so the account walls
 (`lib/tp-php-loopback`, see `../site/AGENTS.md`) bind it: on loopback it may
