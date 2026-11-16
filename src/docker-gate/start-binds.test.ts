@@ -171,7 +171,11 @@ test("the start check allows a generated file only as a read-only live mount of 
       same,
       () => true,
     );
-  const tenant = { "com.docker.compose.project": "app" };
+  const tenant = {
+    "com.docker.compose.project": "app",
+    "io.turbopanel.project": "0b8f6a52-4d1e-4c7a-9a43-6f1d2e8c5b10",
+    "io.turbopanel.environment": "9c2e7d14-83ab-4f60-b5d9-1a7c3e4f8d26",
+  };
   // Inspect's `RW: false` arrives as ReadOnly true.
   assertEquals(await start(tenant, true), {
     violations: [],

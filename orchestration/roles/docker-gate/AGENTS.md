@@ -106,7 +106,7 @@ built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
 (`policy.ts` `isGeneratedFileBind`, allowance `generated-file-bind`). Both ids
 are UUIDs, `<name>` is one segment of the deploy's plan-name rule
 (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`, not `.tmp`), and the authored source
-must already be the resolved one, so a symlink never qualifies. Anything else
+must already be the resolved one, so a symlink never qualifies. The two ids must also equal the container's own `io.turbopanel.project` and `io.turbopanel.environment` labels exactly (old `com.turbopanel.` prefix as the fallback, new one first); a container missing either label is refused. The daemon stamps both on every service of a deploy (`buildHostingLabelsFragment`), overriding tenant-written values. Anything else
 under `/run` stays `bind-forbidden-path`. `runDir` is the policy config's
 `/run/turbopanel` (the layout's `PROD_RUN_DIR_DEFAULT`, repeated because the
 gate imports nothing).

@@ -1034,6 +1034,13 @@ const PROJECT = "0b8f6a52-4d1e-4c7a-9a43-6f1d2e8c5b10";
 const ENVIRONMENT = "9c2e7d14-83ab-4f60-b5d9-1a7c3e4f8d26";
 const GENERATED = `/run/turbopanel/deployments/${PROJECT}/${ENVIRONMENT}`;
 
+/** What the daemon stamps on every service of the deploy that owns `GENERATED`. */
+const TENANT_LABELS = {
+  "com.docker.compose.project": "tenant-app",
+  "io.turbopanel.project": PROJECT,
+  "io.turbopanel.environment": ENVIRONMENT,
+};
+
 async function generatedBind(
   source: string,
   options: { suffix?: string; labels?: Record<string, string> } = {},
@@ -1044,8 +1051,7 @@ async function generatedBind(
     HostConfig: Record<string, unknown>;
     Labels?: Record<string, string>;
   };
-  body.Labels = options.labels ??
-    { "com.docker.compose.project": "tenant-app" };
+  body.Labels = options.labels ?? TENANT_LABELS;
   body.HostConfig.Binds = [
     `${source}:/run/secrets/x${options.suffix ?? ":ro"}`,
   ];
@@ -1059,7 +1065,10 @@ test("a tenant container may bind its generated secret and config files read-onl
     }
   }
   // The long form agrees.
-  const body = baseCreate();
+  const body = baseCreate() as Record<string, unknown> & {
+    HostConfig: Record<string, unknown>;
+  };
+  body.Labels = TENANT_LABELS;
   delete body.HostConfig.Binds;
   body.HostConfig.Mounts = [{
     Type: "bind",
@@ -1107,6 +1116,61 @@ test("generated file binds are refused unless they match exactly", async () => {
   }
 });
 
+test("a generated file bind must match the container's own project and environment labels", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  const OTHER_PROJECT = "1a2b3c4d-0000-4000-8000-000000000001";
+  const OTHER_ENVIRONMENT = "1a2b3c4d-0000-4000-8000-000000000002";
+  const refuse = async (labels: Record<string, string>, why: string) =>
+    assertEquals(
+      ruleNames(await generatedBind(source, { labels })),
+      ["bind-forbidden-path"],
+      why,
+    );
+  const base = { "com.docker.compose.project": "tenant-app" };
+  await refuse(
+    { ...TENANT_LABELS, "io.turbopanel.project": OTHER_PROJECT },
+    "another tenant's project",
+  );
+  await refuse(
+    { ...TENANT_LABELS, "io.turbopanel.environment": OTHER_ENVIRONMENT },
+    "another environment of the same project",
+  );
+  await refuse(base, "no identity labels");
+  await refuse(
+    { ...base, "io.turbopanel.environment": ENVIRONMENT },
+    "project label missing",
+  );
+  await refuse(
+    { ...base, "io.turbopanel.project": PROJECT },
+    "environment label missing",
+  );
+  await refuse(
+    { ...TENANT_LABELS, "io.turbopanel.project": PROJECT.toUpperCase() },
+    "label case differs",
+  );
+  assertEquals(await generatedBind(source, { labels: TENANT_LABELS }), []);
+  // Containers the previous release made carry the old prefix only.
+  assertEquals(
+    await generatedBind(source, {
+      labels: {
+        ...base,
+        "com.turbopanel.project": PROJECT,
+        "com.turbopanel.environment": ENVIRONMENT,
+      },
+    }),
+    [],
+  );
+  // The new label wins over a differing old one.
+  await refuse(
+    {
+      ...TENANT_LABELS,
+      "io.turbopanel.project": OTHER_PROJECT,
+      "com.turbopanel.project": PROJECT,
+    },
+    "new label wins",
+  );
+});
+
 test("generated file binds are for tenant containers only", async () => {
   const source = `${GENERATED}/secrets/a`;
   assertEquals(
@@ -1146,7 +1210,11 @@ test("a symlink does not qualify as a generated file", async () => {
 
 test("the generated file allowance follows the configured run dir", async () => {
   const config = { ...DEFAULT_POLICY_CONFIG, runDir: "/run/elsewhere" };
-  const body = baseCreate() as { HostConfig: Record<string, unknown> };
+  const body = baseCreate() as {
+    HostConfig: Record<string, unknown>;
+    Labels?: Record<string, string>;
+  };
+  body.Labels = TENANT_LABELS;
   body.HostConfig.Binds = [
     `/run/elsewhere/deployments/${PROJECT}/${ENVIRONMENT}/secrets/a:/s:ro`,
   ];

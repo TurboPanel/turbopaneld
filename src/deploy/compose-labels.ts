@@ -310,6 +310,24 @@ export function buildHostingLabelsFragment(input: {
   // it is a non-null read wherever it is used below.
   const ingressNetwork = payload.hostingIngressNetwork!;
 
+  // Every service of the deploy carries the project and environment it was
+  // deployed for, under both prefixes, whatever the tenant wrote: the Docker
+  // gate ties a container's generated secret and config files to these labels.
+  // The overlay merges after the tenant's compose files, so these win.
+  for (const name of Object.keys(resolved.services)) {
+    const labels = serviceLabels(services, name);
+    for (
+      const [key, value] of [
+        [LABEL_PROJECT, payload.projectId],
+        [LABEL_ENVIRONMENT, payload.environmentId],
+      ]
+    ) {
+      addLabel(labels, key, value);
+      addLabel(labels, legacyLabelKey(key), value);
+    }
+    services[name] = { labels };
+  }
+
   for (const hosting of hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");
     const resolvedService = requireResolvedService(
@@ -336,20 +354,10 @@ export function buildHostingLabelsFragment(input: {
       // The shared Traefik only routes containers that carry this label.
       addLabel(labels, LABEL_ROUTED, "true");
     }
-    // Identity labels go out under both prefixes with the same value, so a
-    // tenant- or control-plane-set old-prefix label can never differ from the
-    // new one on a hosted container (the per-service Traefik constraint
-    // accepts either prefix). The old prefix is dropped in a later release.
-    for (
-      const [key, value] of [
-        [LABEL_PROJECT, payload.projectId],
-        [LABEL_ENVIRONMENT, payload.environmentId],
-        [LABEL_SERVICE_ID, hosting.serviceId],
-      ]
-    ) {
-      addLabel(labels, key, value);
-      addLabel(labels, legacyLabelKey(key), value);
-    }
+    // The service id is per hosting; the project and environment identity is
+    // stamped on every service below. Both prefixes carry the same value.
+    addLabel(labels, LABEL_SERVICE_ID, hosting.serviceId);
+    addLabel(labels, legacyLabelKey(LABEL_SERVICE_ID), hosting.serviceId);
 
     services[name] = {
       ...services[name],
