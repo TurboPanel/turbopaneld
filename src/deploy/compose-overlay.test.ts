@@ -361,3 +361,56 @@ test("mergeComposeOverlayFragments treats nested arrays of different lengths as 
     { items: [1] },
   ]);
 });
+
+test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-form labels", () => {
+  const overlay = {
+    services: {
+      web: {
+        labels: {
+          "io.turbopanel.project": "p1",
+          "com.turbopanel.project": "p1",
+        },
+      },
+    },
+  };
+  const listForm = [
+    "services:",
+    "  web:",
+    "    image: nginx",
+    "    labels:",
+    "      - io.turbopanel.project=forged",
+    "      - com.turbopanel.project=forged",
+    "      - com.turbopanel.service=web",
+    "      - tenant.keep=yes",
+    "      - bare.key",
+    "",
+  ].join("\n");
+  const listOut = parse(mergeOverlayIntoComposeYaml(listForm, overlay)) as {
+    services: { web: { labels: Record<string, string> } };
+  };
+  assertEquals(listOut.services.web.labels, {
+    "io.turbopanel.project": "p1",
+    "com.turbopanel.project": "p1",
+    "com.turbopanel.service": "web",
+    "tenant.keep": "yes",
+    "bare.key": "",
+  });
+
+  const mapForm = [
+    "services:",
+    "  web:",
+    "    image: nginx",
+    "    labels:",
+    "      io.turbopanel.project: forged",
+    "      tenant.keep: yes",
+    "",
+  ].join("\n");
+  const mapOut = parse(mergeOverlayIntoComposeYaml(mapForm, overlay)) as {
+    services: { web: { labels: Record<string, string> } };
+  };
+  assertEquals(mapOut.services.web.labels, {
+    "io.turbopanel.project": "p1",
+    "com.turbopanel.project": "p1",
+    "tenant.keep": "yes",
+  });
+});

@@ -414,6 +414,10 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   would be denied until the daemon stamps a platform label on them: backups and
   restores stop working. This is the most critical gap to close before stage 4.
 
+- Before enforcement every environment must be redeployed: rehydrate re-runs
+  stored pre-#825 compose files, and older containers may lack the project
+  labels or carry tenant-written ones.
+
 ## Ownership scope
 
 `unowned-container` / `unowned-volume` / `unowned-network` only say that a target carries none of a Compose project,

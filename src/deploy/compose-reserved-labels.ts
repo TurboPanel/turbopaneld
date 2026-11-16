@@ -13,7 +13,9 @@
  *
  * The control plane's identity labels on tenant services
  * (`io.turbopanel.service`, `io.turbopanel.environment`, and the same under the
- * old `com.turbopanel.` prefix) are not owner labels and stay allowed.
+ * old `com.turbopanel.` prefix) are not owner labels and stay allowed. The
+ * project and environment identity labels are not refused either: the daemon
+ * overrides whatever the tenant wrote.
  *
  * Both prefixes are refused for the owner labels: the old `com.turbopanel.`
  * prefix is read only (containers of the previous release still carry it, and
