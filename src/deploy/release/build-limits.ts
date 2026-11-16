@@ -21,6 +21,7 @@ import {
   type BuildLimitSource,
   roundCores,
 } from "../../contracts/build-limits.ts";
+import { readProcFile } from "../../metrics/collector/proc-read.ts";
 
 export type { BuildLimits, BuildLimitSource };
 
@@ -32,8 +33,9 @@ export const MIN_DEFAULT_BUILD_MEMORY_BYTES = GIB;
 
 /**
  * What the host has: the figures the limits are clamped against. `memoryBytes`
- * is 0 when the RAM could not be read (the daemon's Deno grants allow reading
- * `/proc/meminfo` but not `systemMemoryInfo`); `tp-host` then decides alone.
+ * is 0 when the RAM could not be read: Deno blocks a direct `/proc` read even
+ * with `/proc` in the read grant, so it is read through `cat` instead
+ * (`readProcFile`); `tp-host` then decides alone.
  */
 export type HostCapacity = { cores: number; memoryBytes: number };
 
@@ -65,21 +67,39 @@ export function parseMemTotalBytes(meminfo: string): number {
   return match ? Number(match[1]) * 1024 : 0;
 }
 
+let warnedMeminfo = false;
+
 /** The host's capacity as the daemon sees it. */
-export async function readHostCapacity(): Promise<HostCapacity> {
+export async function readHostCapacity(
+  readMeminfo: () => Promise<string | undefined> = () =>
+    readProcFile("/proc/meminfo"),
+): Promise<HostCapacity> {
   const count = navigator.hardwareConcurrency;
   let memoryBytes = 0;
   try {
-    memoryBytes = parseMemTotalBytes(
-      await Deno.readTextFile("/proc/meminfo"),
-    );
-  } catch {
-    // Unreadable: memory stays unknown.
+    const text = await readMeminfo();
+    if (text !== undefined) memoryBytes = parseMemTotalBytes(text);
+  } catch (err) {
+    warnMeminfoOnce(err);
   }
+  if (memoryBytes === 0) warnMeminfoOnce("no MemTotal in /proc/meminfo");
   return {
     cores: Number.isInteger(count) && count >= 1 ? count : 1,
     memoryBytes,
   };
+}
+
+/** Say once per process why host memory is unknown (it stays 0 and tp-host decides). */
+function warnMeminfoOnce(reason: unknown): void {
+  let text: string;
+  if (reason instanceof Error) text = reason.message;
+  else if (typeof reason === "string") text = reason;
+  else text = JSON.stringify(reason) ?? "unknown error";
+  if (warnedMeminfo) return;
+  warnedMeminfo = true;
+  console.warn(
+    `build limits: host memory unknown (${text})`,
+  );
 }
 
 /** The default memory limit for a host with this much RAM. */
