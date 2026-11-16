@@ -13,6 +13,7 @@ import {
   readHostCapacity,
   resolveBuildLimits,
 } from "./build-limits.ts";
+import { readProcFile } from "../../metrics/collector/proc-read.ts";
 
 const test = Deno.test.bind(Deno);
 const GIB = 1024 ** 3;
@@ -227,32 +228,36 @@ test("readHostCapacity reports the host memory the reader finds, 0 when it canno
     Promise.resolve("MemTotal:  4194304 kB\n")
   );
   assertEquals(found.memoryBytes, 4 * GIB);
-  const lost = await readHostCapacity(() => Promise.reject(new Error("x")));
-  assertEquals(lost.memoryBytes, 0);
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+  try {
+    const lost = await readHostCapacity(() => Promise.reject(new Error("x")));
+    assertEquals(lost.memoryBytes, 0);
+    await readHostCapacity(() => Promise.resolve(undefined));
+  } finally {
+    console.warn = originalWarn;
+  }
+  // The failure is said once, not on every build.
+  assertEquals(warnings.length <= 1, true);
 });
 
-test("host memory is read under the daemon's scoped read grant, where Deno refuses /proc", async () => {
-  const here = new URL(".", import.meta.url).pathname;
-  const probe = `
-    import { readMeminfoText, parseMemTotalBytes } from ${
-    JSON.stringify(new URL("./build-limits.ts", import.meta.url).href)
-  };
-    console.log(parseMemTotalBytes(await readMeminfoText()));
-  `;
-  const out = await new Deno.Command(Deno.execPath(), {
-    args: [
-      "run",
-      "--quiet",
-      `--allow-read=/proc,${here},${here}../../..`,
-      "--allow-run=cat",
-      "--allow-env",
-      `data:application/typescript,${encodeURIComponent(probe)}`,
-    ],
-    stdout: "piped",
-    stderr: "piped",
-  }).output();
-  const err = new TextDecoder().decode(out.stderr);
-  assertEquals(out.code, 0, err);
-  const bytes = Number(new TextDecoder().decode(out.stdout).trim());
-  assertEquals(bytes > 0, true);
+test("host memory is read through cat when Deno blocks the direct /proc read", async () => {
+  let catRan = false;
+  const host = await readHostCapacity(() =>
+    readProcFile("/proc/meminfo", {
+      readTextFile: () =>
+        Promise.reject(new Deno.errors.PermissionDenied("blocked")),
+      runCat: (path) => {
+        catRan = true;
+        assertEquals(path, "/proc/meminfo");
+        return Promise.resolve({
+          code: 0,
+          stdout: new TextEncoder().encode("MemTotal:  2097152 kB\n"),
+        });
+      },
+    })
+  );
+  assertEquals(catRan, true);
+  assertEquals(host.memoryBytes, 2 * GIB);
 });

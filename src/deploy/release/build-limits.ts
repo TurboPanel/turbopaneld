@@ -21,6 +21,7 @@ import {
   type BuildLimitSource,
   roundCores,
 } from "../../contracts/build-limits.ts";
+import { readProcFile } from "../../metrics/collector/proc-read.ts";
 
 export type { BuildLimits, BuildLimitSource };
 
@@ -32,8 +33,9 @@ export const MIN_DEFAULT_BUILD_MEMORY_BYTES = GIB;
 
 /**
  * What the host has: the figures the limits are clamped against. `memoryBytes`
- * is 0 when the RAM could not be read (the daemon's Deno grants allow reading
- * `/proc/meminfo` but not `systemMemoryInfo`); `tp-host` then decides alone.
+ * is 0 when the RAM could not be read: Deno blocks a direct `/proc` read even
+ * with `/proc` in the read grant, so it is read through `cat` instead
+ * (`readProcFile`); `tp-host` then decides alone.
  */
 export type HostCapacity = { cores: number; memoryBytes: number };
 
@@ -65,41 +67,37 @@ export function parseMemTotalBytes(meminfo: string): number {
   return match ? Number(match[1]) * 1024 : 0;
 }
 
-/**
- * `/proc/meminfo` text. Deno refuses a `/proc` read under the daemon's scoped
- * `--allow-read` ("Requires all access"), so the direct read fails there and
- * the fallback is `cat`, which the daemon may run (as `host-summary.ts` does).
- */
-export async function readMeminfoText(): Promise<string> {
-  try {
-    return await Deno.readTextFile("/proc/meminfo");
-  } catch {
-    // Blocked by the read grant: go through cat.
-  }
-  const { code, stdout } = await new Deno.Command("cat", {
-    args: ["/proc/meminfo"],
-    stdout: "piped",
-    stderr: "null",
-  }).output();
-  if (code !== 0) throw new Error(`cat /proc/meminfo exited ${code}`);
-  return new TextDecoder().decode(stdout);
-}
+let warnedMeminfo = false;
 
 /** The host's capacity as the daemon sees it. */
 export async function readHostCapacity(
-  readMeminfo: () => Promise<string> = readMeminfoText,
+  readMeminfo: () => Promise<string | undefined> = () =>
+    readProcFile("/proc/meminfo"),
 ): Promise<HostCapacity> {
   const count = navigator.hardwareConcurrency;
   let memoryBytes = 0;
   try {
-    memoryBytes = parseMemTotalBytes(await readMeminfo());
-  } catch {
-    // Unreadable: memory stays unknown.
+    const text = await readMeminfo();
+    if (text !== undefined) memoryBytes = parseMemTotalBytes(text);
+  } catch (err) {
+    warnMeminfoOnce(err);
   }
+  if (memoryBytes === 0) warnMeminfoOnce("no MemTotal in /proc/meminfo");
   return {
     cores: Number.isInteger(count) && count >= 1 ? count : 1,
     memoryBytes,
   };
+}
+
+/** Say once per process why host memory is unknown (it stays 0 and tp-host decides). */
+function warnMeminfoOnce(reason: unknown): void {
+  if (warnedMeminfo) return;
+  warnedMeminfo = true;
+  console.warn(
+    `build limits: host memory unknown (${
+      reason instanceof Error ? reason.message : String(reason)
+    })`,
+  );
 }
 
 /** The default memory limit for a host with this much RAM. */
