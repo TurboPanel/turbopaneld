@@ -91,12 +91,14 @@ export async function readHostCapacity(
 
 /** Say once per process why host memory is unknown (it stays 0 and tp-host decides). */
 function warnMeminfoOnce(reason: unknown): void {
+  let text: string;
+  if (reason instanceof Error) text = reason.message;
+  else if (typeof reason === "string") text = reason;
+  else text = JSON.stringify(reason) ?? "unknown error";
   if (warnedMeminfo) return;
   warnedMeminfo = true;
   console.warn(
-    `build limits: host memory unknown (${
-      reason instanceof Error ? reason.message : String(reason)
-    })`,
+    `build limits: host memory unknown (${text})`,
   );
 }
 
