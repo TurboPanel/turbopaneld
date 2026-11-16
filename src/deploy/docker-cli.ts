@@ -109,7 +109,10 @@ function ensureDockerConfigDir(): string | undefined {
   try {
     Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const found = trustConfigDir(dir);
-    if (found === undefined) return (ensuredConfigDir = dir);
+    if (found === undefined) {
+      ensuredConfigDir = dir;
+      return ensuredConfigDir;
+    }
     problem = `${dir} is unusable (${found})`;
   } catch (err) {
     problem = `${dir} cannot be created (${
@@ -124,7 +127,8 @@ function ensureDockerConfigDir(): string | undefined {
     const found = trustConfigDir(fresh);
     if (found === undefined) {
       warnConfigDirOnce(`${problem}, using ${fresh}`);
-      return (ensuredConfigDir = fresh);
+      ensuredConfigDir = fresh;
+      return ensuredConfigDir;
     }
     problem += `; ${fresh} is unusable too (${found})`;
   } catch (err) {
