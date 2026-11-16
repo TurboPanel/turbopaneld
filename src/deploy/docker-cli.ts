@@ -16,11 +16,56 @@
  * development host whose user has full sudo.
  */
 
+import { join } from "@std/path";
 import { emitBufferedLines, pumpLines } from "../logs/line-stream.ts";
+import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
 
 const decoder = new TextDecoder();
 const SUDO_BIN = "/usr/bin/sudo";
 const DOCKER_BIN = "/usr/bin/docker";
+
+/**
+ * The Docker client's config folder for every call this module makes.
+ *
+ * The CLI (and its compose and buildx plugins) writes `<config>/` on first
+ * use, and with no `--config` it picks `$HOME/.docker`. The daemon's home is
+ * the state root, which a hardened host keeps `root:tp 0750`, so the mkdir
+ * failed there ("mkdir /var/lib/turbopanel/.docker: permission denied") and
+ * every Compose or image build with it. The daemon already owns its run
+ * folder (the control sockets live there), so the config goes in a folder of
+ * its own under it: tmpfs, `0700`, nothing for the state root's mode to
+ * decide. It is passed as the `--config` argument, not `DOCKER_CONFIG`, so it
+ * survives the `sudo` rungs below, which reset the environment.
+ */
+export function dockerConfigDir(
+  runDir: string = Deno.env.get("TURBOPANEL_RUN_DIR")?.trim() ||
+    PROD_RUN_DIR_DEFAULT,
+): string {
+  return join(runDir, "docker-config");
+}
+
+let ensuredConfigDir: Promise<string | undefined> | undefined;
+
+/** Create the config folder once; `undefined` leaves Docker its own default. */
+async function ensureDockerConfigDir(): Promise<string | undefined> {
+  ensuredConfigDir ??= (async () => {
+    const dir = ioOverride ? ioOverride.configDir : dockerConfigDir();
+    if (dir === undefined) return undefined;
+    try {
+      await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+      return dir;
+    } catch {
+      return undefined;
+    }
+  })();
+  return await ensuredConfigDir;
+}
+
+/** `args` behind the global `--config <folder>` flag, when the folder exists. */
+export async function withDockerConfig(args: string[]): Promise<string[]> {
+  const dir = await ensureDockerConfigDir();
+  return dir === undefined ? args : ["--config", dir, ...args];
+}
 
 export type DockerCliResult = {
   success: boolean;
@@ -48,6 +93,11 @@ export type DockerCliIo = {
    * `/usr/bin/docker` (host-free spawn coverage via `/bin/true` / `/bin/cat`).
    */
   dockerBin?: string;
+  /**
+   * The `--config` folder to use. A test override leaves the flag off unless it
+   * names one, so nothing here touches the real `/run/turbopanel`.
+   */
+  configDir?: string;
   /**
    * When set, {@link spawnDockerStreaming} uses this instead of
    * `Deno.Command.spawn` (binary dump path — never decode into a string).
@@ -96,6 +146,7 @@ export async function dockerBinaryInstalled(): Promise<boolean> {
 function clearDockerInvocationCache(): void {
   cachedInvocation = undefined;
   cachedInvocationPromise = undefined;
+  ensuredConfigDir = undefined;
 }
 
 function isDockerSocketPermissionError(text: string): boolean {
@@ -317,9 +368,10 @@ function escalationBlocked(result: DockerCliResult): boolean {
  * argv. Do not pass secrets via environment — the sudo fallback would drop it.
  */
 export async function runDocker(
-  args: string[],
+  userArgs: string[],
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
+  const args = await withDockerConfig(userArgs);
   const direct = await runRaw(resolvedDockerBin(), args, options);
   if (
     direct.success ||
@@ -366,7 +418,8 @@ const PROBE_ARGS = ["version", "--format", "{{.Server.Version}}"];
 
 async function probeDockerInvocation(): Promise<DockerInvocation> {
   const dockerBin = resolvedDockerBin();
-  const direct = await runRaw(dockerBin, PROBE_ARGS);
+  const probeArgs = await withDockerConfig(PROBE_ARGS);
+  const direct = await runRaw(dockerBin, probeArgs);
   if (
     direct.success ||
     !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
@@ -380,7 +433,7 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
   // identical to the buffered one.
   const user = await currentUsername();
   const selfPrefix = ["-n", "-u", user, "--", dockerBin];
-  const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...PROBE_ARGS]);
+  const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...probeArgs]);
   if (refreshed.success) return { bin: SUDO_BIN, prefixArgs: selfPrefix };
   // This process may not run sudo at all: keep the direct invocation so the
   // caller sees Docker's own socket error, not a Deno permission error.
@@ -389,7 +442,7 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
   }
 
   const rootPrefix = ["-n", "--", dockerBin];
-  const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...PROBE_ARGS]);
+  const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...probeArgs]);
   if (asRoot.success) return { bin: SUDO_BIN, prefixArgs: rootPrefix };
 
   // Nothing reached the socket; keep the self-refresh invocation so the
@@ -436,7 +489,10 @@ export async function spawnDockerStreaming(
   options?: SpawnDockerStreamingOptions,
 ): Promise<Deno.ChildProcess> {
   const invocation = await resolveDockerInvocation();
-  const fullArgs = [...invocation.prefixArgs, ...args];
+  const fullArgs = [
+    ...invocation.prefixArgs,
+    ...(await withDockerConfig(args)),
+  ];
   const spawnOverride = ioOverride?.spawnStreaming;
   if (spawnOverride) {
     return await spawnOverride(invocation.bin, fullArgs, options);

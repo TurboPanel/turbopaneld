@@ -1,6 +1,7 @@
 import { assertEquals } from "@std/assert";
 import {
   type DockerCliResult,
+  dockerConfigDir,
   dockerEngineProbe,
   dockerEngineReachable,
   resolveDockerInvocation,
@@ -603,4 +604,131 @@ test("dockerEngineProbe returns the probe's stderr so the diagnosis can use it",
   } finally {
     restore();
   }
+});
+
+/** Run `fn` with a fresh temp folder, removed afterwards. */
+async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = await Deno.makeTempDir({ prefix: "tp-docker-cfg-" });
+  try {
+    await fn(dir);
+  } finally {
+    await Deno.remove(dir, { recursive: true }).catch(() => {});
+  }
+}
+
+test("the default config folder is under the run dir, never the state root or home", () => {
+  assertEquals(
+    dockerConfigDir("/run/turbopanel"),
+    "/run/turbopanel/docker-config",
+  );
+  const previous = Deno.env.get("TURBOPANEL_RUN_DIR");
+  Deno.env.set("TURBOPANEL_RUN_DIR", "/run/custom");
+  try {
+    assertEquals(dockerConfigDir(), "/run/custom/docker-config");
+  } finally {
+    if (previous === undefined) Deno.env.delete("TURBOPANEL_RUN_DIR");
+    else Deno.env.set("TURBOPANEL_RUN_DIR", previous);
+  }
+});
+
+test("runDocker points the client config at its own 0700 folder", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const calls: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      runRaw: (_command, args) => {
+        calls.push([...args]);
+        return Promise.resolve(ok("x"));
+      },
+    });
+    try {
+      await runDocker(["compose", "build"]);
+      assertEquals(calls[0], ["--config", config, "compose", "build"]);
+      const info = await Deno.stat(config);
+      assertEquals(info.isDirectory, true);
+      assertEquals((info.mode ?? 0) & 0o777, 0o700);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("the config folder survives the sudo rungs as an argument, not the environment", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      runRaw: (command, args) => {
+        calls.push({ command, args: [...args] });
+        return Promise.resolve(
+          command === "/usr/bin/docker"
+            ? fail(
+              "permission denied while trying to connect to the Docker daemon socket",
+            )
+            : ok("ok"),
+        );
+      },
+    });
+    const previousUser = Deno.env.get("USER");
+    Deno.env.set("USER", "tp");
+    try {
+      await runDocker(["ps"]);
+      assertEquals(calls[1]?.command, "/usr/bin/sudo");
+      assertEquals(calls[1]?.args.slice(-3), ["--config", config, "ps"]);
+    } finally {
+      if (previousUser === undefined) Deno.env.delete("USER");
+      else Deno.env.set("USER", previousUser);
+      restore();
+    }
+  });
+});
+
+test("the streaming spawn and the probe carry the config folder too", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const probes: string[][] = [];
+    const spawned: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      runRaw: (_command, args) => {
+        probes.push([...args]);
+        return Promise.resolve(ok("1"));
+      },
+      spawnStreaming: (_bin, args) => {
+        spawned.push([...args]);
+        return Promise.resolve(new Deno.Command("/bin/true").spawn());
+      },
+    });
+    try {
+      const child = await spawnDockerStreaming(["save", "img"]);
+      await child.status;
+      assertEquals(probes[0]?.slice(0, 3), ["--config", config, "version"]);
+      assertEquals(spawned[0], ["--config", config, "save", "img"]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a config folder the daemon cannot create leaves docker its own default", async () => {
+  await withTempDir(async (dir) => {
+    const blocker = `${dir}/blocker`;
+    await Deno.writeTextFile(blocker, "");
+    const calls: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      configDir: `${blocker}/docker-config`,
+      runRaw: (_command, args) => {
+        calls.push([...args]);
+        return Promise.resolve(ok("x"));
+      },
+    });
+    try {
+      await runDocker(["ps"]);
+      assertEquals(calls[0], ["ps"]);
+    } finally {
+      restore();
+    }
+  });
 });

@@ -1365,3 +1365,5 @@ table's generation always follows the table last accepted.
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH), `src/deploy/acme/AGENTS.md` (the daemon's own ACME client) |
+
+**Docker client config folder.** Every call through `docker-cli.ts` runs `docker --config <run dir>/docker-config` (`dockerConfigDir`, created `0700` by the daemon, tmpfs). Without it the CLI and its compose and buildx plugins mkdir `$HOME/.docker`, and the daemon's home is the state root, which a hardened host keeps `root:tp 0750`. It is an argument, not `DOCKER_CONFIG`, because the `sudo` rungs reset the environment. Nothing on disk survives a reboot, so `scripts/purge.sh` needs no entry (`/run/turbopanel` is already in `TP_OWNED_TREES`).
