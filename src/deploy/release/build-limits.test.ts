@@ -11,7 +11,6 @@ import {
   noteServerMemoryTotal,
   parseMemTotalBytes,
   readHostCapacity,
-  readMeminfoText,
   resolveBuildLimits,
 } from "./build-limits.ts";
 
