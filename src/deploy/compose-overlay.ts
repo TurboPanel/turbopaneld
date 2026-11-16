@@ -73,7 +73,8 @@ function labelEntryText(item: unknown): string {
     typeof item === "number" || typeof item === "boolean" ||
     typeof item === "bigint"
   ) return `${item}`;
-  if (item === null || item === undefined) return `${item}`;
+  if (item === null) return "null";
+  if (item === undefined) return "undefined";
   return JSON.stringify(item) ?? "";
 }
 
