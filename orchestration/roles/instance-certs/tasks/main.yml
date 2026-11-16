@@ -118,10 +118,10 @@
 
 # Caddy runs as `tpcaddy` and is the only reader of the server leaf key, so
 # the key is tpcaddy's own (group tpcaddy, mode 0600), like the Let's Encrypt
-# keys. The certificate stays group tp (0640). generate-self-signed-cert.mjs
-# chmods both keys to 0640 on every run without changing the group; the
-# tasks below set them back, and because neither key's group is tp the
-# 0640 between the two never lets the daemon account read one.
+# keys. The certificate stays group tp (0640). The generator writes
+# self-signed.{crt,key} as new files renamed into place (never through an
+# existing name, so a link planted there is replaced, not followed) with a
+# 0600 key and no chmod; the copies below publish them to platform-ca.*.
 - name: Publish the platform-ca leaf certificate
   ansible.builtin.copy:
     src: "{{ turbopanel_instance_certs_dir }}/self-signed.crt"
