@@ -45,8 +45,8 @@ On a Vagrant or Incus host (`TURBOPANEL_DEV_ENV` in
 worktree works too) the hook runs the secret scan only, prints one line saying
 so, and neither resolves nor installs Deno: the host needs no Deno, and the
 guest (which has no mode file) and CI run everything. A Direct machine is
-unchanged. Set `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt **and** the guards (secret scan
-still runs; CI still gates all of them). The dev console’s daemon install
-(`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
+unchanged. Set `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt **and** the guards
+(secret scan still runs; CI still gates all of them). The dev console’s daemon
+install (`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
 `core.hooksPath=.githooks` after a successful clone or update when
 `.githooks/pre-commit` exists. Production `scripts/run.sh` never wires hooks.
