@@ -294,6 +294,30 @@ function serviceLabels(
 }
 
 /**
+ * Stamps the deploy's project and environment identity, under both label
+ * prefixes, on every service of the resolved model.
+ */
+function stampIdentityLabels(
+  services: Record<string, Record<string, unknown>>,
+  resolved: ResolvedComposeModel,
+  payload: EnvironmentDeployPayload,
+): void {
+  for (const name of Object.keys(resolved.services)) {
+    const labels = serviceLabels(services, name);
+    for (
+      const [key, value] of [
+        [LABEL_PROJECT, payload.projectId],
+        [LABEL_ENVIRONMENT, payload.environmentId],
+      ]
+    ) {
+      addLabel(labels, key, value);
+      addLabel(labels, legacyLabelKey(key), value);
+    }
+    services[name] = { labels };
+  }
+}
+
+/**
  * Platform label / network attachment fragment for Traefik hostings and
  * managed-ingress network attachment. Emits only daemon-authored fields.
  */
@@ -314,19 +338,7 @@ export function buildHostingLabelsFragment(input: {
   // deployed for, under both prefixes, whatever the tenant wrote: the Docker
   // gate ties a container's generated secret and config files to these labels.
   // The overlay merges after the tenant's compose files, so these win.
-  for (const name of Object.keys(resolved.services)) {
-    const labels = serviceLabels(services, name);
-    for (
-      const [key, value] of [
-        [LABEL_PROJECT, payload.projectId],
-        [LABEL_ENVIRONMENT, payload.environmentId],
-      ]
-    ) {
-      addLabel(labels, key, value);
-      addLabel(labels, legacyLabelKey(key), value);
-    }
-    services[name] = { labels };
-  }
+  stampIdentityLabels(services, resolved, payload);
 
   for (const hosting of hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");

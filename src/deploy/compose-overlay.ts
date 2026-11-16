@@ -67,7 +67,11 @@ function labelsToMap(value: unknown[] | Record<string, unknown>) {
   if (!Array.isArray(value)) return value;
   const out: Record<string, unknown> = {};
   for (const item of value) {
-    const text = String(item);
+    // A list entry should be a string; an object entry is rendered as JSON
+    // rather than as "[object Object]".
+    const text = typeof item === "object" && item !== null
+      ? JSON.stringify(item)
+      : String(item);
     const eq = text.indexOf("=");
     if (eq < 0) out[text] = "";
     else out[text.slice(0, eq)] = text.slice(eq + 1);
