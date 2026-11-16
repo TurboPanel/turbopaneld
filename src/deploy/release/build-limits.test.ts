@@ -10,6 +10,8 @@ import {
   formatBuildMemory,
   noteServerMemoryTotal,
   parseMemTotalBytes,
+  readHostCapacity,
+  readMeminfoText,
   resolveBuildLimits,
 } from "./build-limits.ts";
 
@@ -219,4 +221,39 @@ test("the wire value is optional, strict and per part", () => {
   ) {
     assertThrows(() => parseBuildLimits(bad), TypeError);
   }
+});
+
+test("readHostCapacity reports the host memory the reader finds, 0 when it cannot", async () => {
+  const found = await readHostCapacity(() =>
+    Promise.resolve("MemTotal:  4194304 kB\n")
+  );
+  assertEquals(found.memoryBytes, 4 * GIB);
+  const lost = await readHostCapacity(() => Promise.reject(new Error("x")));
+  assertEquals(lost.memoryBytes, 0);
+});
+
+test("host memory is read under the daemon's scoped read grant, where Deno refuses /proc", async () => {
+  const here = new URL(".", import.meta.url).pathname;
+  const probe = `
+    import { readMeminfoText, parseMemTotalBytes } from ${
+    JSON.stringify(new URL("./build-limits.ts", import.meta.url).href)
+  };
+    console.log(parseMemTotalBytes(await readMeminfoText()));
+  `;
+  const out = await new Deno.Command(Deno.execPath(), {
+    args: [
+      "run",
+      "--quiet",
+      `--allow-read=/proc,${here},${here}../../..`,
+      "--allow-run=cat",
+      "--allow-env",
+      `data:application/typescript,${encodeURIComponent(probe)}`,
+    ],
+    stdout: "piped",
+    stderr: "piped",
+  }).output();
+  const err = new TextDecoder().decode(out.stderr);
+  assertEquals(out.code, 0, err);
+  const bytes = Number(new TextDecoder().decode(out.stdout).trim());
+  assertEquals(bytes > 0, true);
 });
