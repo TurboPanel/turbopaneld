@@ -445,7 +445,9 @@ function isGeneratedFileBind(
   ctx: BindContext,
 ): boolean {
   if (!ctx.tenant || !entry.readOnly || source !== resolved) return false;
-  const prefix = `${ctx.config.runDir.replace(/\/+$/, "")}/deployments/`;
+  let runDir = ctx.config.runDir;
+  while (runDir.endsWith("/")) runDir = runDir.slice(0, -1);
+  const prefix = `${runDir}/deployments/`;
   if (!resolved.startsWith(prefix)) return false;
   const [project, environment, kind, name, ...rest] = resolved
     .slice(prefix.length).split("/");
