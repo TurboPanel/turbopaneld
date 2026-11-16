@@ -62,16 +62,27 @@ function mergeValues(left: unknown, right: unknown): unknown {
   return right;
 }
 
+/**
+ * Text of one list-form label entry. Entries should be strings; numbers and
+ * booleans keep their plain form, and anything else (an object or array) is
+ * written out as JSON, so it can never read as a `turbopanel` label key.
+ */
+function labelEntryText(item: unknown): string {
+  if (typeof item === "string") return item;
+  if (
+    typeof item === "number" || typeof item === "boolean" ||
+    typeof item === "bigint"
+  ) return `${item}`;
+  if (item === null || item === undefined) return `${item}`;
+  return JSON.stringify(item) ?? "";
+}
+
 /** Compose allows `labels` as a map or as a list of `key=value` / bare `key`. */
 function labelsToMap(value: unknown[] | Record<string, unknown>) {
   if (!Array.isArray(value)) return value;
   const out: Record<string, unknown> = {};
   for (const item of value) {
-    // A list entry should be a string; an object entry is rendered as JSON
-    // rather than as "[object Object]".
-    const text = typeof item === "object" && item !== null
-      ? JSON.stringify(item)
-      : String(item);
+    const text = labelEntryText(item);
     const eq = text.indexOf("=");
     if (eq < 0) out[text] = "";
     else out[text.slice(0, eq)] = text.slice(eq + 1);

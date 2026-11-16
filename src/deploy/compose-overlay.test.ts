@@ -414,3 +414,31 @@ test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-f
     "tenant.keep": "yes",
   });
 });
+
+test("mergeOverlayIntoComposeYaml never reads an object or array list entry as a turbopanel label", () => {
+  const overlay = {
+    services: { web: { labels: { "io.turbopanel.project": "p1" } } },
+  };
+  const listForm = [
+    "services:",
+    "  web:",
+    "    image: nginx",
+    "    labels:",
+    "      - io.turbopanel.environment: forged",
+    "      - [com.turbopanel.environment=forged]",
+    "      - 8080",
+    "",
+  ].join("\n");
+  const out = parse(mergeOverlayIntoComposeYaml(listForm, overlay)) as {
+    services: { web: { labels: Record<string, string> } };
+  };
+  const keys = Object.keys(out.services.web.labels);
+  assertEquals(out.services.web.labels["io.turbopanel.project"], "p1");
+  assertEquals(
+    keys.filter((k) =>
+      k.includes("turbopanel.") && !k.startsWith("{") && !k.startsWith("[")
+    ),
+    ["io.turbopanel.project"],
+  );
+  assertEquals(out.services.web.labels["8080"], "");
+});
