@@ -17,6 +17,7 @@ import {
   isIngressContainer,
   isPlatformContainer,
   labelsOf,
+  ownerOf,
   platformBindVerdict,
   type PlatformRoots,
 } from "./platform.ts";
@@ -46,6 +47,13 @@ export type PolicyConfig = {
   platform: PlatformRoots;
   /** The read-only listener's directory: a Traefik may bind exactly it, read-only. */
   ingressSocketDir: string;
+  /**
+   * The daemon's run directory (`/run/turbopanel`, the layout's
+   * `PROD_RUN_DIR_DEFAULT`; this file is dependency-free, so it is repeated):
+   * a tenant container may bind exactly the generated secret and config files
+   * under `<runDir>/deployments/` (see `isGeneratedFileBind`).
+   */
+  runDir: string;
 };
 
 export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
@@ -67,6 +75,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   capAllowlist: [],
   platform: DEFAULT_PLATFORM_ROOTS,
   ingressSocketDir: DEFAULT_INGRESS_SOCKET_DIR,
+  runDir: "/run/turbopanel",
 };
 
 /** Resolve symlinks of the deepest existing ancestor (injected so tests need no disk). */
@@ -403,6 +412,8 @@ type BindContext = {
   platform: boolean;
   /** A Traefik: the only kind of container that may bind the read-only socket. */
   ingress: boolean;
+  /** A tenant workload (see `ownerOf`): the only kind that may bind generated files. */
+  tenant: boolean;
 };
 
 /** A Traefik binding exactly the read-only listener's directory, read-only. */
@@ -413,6 +424,38 @@ function isIngressSocketBind(
 ): boolean {
   return ctx.ingress && entry.readOnly &&
     resolved === ctx.config.ingressSocketDir;
+}
+
+const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** The deploy's own file name rule (`SECRET_PLAN_NAME_RE`): one segment, no `..`. */
+const GENERATED_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * The files the daemon writes for Compose `secrets:` and `configs:`: exactly
+ * `<runDir>/deployments/<projectId>/<environmentId>/(secrets|configs)/<name>`,
+ * both ids UUIDs and the name one plain segment (no `..`, no `.tmp` temp file).
+ * Read-only, tenant containers only, and only when the authored source is
+ * already the resolved one, so a symlink never qualifies (the deploy writes
+ * regular files; a link there is someone else's doing).
+ */
+function isGeneratedFileBind(
+  source: string,
+  resolved: string,
+  entry: BindEntry,
+  ctx: BindContext,
+): boolean {
+  if (!ctx.tenant || !entry.readOnly || source !== resolved) return false;
+  let runDir = ctx.config.runDir;
+  while (runDir.endsWith("/")) runDir = runDir.slice(0, -1);
+  const prefix = `${runDir}/deployments/`;
+  if (!resolved.startsWith(prefix)) return false;
+  const [project, environment, kind, name, ...rest] = resolved
+    .slice(prefix.length).split("/");
+  const id = new RegExp(`^${UUID}$`, "i");
+  return rest.length === 0 && id.test(project ?? "") &&
+    id.test(environment ?? "") && (kind === "secrets" || kind === "configs") &&
+    name !== undefined && GENERATED_FILE_NAME.test(name) &&
+    !name.includes("..") && !name.endsWith(".tmp");
 }
 
 function platformOutcome(
@@ -463,6 +506,9 @@ async function checkBindSource(
   const resolved = await resolvedSource(source, ctx.resolvePath);
   if (isIngressSocketBind(resolved, entry, ctx)) {
     return { allowance: "ingress-socket" };
+  }
+  if (isGeneratedFileBind(source, resolved, entry, ctx)) {
+    return { allowance: "generated-file-bind" };
   }
   const platform = platformOutcome(resolved, entry, ctx);
   if (platform) return platform;
@@ -547,7 +593,7 @@ async function checkVolumeDevice(
   if (mount.bind && mount.device.startsWith("/")) {
     const outcome = await checkBindSource(
       { source: mount.device, readOnly: false },
-      { config, resolvePath, platform: false, ingress: false },
+      { config, resolvePath, platform: false, ingress: false, tenant: false },
     );
     const verdict = outcome.violation;
     if (!verdict) return [];
@@ -982,6 +1028,7 @@ async function evaluateContainerCreate(
     resolvePath,
     platform,
     ingress: isIngressContainer(labels),
+    tenant: ownerOf(labels) === "tenant",
   });
   return {
     violations: [
@@ -1023,6 +1070,7 @@ export async function evaluateStartBinds(
     resolvePath,
     platform: isPlatformContainer(doc.labels),
     ingress: isIngressContainer(doc.labels),
+    tenant: ownerOf(doc.labels) === "tenant",
   });
   const seen = new Set<string>();
   const violations: Violation[] = [];

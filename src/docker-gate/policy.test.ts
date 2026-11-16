@@ -1025,3 +1025,129 @@ test("an unknown path, or a known path under the wrong method, is a finding (den
     assertEquals(found.map((v) => v.rule), ["unclassified-route"], path);
   }
 });
+
+const PROJECT = "0b8f6a52-4d1e-4c7a-9a43-6f1d2e8c5b10";
+const ENVIRONMENT = "9c2e7d14-83ab-4f60-b5d9-1a7c3e4f8d26";
+const GENERATED = `/run/turbopanel/deployments/${PROJECT}/${ENVIRONMENT}`;
+
+async function generatedBind(
+  source: string,
+  options: { suffix?: string; labels?: Record<string, string> } = {},
+  resolve: ResolvePath = identity,
+): Promise<Violation[]> {
+  const body = baseCreate() as {
+    HostConfig: Record<string, unknown>;
+    Labels?: Record<string, string>;
+  };
+  body.Labels = options.labels ??
+    { "com.docker.compose.project": "tenant-app" };
+  body.HostConfig.Binds = [
+    `${source}:/run/secrets/x${options.suffix ?? ":ro"}`,
+  ];
+  return await verdict({ body }, DEFAULT_POLICY_CONFIG, resolve);
+}
+
+test("a tenant container may bind its generated secret and config files read-only", async () => {
+  for (const kind of ["secrets", "configs"]) {
+    for (const name of ["db_password", "ca.pem", "A-1.conf"]) {
+      assertEquals(await generatedBind(`${GENERATED}/${kind}/${name}`), []);
+    }
+  }
+  // The long form agrees.
+  const body = baseCreate();
+  delete body.HostConfig.Binds;
+  body.HostConfig.Mounts = [{
+    Type: "bind",
+    Source: `${GENERATED}/secrets/db_password`,
+    Target: "/run/secrets/db_password",
+    ReadOnly: true,
+  }];
+  assertEquals(await verdict({ body }), []);
+});
+
+test("generated file binds are refused unless they match exactly", async () => {
+  const refused: Array<[string, string, string]> = [
+    ["read-write", `${GENERATED}/secrets/a`, ":rw"],
+    ["no mode", `${GENERATED}/secrets/a`, ":"],
+    ["the folder", `${GENERATED}/secrets`, ":ro"],
+    ["the folder with a slash", `${GENERATED}/secrets/`, ":ro"],
+    ["a nested name", `${GENERATED}/secrets/sub/a`, ":ro"],
+    ["another kind", `${GENERATED}/other/a`, ":ro"],
+    ["the environment folder", GENERATED, ":ro"],
+    ["the deployments folder", "/run/turbopanel/deployments", ":ro"],
+    [
+      "a non-UUID project",
+      `/run/turbopanel/deployments/x/${ENVIRONMENT}/secrets/a`,
+      ":ro",
+    ],
+    [
+      "a non-UUID environment",
+      `/run/turbopanel/deployments/${PROJECT}/x/secrets/a`,
+      ":ro",
+    ],
+    ["a hidden name", `${GENERATED}/secrets/.a`, ":ro"],
+    ["a temp name", `${GENERATED}/secrets/a.tmp`, ":ro"],
+    ["dotdot", `${GENERATED}/secrets/../../../../../etc/passwd`, ":ro"],
+    ["dotdot inside", `${GENERATED}/secrets/a..b/../c`, ":ro"],
+    [
+      "another run dir",
+      `/run/other/deployments/${PROJECT}/${ENVIRONMENT}/secrets/a`,
+      ":ro",
+    ],
+    ["the daemon's other run files", "/run/turbopanel/state.json", ":ro"],
+  ];
+  for (const [name, source, suffix] of refused) {
+    const found = await generatedBind(source, { suffix });
+    assert(found.length > 0, `${name} is refused`);
+  }
+});
+
+test("generated file binds are for tenant containers only", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  assertEquals(
+    ruleNames(await generatedBind(source, { labels: {} })),
+    ["bind-forbidden-path"],
+  );
+  assertEquals(
+    ruleNames(
+      await generatedBind(source, {
+        labels: { "tp.managed.engine": "postgres" },
+      }),
+    ),
+    ["bind-forbidden-path"],
+  );
+});
+
+test("a symlink does not qualify as a generated file", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  // The link resolves elsewhere in the same tree.
+  const found = await generatedBind(
+    source,
+    {},
+    (path) =>
+      Promise.resolve(
+        path === source ? `${GENERATED}/secrets/b` : path,
+      ),
+  );
+  assertEquals(ruleNames(found), ["bind-forbidden-path"]);
+  // And one that leaves it.
+  const out = await generatedBind(
+    source,
+    {},
+    () => Promise.resolve("/etc/shadow"),
+  );
+  assertEquals(ruleNames(out), ["bind-forbidden-path"]);
+});
+
+test("the generated file allowance follows the configured run dir", async () => {
+  const config = { ...DEFAULT_POLICY_CONFIG, runDir: "/run/elsewhere" };
+  const body = baseCreate() as { HostConfig: Record<string, unknown> };
+  body.HostConfig.Binds = [
+    `/run/elsewhere/deployments/${PROJECT}/${ENVIRONMENT}/secrets/a:/s:ro`,
+  ];
+  assertEquals(await verdict({ body }, config), []);
+  body.HostConfig.Binds = [`${GENERATED}/secrets/a:/s:ro`];
+  assertEquals(ruleNames(await verdict({ body }, config)), [
+    "bind-forbidden-path",
+  ]);
+});
