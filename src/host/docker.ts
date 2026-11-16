@@ -8,6 +8,7 @@
  * Docker data-root discovery is CLI-free: it reads the Docker Engine API
  * (`GET /info`) over the Unix socket via {@link DockerClient}.
  */
+import { withDockerConfig } from "../deploy/docker-cli.ts";
 import { DockerClient, type DockerInfo } from "../docker/client.ts";
 
 export type HostDockerMetadata = {
@@ -103,12 +104,15 @@ export function hostDockerFromVersions(
 }
 
 function probeComposeVersion(bin: string): string | undefined {
-  const short = spawnText(bin, ["compose", "version", "--short"]);
+  const short = spawnText(
+    bin,
+    withDockerConfig(["compose", "version", "--short"]),
+  );
   if (short) {
     const parsed = parseComposeVersion(short);
     if (parsed) return parsed;
   }
-  const full = spawnText(bin, ["compose", "version"]);
+  const full = spawnText(bin, withDockerConfig(["compose", "version"]));
   if (!full) return undefined;
   return parseComposeVersion(full);
 }
@@ -164,7 +168,7 @@ export function readDocker(
   dockerBin: string = DOCKER_BIN,
 ): HostDockerMetadata | undefined {
   if (!pathExists(dockerBin)) return undefined;
-  const cliText = spawnText(dockerBin, ["--version"]);
+  const cliText = spawnText(dockerBin, withDockerConfig(["--version"]));
   const version = cliText ? parseDockerCliVersion(cliText) : undefined;
   return hostDockerFromVersions(version, probeComposeVersion(dockerBin));
 }
