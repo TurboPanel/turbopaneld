@@ -154,6 +154,47 @@ test("a source that resolves elsewhere by start time is refused (symlink swapped
   ]);
 });
 
+const GENERATED_FILE =
+  "/run/turbopanel/deployments/0b8f6a52-4d1e-4c7a-9a43-6f1d2e8c5b10/9c2e7d14-83ab-4f60-b5d9-1a7c3e4f8d26/secrets/a";
+
+test("the start check allows a generated file only as a read-only live mount of a tenant", async () => {
+  const live = (readOnly: boolean) => [
+    { Type: "bind", Source: GENERATED_FILE, ReadOnly: readOnly },
+  ];
+  const start = (
+    labels: Record<string, string>,
+    readOnly: boolean,
+  ) =>
+    evaluateStartBinds(
+      { ...doc({}, live(readOnly)), labels },
+      DEFAULT_POLICY_CONFIG,
+      same,
+      () => true,
+    );
+  const tenant = { "com.docker.compose.project": "app" };
+  // Inspect's `RW: false` arrives as ReadOnly true.
+  assertEquals(await start(tenant, true), {
+    violations: [],
+    allowances: ["generated-file-bind"],
+  });
+  assertEquals((await start(tenant, false)).violations, [
+    { rule: "start-bind-forbidden-path", detail: GENERATED_FILE },
+  ]);
+  assertEquals((await start({}, true)).violations, [
+    { rule: "start-bind-forbidden-path", detail: GENERATED_FILE },
+  ]);
+  // Gone or replaced by a directory by start time: refused.
+  const gone = await evaluateStartBinds(
+    doc({}, live(true)),
+    DEFAULT_POLICY_CONFIG,
+    same,
+    () => false,
+  );
+  assertEquals(gone.violations.map((v) => v.rule), [
+    "start-bind-forbidden-path",
+  ]);
+});
+
 /** One-shot engine answering every connection with `body` as the inspect answer. */
 async function withInspect<T = void>(
   body: unknown,

@@ -2,8 +2,10 @@ import { assert, assertEquals, assertFalse } from "@std/assert";
 import {
   classifyRoute,
   DEFAULT_POLICY_CONFIG,
+  denoIsRegularFile,
   evaluateDetailed,
   evaluateRequest,
+  type IsRegularFile,
   pathIsCanonical,
   type PolicyConfig,
   type RequestFacts,
@@ -53,6 +55,7 @@ async function verdict(
   facts: Partial<RequestFacts> & { body?: unknown },
   config: PolicyConfig = DEFAULT_POLICY_CONFIG,
   resolve: ResolvePath = identity,
+  isRegularFile: IsRegularFile = () => true,
 ): Promise<Violation[]> {
   return await evaluateRequest(
     {
@@ -63,6 +66,7 @@ async function verdict(
     },
     config,
     resolve,
+    isRegularFile,
   );
 }
 
@@ -1034,6 +1038,7 @@ async function generatedBind(
   source: string,
   options: { suffix?: string; labels?: Record<string, string> } = {},
   resolve: ResolvePath = identity,
+  isRegularFile: IsRegularFile = () => true,
 ): Promise<Violation[]> {
   const body = baseCreate() as {
     HostConfig: Record<string, unknown>;
@@ -1044,7 +1049,7 @@ async function generatedBind(
   body.HostConfig.Binds = [
     `${source}:/run/secrets/x${options.suffix ?? ":ro"}`,
   ];
-  return await verdict({ body }, DEFAULT_POLICY_CONFIG, resolve);
+  return await verdict({ body }, DEFAULT_POLICY_CONFIG, resolve, isRegularFile);
 }
 
 test("a tenant container may bind its generated secret and config files read-only", async () => {
@@ -1150,4 +1155,136 @@ test("the generated file allowance follows the configured run dir", async () => 
   assertEquals(ruleNames(await verdict({ body }, config)), [
     "bind-forbidden-path",
   ]);
+});
+
+test("a generated file bind needs an existing regular file (a directory or a missing source is refused)", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  const asked: string[] = [];
+  const probe = (kind: "file" | "dir" | "missing"): IsRegularFile => (path) => {
+    asked.push(path);
+    return kind === "file";
+  };
+  assertEquals(await generatedBind(source, {}, identity, probe("file")), []);
+  assertEquals(asked, [source]);
+  for (const kind of ["dir", "missing"] as const) {
+    assertEquals(
+      ruleNames(await generatedBind(source, {}, identity, probe(kind))),
+      ["bind-forbidden-path"],
+      kind,
+    );
+  }
+});
+
+test("the production probe is lstat: a directory, a link and a missing path are not regular files", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-gate-probe-" });
+  try {
+    await Deno.writeTextFile(`${dir}/file`, "x");
+    await Deno.mkdir(`${dir}/sub`);
+    await Deno.symlink(`${dir}/file`, `${dir}/link`);
+    assertEquals(denoIsRegularFile(`${dir}/file`), true);
+    assertEquals(denoIsRegularFile(`${dir}/sub`), false);
+    assertEquals(denoIsRegularFile(`${dir}/link`), false);
+    assertEquals(denoIsRegularFile(`${dir}/none`), false);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a resolver that throws fails closed: no generated file allowance", async () => {
+  const body = baseCreate() as {
+    HostConfig: Record<string, unknown>;
+    Labels?: Record<string, string>;
+  };
+  body.Labels = { "com.docker.compose.project": "tenant-app" };
+  body.HostConfig.Binds = [`${GENERATED}/secrets/a:/s:ro`];
+  const throwing: ResolvePath = () => Promise.reject(new Error("EACCES"));
+  const found = await evaluateDetailed(
+    {
+      method: "POST",
+      path: "/containers/create",
+      query: new URLSearchParams(),
+      body,
+    },
+    DEFAULT_POLICY_CONFIG,
+    throwing,
+    () => true,
+  );
+  assertEquals(ruleNames(found.violations), ["bind-forbidden-path"]);
+  assertEquals(found.allowances, []);
+});
+
+test("generated file binds need lowercase ids (the daemon writes lowercase)", async () => {
+  const upper = (id: string) => id.toUpperCase();
+  const root = "/run/turbopanel/deployments";
+  for (
+    const source of [
+      `${root}/${upper(PROJECT)}/${ENVIRONMENT}/secrets/a`,
+      `${root}/${PROJECT}/${upper(ENVIRONMENT)}/secrets/a`,
+    ]
+  ) {
+    assertEquals(ruleNames(await generatedBind(source)), [
+      "bind-forbidden-path",
+    ], source);
+  }
+});
+
+test("generated file binds refuse SELinux relabel options", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  for (const suffix of [":ro,z", ":ro,Z", ":z,ro", ":Z,ro"]) {
+    assertEquals(
+      ruleNames(await generatedBind(source, { suffix })),
+      ["bind-forbidden-path"],
+      suffix,
+    );
+  }
+});
+
+test("a rshared or rslave propagation on a generated file bind is refused", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  for (const suffix of [":ro,rshared", ":ro,shared", ":ro,rslave"]) {
+    assert(
+      ruleNames(await generatedBind(source, { suffix })).includes(
+        "bind-propagation",
+      ),
+      suffix,
+    );
+  }
+});
+
+test("a mount entry binds a generated file only when ReadOnly is true", async () => {
+  const mounts = (extra: Record<string, unknown>) => {
+    const body = baseCreate();
+    delete body.HostConfig.Binds;
+    body.HostConfig.Mounts = [{
+      Type: "bind",
+      Source: `${GENERATED}/secrets/a`,
+      Target: "/run/secrets/a",
+      ...extra,
+    }];
+    return body;
+  };
+  for (const extra of [{ ReadOnly: false }, {}, { ReadOnly: "true" }]) {
+    assertEquals(
+      ruleNames(await verdict({ body: mounts(extra) })),
+      ["bind-forbidden-path"],
+      JSON.stringify(extra),
+    );
+  }
+});
+
+test("a local volume cannot bind a generated path through o=bind and device", async () => {
+  for (const o of ["bind", "rbind", "bind,ro"]) {
+    const found = await verdict({
+      path: "/volumes/create",
+      body: {
+        Driver: "local",
+        DriverOpts: {
+          type: "none",
+          o,
+          device: `${GENERATED}/secrets/a`,
+        },
+      },
+    });
+    assertEquals(ruleNames(found), ["volume-bind-forbidden-path"], o);
+  }
 });
