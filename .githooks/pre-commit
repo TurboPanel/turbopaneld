@@ -60,8 +60,8 @@ tp_precommit_dev_checkout() {
     CDPATH= cd -- "$ROOT/../dev" && pwd
     return 0
   fi
-  # From a worktree (for example .claude/worktrees/<name>), ROOT's parent is
-  # not the folder holding the sibling checkouts; the main checkout's is.
+  # From a linked worktree, ROOT's parent is not the folder holding the
+  # sibling checkouts; the main checkout's is.
   _common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _common=""
   if [ -n "$_common" ] && [ -f "$(dirname -- "$_common")/../dev/Vagrantfile" ]; then
     CDPATH= cd -- "$(dirname -- "$_common")/../dev" && pwd
