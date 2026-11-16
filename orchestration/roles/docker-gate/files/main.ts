@@ -152,6 +152,7 @@ export function loadConfig(env: Env): GateConfig {
       denyPrefixes: [...DEFAULT_POLICY_CONFIG.denyPrefixes, ...denyExtra],
       dockerSockets: DEFAULT_POLICY_CONFIG.dockerSockets,
       capAllowlist: caps,
+      runDir: DEFAULT_POLICY_CONFIG.runDir,
       ingressSocketDir: ingressSocketDirOf(env.TP_DOCKER_GATE_RO_SOCKET),
       platform: {
         readOnly: platformRo.length > 0

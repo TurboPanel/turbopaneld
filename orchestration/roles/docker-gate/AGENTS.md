@@ -100,6 +100,17 @@ container is not caught here. An operator-chosen storage path under a home
 refused too, backup and restore helpers included. `principalRoots` is the
 built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
 
+**Generated secret and config files.** A tenant container (`ownerOf` is
+`tenant`) may bind, read-only, exactly the files the daemon writes for Compose
+`secrets:` and `configs:`: `<runDir>/deployments/<projectId>/<environmentId>/(secrets|configs)/<name>`
+(`policy.ts` `isGeneratedFileBind`, allowance `generated-file-bind`). Both ids
+are UUIDs, `<name>` is one segment of the deploy's plan-name rule
+(`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`, not `.tmp`), and the authored source
+must already be the resolved one, so a symlink never qualifies. Anything else
+under `/run` stays `bind-forbidden-path`. `runDir` is the policy config's
+`/run/turbopanel` (the layout's `PROD_RUN_DIR_DEFAULT`, repeated because the
+gate imports nothing).
+
 **Start / restart re-check.** The engine resolves a bind source again at
 `start`, so a clean create can be stale (source swapped for a symlink, a
 container made before the gate enforced). `POST /containers/{id}/start|restart`
