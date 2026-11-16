@@ -24,6 +24,14 @@ const decoder = new TextDecoder();
 const SUDO_BIN = "/usr/bin/sudo";
 const DOCKER_BIN = "/usr/bin/docker";
 
+function configuredRunDir(): string {
+  try {
+    return Deno.env.get("TURBOPANEL_RUN_DIR")?.trim() || PROD_RUN_DIR_DEFAULT;
+  } catch {
+    return PROD_RUN_DIR_DEFAULT; // a caller without env access
+  }
+}
+
 /**
  * The Docker client's config folder for every call this module makes.
  *
@@ -37,33 +45,100 @@ const DOCKER_BIN = "/usr/bin/docker";
  * decide. It is passed as the `--config` argument, not `DOCKER_CONFIG`, so it
  * survives the `sudo` rungs below, which reset the environment.
  */
-export function dockerConfigDir(
-  runDir: string = Deno.env.get("TURBOPANEL_RUN_DIR")?.trim() ||
-    PROD_RUN_DIR_DEFAULT,
-): string {
+export function dockerConfigDir(runDir: string = configuredRunDir()): string {
   return join(runDir, "docker-config");
 }
 
-let ensuredConfigDir: Promise<string | undefined> | undefined;
+let ensuredConfigDir: string | undefined;
+let configDirResolved = false;
+let warnedConfigDir = false;
 
-/** Create the config folder once; `undefined` leaves Docker its own default. */
-async function ensureDockerConfigDir(): Promise<string | undefined> {
-  ensuredConfigDir ??= (async () => {
-    const dir = ioOverride ? ioOverride.configDir : dockerConfigDir();
-    if (dir === undefined) return undefined;
-    try {
-      await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
-      return dir;
-    } catch {
-      return undefined;
-    }
-  })();
-  return await ensuredConfigDir;
+function warnConfigDirOnce(reason: string): void {
+  if (warnedConfigDir) return;
+  warnedConfigDir = true;
+  console.warn(
+    `docker config folder: ${reason}; docker uses its own default config`,
+  );
 }
 
-/** `args` behind the global `--config <folder>` flag, when the folder exists. */
-export async function withDockerConfig(args: string[]): Promise<string[]> {
-  const dir = await ensureDockerConfigDir();
+type ConfigDirStat = {
+  isDirectory: boolean;
+  isSymlink: boolean;
+  uid: number | null;
+  mode: number | null;
+};
+
+/** The folder is ours and private: a real directory (not a link), our uid, mode 0700. */
+function trustConfigDir(dir: string): string | undefined {
+  const lstat = ioOverride?.lstatSync ??
+    ((p: string): ConfigDirStat => Deno.lstatSync(p));
+  const myUid = ioOverride?.uid ?? Deno.uid();
+  const check = (): string | undefined => {
+    const info = lstat(dir);
+    if (info.isSymlink || !info.isDirectory) return "not a plain directory";
+    if (info.uid !== myUid) return "owned by another account";
+    if (((info.mode ?? 0) & 0o7777) !== 0o700) return "mode is not 0700";
+    return undefined;
+  };
+  try {
+    let problem = check();
+    // Only our own folder is worth fixing; a foreign or linked one is refused.
+    if (problem === "mode is not 0700") {
+      Deno.chmodSync(dir, 0o700);
+      problem = check();
+    }
+    return problem;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Create and vet the config folder once; `undefined` leaves Docker its own
+ * default. Docker runs plugins and credential helpers named in this folder as
+ * the daemon account, and other accounts share the run dir's group, so
+ * whatever is found at the path is trusted only when it is our own private
+ * directory. Otherwise a fresh unguessable folder is made beside it.
+ */
+function ensureDockerConfigDir(): string | undefined {
+  if (configDirResolved) return ensuredConfigDir;
+  configDirResolved = true;
+  const dir = ioOverride ? ioOverride.configDir : dockerConfigDir();
+  if (dir === undefined) return undefined;
+  let problem: string;
+  try {
+    Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const found = trustConfigDir(dir);
+    if (found === undefined) return (ensuredConfigDir = dir);
+    problem = `${dir} is unusable (${found})`;
+  } catch (err) {
+    problem = `${dir} cannot be created (${
+      err instanceof Error ? err.message : String(err)
+    })`;
+  }
+  try {
+    const fresh = Deno.makeTempDirSync({
+      dir: join(dir, ".."),
+      prefix: "docker-config-",
+    });
+    const found = trustConfigDir(fresh);
+    if (found === undefined) {
+      warnConfigDirOnce(`${problem}, using ${fresh}`);
+      return (ensuredConfigDir = fresh);
+    }
+    problem += `; ${fresh} is unusable too (${found})`;
+  } catch (err) {
+    problem += `; no fallback folder (${
+      err instanceof Error ? err.message : String(err)
+    })`;
+  }
+  warnConfigDirOnce(problem);
+  return undefined;
+}
+
+/** `args` behind the global `--config <folder>` flag, when a trusted folder exists. */
+export function withDockerConfig(args: string[]): string[] {
+  const dir = ensureDockerConfigDir();
   return dir === undefined ? args : ["--config", dir, ...args];
 }
 
@@ -98,6 +173,14 @@ export type DockerCliIo = {
    * names one, so nothing here touches the real `/run/turbopanel`.
    */
   configDir?: string;
+  /** Replaces `Deno.lstatSync` / `Deno.uid()` when vetting the config folder. */
+  lstatSync?: (path: string) => {
+    isDirectory: boolean;
+    isSymlink: boolean;
+    uid: number | null;
+    mode: number | null;
+  };
+  uid?: number;
   /**
    * When set, {@link spawnDockerStreaming} uses this instead of
    * `Deno.Command.spawn` (binary dump path — never decode into a string).
@@ -147,6 +230,8 @@ function clearDockerInvocationCache(): void {
   cachedInvocation = undefined;
   cachedInvocationPromise = undefined;
   ensuredConfigDir = undefined;
+  configDirResolved = false;
+  warnedConfigDir = false;
 }
 
 function isDockerSocketPermissionError(text: string): boolean {
@@ -371,7 +456,7 @@ export async function runDocker(
   userArgs: string[],
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
-  const args = await withDockerConfig(userArgs);
+  const args = withDockerConfig(userArgs);
   const direct = await runRaw(resolvedDockerBin(), args, options);
   if (
     direct.success ||
@@ -418,7 +503,7 @@ const PROBE_ARGS = ["version", "--format", "{{.Server.Version}}"];
 
 async function probeDockerInvocation(): Promise<DockerInvocation> {
   const dockerBin = resolvedDockerBin();
-  const probeArgs = await withDockerConfig(PROBE_ARGS);
+  const probeArgs = withDockerConfig(PROBE_ARGS);
   const direct = await runRaw(dockerBin, probeArgs);
   if (
     direct.success ||
@@ -491,7 +576,7 @@ export async function spawnDockerStreaming(
   const invocation = await resolveDockerInvocation();
   const fullArgs = [
     ...invocation.prefixArgs,
-    ...(await withDockerConfig(args)),
+    ...(withDockerConfig(args)),
   ];
   const spawnOverride = ioOverride?.spawnStreaming;
   if (spawnOverride) {

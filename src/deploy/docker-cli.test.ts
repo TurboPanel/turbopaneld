@@ -617,6 +617,7 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
 }
 
 test("the default config folder is under the run dir, never the state root or home", () => {
+  setDockerCliIoForTest()(); // drop any cached folder from an earlier test
   assertEquals(
     dockerConfigDir("/run/turbopanel"),
     "/run/turbopanel/docker-config",
@@ -730,5 +731,93 @@ test("a config folder the daemon cannot create leaves docker its own default", a
     } finally {
       restore();
     }
+  });
+});
+
+async function configDirCalls(
+  dir: string,
+  extra: Partial<Parameters<typeof setDockerCliIoForTest>[0] & object> = {},
+): Promise<{ args: string[]; warnings: string[] }> {
+  const calls: string[][] = [];
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...a: unknown[]) => warnings.push(a.join(" "));
+  const restore = setDockerCliIoForTest({
+    configDir: dir,
+    runRaw: (_command, args) => {
+      calls.push([...args]);
+      return Promise.resolve(ok("x"));
+    },
+    ...extra,
+  });
+  try {
+    await runDocker(["ps"]);
+    await runDocker(["ps"]);
+  } finally {
+    console.warn = originalWarn;
+    restore();
+  }
+  return { args: calls[0] ?? [], warnings };
+}
+
+test("a config folder that already exists is used when it is ours, and its mode is set to 0700", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    await Deno.mkdir(config, { mode: 0o755 });
+    await Deno.chmod(config, 0o755);
+    const { args, warnings } = await configDirCalls(config);
+    assertEquals(args, ["--config", config, "ps"]);
+    assertEquals(((await Deno.stat(config)).mode ?? 0) & 0o7777, 0o700);
+    assertEquals(warnings, []);
+  });
+});
+
+test("a config folder owned by another account is never used, and a private one is made instead", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    await Deno.mkdir(config, { mode: 0o700 });
+    const real = Deno.lstatSync;
+    const { args, warnings } = await configDirCalls(config, {
+      // Our folder reads as foreign; the fresh one reads as ours.
+      lstatSync: (p) => {
+        const info = real(p);
+        return {
+          isDirectory: info.isDirectory,
+          isSymlink: info.isSymlink,
+          uid: p === config ? (info.uid ?? 0) + 1 : info.uid,
+          mode: info.mode,
+        };
+      },
+    });
+    assertEquals(args[0], "--config");
+    assertEquals(args[1] !== config, true);
+    assertEquals(args[1]?.startsWith(`${dir}/docker-config-`), true);
+    assertEquals(((await Deno.stat(args[1]!)).mode ?? 0) & 0o777, 0o700);
+    assertEquals(warnings.length, 1);
+    assertEquals(warnings[0]?.includes("owned by another account"), true);
+  });
+});
+
+test("a symlink at the config path is never followed or used", async () => {
+  await withTempDir(async (dir) => {
+    const planted = `${dir}/planted`;
+    await Deno.mkdir(planted, { mode: 0o700 });
+    const config = `${dir}/docker-config`;
+    await Deno.symlink(planted, config);
+    const { args, warnings } = await configDirCalls(config);
+    assertEquals(args[0], "--config");
+    assertEquals(args[1] !== config && args[1] !== planted, true);
+    assertEquals(warnings.length, 1);
+    assertEquals(warnings[0]?.includes("not a plain directory"), true);
+  });
+});
+
+test("when nothing can be trusted docker gets no flag and the reason is logged once", async () => {
+  await withTempDir(async (dir) => {
+    const blocker = `${dir}/blocker`;
+    await Deno.writeTextFile(blocker, "");
+    const { args, warnings } = await configDirCalls(`${blocker}/docker-config`);
+    assertEquals(args, ["ps"]);
+    assertEquals(warnings.length, 1);
   });
 });
