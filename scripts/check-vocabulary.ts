@@ -111,6 +111,17 @@ async function isNestedCheckout(abs: string): Promise<boolean> {
   }
 }
 
+/** Directories the walk never enters: skip lists, local dot-dirs, checkouts. */
+async function shouldSkipDir(
+  abs: string,
+  name: string,
+  rel: string,
+): Promise<boolean> {
+  if (SKIP_DIRS.has(name) || isSkippedPath(rel)) return true;
+  if (name.startsWith(".") && !SCANNED_DOT_DIRS.has(name)) return true;
+  return await isNestedCheckout(abs);
+}
+
 export async function* walkVocabularyFiles(
   dir: string,
   root = repoRoot,
@@ -119,11 +130,7 @@ export async function* walkVocabularyFiles(
     const abs = `${dir}/${entry.name}`;
     const rel = relative(root, abs);
     if (entry.isDirectory) {
-      if (SKIP_DIRS.has(entry.name) || isSkippedPath(rel)) continue;
-      if (entry.name.startsWith(".") && !SCANNED_DOT_DIRS.has(entry.name)) {
-        continue;
-      }
-      if (await isNestedCheckout(abs)) continue;
+      if (await shouldSkipDir(abs, entry.name, rel)) continue;
       yield* walkVocabularyFiles(abs, root);
     } else if (entry.isFile) {
       if (SKIP_FILENAMES.has(entry.name) || isSkippedPath(rel)) continue;
