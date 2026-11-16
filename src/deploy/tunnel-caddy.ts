@@ -44,6 +44,13 @@ export const TUNNEL_PEER_FILES = {
 /** What a visitor sees when the server that runs the site cannot answer. */
 export const TUNNEL_ERROR_TEXT = "This site is not running right now.";
 
+/**
+ * The one status the error page answers with. With one upstream and a three
+ * second retry window the error is 502 or 503 at random, and the edge replaces
+ * a 502 with its own page, so the page always answers 503, which it passes on.
+ */
+export const TUNNEL_ERROR_STATUS = 503;
+
 const LOOPBACK_RANGES = "127.0.0.0/8 ::1";
 const DEFAULT_PEER_PORT = 443;
 /** Named matchers are per site block, and these names are used once in each. */
@@ -133,6 +140,9 @@ export function tunnelLockLines(peers: readonly string[]): string {
  * fails to connect is skipped for ten seconds, and a request is retried on the
  * other targets for up to three seconds before the error page answers.
  * `header_up Host` is needed because Caddy rewrites Host on a TLS hop.
+ * The transport has a dial timeout inside the retry window, a limit on the
+ * wait for the first response header only (a long body is never cut off), and
+ * a short idle keepalive so a pooled connection to a silent peer is not reused.
  * `tls_server_name` is fixed: the receiving server presents the certificate it
  * loaded for that name, and the sender trusts only the organization's bundle.
  */
@@ -164,6 +174,9 @@ export function peerUpstreamText(upstream: PeerUpstream): string {
     tls_trust_pool file ${trust}
     tls_server_name ${TUNNEL_PEER_TLS_NAME}
     versions 2
+    dial_timeout 2s
+    response_header_timeout 60s
+    keepalive 15s
   }
 }`;
 }
@@ -236,7 +249,7 @@ ${proxy}
   return `${route.hostname} {
   tls internal
 ${peerRule}${forward}  handle_errors {
-    respond "${TUNNEL_ERROR_TEXT}" {err.status_code}
+    respond "${TUNNEL_ERROR_TEXT}" ${TUNNEL_ERROR_STATUS}
   }
 }
 `;

@@ -64,6 +64,9 @@ const PROXY_TAIL = `      lb_policy round_robin
         tls_trust_pool file /etc/turbopanel/hosting/peer/abc123/ca.pem
         tls_server_name tp-peer.internal
         versions 2
+        dial_timeout 2s
+        response_header_timeout 60s
+        keepalive 15s
       }
     }`;
 
@@ -84,7 +87,7 @@ ${PROXY_TAIL}
     abort
   }
   handle_errors {
-    respond "This site is not running right now." {err.status_code}
+    respond "This site is not running right now." 503
   }
 }
 
@@ -99,7 +102,7 @@ open.example.com {
 ${PROXY_TAIL}
   }
   handle_errors {
-    respond "This site is not running right now." {err.status_code}
+    respond "This site is not running right now." 503
   }
 }
 

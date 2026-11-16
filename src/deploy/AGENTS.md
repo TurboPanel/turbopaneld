@@ -1282,7 +1282,10 @@ listens on its own address set, so a peer reaching it needs that set to include
 the peer-facing address (`extraBind`); the peer name is not served there yet.
 Visitor
 addresses are trusted per `reverse_proxy` (loopback and peers), never
-server-wide. A tunnel block never asks for a public certificate. All files are
+server-wide. The error page of a forward block always answers 503 (a random
+502 would be replaced by the edge's own page), and the peer transport sets
+`dial_timeout 2s`, `response_header_timeout 60s` (first header only, so long
+responses are not cut) and `keepalive 15s`. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
 
 **The lock follows the table** (feature `tunnel-lock-follow-v1`). The table may
