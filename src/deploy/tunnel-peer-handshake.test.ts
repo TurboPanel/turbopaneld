@@ -5,9 +5,10 @@
  * the hosting server (here on a stand-in for 443) alone: no client certificate
  * asked for and no 421 for a connection that names the real host.
  *
- * Runs only where a Caddy binary is named (TP_TEST_CADDY=/path/to/caddy) and
+ * Runs only where a Caddy binary is named (TURBOPANEL_TEST_CADDY=/path/to/caddy, or the pinned caddy on PATH) and
  * `openssl` and `curl` exist, like the other real-Caddy tests.
  */
+import { pinnedCaddy } from "../testing/panel-caddy.ts";
 import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
@@ -19,6 +20,7 @@ import {
 const test = Deno.test.bind(Deno);
 
 /** Stand-ins for 443 and the peer port, so nothing needs privileges. */
+const CADDY = pinnedCaddy();
 const HOSTING_PORT = 18443;
 const PEER_PORT = 19443;
 const SENDER_PORT = 18444;
@@ -151,7 +153,7 @@ async function curl(args: string[]): Promise<Reply> {
 test({
   name:
     "a real Caddy: no certificate and a foreign one are refused, a valid one is forwarded, 443 is untouched",
-  ignore: !Deno.env.get("TP_TEST_CADDY"),
+  ignore: CADDY === undefined,
   fn: async () => {
     const dir = await Deno.makeTempDir({ prefix: "tp-peer-mtls-" });
     let child: Deno.ChildProcess | undefined;
@@ -192,6 +194,11 @@ test({
           },
           clientAuth: "require",
           presentCertificate: true,
+          inbound: [
+            { hostname: HOST, peers: ["127.0.0.1"] },
+            { hostname: "elsewhere.example.net", peers: ["192.0.2.9"] },
+            { hostname: "local.example.net", peers: [], lock: true },
+          ],
         },
         new Set(),
       ).contents
@@ -216,7 +223,7 @@ https://:${HOSTING_PORT} {
 ${rendered}`;
       const path = join(dir, "Caddyfile");
       await Deno.writeTextFile(path, caddyfile);
-      child = new Deno.Command(Deno.env.get("TP_TEST_CADDY")!, {
+      child = new Deno.Command(CADDY!, {
         args: ["run", "--config", path, "--adapter", "caddyfile"],
         env: { XDG_DATA_HOME: dir, XDG_CONFIG_HOME: dir, HOME: dir },
         stdout: "null",
@@ -263,6 +270,44 @@ ${rendered}`;
       assertEquals(good.code, 0);
       assertEquals(good.status, "200");
       assertEquals(good.body, `hosted ${HOST} hop=1 spoof=`);
+
+      // A valid certificate alone reaches nothing else: a name the table does
+      // not list, a listed name whose peers leave this address out, and a
+      // local-only name are all cut.
+      for (
+        const name of [
+          "unlisted.example.net",
+          "elsewhere.example.net",
+          "local.example.net",
+        ]
+      ) {
+        const refused = await curl([
+          "--cert",
+          join(dir, "peer.pem"),
+          "--key",
+          join(dir, "peer.key"),
+          "--resolve",
+          `tp-peer.internal:${PEER_PORT}:127.0.0.1`,
+          "--cacert",
+          join(dir, "org.pem"),
+          "-H",
+          `X-Tp-Peer-Host: ${name}`,
+          `https://tp-peer.internal:${PEER_PORT}/`,
+        ]);
+        assert(
+          refused.status !== "200" && !refused.body.includes("hosted"),
+          `${name} was handed on`,
+        );
+      }
+
+      // No certificate, with the real hostname as the server name: refused.
+      const named443 = await curl([
+        "-k",
+        "--resolve",
+        `${HOST}:${PEER_PORT}:127.0.0.1`,
+        `https://${HOST}:${PEER_PORT}/`,
+      ]);
+      assert(named443.code !== 0, "a certificate-less connection got in");
 
       // The whole path as a visitor sees it: the sender block shows its
       // certificate, the receiver lets it in and the site answers.

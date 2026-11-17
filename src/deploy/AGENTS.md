@@ -1300,7 +1300,7 @@ and proxies to the hosting server on loopback. The sender cannot send the real
 Host (the strict SNI match would answer 421 for it), so it sends the fixed Host
 `tp-peer.internal` and the real one in `X-Tp-Peer-Host`; the peer server puts it
 back as Host and SNI for the hop to hosting and removes the header. Hosting
-stays on :443 with no client certificate. In this mode the site locks and
+stays on :443 with no client certificate. The peer server hands a request on only through a door per `inbound` name that has peers (`header X-Tp-Peer-Host <name>` and `remote_ip <that name's peers>`); a name not listed, a listed name from an unlisted peer and a local-only name (`peers: []`) are aborted, because the sites admit loopback only and a valid certificate alone must not reach them. In this mode the site locks and
 `trusted_proxies` are loopback-only (peer traffic arrives from loopback) and the
 forward block's loop guard is the hop header. A forward block shows this
 server's own peer certificate (`tls_client_auth`) and targets the peer port

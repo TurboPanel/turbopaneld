@@ -7971,6 +7971,38 @@ function parseTunnelInboundList(value: unknown): TunnelInbound[] {
   return inbound;
 }
 
+/** The optional fields of `server.tunnel.routes`, parsed onto `payload`. */
+function readTunnelRoutesOptionals(
+  value: Record<string, unknown>,
+  payload: TunnelRoutesPayload,
+): void {
+  if (value.listenAddresses !== undefined) {
+    payload.listenAddresses = parseTunnelAddressList(
+      value.listenAddresses,
+      "server.tunnel.routes listenAddresses",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  if (value.peerMaterial !== undefined) {
+    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (value.peerClientAuth !== undefined) {
+    payload.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.routes",
+    );
+  }
+  if (value.inbound !== undefined) {
+    payload.inbound = parseTunnelInboundList(value.inbound);
+  }
+  const generation = parseTunnelGeneration(
+    value.generation,
+    "server.tunnel.routes generation",
+  );
+  if (generation !== undefined) payload.generation = generation;
+}
+
 /** Parse `server.tunnel.routes`. */
 export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
   if (!isRecord(value)) {
@@ -8002,31 +8034,7 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
     routes,
     peerAddresses,
   };
-  if (value.listenAddresses !== undefined) {
-    payload.listenAddresses = parseTunnelAddressList(
-      value.listenAddresses,
-      "server.tunnel.routes listenAddresses",
-      1,
-      MAX_TUNNEL_ADDRESSES,
-    );
-  }
-  if (value.peerMaterial !== undefined) {
-    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
-  }
-  if (value.peerClientAuth !== undefined) {
-    payload.peerClientAuth = parseTunnelPeerClientAuth(
-      value.peerClientAuth,
-      "server.tunnel.routes",
-    );
-  }
-  if (value.inbound !== undefined) {
-    payload.inbound = parseTunnelInboundList(value.inbound);
-  }
-  const generation = parseTunnelGeneration(
-    value.generation,
-    "server.tunnel.routes generation",
-  );
-  if (generation !== undefined) payload.generation = generation;
+  readTunnelRoutesOptionals(value, payload);
   if (
     (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial
   ) {

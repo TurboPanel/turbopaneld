@@ -24,6 +24,7 @@ import {
   isValidIpv6Literal,
   TUNNEL_PEER_PORT,
   TUNNEL_PEER_TLS_NAME,
+  type TunnelInbound,
   type TunnelPeerClientAuth,
   type TunnelRoute,
 } from "../contracts/commands-contracts.ts";
@@ -250,6 +251,11 @@ export type TunnelFileInputs = Readonly<{
    * sends nothing, as before.
    */
   presentCertificate?: boolean;
+  /**
+   * Names that run here and who may forward each (strict mode only): the peer
+   * server hands a request on only for a listed name from one of its peers.
+   */
+  inbound?: readonly TunnelInbound[];
 }>;
 
 /** One forward block for a site that runs on other servers. */
@@ -377,6 +383,44 @@ function dedicatedPeerSite(inputs: TunnelFileInputs): string {
     ? "require_and_verify"
     : "verify_if_given";
   const peers = inputs.peerAddresses.join(" ");
+  const proxy = `    reverse_proxy https://127.0.0.1:443 {
+      header_up Host {header.${TUNNEL_PEER_HOST_HEADER}}
+      header_up -${TUNNEL_PEER_HOST_HEADER}
+      header_up ${TUNNEL_PEER_HOP_HEADER} 1
+      trusted_proxies ${tunnelTrustedRanges(inputs.peerAddresses).join(" ")}
+      transport http {
+        tls_server_name {http.request.header.${TUNNEL_PEER_HOST_HEADER}}
+        tls_insecure_skip_verify
+        dial_timeout 2s
+        response_header_timeout 60s
+      }
+    }`;
+  // One door per name the table lists with peers: the name in the header and a
+  // source address that name allows. Anything else (a name not listed, a
+  // local-only name with no peers, a listed name from an unlisted peer) is cut,
+  // so a valid certificate alone reaches nothing.
+  const byName = new Map<string, readonly string[]>();
+  for (const entry of inputs.inbound ?? []) {
+    const name = foldHostname(entry.hostname);
+    if (!byName.has(name)) byName.set(name, entry.peers);
+  }
+  const doors = [...byName].filter(([, who]) => who.length > 0).map((
+    [name, who],
+    index,
+  ) => {
+    if (!isValidHostname(name)) {
+      throw new ConfigValueError("tunnel hostname", "must be a hostname");
+    }
+    const matcher = `@tp_door_${index}`;
+    return `  ${matcher} {
+    header ${TUNNEL_PEER_HOST_HEADER} ${name}
+    remote_ip ${who.join(" ")}
+  }
+  handle ${matcher} {
+${proxy}
+  }
+`;
+  }).join("");
   return `https://:${TUNNEL_PEER_PORT} {
   tls ${certificate} ${key} {
     client_auth {
@@ -388,19 +432,8 @@ function dedicatedPeerSite(inputs: TunnelFileInputs): string {
   handle ${OUTSIDE_MATCHER} {
     abort
   }
-  handle {
-    reverse_proxy https://127.0.0.1:443 {
-      header_up Host {header.${TUNNEL_PEER_HOST_HEADER}}
-      header_up -${TUNNEL_PEER_HOST_HEADER}
-      header_up ${TUNNEL_PEER_HOP_HEADER} 1
-      trusted_proxies ${tunnelTrustedRanges(inputs.peerAddresses).join(" ")}
-      transport http {
-        tls_server_name {http.request.header.${TUNNEL_PEER_HOST_HEADER}}
-        tls_insecure_skip_verify
-        dial_timeout 2s
-        response_header_timeout 60s
-      }
-    }
+${doors}  handle {
+    abort
   }
 }
 `;

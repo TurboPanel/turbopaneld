@@ -515,7 +515,11 @@ const DEDICATED_SITE = `https://:9443 {
   handle @tp_outside {
     abort
   }
-  handle {
+  @tp_door_0 {
+    header X-Tp-Peer-Host app.example.com
+    remote_ip 10.0.0.5
+  }
+  handle @tp_door_0 {
     reverse_proxy https://127.0.0.1:443 {
       header_up Host {header.X-Tp-Peer-Host}
       header_up -X-Tp-Peer-Host
@@ -529,16 +533,27 @@ const DEDICATED_SITE = `https://:9443 {
       }
     }
   }
+  handle {
+    abort
+  }
 }
 `;
+
+/** One name with a peer, one local-only name (no peers): only the first gets a door. */
+const DEDICATED_INBOUND = [
+  { hostname: "App.Example.com", peers: ["10.0.0.5"] },
+  { hostname: "mine.example.com", peers: [], lock: true },
+];
 
 test("with client auth the peer hop is its own server on its own port, requiring a certificate", () => {
   const text = renderTunnelFile(
     ROUTES,
-    { ...INPUTS, clientAuth: "require" },
+    { ...INPUTS, clientAuth: "require", inbound: DEDICATED_INBOUND },
     new Set(),
   ).contents;
   assert(text.endsWith(DEDICATED_SITE));
+  // A local-only name gets no door, so a peer cannot ask for it.
+  assertEquals(text.includes("mine.example.com"), false);
   // The shared-port peer site is gone, and so is its name on 443.
   assertEquals(text.includes("tp-peer.internal {"), false);
   assertEquals(TUNNEL_PEER_PORT, 9443);
@@ -547,7 +562,7 @@ test("with client auth the peer hop is its own server on its own port, requiring
 test("in verify mode the peer server only checks a certificate that is shown", () => {
   const text = renderTunnelFile(
     ROUTES,
-    { ...INPUTS, clientAuth: "verify" },
+    { ...INPUTS, clientAuth: "verify", inbound: DEDICATED_INBOUND },
     new Set(),
   ).contents;
   assert(
@@ -613,4 +628,14 @@ test({
     assertStringIncludes(json, '"client_certificate_file"');
     assertStringIncludes(json, PEER_DIR.certificate);
   },
+});
+
+test("a peer server with no inbound names hands nothing on", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assertEquals(text.includes("@tp_door_"), false);
+  assertEquals(text.includes("reverse_proxy https://127.0.0.1:443"), false);
 });

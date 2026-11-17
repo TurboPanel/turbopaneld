@@ -192,6 +192,7 @@ export function tunnelInputs(
     ...(material ? { material } : {}),
     ...(state.clientAuth ? { clientAuth: state.clientAuth } : {}),
     ...(state.presentCertificate ? { presentCertificate: true } : {}),
+    ...(state.inbound ? { inbound: state.inbound } : {}),
   };
 }
 
