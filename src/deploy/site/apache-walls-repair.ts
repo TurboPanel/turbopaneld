@@ -73,23 +73,28 @@ import { cachedPhpSiteKeySecret, phpSiteKey } from "./php-site-key.ts";
 export const APACHE_WALLS_MARKER = ".apache-walls-repair.json";
 
 const WALL_PREFIX = '  ProxyFCGISetEnvIf "true" ';
-const WALL_NAMES = [
+const WALL_NAMES = new Set([
   "PHP_VALUE",
   "PHP_ADMIN_VALUE",
   "PHPRC",
   "PHP_INI_SCAN_DIR",
   "TP_SITE_KEY",
-];
+]);
 
 /** A wall line (an unset, or the site key) a deploy writes, however old. */
 function isWallLine(line: string): boolean {
   if (!line.startsWith(WALL_PREFIX)) return false;
   const rest = line.slice(WALL_PREFIX.length);
   if (rest.startsWith('TP_SITE_KEY "')) return true;
-  return rest.startsWith("!") && WALL_NAMES.includes(rest.slice(1));
+  return rest.startsWith("!") && WALL_NAMES.has(rest.slice(1));
 }
 
-const PHP_HANDLER_RE = /^\s*SetHandler "proxy:/m;
+/** A vhost that already hands PHP to a runtime socket. */
+function hasPhpHandler(text: string): boolean {
+  return text.split("\n").some((line) =>
+    line.trimStart().startsWith('SetHandler "proxy:')
+  );
+}
 
 /** The vhost text with the wall lines (and the key) a deploy would write. */
 export function patchApacheVhost(
@@ -423,7 +428,7 @@ async function repairSite(
   runtimeIo: SitePhpRuntimeIo,
 ): Promise<SiteOutcome> {
   const ids = [...new Set(sitePhpRuntimeIdsIn(text))];
-  const hasHandler = PHP_HANDLER_RE.test(text);
+  const hasHandler = hasPhpHandler(text);
   if (ids.length !== 1) {
     return await withLocks(lockKeysFor(file, undefined), async () => {
       const now = await freshVhost(io, file, ids);
