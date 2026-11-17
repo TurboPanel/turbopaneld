@@ -74,6 +74,10 @@ export const TUNNEL_PEER_HOST_HEADER = "X-Tp-Peer-Host";
 const OUTSIDE_MATCHER = "@tp_outside";
 const PEER_MATCHER = "@tp_peer";
 const LOCAL_MATCHER = "@tp_local";
+const REPEATED_HOST_MATCHER = "@tp_repeated_host";
+/** Caddy joins a repeated header with a comma, and a hostname never holds one. */
+const TUNNEL_PEER_HOST_HEADER_PLACEHOLDER =
+  `{http.request.header.${TUNNEL_PEER_HOST_HEADER}}`;
 
 const SAFE_PATH_RE = /^\/[A-Za-z0-9_./-]+$/;
 
@@ -395,6 +399,9 @@ function dedicatedPeerSite(inputs: TunnelFileInputs): string {
         response_header_timeout 60s
       }
     }`;
+  // A repeated peer-host header is refused outright, before any door: the
+  // header matcher alone passes on any one value, and the Host would then be
+  // the joined list.
   // One door per name the table lists with peers: the name in the header and a
   // source address that name allows. Anything else (a name not listed, a
   // local-only name with no peers, a listed name from an unlisted peer) is cut,
@@ -430,6 +437,12 @@ ${proxy}
   }
   ${OUTSIDE_MATCHER} not remote_ip ${peers}
   handle ${OUTSIDE_MATCHER} {
+    abort
+  }
+  ${REPEATED_HOST_MATCHER} {
+    vars_regexp ${TUNNEL_PEER_HOST_HEADER_PLACEHOLDER} ,
+  }
+  handle ${REPEATED_HOST_MATCHER} {
     abort
   }
 ${doors}  handle {
