@@ -524,8 +524,24 @@ the install, vendor and config roots. `tp-host` refuses every generic verb on
 the folder (`tp_path_class`).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
 whenever the binary **or** the account is missing (`ensureHostingCaddy`).
-`daemon-converge` does not run it; the daemon sets the edge up on the first
-compose deploy that needs it. The role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
+An update also repairs modes a fresh install sets: `daemon-converge.yml` and
+`daemon-colocated-refresh.yml` import `caddy/tasks/repair-modes.yml` (vendor
+Caddy folders root:tp `rx`, ACL traverse) and
+`turbopanel-user/tasks/vendor-locks.yml` (uv lock-file modes). After a Deno
+bump, `deno-runtime/tasks/restart-dependents.yml` restarts every
+`turbopanel-*` unit still running the deleted binary, except the daemon and
+instance units, whose restarts the update flow owns. The control-plane units
+(caddy, dbstudio, ui, website, redis) set `StartLimitIntervalSec=0` and
+`RestartSteps`/`RestartMaxDelaySec`, so a burst never leaves one stopped; the
+redis unit is not re-rendered by an update playbook, so an updated host gets
+the same settings from a drop-in (`redis/tasks/retry-dropin.yml`, written by
+daemon-converge and the co-located refresh; daemon-reload only). `RestartSteps`
+needs systemd 254; an older systemd ignores it with a warning. A unit that
+fails to restart after a Deno bump is reported, never failing the play.
+
+`daemon-converge` does not run the hosting-caddy role; the daemon sets the edge
+up on the first compose deploy that needs it. The role grants `tpedge` exactly
+what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on
 `/etc/turbopanel/hosting{,/sites}` (so every Caddyfile and snippet the daemon

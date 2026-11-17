@@ -36,7 +36,6 @@
     turbopanel_uid: 9999
     turbopanel_gid: 9999
     turbopanel_service_name: turbopaneld
-    turbopanel_tunnel_token: ""
     turbopanel_instance_ca: ""
     turbopanel_start: true
 

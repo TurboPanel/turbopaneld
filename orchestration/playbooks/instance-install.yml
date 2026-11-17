@@ -100,7 +100,6 @@
     turbopanel_service_name: turbopaneld
     turbopanel_instance_url: ""
     turbopanel_instance_ca: ""
-    turbopanel_tunnel_token: ""
     turbopanel_after_instance_service: true
     turbopanel_start: "{{ instance_start }}"
 

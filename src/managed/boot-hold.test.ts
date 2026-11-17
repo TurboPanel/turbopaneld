@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
+import { managedDir } from "./engine-paths.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { waitFor } from "../testing/wait-for.ts";
@@ -18,7 +19,12 @@ import {
   lookupManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
-import type { ManagedHaMemberRecord } from "./ha-member.ts";
+import {
+  managedHaMemberPath,
+  type ManagedHaMemberRecord,
+  readManagedHaMember,
+  saveManagedHaMember,
+} from "./ha-member.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -63,6 +69,24 @@ function docker(outcomes: boolean[] = []) {
   };
   return { run, calls };
 }
+
+test("a stored member record without peerCount is rejected, not read as peerless", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await Deno.mkdir(managedDir(layout, PRIMARY_ID), { recursive: true });
+    await saveManagedHaMember(layout, record());
+    assertEquals(
+      (await readManagedHaMember(layout, PRIMARY_ID))?.peerCount,
+      1,
+    );
+    const { peerCount: _dropped, ...partial } = record();
+    await Deno.writeTextFile(
+      managedHaMemberPath(layout, PRIMARY_ID),
+      JSON.stringify(partial),
+    );
+    assertEquals(await readManagedHaMember(layout, PRIMARY_ID), null);
+  });
+});
 
 test("only a primary with a peer is holdable", () => {
   assert(isHoldablePrimary(record()));

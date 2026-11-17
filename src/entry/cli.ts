@@ -48,7 +48,6 @@ export type InstallerCliFlags = {
   instanceUrl?: string;
   start: boolean;
   instanceCa?: string;
-  tunnelToken?: string;
   varsFile?: string;
   playbook?: InstallerPlaybook;
 };
@@ -305,9 +304,6 @@ export function parseInstallerFlags(
       }
       case "--instance-ca":
         flags.instanceCa = requireFlagValue(arg, args[++i], io);
-        break;
-      case "--tunnel-token":
-        flags.tunnelToken = requireFlagValue(arg, args[++i], io);
         break;
       case "--vars-file":
         flags.varsFile = requireFlagValue(arg, args[++i], io);

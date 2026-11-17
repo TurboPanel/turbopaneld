@@ -106,6 +106,7 @@ function parseRecord(text: string): ManagedHaMemberRecord | null {
       (value.role !== "primary" && value.role !== "replica") ||
       typeof value.containerName !== "string" ||
       typeof value.replicaPeerCount !== "number" ||
+      typeof value.peerCount !== "number" ||
       typeof value.updatedAt !== "string"
     ) {
       return null;

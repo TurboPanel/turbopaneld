@@ -1,0 +1,46 @@
+---
+# A Deno bump prunes the superseded version directory, but a unit started
+# before the bump keeps running the deleted binary (/proc/<pid>/exe shows
+# "(deleted)") until something restarts it. Restart those units here, after
+# the prune. Found by what is actually running, so a unit added later is
+# covered without a list.
+#
+# Never restarted from here: turbopaneld (this play runs inside it on a
+# managed host; the update flow restarts it once) and turbopanel-instance (the
+# control-plane update owns that restart under its health check and rollback).
+# A no-op when nothing runs a deleted Deno.
+- name: Restart units still running a replaced Deno binary
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: |
+      set -u
+      vendor={{ turbopanel_vendor_dir | quote }}/deno
+      units=
+      for exe in /proc/[0-9]*/exe; do
+        target=$(readlink "$exe" 2>/dev/null) || continue
+        case $target in
+          "$vendor"/*"/deno (deleted)") ;;
+          *) continue ;;
+        esac
+        pid=${exe#/proc/}; pid=${pid%/exe}
+        unit=$(sed -n 's#^0::/system.slice/\(turbopanel-[^/]*\.service\)$#\1#p' "/proc/$pid/cgroup" 2>/dev/null | head -n1)
+        [ -n "$unit" ] || continue
+        case $unit in
+          turbopaneld.service|turbopanel-instance.service) continue ;;
+        esac
+        case " $units " in *" $unit "*) ;; *) units="$units $unit" ;; esac
+      done
+      for unit in $units; do
+        echo "restarting $unit (was running a replaced Deno)"
+        systemctl restart "$unit" || echo "WARNING: restarting $unit failed"
+      done
+  register: _deno_dependents_restart
+  changed_when: "'restarting ' in _deno_dependents_restart.stdout"
+  # One unit that will not restart must not fail the rest of the update; it is
+  # reported below and keeps its own restart policy.
+  failed_when: false
+
+- name: Report units that did not restart after a Deno replacement
+  ansible.builtin.debug:
+    msg: "{{ _deno_dependents_restart.stdout_lines | select('search', 'WARNING') | list }}"
+  when: "'WARNING' in (_deno_dependents_restart.stdout | default(''))"

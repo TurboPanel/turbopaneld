@@ -36,6 +36,21 @@ Docker Compose. The daemon:
    A refused `.htaccess` line makes Apache answer 500 for that folder and its
    reason lands in that file.
 
+   **Walls on hosts an update reaches.** Hosts deployed before the walls have
+   vhosts, `php.ini` and `php-fpm.conf` without them. After a daemon update,
+   `site/apache-walls-repair.ts` (started from `entry/run.ts` once the daemon is
+   ready) patches each existing Apache PHP site in place: the vhost gets the
+   wall lines and its key, the runtime gets the key, `site-guard.php` and the
+   guard lines, through the same stage, probe, commit and rollback a deploy
+   uses. The patched text must equal what the renderers write (the tests pin
+   that). It is idempotent and recorded once per daemon version in
+   `<stateDir>/sites/.apache-walls-repair.json`, and only when no site failed.
+   The vhost is read again under the environment lock before it is patched (a
+   deploy may have rewritten it since the listing); without a runtime record
+   the lock is taken on every environment id the file name could hold. A static
+   or shared-pool vhost gets the unset lines only; a shared-pool one has no
+   single runtime to key and is also logged as needing a redeploy.
+
    **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
    socket path is no boundary. Every Apache PHP runtime therefore has a site
    key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
@@ -72,8 +87,8 @@ Docker Compose. The daemon:
    answers 403 (fail closed). The first deploy of an existing site changes the
    runtime and the vhost together, so its PHP pages can answer 403 for the few
    seconds between the PHP restart and the Apache reload. A runtime has its guard
-   only after its own site is deployed; until then another site can still proxy
-   to it and run its existing scripts. The Apache role does tighten every vhost
+   only after its own site is deployed or the update repair above has run; until
+   then another site can still proxy to it and run its existing scripts. The Apache role does tighten every vhost
    already on disk at the host's first Apache deploy (`orchestration/AGENTS.md`):
    no `FileInfo`, the closed list, the strip lines. Known limit: a `[P]` to a
    FastCGI listener on loopback that is not a site runtime is not covered by the

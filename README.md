@@ -19,7 +19,7 @@ On each enrolled server, `turbopaneld`:
 - Runs Ansible playbooks to install runtimes, Docker, Caddy, databases, and application stacks
 - Executes correlated commands (deploy, stop, ping, hostname, reboot, timezone, NTP, TurboFabric, managed engines)
 - Collects and reports host metrics (`/proc`-based, 20-metric contract)
-- Applies dev-sync tarballs and tunnel tokens when co-located with a developer control plane
+- Applies dev-sync tarballs when co-located with a developer control plane
 
 The daemon is the **only** component that runs Ansible on managed hosts.
 

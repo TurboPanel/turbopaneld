@@ -1560,13 +1560,12 @@ tp_site_lifecycle_ok() {
     [ "$_sl_dev" -eq 1 ]
 }
 
-# A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
-# names the daemon has always used for the instance's own tunnel (`instance`,
-# and `default` from the installer's --tunnel-token). Kept equal to
-# isTunnelId in src/tunnels/connector-unit.ts.
+# A Cloudflare tunnel connector's id: a lower-case UUID, or `instance` (the
+# control plane's own tunnel). Kept equal to isTunnelId in
+# src/tunnels/connector-unit.ts.
 tp_tunnel_id_ok() {
   case "$1" in
-    instance|default) return 0 ;;
+    instance) return 0 ;;
   esac
   tp_uuid_ok "$1"
 }
@@ -2874,7 +2873,11 @@ tp_verb_test() {
 
 tp_verb_cat() {
   [ "$#" -eq 2 ] && [ "$1" = "--" ] || tp_die "cat: only cat -- PATH"
-  tp_require_class "$2" tree
+  # A per-site PHP config file too (php.ini, php-fpm.conf, the guard): the
+  # daemon reads them to add the Apache walls to a runtime an update left as it
+  # was. Only those three names reach this class; they hold no secret the
+  # daemon cannot derive (the site key is an HMAC under its own secret).
+  tp_require_class "$2" tree phpconf
   tp_open_verified "$2" || tp_die "no such file $2"
   cat <&3
 }
@@ -4042,8 +4045,7 @@ tp_reserved_name() {
 }
 
 tp_new_name_ok() {
-  # Never <name>-grp: that is an older site owner's group name (groupmod
-  # renames it). Never all digits: getent would read it as an id.
+  # Never all digits: getent would read it as an id.
   case "$1" in *[!0-9]*) ;; *) return 1 ;; esac
   tp_owner_shape_ok "$1" || return 1
   ! tp_reserved_new_name "$1" || return 1
@@ -4159,24 +4161,6 @@ tp_verb_usermod() {
     *) tp_die "usermod: unsupported form" ;;
   esac
   tp_exec usermod "$@"
-}
-
-# groupmod -n NAME NAME-grp: a site owner's group from before the group took
-# the owner's own name is renamed in place, so everything keyed on its gid
-# (files, memberships) keeps working. Only for a principal NAME whose primary
-# group is NAME-grp in the principal band, with no group NAME yet, and only to
-# a name a new site owner could take.
-tp_verb_groupmod() {
-  [ "$#" -eq 3 ] && [ "$1" = "-n" ] && [ "$3" = "$2-grp" ] ||
-    tp_die "groupmod: only -n NAME NAME-grp"
-  tp_retire_name_ok "$2" || tp_die "groupmod: refusing name $2"
-  ! tp_reserved_name "$2" || tp_die "groupmod: refusing name $2"
-  tp_is_principal "$2" || tp_die "groupmod: $2 is not a principal"
-  ! tp_getent group "$2" >/dev/null 2>&1 || tp_die "groupmod: group $2 exists"
-  _gm_gid="$(tp_band_group_gid "$3")" || tp_die "groupmod: no group $3 in the principal band"
-  [ "$(tp_getent passwd "$2" | cut -d: -f4)" = "$_gm_gid" ] ||
-    tp_die "groupmod: $3 is not $2's primary group"
-  tp_exec groupmod -n "$2" "$3"
 }
 
 tp_verb_gpasswd() {
@@ -6068,6 +6052,18 @@ tp_verb_tunnel_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# Says `present` or `absent` for a tunnel's token copy (the folder is closed to
+# every generic verb, and the daemon cannot read it).
+tp_verb_tunnel_env_present() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-present: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-present: refusing tunnel id $1"
+  if tp_pin_dir "$R_TUNNELENV" && [ -f "./$1.env" ] && [ ! -L "./$1.env" ]; then
+    echo present
+  else
+    echo absent
+  fi
+}
+
 # --- helper container ports (lib/tp-php-loopback) --------------------------
 # A helper container publishes one port on 127.0.0.1 for the Hosting Account of
 # its project, and lib/tp-php-loopback opens that port to that account only. The
@@ -7076,7 +7072,6 @@ case "$_verb" in
   ip) tp_verb_ip "$@" ;;
   wg) tp_verb_wg "$@" ;;
   groupadd) tp_verb_groupadd "$@" ;;
-  groupmod) tp_verb_groupmod "$@" ;;
   useradd) tp_verb_useradd "$@" ;;
   usermod) tp_verb_usermod "$@" ;;
   gpasswd) tp_verb_gpasswd "$@" ;;
@@ -7106,6 +7101,7 @@ case "$_verb" in
   site-env-remove) tp_verb_site_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  tunnel-env-present) tp_verb_tunnel_env_present "$@" ;;
   reach-ports-install) tp_verb_reach_ports_install "$@" ;;
   reach-ports-remove) tp_verb_reach_ports_remove "$@" ;;
   cache-prepare) tp_verb_cache_prepare "$@" ;;

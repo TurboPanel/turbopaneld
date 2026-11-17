@@ -123,7 +123,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
     staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
     `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
-    <id>`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
+    <id>`; `tunnel-env-present <id>` prints `present` or `absent`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
     sync`, which lets only root and the daemon account reach the connector
     metrics band on loopback, see `src/tunnels/AGENTS.md`); a project's helper
     container ports work the same way in `<config>/reach-ports/<environment
@@ -213,8 +213,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     takes the same names and only a fresh group of the user's own name: in the
     band, nobody's primary group yet, no members. Residual risk accepted with
     the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
-    lines that name a group are not scanned. `groupmod` only renames a site
-    owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
+    lines that name a group are not scanned. It takes `chpasswd`
     input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and

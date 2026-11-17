@@ -2,6 +2,9 @@
 Description=TurboPanel Caddy reverse proxy
 After=network-online.target {{ instance_service_name }}.service
 Wants=network-online.target
+# Never give up retrying: the default start limit (5 starts in 10 s) left this
+# unit failed after a burst of quick failures until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -64,6 +67,8 @@ ExecReload={{ turbopanel_vendor_dir }}/caddy/current/caddy reload --config {{ tu
 TimeoutStopSec=60
 Restart=always
 RestartSec=2
+RestartSteps=10
+RestartMaxDelaySec=120
 CPUQuota=100%
 
 [Install]

@@ -1264,7 +1264,7 @@ the whole-server table and re-rendered by every environment deploy and removal
 (`tunnel-state.ts`, table in `hosting/tunnel-routes.json`), which drops any name
 now served here so Caddy never sees a name twice. The hop uses the
 organization's certificate: material under `hosting/peer/<id>/`, trusted only for
-the fixed name `tp-peer.internal`, which a small reserved site loads on the
+the fixed name `tp-peer.internal` (`leaf.key` is written only when the table needs it, with an empty group entry, and dropped once a table that does not is in place), which a small reserved site loads on the
 receiving server (Caddy picks a certificate by the connecting name). That site
 has no `bind`: Caddy makes one server per set of listen addresses, so a bound
 peer site would be a server of its own holding only that name, and a forwarded

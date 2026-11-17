@@ -11,6 +11,7 @@ import type {
 import { ConfigValueError } from "../contracts/config-values.ts";
 import { buildCaddyHostnameRoutes, caddyfile, siteSnippet } from "./ingress.ts";
 import {
+  canonicalAddress,
   peerUpstreamText,
   renderTunnelFile,
   TUNNEL_PEER_PORT,
@@ -515,6 +516,12 @@ const DEDICATED_SITE = `https://:9443 {
   handle @tp_outside {
     abort
   }
+  @tp_repeated_host {
+    vars_regexp {http.request.header.X-Tp-Peer-Host} ,
+  }
+  handle @tp_repeated_host {
+    abort
+  }
   @tp_door_0 {
     header X-Tp-Peer-Host app.example.com
     remote_ip 10.0.0.5
@@ -638,4 +645,110 @@ test("a peer server with no inbound names hands nothing on", () => {
   ).contents;
   assertEquals(text.includes("@tp_door_"), false);
   assertEquals(text.includes("reverse_proxy https://127.0.0.1:443"), false);
+});
+
+test("a source address is rendered as local_address when it is on this host", () => {
+  const routes: TunnelRoute[] = [{
+    hostname: "app.example.com",
+    local: false,
+    lock: false,
+    upstreams: [
+      {
+        serverId: SERVER_A,
+        addresses: ["10.0.0.5", "fd00::5"],
+        localAddress: "10.0.0.7",
+      },
+      { serverId: SERVER_B, addresses: ["10.0.0.6"], localAddress: "10.0.0.7" },
+    ],
+  }];
+  const owned = new Set(["10.0.0.7"]);
+  const out = renderTunnelFile(
+    routes,
+    { ...INPUTS, localAddresses: owned },
+    new Set(),
+  );
+  assertStringIncludes(out.contents, "    local_address 10.0.0.7\n");
+  // The IPv6 target cannot be dialed from an IPv4 source.
+  assertStringIncludes(
+    out.contents,
+    "reverse_proxy 10.0.0.5:443 10.0.0.6:443 {",
+  );
+  assertEquals(out.contents.includes("[fd00::5]:"), false);
+  // Leaving a target out is said, not silent.
+  assertEquals(out.warnings.length, 1);
+  assertStringIncludes(out.warnings[0], "other address family");
+
+  // Not checked when the host's addresses are not given.
+  assertStringIncludes(
+    renderTunnelFile(routes, INPUTS, new Set()).contents,
+    "local_address 10.0.0.7",
+  );
+});
+
+test("a source address that is not on this host, or that the carriers disagree on, is left out with a warning", () => {
+  const route = (first?: string, second?: string): TunnelRoute[] => [{
+    hostname: "app.example.com",
+    local: false,
+    lock: false,
+    upstreams: [
+      { serverId: SERVER_A, addresses: ["10.0.0.5"], localAddress: first },
+      { serverId: SERVER_B, addresses: ["10.0.0.6"], localAddress: second },
+    ],
+  }];
+  const inputs = { ...INPUTS, localAddresses: new Set(["10.0.0.7"]) };
+  for (
+    const routes of [
+      route("10.0.0.99", "10.0.0.99"),
+      route("10.0.0.7", "10.0.0.8"),
+      route("10.0.0.7", undefined),
+    ]
+  ) {
+    const out = renderTunnelFile(routes, inputs, new Set());
+    assertEquals(out.contents.includes("local_address"), false);
+    assertEquals(out.warnings.length, 1);
+    assertStringIncludes(out.contents, "10.0.0.5:443 10.0.0.6:443");
+  }
+  // No pin on any upstream: nothing to say.
+  const none = renderTunnelFile(route(), inputs, new Set());
+  assertEquals(none.warnings, []);
+  assertEquals(none.contents.includes("local_address"), false);
+  // A pin with no target of its family is dropped, not the route.
+  const v6only = renderTunnelFile(
+    [{
+      hostname: "app.example.com",
+      local: false,
+      lock: false,
+      upstreams: [{
+        serverId: SERVER_A,
+        addresses: ["10.0.0.5"],
+        localAddress: "fd00::7",
+      }],
+    }],
+    { ...INPUTS, localAddresses: new Set(["fd00::7"]) },
+    new Set(),
+  );
+  assertEquals(v6only.contents.includes("local_address"), false);
+  assertEquals(v6only.warnings.length, 1);
+});
+
+test("addresses compare by their canonical form", () => {
+  assertEquals(canonicalAddress("FD00:0:0:0:0:0:0:7"), "fd00::7");
+  assertEquals(canonicalAddress("fe80::1%eth0"), "fe80::1");
+  assertEquals(canonicalAddress("10.0.0.7"), "10.0.0.7");
+  const out = renderTunnelFile(
+    [{
+      hostname: "app.example.com",
+      local: false,
+      lock: false,
+      upstreams: [{
+        serverId: SERVER_A,
+        addresses: ["fd00::5"],
+        localAddress: "FD00::7",
+      }],
+    }],
+    { ...INPUTS, localAddresses: new Set(["fd00:0:0:0:0:0:0:7"]) },
+    new Set(),
+  );
+  assertStringIncludes(out.contents, "local_address fd00::7");
+  assertEquals(out.warnings, []);
 });

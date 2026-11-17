@@ -170,3 +170,13 @@ non-link binary of that release, an installed config whose port equals the
 unit's `PORT=`, and an id that stays with the first account that used it.
 `journalctl` may read `turbopanel-cache-*`. The daemon side is
 `src/deploy/cache/`.
+
+## Update repairs read per-site PHP files through `tp-host cat`
+
+`tp-host cat -- PATH` accepts the `phpconf` class as well as `tree`, so the
+daemon can read a runtime's `php.ini`, `php-fpm.conf` and guard file when the
+one-time Apache walls repair (`src/deploy/site/apache-walls-repair.ts`) brings
+an older runtime up to date. Nothing else under `php/sites` reaches `cat`
+(`tp-host.test.ts` covers it), and it stays read-only. The same update also
+repairs the vendored Caddy folder modes and the lock-file modes through the
+`caddy` and `turbopanel-user` roles (`repair-modes.yml`, `vendor-locks.yml`).

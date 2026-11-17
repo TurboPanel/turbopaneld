@@ -56,6 +56,14 @@ drop with every update. `<id>` is the provider's tunnel id (lower-case UUID) or
   and `<vendor>` are not set by this code, so a canary check must confirm both
   are traversable by other users (`namei -m` on the binary path as a non-tp user)
   before calling the feature proven.
+- A resend (`server.tunnel.connectors`) also repairs a connector whose record is
+  here but whose unit file is gone: the unit is written again from the record
+  (same port, slot and program) pointing at the token copy already in
+  `<config>/tunnel-env/`, started, then enabled, and the record is written with
+  the pinned version (so the next update does not switch slots for nothing); no
+  token is staged. If the token copy is gone too, the unit cannot start: the
+  command fails naming the missing token, and the unit is left stopped and not
+  enabled.
 - Purge needs no tunnel-specific code beyond the port lock's table name: it
   stops and removes every `turbopanel*` unit (the boot unit below included) and
   removes `/etc/turbopanel`, `/var/lib/turbopanel` and `/opt/turbopanel` whole,
