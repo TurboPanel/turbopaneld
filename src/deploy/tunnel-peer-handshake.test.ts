@@ -13,6 +13,8 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   renderTunnelFile,
+  TUNNEL_ERROR_STATUS,
+  TUNNEL_ERROR_TEXT,
   TUNNEL_PEER_HOST_HEADER as PEER_HOST_HEADER,
   TUNNEL_PEER_PORT,
 } from "./tunnel-caddy.ts";
@@ -130,6 +132,16 @@ async function waitFor(port: number): Promise<void> {
 }
 
 type Reply = { code: number; status: string; body: string };
+
+/**
+ * `abort` closes the connection with no answer: curl reports no status (000)
+ * and an empty reply, a reset or an HTTP/2 stream reset (52, 56 or 92). A bind
+ * or connect failure, or an error page, is a different result and must not pass.
+ */
+function assertAborted(reply: Reply, what: string): void {
+  assertEquals(reply.status, "000", `${what}: an HTTP status came back`);
+  assert([52, 56, 92].includes(reply.code), `${what}: curl exit ${reply.code}`);
+}
 
 async function curl(args: string[]): Promise<Reply> {
   const result = await run("curl", [
@@ -492,10 +504,32 @@ ${receiver}`;
         `${HOST}:${SENDER_PORT + 1}:127.0.0.1`,
         `https://${HOST}:${SENDER_PORT + 1}/`,
       ]);
-      assert(
-        viaKernel.status !== "200" && !viaKernel.body.includes("hosted"),
-        "an unpinned sender got through a door that lists another source",
-      );
+      // The sender cannot get through, so the visitor sees the fixed error page.
+      assertEquals(viaKernel.status, String(TUNNEL_ERROR_STATUS));
+      assertStringIncludes(viaKernel.body, TUNNEL_ERROR_TEXT);
+
+      // The refusal itself is the door aborting the connection: straight to the
+      // peer port, 127.0.0.1 (the kernel's choice) is cut and 127.0.0.3 is let in.
+      const direct = (from: string) =>
+        curl([
+          "--interface",
+          from,
+          "--cert",
+          join(dir, "server.pem"),
+          "--key",
+          join(dir, "server.key"),
+          "--resolve",
+          `tp-peer.internal:${PEER_PORT}:127.0.0.1`,
+          "--cacert",
+          join(dir, "org.pem"),
+          "-H",
+          `${PEER_HOST_HEADER}: ${HOST}`,
+          `https://tp-peer.internal:${PEER_PORT}/`,
+        ]);
+      assertAborted(await direct("127.0.0.1"), "an unpinned source");
+      const listed = await direct("127.0.0.3");
+      assertEquals(listed.status, "200");
+      assertEquals(listed.body, `hosted ${HOST}`);
     } finally {
       try {
         child?.kill();
