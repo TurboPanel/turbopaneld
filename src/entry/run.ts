@@ -19,6 +19,10 @@ import { syncAccountWallQuietly } from "../deploy/account-wall.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { armPhpPatchRestarts } from "../deploy/site/php-patch-restart.ts";
+import {
+  hostApacheWallsRepairIo,
+  repairApacheWalls,
+} from "../deploy/site/apache-walls-repair.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
@@ -148,6 +152,11 @@ export type DaemonRunIo = {
   syncAccountWall?: () => Promise<void>;
   /** Start the PHP patch restarts (the boot pass and the watch). */
   armPhpPatchRestarts?: () => void;
+  /**
+   * The one-time Apache walls repair for a host that took a daemon update
+   * (once per daemon version); runs in the background.
+   */
+  repairApacheWalls?: () => Promise<unknown>;
   /** Start containers a restore stopped before the daemon died. */
   recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
@@ -516,6 +525,17 @@ async function afterOrchestration(
   // After the runtimes are back: restart what still runs a PHP build older
   // than the installed one, in the background, and keep watching.
   (io.armPhpPatchRestarts ?? (() => armPhpPatchRestarts(resolveLayout())))();
+  // Also in the background: add the Apache walls to the sites an update left
+  // as they were (once per daemon version; a failure is only ever reported).
+  (io.repairApacheWalls ??
+    (() => repairApacheWalls(hostApacheWallsRepairIo(resolveLayout()))))()
+    .catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "Apache walls repair failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
     .catch((err) => {
       (io.logWarn ?? logWarn)(

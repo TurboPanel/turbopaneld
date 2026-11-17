@@ -35,6 +35,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   phpReconciles: number;
   wallSyncs: number;
   phpPatchArms: number;
+  wallsRepairs: number;
   stackHeals: number;
   instanceStops: number;
   sentinelStops: number;
@@ -50,6 +51,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let phpReconciles = 0;
   let wallSyncs = 0;
   let phpPatchArms = 0;
+  let wallsRepairs = 0;
   let stackHeals = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
@@ -122,6 +124,10 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     armPhpPatchRestarts: () => {
       phpPatchArms += 1;
     },
+    repairApacheWalls: () => {
+      wallsRepairs += 1;
+      return Promise.resolve();
+    },
     shouldEnableDockerIntegration: () => false,
     shouldConnectToInstance: () => false,
     createDockerClient: () => dockerClient,
@@ -164,6 +170,9 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get phpPatchArms() {
       return phpPatchArms;
     },
+    get wallsRepairs() {
+      return wallsRepairs;
+    },
     get phpReconciles() {
       return phpReconciles;
     },
@@ -191,6 +200,7 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   // The wall is reloaded at start even when orchestration never becomes ready.
   assertEquals(stub.wallSyncs, 1);
   assertEquals(stub.phpPatchArms, 0);
+  assertEquals(stub.wallsRepairs, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
   assertEquals(stub.instanceStops, 0);
@@ -220,6 +230,8 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   assertEquals(stub.wallSyncs >= 1, true);
   // The patch restarts are armed once the runtimes are back.
   assertEquals(stub.phpPatchArms, 1);
+  // The Apache walls repair starts with them, in the background.
+  assertEquals(stub.wallsRepairs, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);
   assertEquals(stub.dockerCloses, 1);
   assertEquals(stub.instanceStops, 1);

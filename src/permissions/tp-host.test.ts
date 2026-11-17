@@ -1491,6 +1491,18 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
+test("cat reads a site's PHP config file and nothing else under php/sites", async () => {
+  await withHost(async (host) => {
+    const dir = host.path("etc/turbopanel/php/sites/shop-0a1b2c3d4e5f-fcgi84");
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(join(dir, "php.ini"), "memory_limit=64M\n");
+    await Deno.writeTextFile(join(dir, "notes.txt"), "x\n");
+    const ok = await host.run(["cat", "--", join(dir, "php.ini")]);
+    assertEquals(ok.stdout, "memory_limit=64M\n");
+    await refused(host, ["cat", "--", join(dir, "notes.txt")]);
+  });
+});
+
 test("test -d answers for a real directory, never a symlink to one", async () => {
   await withHost(async (host) => {
     const release = host.path("srv/users/alice/sites/web/releases/r1");
