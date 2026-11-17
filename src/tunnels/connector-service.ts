@@ -539,8 +539,22 @@ async function reinstallMissingUnit(
   await lockMetricsPorts(io);
   const unit = tunnelUnitName(record.id, slot);
   await systemctl(io, ["reset-failed", unit]);
+  // Started before it is enabled: the token copy sits in a folder only root
+  // can read, so a missing one shows as a unit that cannot start (systemd
+  // refuses a missing environment file), and then nothing is left enabled.
+  const started = await systemctl(io, ["restart", unit]);
+  if (!started.success) {
+    const result = await systemctl(io, ["show", "--property=Result", unit]);
+    await systemctl(io, ["stop", unit]);
+    throw new Error(
+      result.stdout.includes("Result=resources")
+        ? `the stored run token copy for tunnel ${record.id} is missing, so its connector was not started or enabled; the run token must be installed again`
+        : `systemctl restart failed: ${started.stderr || "no detail"}`,
+    );
+  }
   await mustSystemctl(io, ["enable", unit]);
-  await mustSystemctl(io, ["restart", unit]);
+  // The unit runs the program this daemon pins, so the record says so.
+  await writeRecord(io, { ...record, version: io.version });
   logInfo("tunnels", `connector ${record.id}: put its missing unit back`);
 }
 
@@ -549,28 +563,29 @@ async function reinstallMissingUnit(
  * hand, or given up on by systemd after repeated crashes), or whose unit file
  * is gone (it is written again from the record and the stored token copy). A
  * unit that is running or still starting is left alone, so a resend never
- * bounces it. Returns true when it was started or reinstalled.
+ * bounces it. Says what it did: `reinstalled`, `started`, or `null` when the
+ * connector was left alone.
  */
 export async function startStoppedConnector(
   io: ConnectorIo,
   id: string,
-): Promise<boolean> {
+): Promise<"reinstalled" | "started" | null> {
   assertTunnelId(id);
   return await serialized(async () => {
     const record = await readRecord(io, id);
-    if (!record) return false;
+    if (!record) return null;
     const exists = io.unitExists ?? defaultUnitExists;
     if (!(await exists(tunnelUnitPath(id, undefined, record.slot)))) {
       await reinstallMissingUnit(io, record);
-      return true;
+      return "reinstalled";
     }
     const unit = tunnelUnitName(id, record.slot);
     const state = await systemctl(io, ["is-active", unit]);
     const status = mapConnectorStatus(state.stdout.split("\n")[0] ?? "", null);
-    if (status !== "stopped" && status !== "failed") return false;
+    if (status !== "stopped" && status !== "failed") return null;
     await systemctl(io, ["reset-failed", unit]);
     await mustSystemctl(io, ["start", unit]);
-    return true;
+    return "started";
   });
 }
 

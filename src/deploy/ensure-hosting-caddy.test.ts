@@ -859,6 +859,65 @@ test("grantHostingCaddyRead sets rX on files, rX plus a default on folders, skip
   }
 });
 
+test("grantHostingCaddyRead empties the group entry of a peer key and leaves the web server's read", async () => {
+  const host = fakeHost({ acl: OK_ACL });
+  const dir = await plantHostingTree();
+  try {
+    const keyDir = join(dir, "peer", "abc");
+    await Deno.mkdir(keyDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(join(keyDir, "leaf.key"), "k", { mode: 0o600 });
+    await Deno.writeTextFile(join(keyDir, "leaf.pem"), "c", { mode: 0o640 });
+    await grantHostingCaddyRead(dir, host.run);
+    const emptied = host.calls.filter((c) => c.args.includes("g::---"));
+    assertEquals(emptied.length, 1);
+    assertEquals(emptied[0]!.args.slice(-1), [join(keyDir, "leaf.key")]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a new peer key ends up with an empty group entry and the web server's read, in the real ACL", async () => {
+  const me = await new Deno.Command("id", { args: ["-un"] }).output();
+  const user = new TextDecoder().decode(me.stdout).trim();
+  const dir = await Deno.makeTempDir({ prefix: "tp-hosting-acl-real-" });
+  try {
+    const peer = join(dir, "peer");
+    await Deno.mkdir(peer, { mode: 0o750 });
+    const probe = await new Deno.Command("setfacl", {
+      args: ["-d", "-m", "g::r-x,u:" + user + ":r-x", peer],
+      stderr: "null",
+    }).output().catch(() => ({ success: false }));
+    if (!probe.success) return; // no ACL support here
+    const keyDir = join(peer, "abc");
+    await Deno.mkdir(keyDir, { mode: 0o750 });
+    const key = join(keyDir, "leaf.key");
+    await Deno.writeTextFile(key, "k", { mode: 0o600 });
+    const run = async (command: string, args: string[]) => {
+      const out = await new Deno.Command(command, {
+        args,
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return {
+        success: out.success,
+        stdout: new TextDecoder().decode(out.stdout),
+        stderr: new TextDecoder().decode(out.stderr),
+      };
+    };
+    // As created: the folder's default entry gives the group a read.
+    const before = (await run("getfacl", ["-p", "--", key])).stdout;
+    assertStringIncludes(before, "group::r-x");
+    await grantHostingCaddyRead(dir, run, user);
+    const shown = (await run("getfacl", ["-p", "--", key])).stdout;
+    assertStringIncludes(shown, "group::---");
+    assertEquals(new RegExp(`user:${user}:r`).test(shown), true);
+    // The mask still lets the web server read, and nobody write.
+    assertEquals(/mask::r-[-x]/.test(shown), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 test("grantHostingCaddyRead leaves a host without the account alone", async () => {
   const dir = await plantHostingTree();
   try {

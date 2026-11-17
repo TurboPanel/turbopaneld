@@ -167,6 +167,9 @@ export type EnsureHostingCaddyDeps = {
   grantHostingRead?: (hostingDir: string) => Promise<void>;
 };
 
+/** The peer certificate key: `<hosting>/peer/<id>/leaf.key` (`TUNNEL_PEER_FILES.key`). */
+const PEER_KEY_PATH = /\/peer\/[^/]+\/leaf\.key$/;
+
 /** A path under the hosting config directory and whether it is a folder. */
 type HostingEntry = { path: string; dir: boolean };
 
@@ -219,7 +222,8 @@ function parseUserEntries(
  * if it already carries the entry. A host without the account (dev, tests) is
  * left alone. The files the daemon writes must keep a group-or-mask read bit
  * (0640): a later chmod 0600 would mask the entry away, which the check
- * reports.
+ * reports. The one exception is the peer certificate key, whose group entry is
+ * emptied after the grant (the mask keeps the web server's read).
  */
 export async function grantHostingCaddyRead(
   hostingDir: string,
@@ -249,6 +253,16 @@ export async function grantHostingCaddyRead(
     access,
     `d:${access}`,
   ]);
+  // A peer certificate key is for the daemon and the web server only. The
+  // folder's default entries give a new file `group::r-x`, which the entry
+  // above would turn into a group read; empty the group entry again (the mask
+  // stays at what the web server needs).
+  await apply(
+    entries.filter((e) => !e.dir && PEER_KEY_PATH.test(e.path)).map((e) =>
+      e.path
+    ),
+    ["g::---"],
+  );
 
   // The read-back decides, not setfacl's exit code.
   const shown = await runCommand("getfacl", [

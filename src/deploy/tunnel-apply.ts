@@ -81,13 +81,15 @@ function peerKeyNeeded(
 
 /**
  * The folder holds what the table needs: the certificate and the trust bundle
- * always, the private key exactly when {@link peerKeyNeeded} (a key left from
- * an earlier table that needed it is replaced by a folder without it).
+ * always, the private key when {@link peerKeyNeeded}. With `exact`, a key the
+ * table does not need counts as not present (it is dropped after the table is
+ * in place, see {@link dropUnusedKey}).
  */
 async function peerFilesPresent(
   hostingDir: string,
   id: string,
   withKey: boolean,
+  exact = false,
 ): Promise<boolean> {
   const paths = tunnelPeerPaths(hostingDir, id);
   const [certificate, key, trust] = await Promise.all([
@@ -95,7 +97,15 @@ async function peerFilesPresent(
     exists(paths.key),
     exists(paths.trust),
   ]);
-  return certificate && trust && key === withKey;
+  return certificate && trust && (exact ? key === withKey : key || !withKey);
+}
+
+/**
+ * Remove a key the table in place no longer uses. Only after the swap: until
+ * then the running Caddy and a failed table still point at it.
+ */
+async function dropUnusedKey(hostingDir: string, id: string): Promise<void> {
+  await Deno.remove(tunnelPeerPaths(hostingDir, id).key).catch(() => {});
 }
 
 /**
@@ -103,9 +113,10 @@ async function peerFilesPresent(
  * unsealed key into `hosting/peer/<id>/` through a sibling folder renamed into
  * place. Returns true when the folder was made by this call. The certificate
  * and trust bundle are 0640 (public, read by the hosting Caddy account through
- * the folder's access list, like the site files). The key is 0600: only the
- * daemon account and, through the access list the hosting grant adds, the
- * hosting Caddy account can read it; its group class holds nothing.
+ * the folder's access list, like the site files). The key is created 0600 and
+ * the hosting grant (`grantHostingCaddyRead`) then gives it the Caddy entry
+ * and empties its group entry, so only the daemon account and the hosting
+ * Caddy account read it.
  */
 async function ensurePeerMaterial(
   hostingDir: string,
@@ -181,7 +192,12 @@ async function unchangedResult(
   ) return undefined;
   const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
   const filesOk = prior.peerId === undefined ||
-    await peerFilesPresent(hostingDir, prior.peerId, peerKeyNeeded(prior));
+    await peerFilesPresent(
+      hostingDir,
+      prior.peerId,
+      peerKeyNeeded(prior),
+      true,
+    );
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
   // A site deployed since (or written by an older daemon) may hold other peers.
   if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
@@ -381,6 +397,9 @@ async function applyTunnelRoutesLocked(
       : writeTunnelState(hostingDir, state));
     await settleGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
+    if (peerId !== undefined && !peerKeyNeeded(state)) {
+      await dropUnusedKey(hostingDir, peerId);
+    }
     // Logged, not returned: a warning makes the control plane send the table again.
     for (const warning of plan.warnings) logWarn("tunnels", warning);
     logInfo(

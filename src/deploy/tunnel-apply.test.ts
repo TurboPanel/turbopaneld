@@ -257,6 +257,35 @@ test("a server that only carries a tunnel gets no private key, and one left from
   });
 });
 
+test("a refused table that no longer needs the key leaves the key the live file points at", async () => {
+  await withHost(async ({ layout, hostingDir, refuse }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(layout, table(), deps);
+    const id = (await readTunnelState(hostingDir))!.peerId!;
+    const paths = tunnelPeerPaths(hostingDir, id);
+    refuse.tunnel = true;
+    // Same material, but no peer sends here any more: the key is not needed.
+    await assertRejects(() =>
+      applyTunnelRoutes(
+        layout,
+        table({ hash: HASH_2, peerAddresses: [] }),
+        deps,
+      )
+    );
+    assertEquals((await readTunnelState(hostingDir))!.hash, HASH_1);
+    assertEquals(await exists(paths.key), true);
+    // Once Caddy accepts the table, the key goes.
+    refuse.tunnel = false;
+    await applyTunnelRoutes(
+      layout,
+      table({ hash: HASH_2, peerAddresses: [] }),
+      deps,
+    );
+    assertEquals(await exists(paths.key), false);
+    assertEquals(await exists(paths.certificate), true);
+  });
+});
+
 test("the same table again changes nothing and runs no command", async () => {
   await withHost(async ({ layout, calls }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };

@@ -1,4 +1,10 @@
-import { assert, assertEquals, assertRejects, assertThrows } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertStringIncludes,
+  assertThrows,
+} from "@std/assert";
 import { join } from "@std/path";
 import {
   parseTunnelConnectorsPayload,
@@ -148,39 +154,91 @@ for (const state of ["inactive", "failed"]) {
   });
 }
 
-test("a connector whose unit file is gone is installed again from its token copy by a resend", async () => {
-  await withIo(async (io, calls) => {
+/** An io that records the unit text at each `install` and can lose its unit or its token copy. */
+function unitRecorder(base: ConnectorIo, calls: string[]) {
+  const units: string[] = [];
+  const lost = { unit: false, tokenCopy: false };
+  const io: ConnectorIo = {
+    ...base,
+    unitExists: () => Promise.resolve(!lost.unit),
+    run: async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      const verb = args.find((a) =>
+        ["cmp", "install", "restart", "show"].includes(a)
+      );
+      if (verb === "install") {
+        units.push(await Deno.readTextFile(args.at(-2)!));
+      }
+      // The unit on disk never equals the new text (a fresh or a lost unit).
+      if (verb === "cmp") return { success: false, stdout: "", stderr: "" };
+      if (verb === "restart" && lost.tokenCopy) {
+        return { success: false, stdout: "", stderr: "Job failed" };
+      }
+      if (verb === "show") {
+        return { success: true, stdout: "Result=resources\n", stderr: "" };
+      }
+      return { success: true, stdout: "", stderr: "" };
+    },
+  };
+  return { io, units, lost };
+}
+
+test("a connector whose unit file is gone is written again like a fresh install, from its token copy", async () => {
+  await withIo(async (base, calls) => {
+    const { io, units, lost } = unitRecorder(base, calls);
     await handleTunnelConnectors(payload(), "now", {
       io,
       decryptSecrets: unseal(),
     });
+    assertEquals(units.length, 1);
+    // The daemon now pins a newer program than the one that installed it.
+    io.version = "2026.12.0";
+    io.ensureBinary = () =>
+      Promise.resolve("/opt/turbopanel/vendor/cloudflared/y/cloudflared");
+    lost.unit = true;
     calls.length = 0;
     const result = await handleTunnelConnectors(payload(), "now", {
-      io: {
-        ...io,
-        unitExists: () => Promise.resolve(false),
-        // No unit file on disk: the comparison with the new text fails.
-        run: (command, args) => {
-          calls.push([command, ...args].join(" "));
-          return Promise.resolve({
-            success: !args.includes("cmp"),
-            stdout: "",
-            stderr: "",
-          });
-        },
-      },
+      io,
       decryptSecrets: unseal(),
     });
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
+    assertEquals(units.length, 2);
+    assertEquals(
+      units[1],
+      units[0]!.replace("/x/cloudflared", "/y/cloudflared"),
+    );
     const unit = `turbopanel-tunnel-${ID_A}.service`;
     const at = (needle: string) => calls.findIndex((c) => c.includes(needle));
-    assert(at("cmp ") >= 0, calls.join("\n"));
-    assert(at("install ") > at("cmp "));
     assert(at("daemon-reload") > at("install "));
-    assert(at(`enable ${unit}`) > at("daemon-reload"));
-    assert(at(`restart ${unit}`) > at(`enable ${unit}`));
+    assert(at(`restart ${unit}`) > at("daemon-reload"));
+    assert(at(`enable ${unit}`) > at(`restart ${unit}`));
     // The stored token copy is reused: no new token copy is made.
     assertEquals(calls.filter((c) => c.includes("tunnel-env-install")), []);
+    // The record carries the version that now runs, so no pointless update.
+    lost.unit = false;
+    assertEquals((await updateConnector(io, ID_A)).kind, "current");
+  });
+});
+
+test("a missing token copy fails the repair, names the token and leaves the unit not enabled", async () => {
+  await withIo(async (base, calls) => {
+    const { io, lost } = unitRecorder(base, calls);
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    lost.unit = true;
+    lost.tokenCopy = true;
+    calls.length = 0;
+    const error = await assertRejects(() =>
+      handleTunnelConnectors(payload(), "now", {
+        io,
+        decryptSecrets: unseal(),
+      })
+    );
+    assertStringIncludes(String(error), "run token copy");
+    assertStringIncludes(String(error), ID_A);
+    assertEquals(calls.filter((c) => c.includes(" enable ")), []);
   });
 });
 

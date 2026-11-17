@@ -59,8 +59,11 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
 - A resend (`server.tunnel.connectors`) also repairs a connector whose record is
   here but whose unit file is gone: the unit is written again from the record
   (same port, slot and program) pointing at the token copy already in
-  `<config>/tunnel-env/`, then enabled and restarted; no token is staged. If the
-  token copy is gone too, the unit fails to start and the next resend reports it.
+  `<config>/tunnel-env/`, started, then enabled, and the record is written with
+  the pinned version (so the next update does not switch slots for nothing); no
+  token is staged. If the token copy is gone too, the unit cannot start: the
+  command fails naming the missing token, and the unit is left stopped and not
+  enabled.
 - Hosts that held a tunnel as `<id>.token` in the tunnels folder migrate on
   daemon start: the file becomes a service and is deleted once the service is
   enabled and (re)started (not once `/ready` passes; status shows that). If a
