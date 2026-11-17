@@ -106,7 +106,8 @@ tp_write_file() (
 
 # The `--version` line of a binary, or nothing when it hangs or fails.
 tp_binary_version_line() {
-  timeout "$VERSION_READ_TIMEOUT_SEC" "$1" --version 2>/dev/null | head -1 || true
+  _vl_bin="$1"
+  timeout "$VERSION_READ_TIMEOUT_SEC" "$_vl_bin" --version 2>/dev/null | head -1 || true
 }
 
 # Documented `turbopaneld --version` line:

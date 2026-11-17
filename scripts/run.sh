@@ -1066,10 +1066,12 @@ tp_manifest_field() {
 # inside an artifact object can never stand in for it. Nothing when the field
 # is missing or is not a string.
 tp_manifest_top_field() {
-  printf '%s' "$1" | python3 -c 'import json, sys
+  _top_json="$1"
+  _top_name="$2"
+  printf '%s' "$_top_json" | python3 -c 'import json, sys
 v = json.load(sys.stdin).get(sys.argv[1])
 if isinstance(v, str) and "\n" not in v:
-    print(v)' "$2" 2>/dev/null || true
+    print(v)' "$_top_name" 2>/dev/null || true
 }
 
 tp_manifest_artifact_field() {
@@ -1804,7 +1806,8 @@ tp_emit_update_stage() {
 
 # The `--version` line of a binary, or nothing when it hangs (10 s) or fails.
 tp_binary_version_line() {
-  timeout 10 "$1" --version 2>/dev/null | head -1 || true
+  _vl_bin="$1"
+  timeout 10 "$_vl_bin" --version 2>/dev/null | head -1 || true
 }
 
 # Documented `turbopaneld --version` line:
