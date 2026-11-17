@@ -91,10 +91,9 @@ through `tp-host`, like "Operation not permitted".
 `command-outbox.ts` journals every accepted command under
 `<stateDir>/commands/inflight/<id>.json` (atomic temp file + rename): the
 accept time, the latest step plan (rewritten on a step change, otherwise at
-most every 30 s) and, once finished, the final `command-outcome`. With a
-control plane that advertises the feature the entry is removed only when its
-`command-outcome-ack` arrives; until then the outcome is sent again on every
-attach and every 30 s. Without the feature it is removed once sent, as before.
+most every 30 s) and, once finished, the final `command-outcome`. The
+entry is removed only when its `command-outcome-ack` arrives; until then the
+outcome is sent again on every attach and every 30 s.
 Kept results are paced: at most `OUTCOME_BURST_MAX` (20) per socket per 30 s
 window (the control plane closes a socket past 120 frames a minute), never
 sent twice on one socket between its open and its attach, and the rest go out

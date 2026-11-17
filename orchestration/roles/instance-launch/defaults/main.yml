@@ -224,9 +224,6 @@ rabbitmq_user: turbopanel
 redis_socket_path: /run/turbopanel/redis.sock
 # Server metrics on by default; set false to opt out.
 turbopanel_server_metrics_retention_days: 90
-# Retired separate mailer unit name — kept only so converge can stop/remove
-# an older host's turbopanel-mailer.service after email moved in-process.
-mailer_service_name: turbopanel-mailer
 mailpit_web_port: 8025
 mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio

@@ -887,17 +887,6 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/ensure-principal.ts|["-n","groupmod","-n",groupName,legacyName]',
-    {
-      argv: ["groupmod", "-n", "dave", "dave-grp"],
-      // A site owner from before the group took the owner's own name.
-      setup: {
-        groups: ["dave-grp:x:15004:"],
-        passwd: ["dave:x:15004:15004::{P}/srv/users/dave/home:/bin/bash"],
-      },
-    },
-  ),
-  tpHost(
     'src/deploy/ensure-principal.ts|["-n","usermod","-s",shell,principal.username]',
     { argv: ["usermod", "-s", "/usr/sbin/nologin", "alice"] },
   ),
@@ -1047,16 +1036,6 @@ const SITES: CallSite[] = [
         `${P}/run/turbopanel/instance-acme.sock`,
       ],
       setup: { sockets: [`${P}/run/turbopanel/instance-acme.sock`] },
-    },
-  ),
-  tpHost(
-    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","stop",unit]',
-    {
-      argv: [
-        "systemctl",
-        "stop",
-        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
-      ],
     },
   ),
   tpHost(

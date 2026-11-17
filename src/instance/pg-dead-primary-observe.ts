@@ -12,9 +12,6 @@
  *   with at least one replica peer (`ha-member.ts`); the control plane still
  *   requires a healthy same-datacenter `failover` replica before promoting;
  * - globally off with `TURBOPANEL_MANAGED_PG_PROBE=off`;
- * - never sends unless the attached control plane advertises
- *   `managed-ha-probe-v1` (an older one would fail over whatever member it
- *   currently calls primary, without checking who reported);
  * - suppressed while a platform intent marker is active (`ha-intent.ts`);
  * - never sends after `detach()` (daemon SIGTERM) or unless systemd positively
  *   reports the host `running`/`degraded` (2 s timeout, fails closed);
@@ -105,8 +102,6 @@ export type IntentState = {
 export type PgDeadPrimaryObserverOptions = {
   /** Returns true only when the event reached an open socket. */
   send: (message: PgDeadPrimaryEventMessage) => boolean;
-  /** Control plane advertised `managed-ha-probe-v1`. */
-  peerSupportsProbe: () => boolean;
   config?: Partial<PgDeadPrimaryConfig>;
   /** Monotonic ms for streaks/graces/back-off. Defaults to `performance.now`. */
   monoMs?: () => number;
@@ -195,7 +190,6 @@ function isHealthySample(sample: ProbeSample): boolean {
 export class PgDeadPrimaryObserver {
   readonly #config: PgDeadPrimaryConfig;
   readonly #send: PgDeadPrimaryObserverOptions["send"];
-  readonly #peerSupportsProbe: () => boolean;
   readonly #monoMs: () => number;
   readonly #wallMs: () => number;
   readonly #globallyEnabled: () => boolean;
@@ -221,7 +215,6 @@ export class PgDeadPrimaryObserver {
   constructor(options: PgDeadPrimaryObserverOptions) {
     this.#config = { ...DEFAULT_PG_DEAD_PRIMARY_CONFIG, ...options.config };
     this.#send = options.send;
-    this.#peerSupportsProbe = options.peerSupportsProbe;
     this.#monoMs = options.monoMs ?? (() => performance.now());
     this.#wallMs = options.wallMs ?? (() => Date.now());
     this.#globallyEnabled = options.globallyEnabled ??
@@ -594,16 +587,6 @@ export class PgDeadPrimaryObserver {
       logInfo(
         "managed",
         `pg dead-primary suppressed (host not confirmed running) managedId=${record.managedId}`,
-      );
-      return false;
-    }
-    if (!this.#peerSupportsProbe()) {
-      // Count it as an event so the re-send back-off applies: logged a few
-      // times per incident, never every tick.
-      detector.markEmitted(this.#monoMs());
-      logWarn(
-        "managed",
-        `pg dead-primary detected but control plane lacks managed-ha-probe-v1; not sent managedId=${record.managedId}`,
       );
       return false;
     }

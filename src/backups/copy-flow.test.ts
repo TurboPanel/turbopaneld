@@ -177,18 +177,12 @@ test("a manual backup is queued, copied, reported, and its copy removed on delet
       assertEquals(reports[0]!.report.state, "copied");
       assertEquals(reports[0]!.report.objectKey, key);
 
-      // The reporter sends it only to a control plane that lists the feature,
-      // and drops the file when the answer comes back.
+      // The reporter sends it and drops the file when the answer comes back.
       const sent: unknown[] = [];
-      let supports = false;
       const reporter = new BackupCopyReporter({
         send: (m) => (sent.push(m), true),
-        peerSupports: () => supports,
         layout,
       });
-      await reporter.tick();
-      assertEquals(sent.length, 0);
-      supports = true;
       await reporter.tick();
       assertEquals(sent.length, 1);
       const frame = sent[0] as { id: string; type: string; state: string };

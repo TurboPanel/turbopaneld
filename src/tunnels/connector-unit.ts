@@ -22,25 +22,18 @@ export const TUNNEL_UNIT_PREFIX = "turbopanel-tunnel-";
 
 /** The self-hosted instance's own tunnel. */
 export const INSTANCE_TUNNEL_ID = "instance";
-/**
- * The name the installer's `--tunnel-token` has always written
- * (`default.token`). Kept so a host installed that way migrates.
- */
-export const LEGACY_DEFAULT_TUNNEL_ID = "default";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
- * A tunnel id: a lower-case UUID (the provider's tunnel id), or one of the two
- * legacy names. Anything else is refused, so an id can never become a path
+ * A tunnel id: a lower-case UUID (the provider's tunnel id), or `instance`. Anything else is refused, so an id can never become a path
  * segment or a unit name that reaches somewhere else. `tp-host` applies the
  * same rule (`tp_tunnel_id_ok`).
  */
 export function isTunnelId(value: unknown): value is string {
   return typeof value === "string" &&
-    (value === INSTANCE_TUNNEL_ID || value === LEGACY_DEFAULT_TUNNEL_ID ||
-      UUID_RE.test(value));
+    (value === INSTANCE_TUNNEL_ID || UUID_RE.test(value));
 }
 
 export function assertTunnelId(value: unknown): asserts value is string {

@@ -276,31 +276,6 @@ test("environment.deploy rejects a Compose-invalid hostingIngressNetwork", () =>
   );
 });
 
-test("environment.deploy rejects the pre-rename traditionalWebSites key", () => {
-  // Unknown keys are ignored here, so without this guard an old control plane
-  // would parse zero sites: stale vhosts keep serving on loopback while hosting
-  // Caddy finds no loopback entry and routes the hostname to Traefik. That is a
-  // 502 with the old content still live, on a deploy that reported success.
-  assertThrows(
-    () =>
-      parseEnvironmentDeployPayload({
-        environmentId: "env-1",
-        projectId: "proj-1",
-        organizationId: "org-1",
-        projectName: "demo",
-        composeFiles: [{
-          filename: "compose.yaml",
-          role: "runtime",
-          content: "services: {}\n",
-        }],
-        hostings: [],
-        traditionalWebSites: [],
-      }),
-    TypeError,
-    "traditionalWebSites was renamed to sites",
-  );
-});
-
 test("environment.deploy rejects hostingIngress that is not traefik", () => {
   const serviceId = "00000000-0000-4000-8000-0000000000aa";
   assertThrows(

@@ -573,7 +573,11 @@ test("a deploy that waits for the host says so again every minute until it runs 
   h.reporter.running(true);
   const afterRun = h.sent.length;
   h.advance(DEPLOY_PROGRESS_WAITING_BEAT_MS * 3);
-  assertEquals(h.sent.length, afterRun);
+  // The running keepalive repeats the payload, but no more waiting beats.
+  for (const frame of h.sent.slice(afterRun)) {
+    assertEquals(frame.progress.runningSince !== null, true);
+  }
+  h.reporter.finish("cancelled");
   assertEquals(h.timers.size, 0);
 });
 
@@ -588,7 +592,6 @@ test("finishing a deploy that is still waiting stops the repeat", () => {
 });
 
 test("a running deploy repeats its payload as a keepalive until it finishes", () => {
-  let enabled = true;
   const seen: string[] = [];
   const reporter = createDeployStepReporter({
     id: "dispatch-ka",
@@ -603,7 +606,6 @@ test("a running deploy repeats its payload as a keepalive until it finishes", ()
       return timersKa.length;
     },
     clearTimer: () => {},
-    keepalive: () => enabled,
     onSnapshot: (progress) => snapshots.push(progress.steps.length),
   });
   const timersKa: Array<{ fn: () => void; ms: number }> = [];
@@ -614,9 +616,8 @@ test("a running deploy repeats its payload as a keepalive until it finishes", ()
   assertEquals(timersKa.at(-1)?.ms, DEPLOY_PROGRESS_KEEPALIVE_MS);
   timersKa.shift()?.fn();
   assertEquals(seen.length, before + 1);
-  enabled = false; // an older control plane: no repeats
   timersKa.shift()?.fn();
-  assertEquals(seen.length, before + 1);
+  assertEquals(seen.length, before + 2);
   assertEquals(snapshots.length, seen.length);
   const timersAtFinish = timersKa.length;
   reporter.finish("succeeded");

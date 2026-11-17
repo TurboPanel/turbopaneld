@@ -145,11 +145,7 @@ pointing at `/run/secrets/tp_root_password`, a read-only bind of
 `<stateDir>/managed/<id>/secrets/root-password` (created `0600` by the daemon, then handed to the engine's own user by a
 throwaway root container: `engineUser:engineGroup` `0400`, never world-readable;
 the daemon never rewrites it afterwards), so `docker inspect` shows only a path. The file persists
-(restart policies re-bind it). An engine created before this keeps the old
-env form (persisted compose still contains the placeholder): an apply that
-leaves its compose byte-identical keeps it (no restart); any apply that
-recreates the container anyway moves it to the file form. Only then does the
-legacy `.env` (`0600`, deleted in `finally`) apply to `compose --env-file … up`.
+(restart policies re-bind it).
 
 Compose project names:
 
@@ -160,12 +156,11 @@ Compose project names:
   (`managed.apply`, `managed.ingress.reconcile`, `managed.ha.reconcile`,
   `environment.deploy` when any compose service joins it). There is **no
   daemon-side default and no literal fallback** — a command without the field
-  is a contract error, not a cue to invent a name. Hosts provisioned before the
-  UUID rename may still have a leftover `turbopanel-managed` bridge; ingress
+  is a contract error, not a cue to invent a name. When the name changes, ingress
   reconcile force-recreates onto `payload.managedNetwork` (removing a
   same-named container that Docker Compose no longer owns, which otherwise
   fails with "already in use by container"), then `docker network connect`s a
-  frontend that is still only on the leftover, then prunes that name. Engines
+  frontend that is still only on the previous bridge, then prunes that name. Engines
   join it **always**
   (not only when exposed) and **never** join the tenant hosting-ingress
   network

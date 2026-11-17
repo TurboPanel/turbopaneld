@@ -642,11 +642,6 @@ function renewalStatePath(layout: LayoutPaths): string {
   return join(layout.stateDir, "instance", "acme-renewal-state.json");
 }
 
-/** Where an earlier release looked; read only, never written. */
-function legacyRenewalStatePath(layout: LayoutPaths): string {
-  return join(layout.stateDir, "instance-acme", "renewal-state.json");
-}
-
 async function readOptionalText(path: string): Promise<string | null> {
   try {
     return await Deno.readTextFile(path);
@@ -657,8 +652,7 @@ async function readOptionalText(path: string): Promise<string | null> {
 }
 
 async function readRenewalState(layout: LayoutPaths): Promise<RenewalState> {
-  const raw = await readOptionalText(renewalStatePath(layout)) ??
-    await readOptionalText(legacyRenewalStatePath(layout));
+  const raw = await readOptionalText(renewalStatePath(layout));
   return raw === null ? emptyState() : parseRenewalState(raw);
 }
 

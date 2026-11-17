@@ -179,22 +179,17 @@ async function withService(
   }
 }
 
-test("status goes out only to a control plane that lists dev-host-v1", async () => {
+test("status goes out on attach and on every tick", async () => {
   await withService(async ({ service, written }) => {
     await service.run();
     assertEquals(written.length, 1);
     const sent: DaemonMessage[] = [];
-    let supports = false;
     service.attach({
       send: (m) => {
         sent.push(m);
         return true;
       },
-      peerSupports: () => supports,
     });
-    assertEquals(sent.length, 0);
-    supports = true;
-    service.peerFeaturesChanged();
     assertEquals(sent, [{
       type: "dev-host-status",
       status: { parts: [], lastFetchAt: null, job: null },
@@ -250,7 +245,6 @@ test("the minute timer ticks and stop cancels it; a job change goes out at once"
         sent.push(m);
         return true;
       },
-      peerSupports: () => true,
     });
     const job: DevHostJob = {
       id: "j",

@@ -20,7 +20,7 @@ function reading(
   return { peers, observedAt: OBSERVED_AT };
 }
 
-function setup(options: { supported?: boolean; open?: boolean } = {}) {
+function setup(options: { open?: boolean } = {}) {
   const sent: DaemonMessage[] = [];
   const clock = { ms: 1_000_000 };
   let listener: ((r: FabricPeerReportReading) => void) | undefined;
@@ -31,7 +31,6 @@ function setup(options: { supported?: boolean; open?: boolean } = {}) {
       sent.push(message);
       return true;
     },
-    peerSupportsReport: () => options.supported ?? true,
     subscribe: () => (fn) => {
       subscriptions++;
       listener = fn;
@@ -54,13 +53,6 @@ const healthyA: FabricReconcileObservedPeer = {
   publicKey: KEY_A,
   health: "healthy",
 };
-
-test("nothing is sent when the control plane does not list the feature", () => {
-  const { reporter, sent, emit } = setup({ supported: false });
-  reporter.attach();
-  emit(reading(healthyA));
-  assertEquals(sent, []);
-});
 
 test("the first reading after attach is sent with peers and observedAt", () => {
   const { reporter, sent, emit } = setup();

@@ -7,7 +7,6 @@ import {
   ensureManagedIngressNetwork,
   pruneStaleManagedDockerNetworks,
   removeUnusedManagedDockerNetwork,
-  RETIRED_MANAGED_NETWORK_NAME,
   staleManagedDockerNetworkNames,
 } from "./networks.ts";
 
@@ -18,6 +17,8 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+const OLD_NETWORK = "old-net";
 
 /** Managed network names are the `network(kind='managed')` row's bare UUID. */
 const MANAGED_NETWORK = "00000000-0000-4000-8000-0000000000ee";
@@ -129,22 +130,14 @@ test("ensureManagedIngressNetwork rejects a malformed name before touching Docke
   }
 });
 
-test("staleManagedDockerNetworkNames includes the retired name and a previous compose name", () => {
+test("staleManagedDockerNetworkNames names only a previous compose name", () => {
   assertEquals(
-    staleManagedDockerNetworkNames(
-      MANAGED_NETWORK,
-      RETIRED_MANAGED_NETWORK_NAME,
-    ),
-    [RETIRED_MANAGED_NETWORK_NAME],
+    staleManagedDockerNetworkNames(MANAGED_NETWORK, OLD_NETWORK),
+    [OLD_NETWORK],
   );
+  assertEquals(staleManagedDockerNetworkNames(MANAGED_NETWORK, null), []);
   assertEquals(
-    staleManagedDockerNetworkNames(MANAGED_NETWORK, "old-net"),
-    ["old-net", RETIRED_MANAGED_NETWORK_NAME].sort((a, b) =>
-      a.localeCompare(b)
-    ),
-  );
-  assertEquals(
-    staleManagedDockerNetworkNames(RETIRED_MANAGED_NETWORK_NAME, null),
+    staleManagedDockerNetworkNames(MANAGED_NETWORK, MANAGED_NETWORK),
     [],
   );
 });
@@ -157,7 +150,7 @@ test("containerMissesManagedNetwork treats empty inspect as unknown", () => {
   );
   assertEquals(
     containerMissesManagedNetwork(
-      [RETIRED_MANAGED_NETWORK_NAME],
+      [OLD_NETWORK],
       MANAGED_NETWORK,
     ),
     true,
@@ -167,7 +160,7 @@ test("containerMissesManagedNetwork treats empty inspect as unknown", () => {
 test("containerNamesFromNetworkInspect reads Docker inspect JSON", () => {
   const stdout = JSON.stringify([
     {
-      Name: RETIRED_MANAGED_NETWORK_NAME,
+      Name: OLD_NETWORK,
       Containers: {
         abc: { Name: "frontend-in" },
         def: { Name: "engine-1" },
@@ -185,7 +178,7 @@ test("pruneStaleManagedDockerNetworks skips empty inspect stdout", async () => {
   const calls: string[][] = [];
   await pruneStaleManagedDockerNetworks(
     MANAGED_NETWORK,
-    RETIRED_MANAGED_NETWORK_NAME,
+    OLD_NETWORK,
     (args) => {
       calls.push([...args]);
       return Promise.resolve(okResult());
@@ -193,7 +186,7 @@ test("pruneStaleManagedDockerNetworks skips empty inspect stdout", async () => {
     { disconnect: true },
   );
   assertEquals(calls, [
-    ["network", "inspect", RETIRED_MANAGED_NETWORK_NAME],
+    ["network", "inspect", OLD_NETWORK],
   ]);
 });
 
@@ -201,7 +194,7 @@ test("pruneStaleManagedDockerNetworks disconnects then removes an occupied lefto
   const calls: string[][] = [];
   await pruneStaleManagedDockerNetworks(
     MANAGED_NETWORK,
-    RETIRED_MANAGED_NETWORK_NAME,
+    OLD_NETWORK,
     (args) => {
       calls.push([...args]);
       if (args[0] === "network" && args[1] === "inspect") {
@@ -219,15 +212,15 @@ test("pruneStaleManagedDockerNetworks disconnects then removes an occupied lefto
     { disconnect: true },
   );
   assertEquals(calls, [
-    ["network", "inspect", RETIRED_MANAGED_NETWORK_NAME],
+    ["network", "inspect", OLD_NETWORK],
     [
       "network",
       "disconnect",
       "-f",
-      RETIRED_MANAGED_NETWORK_NAME,
+      OLD_NETWORK,
       "frontend-in",
     ],
-    ["network", "rm", RETIRED_MANAGED_NETWORK_NAME],
+    ["network", "rm", OLD_NETWORK],
   ]);
 });
 
@@ -235,7 +228,7 @@ test("pruneStaleManagedDockerNetworks leaves occupied leftovers when disconnect 
   const calls: string[][] = [];
   await pruneStaleManagedDockerNetworks(
     MANAGED_NETWORK,
-    null,
+    OLD_NETWORK,
     (args) => {
       calls.push([...args]);
       if (args[0] === "network" && args[1] === "inspect") {
@@ -253,7 +246,7 @@ test("pruneStaleManagedDockerNetworks leaves occupied leftovers when disconnect 
     { disconnect: false },
   );
   assertEquals(calls, [
-    ["network", "inspect", RETIRED_MANAGED_NETWORK_NAME],
+    ["network", "inspect", OLD_NETWORK],
   ]);
 });
 

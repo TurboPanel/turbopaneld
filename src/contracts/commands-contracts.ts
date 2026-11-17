@@ -7370,17 +7370,6 @@ export function parseEnvironmentDeployPayload(
     throw new TypeError("hostings must be an array");
   }
 
-  // `traditionalWebSites` was renamed to `sites`. Unknown keys are otherwise
-  // ignored here, so an old control plane would parse **zero** sites: stale
-  // vhosts would keep serving on loopback while hosting Caddy, finding no
-  // loopback entry, routed the hostname to Traefik — a 502 with the old content
-  // still live, and a deploy that reported success. Fail the command instead.
-  if (value.traditionalWebSites !== undefined) {
-    throw new TypeError(
-      "traditionalWebSites was renamed to sites; upgrade the control plane",
-    );
-  }
-
   const managedNetworkServices = parseManagedNetworkServices(
     value.managedNetworkServices,
   );

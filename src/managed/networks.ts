@@ -27,13 +27,6 @@ type RunDockerFn = (
   options?: RunDockerOptions,
 ) => Promise<DockerCliResult>;
 
-/**
- * Pre-UUID managed-engine bridge. Provisioning before the rename left this
- * name on the host; the control plane now stamps the `network` row UUID.
- * Never create it — only prune it after ProxySQL/engines join the current name.
- */
-export const RETIRED_MANAGED_NETWORK_NAME = "turbopanel-managed";
-
 /** Docker network names to remove once `currentName` is the live managed bridge. */
 export function staleManagedDockerNetworkNames(
   currentName: string,
@@ -41,9 +34,6 @@ export function staleManagedDockerNetworkNames(
 ): string[] {
   const names = new Set<string>();
   if (previousName && previousName !== currentName) names.add(previousName);
-  if (RETIRED_MANAGED_NETWORK_NAME !== currentName) {
-    names.add(RETIRED_MANAGED_NETWORK_NAME);
-  }
   return [...names].sort((a, b) => a.localeCompare(b));
 }
 
@@ -130,7 +120,7 @@ function networkCreateAlreadyExists(stderr: string): boolean {
 /**
  * Attach a running container to the current managed-engine bridge.
  * Compose `--force-recreate` can throw or no-op while the frontend stays on
- * a leftover `turbopanel-managed` endpoint.
+ * a leftover endpoint of the previous bridge.
  */
 export async function ensureContainerJoinedManagedNetwork(
   containerName: string,
@@ -164,8 +154,7 @@ export async function ensureContainerJoinedManagedNetwork(
 }
 
 /**
- * Drop leftover managed-engine bridges (retired `turbopanel-managed` and a
- * previous compose name). After a migrate, disconnect stragglers then `rm`.
+ * Drop the leftover managed-engine bridge of a previous compose name. After a migrate, disconnect stragglers then `rm`.
  * When `disconnect` is false, only remove unused (zero-container) networks.
  */
 export async function pruneStaleManagedDockerNetworks(

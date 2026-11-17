@@ -11,7 +11,7 @@ import {
   clampHeartbeatSeconds,
   hostCapacityMoved,
   IdlePresence,
-  installIdlePresenceProviders,
+  installIdlePresenceProviders as installProviders,
   jitteredMaxConnectionAgeMs,
   MAX_CONNECTION_AGE_JITTER,
   MAX_CONNECTION_AGE_MS,
@@ -24,6 +24,20 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+/**
+ * Installs the presence providers; unless a test says otherwise, the host
+ * resources a heartbeat compares against are the ones the hello carried, so a
+ * quiet host reports no capacity change.
+ */
+function installIdlePresenceProviders(
+  source: Parameters<typeof installProviders>[0],
+): () => void {
+  return installProviders({
+    readHostResources: () => source.getHostHelloIdentity?.().resources,
+    ...source,
+  });
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1030,7 +1044,6 @@ function balloonHost(memTotalBytes: number): HostResources {
 }
 
 function capacityPresence(
-  flag: boolean,
   readResources: () => HostResources,
 ): {
   presence: IdlePresence;
@@ -1073,7 +1086,6 @@ function capacityPresence(
     idleCheckIntervalMs,
     idleThresholdMs: idleCheckIntervalMs,
     staleConnectionMs: 60_000,
-    hostCapacityFlag: () => flag,
   });
   presence.attach(socket as unknown as WebSocket);
   const restore = () => {
@@ -1110,7 +1122,6 @@ test("hostCapacityMoved needs more than 32 MiB, a CPU change or a flag flip", ()
 
 test("IdlePresence hello carries present memory and dynamic memory", () => {
   const { presence, socket, restore } = capacityPresence(
-    false,
     () => balloonHost(372 * MIB),
   );
   try {
@@ -1180,7 +1191,6 @@ test("IdlePresence hello carries the command report only when it is not empty", 
 test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", () => {
   let memTotal = 372 * MIB;
   const { presence, socket, restore, tick } = capacityPresence(
-    true,
     () => balloonHost(memTotal),
   );
   try {
@@ -1211,31 +1221,7 @@ test("IdlePresence re-sends memory on a heartbeat once it moves past 32 MiB", ()
   }
 });
 
-test("IdlePresence never sends memory on a heartbeat to an older control plane", () => {
-  let memTotal = 372 * MIB;
-  const { presence, socket, restore, tick } = capacityPresence(
-    false,
-    () => balloonHost(memTotal),
-  );
-  try {
-    memTotal = 2000 * MIB;
-    tick();
-    tick();
-    tick();
-    for (const frame of framesOfType(socket, "heartbeat")) {
-      const resources = (frame as { resources?: HostResources }).resources;
-      assertEquals(resources?.memory, undefined);
-      assertEquals(resources?.cpus, undefined);
-    }
-  } finally {
-    presence.detach();
-    restore();
-  }
-});
-
-async function heartbeatAfterBuildChange(
-  supports: boolean,
-): Promise<Record<string, unknown>> {
+async function heartbeatAfterBuildChange(): Promise<Record<string, unknown>> {
   let build = makeDaemonBuild("commit-a");
   const restore = installIdlePresenceProviders({
     getBuildInfo: () => build,
@@ -1251,12 +1237,11 @@ async function heartbeatAfterBuildChange(
   });
   const socket = openMockSocket();
   const presence = new IdlePresence({
-    serverId: `srv-cmd-hb-${supports}`,
+    serverId: "srv-cmd-hb",
     idleCheckIntervalMs: 15,
     idleThresholdMs: 15,
     staleConnectionMs: 60_000,
     commandReport: () => REPORT,
-    peerSupports: (feature) => supports && feature === "command-recovery-v1",
   });
   try {
     presence.attach(socket as unknown as WebSocket);
@@ -1271,13 +1256,6 @@ async function heartbeatAfterBuildChange(
     restore();
   }
 }
-
-test("IdlePresence heartbeat carries the command report only for a control plane that advertises the feature", async () => {
-  const supported = await heartbeatAfterBuildChange(true);
-  assertEquals(supported.commands, REPORT);
-  const older = await heartbeatAfterBuildChange(false);
-  assertEquals("commands" in older, false);
-});
 
 test("clampHeartbeatSeconds accepts 15..120 and rejects the rest", () => {
   assertEquals(clampHeartbeatSeconds(25), 25);
@@ -1381,4 +1359,9 @@ test("IdlePresence hello carries the attach proof of a signed session, and only 
     presence.detach();
     restore();
   }
+});
+
+test("IdlePresence heartbeat carries the command report", async () => {
+  const heartbeat = await heartbeatAfterBuildChange();
+  assertEquals(heartbeat.commands, REPORT);
 });

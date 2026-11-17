@@ -402,11 +402,8 @@ export async function provisionManagedRootPasswordFile(
 }
 
 /**
- * Pick the compose form for this apply. A cluster created before the file
- * form has a persisted compose with the password as an env var; when this
- * apply changes nothing else about that compose, keep it byte-identical so
- * `compose up` does not recreate (restart) the engine. Any apply that
- * recreates the container anyway moves it to the file form.
+ * Build the compose for this apply: the root password always in the file form,
+ * and the image already stored on disk kept unless the payload moves it.
  */
 export async function chooseManagedCompose(
   composePath: string,
@@ -425,13 +422,6 @@ export async function chooseManagedCompose(
     } catch {
       storedImage = undefined;
     }
-  }
-  if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
-    const legacy = normalizeManagedCompose(payload, {
-      legacyRootPasswordEnv: true,
-      storedImage,
-    });
-    if (legacy.composeYaml === previous) return legacy;
   }
   return normalizeManagedCompose(payload, { storedImage });
 }

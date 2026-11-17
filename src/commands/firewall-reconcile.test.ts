@@ -441,6 +441,7 @@ test({
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
+    (await import("./command-outbox.ts")).resetCommandOutboxForTests();
     const seen: FirewallReconcilePayload[] = [];
     setCommandRouterHandlersForTests({
       handleFirewallReconcile: (p) => {
@@ -476,7 +477,11 @@ test({
 
       const bad = new MockWebSocket() as unknown as WebSocket;
       await handleCommandDispatch(
-        dispatchMessage({ ...payload(), rules: "all" }),
+        {
+          ...dispatchMessage({ ...payload(), rules: "all" }),
+          id: "cmd-fw-bad",
+          commandId: "cmd-fw-bad",
+        },
         bad,
       );
       const badFrames = (bad as unknown as MockWebSocket).sentFrames.map((f) =>
@@ -502,6 +507,7 @@ test({
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
+    (await import("./command-outbox.ts")).resetCommandOutboxForTests();
     const seen: string[] = [];
     setCommandRouterHandlersForTests({
       handleFirewallConfirm: (p) => {
@@ -536,7 +542,14 @@ test({
       assertEquals(seen, ["c".repeat(64)]);
 
       const bad = new MockWebSocket() as unknown as WebSocket;
-      await handleCommandDispatch(confirmMessage({ digest: "NOPE" }), bad);
+      await handleCommandDispatch(
+        {
+          ...confirmMessage({ digest: "NOPE" }),
+          id: "cmd-fw-bad",
+          commandId: "cmd-fw-bad",
+        },
+        bad,
+      );
       const badFrames = (bad as unknown as MockWebSocket).sentFrames.map((f) =>
         JSON.parse(f) as Record<string, unknown>
       );

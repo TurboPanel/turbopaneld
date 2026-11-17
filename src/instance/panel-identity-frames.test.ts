@@ -1,5 +1,4 @@
 import { assert, assertEquals, assertRejects } from "@std/assert";
-import { verifyHello as legacyVerifyHello } from "../testing/legacy-panel-hello.ts";
 import { createTestPanel } from "../testing/panel-signing.ts";
 import {
   helloNonceFrame,
@@ -409,38 +408,4 @@ test("the identity document's boundSessions member is read only from a verified 
   await assertRejects(() =>
     verifyPanelIdentityDocument(injected, panel.pin(), nowMs)
   );
-});
-
-test("a daemon from before the bound session still verifies a hello that names the server and key", async () => {
-  const panel = await createTestPanel();
-  const ctx = {
-    nonce: NONCE,
-    signing: await panel.signing(),
-    pin: panel.pin(),
-    nowMs: NOW_MS,
-  };
-  const bound = await panel.hello({
-    nonce: NONCE,
-    sessionId: "sess",
-    iat: NOW_S,
-    bind: SERVER_A,
-  });
-  // The control plane's key order: the binding sits between kid and keyset.
-  assertEquals(Object.keys(JSON.parse(bound)).slice(0, 7), [
-    "type",
-    "nonce",
-    "sessionId",
-    "kid",
-    "forServer",
-    "forKey",
-    "keyset",
-  ]);
-  const legacy = await legacyVerifyHello(bound, ctx);
-  assert(legacy.ok);
-  assertEquals(legacy.value.sessionId, "sess");
-  // Exact bytes are signed: changing the bound server's text breaks the old check too.
-  const changed = bound.replace("server-a", "server-v");
-  assertEquals((await legacyVerifyHello(changed, ctx)).ok, false);
-  // And the current check agrees on the same bytes.
-  assert((await verifyHello(bound, { ...ctx, binding: SERVER_A })).ok);
 });

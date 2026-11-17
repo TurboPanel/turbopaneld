@@ -99,6 +99,7 @@ test("resolveDemotedMarkerMemberId prefers the payload then ha-member.json", asy
       role: "primary",
       containerName: "db-1",
       replicaPeerCount: 1,
+      peerCount: 1,
       updatedAt: "2026-10-08T12:00:00.000Z",
     });
     assertEquals(

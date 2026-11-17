@@ -10,10 +10,6 @@ import { dirname, fromFileUrl, join } from "@std/path";
 const test = Deno.test.bind(Deno);
 
 const repoRoot = dirname(dirname(dirname(fromFileUrl(import.meta.url))));
-const letsEncryptTasks = join(
-  repoRoot,
-  "orchestration/roles/instance-certs/tasks/letsencrypt-files.yml",
-);
 const resolveTasks = join(
   repoRoot,
   "orchestration/roles/instance-certs/tasks/resolve-hostnames.yml",
@@ -40,17 +36,6 @@ function findAnsiblePlaybook(): string | undefined {
 }
 
 const ansiblePlaybook = findAnsiblePlaybook();
-
-async function openssl(args: string[]): Promise<void> {
-  const out = await new Deno.Command("openssl", {
-    args,
-    stdout: "null",
-    stderr: "piped",
-  }).output();
-  if (!out.success) {
-    throw new TypeError(new TextDecoder().decode(out.stderr));
-  }
-}
 
 async function runPlaybook(
   bin: string,
@@ -97,142 +82,6 @@ async function runPlaybook(
       new TextDecoder().decode(out.stderr),
   };
 }
-
-function itemResults(output: string, task: string): Map<string, string> {
-  const start = output.indexOf(`TASK [${task}]`);
-  if (start < 0) throw new TypeError(output);
-  const rest = output.slice(start);
-  const next = rest.indexOf("\nTASK [");
-  const section = next < 0 ? rest : rest.slice(0, next);
-  const results = new Map<string, string>();
-  const pattern = /^(changed|ok|failed): \[localhost\] => \(item=([^)]+)\)/gm;
-  let match = pattern.exec(section);
-  while (match) {
-    const status = match[1];
-    const item = match[2];
-    if (status && item) results.set(item, status);
-    match = pattern.exec(section);
-  }
-  return results;
-}
-
-test({
-  name:
-    "Let's Encrypt migration reports changed only when a legacy pair is copied",
-  ignore: ansiblePlaybook === undefined,
-  permissions: { read: true, write: true, run: true, env: true },
-  fn: async () => {
-    const bin = ansiblePlaybook;
-    if (!bin) throw new TypeError("ansible-playbook missing");
-    const root = await Deno.makeTempDir({ prefix: "tp-le-migrate-" });
-    const legacy = join(
-      root,
-      "legacy",
-      "acme-v02.api.letsencrypt.org-directory",
-      "panel.example.com",
-    );
-    const dest = join(root, "certs");
-    const home = join(root, "home");
-    await Deno.mkdir(legacy, { recursive: true });
-    await Deno.mkdir(home, { recursive: true });
-    await openssl([
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      join(legacy, "panel.example.com.key"),
-      "-out",
-      join(legacy, "panel.example.com.crt"),
-      "-days",
-      "1",
-      "-subj",
-      "/CN=panel.example.com",
-      "-addext",
-      "subjectAltName=DNS:panel.example.com",
-    ]);
-    const playbook = join(root, "migrate.yml");
-    await Deno.writeTextFile(
-      playbook,
-      [
-        "---",
-        "- name: Migrate Let's Encrypt certificates",
-        "  hosts: localhost",
-        "  connection: local",
-        "  become: true",
-        "  gather_facts: false",
-        "  vars:",
-        "    turbopanel_hostnames:",
-        "      - host: panel.example.com",
-        "        source: lets-encrypt",
-        '        cert_id: ""',
-        "      - host: other.example.com",
-        "        source: lets-encrypt",
-        '        cert_id: ""',
-        '    turbopanel_legacy_acme_certificate_root: "{{ le_legacy_root }}"',
-        '    turbopanel_state_dir: "{{ le_legacy_root }}"',
-        '    turbopanel_instance_certs_dir: "{{ le_dest }}"',
-        "    turbopanel_group: root",
-        "    caddy_user: root",
-        "  tasks:",
-        "    - name: Include Let's Encrypt file tasks",
-        '      ansible.builtin.include_tasks: "{{ le_tasks }}"',
-        "",
-      ].join("\n"),
-    );
-    const extra = [
-      "-e",
-      `le_legacy_root=${join(root, "legacy")}`,
-      "-e",
-      `le_dest=${dest}`,
-      "-e",
-      `le_tasks=${letsEncryptTasks}`,
-    ];
-    try {
-      const first = await runPlaybook(bin, playbook, home, extra);
-      if (first.code !== 0) throw new TypeError(first.output);
-      const migrated = itemResults(
-        first.output,
-        "Migrate validated legacy control-plane certificates",
-      );
-      assertEquals(migrated.get("panel.example.com"), "changed");
-      assertEquals(migrated.get("other.example.com"), "ok");
-      const present = await new Deno.Command("sudo", {
-        args: [
-          "-n",
-          "test",
-          "-f",
-          join(dest, "letsencrypt-panel.example.com.crt"),
-        ],
-      }).output();
-      assertEquals(present.success, true, first.output);
-      const absent = await new Deno.Command("sudo", {
-        args: [
-          "-n",
-          "test",
-          "-f",
-          join(dest, "letsencrypt-other.example.com.crt"),
-        ],
-      }).output();
-      assertEquals(absent.success, false);
-
-      const second = await runPlaybook(bin, playbook, home, extra);
-      if (second.code !== 0) throw new TypeError(second.output);
-      const again = itemResults(
-        second.output,
-        "Migrate validated legacy control-plane certificates",
-      );
-      assertEquals(again.get("panel.example.com"), "ok");
-      assertEquals(again.get("other.example.com"), "ok");
-    } finally {
-      await new Deno.Command("sudo", {
-        args: ["-n", "rm", "-rf", dest],
-      }).output();
-      await Deno.remove(root, { recursive: true });
-    }
-  },
-});
 
 test({
   name: "hostname projection keeps a forwarded LAN address off hostname rows",

@@ -27,7 +27,7 @@ cleanly removed once enabled** — it also ships replacement builds of libraries
 such as OpenSSL, so dropping the repo breaks the PHP install. Treat it as
 permanent on any host that ever serves PHP.
 
-`php_fpm_series` (`8.4`) drives every package name. `php_fpm_apt_version` is an
+`php_fpm_default_series` (`8.4`) and `php_fpm_versions` drive every package name. `php_fpm_apt_version` is an
 optional exact apt pin; empty means "latest in the series". Extension packages
 split into `php_fpm_baseline_extensions` (always installed, parity with the flags the previous
 source build compiled in.

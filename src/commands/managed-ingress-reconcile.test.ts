@@ -1601,8 +1601,10 @@ test({
       Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
       Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
       try {
+        const first = basePayload();
+        first.managedNetwork = "turbopanel-managed";
         await handleManagedIngressReconcile(
-          basePayload(),
+          first,
           new Date().toISOString(),
           {
             runDocker: fakeRun(),

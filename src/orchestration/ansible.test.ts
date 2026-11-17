@@ -2083,76 +2083,6 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
   );
 });
 
-test("instance-launch migrates a legacy control-plane certificate before the file-backed site", async () => {
-  const tasks = await Deno.readTextFile(
-    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
-  );
-  const resolveAt = tasks.indexOf("resolve-hostnames.yml");
-  const migrateAt = tasks.indexOf(
-    "Migrate validated legacy control-plane Let's Encrypt certificates",
-  );
-  const renderAt = tasks.indexOf("Render the Caddy site config");
-  assertEquals(resolveAt >= 0 && migrateAt > resolveAt, true);
-  assertEquals(renderAt > migrateAt, true);
-  assertMatch(
-    tasks,
-    /turbopanel_legacy_acme_certificate_root: "\{\{ turbopanel_caddy_runtime_dir \}\}\/share\/caddy\/certificates"/,
-    "legacy certificate root is the old control-plane Caddy store",
-  );
-  const resolve = await Deno.readTextFile(
-    join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/instance-certs/tasks/resolve-hostnames.yml",
-    ),
-  );
-  assertMatch(
-    resolve,
-    /turbopanel_public_hostname[\s\S]*'lets-encrypt' if \(turbopanel_tls_mode/,
-    "the deprecated single-hostname alias is a Let's Encrypt name",
-  );
-  const leFiles = await Deno.readTextFile(
-    join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/instance-certs/tasks/letsencrypt-files.yml",
-    ),
-  );
-  const copyAt = leFiles.indexOf(
-    "Migrate validated legacy control-plane certificates",
-  );
-  const statAt = leFiles.indexOf("Stat Let's Encrypt certificates");
-  const hardenAt = leFiles.indexOf(
-    "Harden Let's Encrypt keys for the control-plane Caddy user",
-  );
-  assertEquals(copyAt >= 0 && statAt > copyAt && hardenAt > statAt, true);
-  assertMatch(
-    leFiles,
-    /caddy\/\.local\/share\/caddy\/certificates/,
-    "legacy certificates live under the old control-plane data directory",
-  );
-  assertMatch(
-    leFiles,
-    /openssl", "x509"/,
-    "legacy leaves are parsed with openssl x509",
-  );
-  assertMatch(
-    leFiles,
-    /openssl", "pkey"/,
-    "legacy keys are checked with openssl pkey",
-  );
-  assertMatch(
-    leFiles,
-    /letsencrypt-\$\{LE_HOST\}\.crt/,
-    "migrated leaves use the letsencrypt-<host> names",
-  );
-  assertMatch(leFiles, /-m 0640/, "migrated certificates are mode 0640");
-  assertMatch(leFiles, /-m 0600/, "migrated keys are mode 0600");
-  assertMatch(
-    leFiles,
-    /_le_sites/,
-    "migration covers every Let's Encrypt hostname, including the synthesized alias",
-  );
-});
-
 test("stripe-listen role is unit-only, gated on its optional var, and never re-templates stripe.env", async () => {
   const tasks = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/stripe-listen/tasks/main.yml"),
@@ -2582,11 +2512,6 @@ test(
       launchDefaults.includes("turbopanel_mailer_binary"),
       false,
       "no separate mailer binary path — email is in-process",
-    );
-    assertMatch(
-      launchTasks,
-      /Remove retired mailer systemd unit/,
-      "converge removes the retired turbopanel-mailer unit on older hosts",
     );
     assertEquals(
       launchTasks.includes("turbopanel-mailer.service.j2"),

@@ -8,9 +8,8 @@
  * `ha-member.json` (all engines) and sends one `managed-health-report` frame
  * listing them. A replica whose engine is down goes out as `down: true`.
  *
- * Fire-and-forget and read-only: nothing here decides anything. Sent only to a
- * control plane advertising `managed-health-report-v1`; an older one keeps
- * today's behaviour. If this daemon stops reporting, the control plane shows
+ * Fire-and-forget and read-only: nothing here decides anything.
+ * If this daemon stops reporting, the control plane shows
  * the replica's reading as unknown once it passes the freshness window.
  */
 
@@ -41,8 +40,6 @@ const ENGINE_DOWN_TEXT = "engine not running";
 export type ManagedHealthReporterOptions = {
   /** Send one frame; false when the socket is not open. */
   send: (message: DaemonMessage) => boolean;
-  /** True while the control plane advertises `managed-health-report-v1`. */
-  peerSupportsReport: () => boolean;
   intervalMs?: number;
   now?: () => string;
   /** Test seam: defaults to {@link listManagedHaMembers}. */
@@ -54,7 +51,6 @@ export type ManagedHealthReporterOptions = {
 
 export class ManagedHealthReporter {
   readonly #send: (message: DaemonMessage) => boolean;
-  readonly #peerSupportsReport: () => boolean;
   readonly #intervalMs: number;
   readonly #now: () => string;
   readonly #listMembers: () => Promise<ManagedHaMemberRecord[]>;
@@ -67,7 +63,6 @@ export class ManagedHealthReporter {
 
   constructor(options: ManagedHealthReporterOptions) {
     this.#send = options.send;
-    this.#peerSupportsReport = options.peerSupportsReport;
     this.#intervalMs = options.intervalMs ?? MANAGED_HEALTH_REPORT_INTERVAL_MS;
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#listMembers = options.listMembers ??
@@ -102,7 +97,7 @@ export class ManagedHealthReporter {
   }
 
   async poll(): Promise<void> {
-    if (this.#inFlight || !this.#peerSupportsReport()) return;
+    if (this.#inFlight) return;
     this.#inFlight = true;
     try {
       const replicas = (await this.#listMembers())

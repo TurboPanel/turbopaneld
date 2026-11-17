@@ -10,9 +10,7 @@
  * five minutes, not every minute. The first reading after a (re)connect is
  * always sent.
  *
- * Fire-and-forget and read-only. Sent only to a control plane advertising
- * `fabric-peer-report-v1`; an older one keeps today's behaviour (readings only
- * on reconcile).
+ * Fire-and-forget and read-only.
  */
 
 import type { DaemonMessage } from "../contracts/cell-messages.ts";
@@ -36,8 +34,6 @@ export type FabricPeerSubscribe = (
 export type FabricPeerReporterOptions = {
   /** Send one frame; false when the socket is not open. */
   send: (message: DaemonMessage) => boolean;
-  /** True while the control plane advertises `fabric-peer-report-v1`. */
-  peerSupportsReport: () => boolean;
   /** Registers for refreshed readings; undefined when no fabric port is wired. */
   subscribe: () => FabricPeerSubscribe | undefined;
   nowMs?: () => number;
@@ -55,7 +51,6 @@ export function fabricPeerHealthSignature(
 
 export class FabricPeerReporter {
   readonly #send: (message: DaemonMessage) => boolean;
-  readonly #peerSupportsReport: () => boolean;
   readonly #subscribe: () => FabricPeerSubscribe | undefined;
   readonly #nowMs: () => number;
   #unsubscribe: (() => void) | undefined;
@@ -64,7 +59,6 @@ export class FabricPeerReporter {
 
   constructor(options: FabricPeerReporterOptions) {
     this.#send = options.send;
-    this.#peerSupportsReport = options.peerSupportsReport;
     this.#subscribe = options.subscribe;
     this.#nowMs = options.nowMs ?? Date.now;
   }
@@ -84,9 +78,8 @@ export class FabricPeerReporter {
     this.#lastSentMs = undefined;
   }
 
-  /** Send `reading` when supported and changed or quiet for too long. */
+  /** Send `reading` when changed or quiet for too long. */
   report(reading: FabricPeerReportReading): boolean {
-    if (!this.#peerSupportsReport()) return false;
     const peers = reading.peers.slice(0, FABRIC_PEER_REPORT_MAX_PEERS);
     const signature = fabricPeerHealthSignature(peers);
     const nowMs = this.#nowMs();
