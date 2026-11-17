@@ -40,7 +40,7 @@ test("requireHttpsUrl rejects HTTP overlay artifact URLs", () => {
   assertThrows(
     () =>
       requireHttpsUrl(
-        "http://studio.lan/downloads/daemon/turbopaneld-amd64.tar.zst",
+        "http://dev-workstation.example.lan/downloads/daemon/turbopaneld-amd64.tar.zst",
         "artifact.url",
       ),
     MalformedManifestError,

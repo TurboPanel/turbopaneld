@@ -1,7 +1,7 @@
 import { assertEquals } from "@std/assert";
 import { runServerNetworkCheck } from "./network-check.ts";
 
-const iface = () => new Map([["10.10.0.5", "eth1"]]);
+const iface = () => new Map([["10.50.0.5", "eth1"]]);
 
 function conn(hostname: string) {
   return Promise.resolve({
@@ -13,10 +13,10 @@ function conn(hostname: string) {
 Deno.test("reports reachable with source address and interface", async () => {
   let t = 0;
   const res = await runServerNetworkCheck(
-    [{ peerServerId: "s2", address: "10.10.0.6", port: 22 }],
+    [{ peerServerId: "s2", address: "10.50.0.6", port: 22 }],
     "r1",
     {
-      connect: () => conn("10.10.0.5"),
+      connect: () => conn("10.50.0.5"),
       localInterfaces: iface,
       now: () => t += 7,
     },
@@ -25,10 +25,10 @@ Deno.test("reports reachable with source address and interface", async () => {
   assertEquals(res.id, "r1");
   assertEquals(res.results, [{
     peerServerId: "s2",
-    address: "10.10.0.6",
+    address: "10.50.0.6",
     reachable: true,
     latencyMs: 7,
-    sourceAddress: "10.10.0.5",
+    sourceAddress: "10.50.0.5",
     interface: "eth1",
   }]);
 });
@@ -36,13 +36,13 @@ Deno.test("reports reachable with source address and interface", async () => {
 Deno.test("maps refused and unreachable failures", async () => {
   const res = await runServerNetworkCheck(
     [
-      { peerServerId: "a", address: "10.10.0.6", port: 22 },
-      { peerServerId: "b", address: "10.10.0.7", port: 22 },
+      { peerServerId: "a", address: "10.50.0.6", port: 22 },
+      { peerServerId: "b", address: "10.50.0.7", port: 22 },
     ],
     "r2",
     {
       connect: ({ hostname }) =>
-        hostname === "10.10.0.6"
+        hostname === "10.50.0.6"
           ? Promise.reject(new Deno.errors.ConnectionRefused("x"))
           : Promise.reject(new Error("no route")),
       localInterfaces: iface,
@@ -56,7 +56,7 @@ Deno.test("maps refused and unreachable failures", async () => {
 
 Deno.test("a silent peer is cut off as a timeout", async () => {
   const res = await runServerNetworkCheck(
-    [{ peerServerId: "a", address: "10.10.0.6", port: 22 }],
+    [{ peerServerId: "a", address: "10.50.0.6", port: 22 }],
     "r3",
     {
       timeoutMs: 20,

@@ -2287,7 +2287,7 @@ test("boot restore brings up bridges and forwarding when a route cannot be insta
 
 test("parseFabricReconcileResult carries warnings and refuses malformed ones", () => {
   const warning =
-    "LAN route 10.194.0.0/16 via 10.10.3.86 not installed: eth0 already routes it";
+    "LAN route 10.194.0.0/16 via 10.50.3.86 not installed: eth0 already routes it";
   assertEquals(
     parseFabricReconcileResult({
       summary: "TurboFabric reconciled",

@@ -2349,7 +2349,7 @@ async function runEnsureWithContainer(
         return ok("");
       },
       {
-        bindAddresses: ["10.10.1.10"],
+        bindAddresses: ["10.50.1.10"],
         segmentAttachments: [],
         listenerPorts: null,
         managedNetwork: MANAGED_NETWORK,

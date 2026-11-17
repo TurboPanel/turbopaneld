@@ -354,8 +354,8 @@ test("orchestratorRaftReady needs a leader whose HTTP URI is on the leader's hos
   assertEquals(
     orchestratorRaftReady({
       State: "Follower",
-      Leader: "10.10.3.60:33002",
-      LeaderURI: "http://10.10.3.60:33001",
+      Leader: "10.50.3.60:33002",
+      LeaderURI: "http://10.50.3.60:33001",
     }),
     true,
   );
@@ -364,7 +364,7 @@ test("orchestratorRaftReady needs a leader whose HTTP URI is on the leader's hos
     orchestratorRaftReady({
       State: "Follower",
       Leader: "",
-      LeaderURI: "http://10.10.3.60:33001",
+      LeaderURI: "http://10.50.3.60:33001",
     }),
     false,
   );
@@ -376,7 +376,7 @@ test("orchestratorRaftReady needs a leader whose HTTP URI is on the leader's hos
   assertEquals(
     orchestratorRaftReady({
       State: "Follower",
-      Leader: "10.10.3.60:33002",
+      Leader: "10.50.3.60:33002",
       LeaderURI: "http://172.20.4.10:33001",
     }),
     false,
