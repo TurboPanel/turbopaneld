@@ -186,7 +186,7 @@ test({
           }],
         }],
         {
-          peerAddresses: ["127.0.0.1"],
+          peerAddresses: ["127.0.0.1", "127.0.0.2"],
           material: {
             certificate: join(dir, "server.pem"),
             key: join(dir, "server.key"),
@@ -299,6 +299,43 @@ ${rendered}`;
           `${name} was handed on`,
         );
       }
+
+      // A repeated peer-host header is cut, even when one value is allowed.
+      const repeated = await curl([
+        "--cert",
+        join(dir, "peer.pem"),
+        "--key",
+        join(dir, "peer.key"),
+        "--resolve",
+        `tp-peer.internal:${PEER_PORT}:127.0.0.1`,
+        "--cacert",
+        join(dir, "org.pem"),
+        "-H",
+        `${PEER_HOST_HEADER}: ${HOST}`,
+        "-H",
+        `${PEER_HOST_HEADER}: ${HOST}`,
+        `https://tp-peer.internal:${PEER_PORT}/`,
+      ]);
+      assert(
+        repeated.status !== "200" && !repeated.body.includes("hosted"),
+        "a repeated peer-host header was handed on",
+      );
+
+      // A valid certificate from a source address the door does not list is
+      // cut (127.0.0.2 is a peer of the server but not of this name).
+      const otherSource = await curl([
+        "--interface",
+        "127.0.0.2",
+        "--cert",
+        join(dir, "peer.pem"),
+        "--key",
+        join(dir, "peer.key"),
+        ...peer,
+      ]);
+      assert(
+        otherSource.status !== "200" && !otherSource.body.includes("hosted"),
+        "a source address outside the door was handed on",
+      );
 
       // No certificate, with the real hostname as the server name: refused.
       const named443 = await curl([
