@@ -37,12 +37,6 @@ GUARD_PATH="$RUN_DIR/update-guard.json"
 # root-owned, so this is the only record the rollback decision is taken from:
 # the daemon owns RUN_DIR and STATE_DIR and could leave or keep a copy there.
 ROOT_RECORD="$INSTALL_ROOT/lib/update-guard-armed"
-# "Already rolled back from <target> to <previous>": root writes it after a
-# rollback restored a running daemon. A second automatic rollback for the same
-# pair is refused (the host is marked as needing attention instead), so a
-# daemon that fails every update cannot keep the host one release back. Any
-# successful update (disarm) clears it.
-ROLLED_BACK_RECORD="$INSTALL_ROOT/lib/update-guard-rolled-back"
 # `--version` runs the binary being judged: never wait on it for long.
 VERSION_READ_TIMEOUT_SEC=10
 # How long after the deadline an armed record still counts. Past it, a record
@@ -202,7 +196,7 @@ fi
 if [ -f "$DISARM_PATH" ]; then
   _disarm_commit="$(tp_read_json_field "$DISARM_PATH" targetCommit)"
   if [ -n "$_disarm_commit" ] && [ "$_disarm_commit" = "$_target" ]; then
-    rm -f "$GUARD_PATH" "$DISARM_PATH" "$ROLLED_BACK_RECORD"
+    rm -f "$GUARD_PATH" "$DISARM_PATH"
     tp_forget_armed
     exit 0
   fi
@@ -284,28 +278,6 @@ if [ -n "$_previous_commit" ] && [ -x "$BIN_DIR/turbopaneld.prev" ]; then
   fi
 fi
 
-# A second automatic rollback for the same pair, while the daemon runs steadily
-# on the failing build (a missed deadline or a disarm that never came): leave
-# the build in place and say the host needs attention. A failed or crash-looping
-# unit is always rolled back, whatever the record says: a host with no working
-# daemon cannot take the next good build or report anything. The daemon stops
-# the retry loop by skipping the target named in update-rollback.json.
-if [ -f "$ROLLED_BACK_RECORD" ] && [ ! -L "$ROLLED_BACK_RECORD" ] &&
-  [ "$(sed -n 's/^fromCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_from_commit" ] &&
-  [ "$(sed -n 's/^toCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_to_commit" ] &&
-  command -v systemctl >/dev/null 2>&1 && tp_unit_running_steadily; then
-  _at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  mkdir -p "$STATE_DIR"
-  tp_write_file "$STATE_DIR/update-guard-attention.json" \
-    "$(printf '{"needsAttention":true,"targetCommit":"%s","attempts":"0","reason":"already rolled back from this build to %s","at":"%s"}' \
-      "$_from_commit" "$_to_commit" "$_at")" \
-    0640 "$(tp_daemon_file_group)" || true
-  tp_forget_armed
-  printf 'tp-update-guard: already rolled back from %s to %s once; not rolling back again, host needs attention\n' \
-    "$_from_commit" "$_to_commit" >&2
-  exit 0
-fi
-
 if [ -f "$BIN_DIR/turbopaneld.prev" ]; then
   mv -f "$BIN_DIR/turbopaneld.prev" "$BIN_DIR/turbopaneld"
 fi
@@ -335,11 +307,6 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [ "$_restart_ok" = true ]; then
-  # Root's own record, written only once the restored daemon runs (a failed
-  # restore is retried and must not count as a repeat).
-  _rb_tmp="$(mktemp "$INSTALL_ROOT/lib/.update-guard-rolled-back.XXXXXX")" &&
-    printf 'fromCommit=%s\ntoCommit=%s\nat=%s\n' "$_from_commit" "$_to_commit" "$_at" > "$_rb_tmp" &&
-    chmod 0640 "$_rb_tmp" && mv -f "$_rb_tmp" "$ROLLED_BACK_RECORD" || rm -f "${_rb_tmp:-}"
   rm -f "$GUARD_PATH" "$DISARM_PATH"
   tp_forget_armed
   exit 0

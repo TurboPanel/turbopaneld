@@ -1255,6 +1255,10 @@ tp_resolve_channel_manifest() {
   if [ -z "$_manifest_host" ]; then
     _manifest_host="https://turbopanel.app"
   fi
+  # Every published manifest carries a version: the build floor records it.
+  if [ -z "$_manifest_version" ]; then
+    return 1
+  fi
   if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
     || [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
     || [ -z "$_orchestration_artifact_url" ] || [ -z "$_orchestration_artifact_sha256" ]; then
@@ -1808,19 +1812,6 @@ tp_emit_update_stage() {
 tp_binary_version_line() {
   _vl_bin="$1"
   timeout -k 2 10 "$_vl_bin" --version 2>/dev/null | head -1 || true
-}
-
-# The version the build floor records. The canary drop's signed manifest has no
-# version, so the installed binary names its own (base version only, labels
-# dropped); a release manifest's version is used as is.
-tp_floor_version() {
-  _fv_manifest="$1"
-  _fv_bin="$2"
-  if [ -n "$_fv_manifest" ]; then
-    printf '%s' "$_fv_manifest"
-    return 0
-  fi
-  tp_binary_version_line "$_fv_bin" | sed -n 's/^turbopaneld v\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\).*/\1/p' | head -1
 }
 
 # Documented `turbopaneld --version` line:
@@ -4153,9 +4144,8 @@ if ! tp_install_verified_binary_and_orchestration; then
   tp_print_error "Failed to install daemon release artifacts"
   exit 1
 fi
-_floor_version="$(tp_floor_version "${_manifest_version:-}" "$(tp_daemon_binary_path)")"
 if ! tp_write_daemon_build_floor "$DAEMON_BUILD_FLOOR" \
-  "${_manifest_commit:-}" "$_floor_version" "${_manifest_built_at:-}"; then
+  "${_manifest_commit:-}" "${_manifest_version:-}" "${_manifest_built_at:-}"; then
   tp_print_error "Failed to record the installed daemon build in $DAEMON_BUILD_FLOOR"
   exit 1
 fi

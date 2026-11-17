@@ -370,12 +370,16 @@ test("run.sh reads the build identity of a published manifest", async () => {
       stdout: "piped",
       stderr: "piped",
     }).output();
+    if (version === undefined) {
+      // A manifest with no version fails closed.
+      assertEquals(out.code, 1);
+      assertEquals(new TextDecoder().decode(out.stdout), "");
+      continue;
+    }
     assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
     assertEquals(
       new TextDecoder().decode(out.stdout),
-      `abcdef0123456789abcdef0123456789abcdef01|${
-        version ?? ""
-      }|2026-11-01T02:03:04.000Z`,
+      `abcdef0123456789abcdef0123456789abcdef01|${version}|2026-11-01T02:03:04.000Z`,
     );
   }
 });
@@ -409,35 +413,6 @@ test("tp-orchestrate accepts the real installer and refuses one without the floo
       }).output();
       assertEquals(out.code === 0, ok, new TextDecoder().decode(out.stderr));
     }
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
-
-test("a manifest without a version records the installed binary's base version", async () => {
-  const source = await Deno.readTextFile(
-    new URL("../../scripts/run.sh", import.meta.url),
-  );
-  const dir = await Deno.makeTempDir({ prefix: "tp-floor-version-" });
-  try {
-    const bin = `${dir}/turbopaneld`;
-    await Deno.writeTextFile(
-      bin,
-      "#!/bin/sh\nprintf 'turbopaneld v0.1.18-canary.4 abc1234 (canary, b9, 2026-11-01T00:00:00Z)\\n'\n",
-    );
-    await Deno.chmod(bin, 0o755);
-    const script = [
-      topLevelFunction(source, "tp_binary_version_line"),
-      topLevelFunction(source, "tp_floor_version"),
-      'printf "%s|%s" "$(tp_floor_version "" "$1")" "$(tp_floor_version 0.1.19 "$1")"',
-    ].join("\n");
-    const out = await new Deno.Command("sh", {
-      args: ["-c", script, "sh", bin],
-      env: { PATH: "/usr/bin:/bin" },
-      stdout: "piped",
-    }).output();
-    // No manifest version: the binary's base version. A manifest version wins.
-    assertEquals(new TextDecoder().decode(out.stdout), "0.1.18|0.1.19");
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

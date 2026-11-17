@@ -845,12 +845,9 @@ the service. Either way the guard unit runs
 `orchestration/scripts/tp-update-guard` (root, no sudoers entry). The guard
 restores `bin/turbopaneld.prev`, `bin/turbopaneld.js.prev` on JS-mode hosts,
 and `share/orchestration.prev`, writes `<stateDir>/update-rollback.json`, and
-restarts the daemon, then records the pair in root's
-`lib/update-guard-rolled-back`; a repeat rollback of the same pair is refused
-only while the unit runs steadily (a failed or crash-looping unit is always
-rolled back) and flagged in `<stateDir>/update-guard-attention.json`; the
+restarts the daemon. A failed build is always rolled back; the
 daemon then refuses that build via `<stateDir>/update-skip-target.json`. A successful new build
-disarms (and clears that record) via
+disarms via
 `<stateDir>/update-guard-disarm.json` on attach (the armed file stays
 root-owned `0640` with the daemon group so the process can read it). A restored
 previous build reports `rolled-back` from `<stateDir>/update-rollback.json`
