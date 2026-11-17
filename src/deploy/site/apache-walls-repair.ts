@@ -72,8 +72,23 @@ import { cachedPhpSiteKeySecret, phpSiteKey } from "./php-site-key.ts";
 /** The marker file, in the daemon's `sites` state folder. */
 export const APACHE_WALLS_MARKER = ".apache-walls-repair.json";
 
-const WALL_VAR_RE =
-  /^ {2}ProxyFCGISetEnvIf "true" (!(PHP_VALUE|PHP_ADMIN_VALUE|PHPRC|PHP_INI_SCAN_DIR|TP_SITE_KEY)|TP_SITE_KEY ")/;
+const WALL_PREFIX = '  ProxyFCGISetEnvIf "true" ';
+const WALL_NAMES = [
+  "PHP_VALUE",
+  "PHP_ADMIN_VALUE",
+  "PHPRC",
+  "PHP_INI_SCAN_DIR",
+  "TP_SITE_KEY",
+];
+
+/** A wall line (an unset, or the site key) a deploy writes, however old. */
+function isWallLine(line: string): boolean {
+  if (!line.startsWith(WALL_PREFIX)) return false;
+  const rest = line.slice(WALL_PREFIX.length);
+  if (rest.startsWith('TP_SITE_KEY "')) return true;
+  return rest.startsWith("!") && WALL_NAMES.includes(rest.slice(1));
+}
+
 const PHP_HANDLER_RE = /^\s*SetHandler "proxy:/m;
 
 /** The vhost text with the wall lines (and the key) a deploy would write. */
@@ -83,8 +98,8 @@ export function patchApacheVhost(
 ): string {
   const wall = apacheWallLines(siteKey);
   const lines = text.split("\n");
-  const first = lines.findIndex((line) => WALL_VAR_RE.test(line));
-  const kept = lines.filter((line) => !WALL_VAR_RE.test(line));
+  const first = lines.findIndex((line) => isWallLine(line));
+  const kept = lines.filter((line) => !isWallLine(line));
   let at = first;
   if (at < 0) {
     at = kept.findIndex((line) => line.startsWith("  <LocationMatch "));
