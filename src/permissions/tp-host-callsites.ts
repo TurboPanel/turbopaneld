@@ -285,6 +285,7 @@ const WORKER_TEXT = workerUnitContent({
 
 // One per-site PHP runtime of alice's, as `php-runtime.ts` renders it.
 const PHP_APPLY = "src/deploy/site/php-runtime-apply.ts|";
+const WALLS = "src/deploy/site/apache-walls-repair.ts|";
 const PHP_ID = "shop-0a1b2c3d4e5f-fcgi84";
 const PHP_FPM_ID = "shop-0a1b2c3d4e5f-fpm84";
 const PHP_UNIT = `turbopanel-php-${PHP_ID}`;
@@ -501,6 +502,30 @@ const SITES: CallSite[] = [
   tpHost(`${PHP_APPLY}sudo(io,["cat","--",join(dir,name)])`, {
     argv: ["cat", "--", `${CONF}/nginx/sites/tp-env1-www.conf`],
     setup: file(`${CONF}/nginx/sites/tp-env1-www.conf`),
+  }),
+  tpHost(`${WALLS}["-n",...args]`, {
+    argv: ["cat", "--", PHP_INI],
+    setup: file(PHP_INI),
+  }),
+  tpHost(`${WALLS}sudoText(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/apache/sites`],
+    setup: dir(`${CONF}/apache/sites`),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",file])`, {
+    argv: ["cat", "--", `${CONF}/apache/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/apache/sites/tp-env1-www.conf`),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",join(dir,"php.ini")])`, {
+    argv: ["cat", "--", PHP_INI],
+    setup: file(PHP_INI),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",join(dir,"php-fpm.conf")])`, {
+    argv: ["cat", "--", `${PHP_FPM_CONF_DIR}/php-fpm.conf`],
+    setup: file(`${PHP_FPM_CONF_DIR}/php-fpm.conf`),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",guardPath])`, {
+    argv: ["cat", "--", `${PHP_CONF_DIR}/site-guard.php`],
+    setup: file(`${PHP_CONF_DIR}/site-guard.php`),
   }),
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],

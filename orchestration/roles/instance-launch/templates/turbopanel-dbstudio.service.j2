@@ -2,6 +2,9 @@
 Description=TurboPanel Drizzle Studio
 After=network-online.target docker.service turbopanel-system-stack.service {{ instance_service_name }}.service
 Wants=network-online.target turbopanel-system-stack.service {{ instance_service_name }}.service
+# Never give up retrying: the default start limit (5 starts in 10 s) left this
+# unit failed after a burst of quick failures until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -27,6 +30,8 @@ StandardError=append:{{ instance_log_dir }}/dbstudio.err.log
 ExecStart={{ turbopanel_instance_dir }}/scripts/drizzle-studio-serve.sh
 Restart=on-failure
 RestartSec=2
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

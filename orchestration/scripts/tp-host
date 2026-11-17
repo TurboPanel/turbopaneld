@@ -2874,7 +2874,11 @@ tp_verb_test() {
 
 tp_verb_cat() {
   [ "$#" -eq 2 ] && [ "$1" = "--" ] || tp_die "cat: only cat -- PATH"
-  tp_require_class "$2" tree
+  # A per-site PHP config file too (php.ini, php-fpm.conf, the guard): the
+  # daemon reads them to add the Apache walls to a runtime an update left as it
+  # was. Only those three names reach this class; they hold no secret the
+  # daemon cannot derive (the site key is an HMAC under its own secret).
+  tp_require_class "$2" tree phpconf
   tp_open_verified "$2" || tp_die "no such file $2"
   cat <&3
 }

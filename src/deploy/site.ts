@@ -1494,7 +1494,7 @@ const PHP_SITE_KEY_RE = /^[0-9a-f]{64}$/;
  * (vhost lines first, then folder ones), so the unset of `TP_SITE_KEY` must
  * come before the line that sets this site's own key.
  */
-function apacheWallLines(siteKey: string | null): string[] {
+export function apacheWallLines(siteKey: string | null): string[] {
   return [
     '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
     '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
