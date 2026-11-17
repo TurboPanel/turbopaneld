@@ -211,11 +211,49 @@ test("a table writes the forward file, the peer material and the stored table, t
     assertEquals(state?.hash, HASH_1);
     const paths = tunnelPeerPaths(hostingDir, state!.peerId!);
     assertStringIncludes(await Deno.readTextFile(paths.key), "KEY");
-    assertEquals((await Deno.stat(paths.key)).mode! & 0o777, 0o640);
+    assertEquals((await Deno.stat(paths.key)).mode! & 0o777, 0o600);
+    assertEquals((await Deno.stat(paths.certificate)).mode! & 0o777, 0o640);
+    assertEquals((await Deno.stat(paths.trust)).mode! & 0o777, 0o640);
     assertStringIncludes(file, paths.trust);
     const validateAt = calls.findIndex((a) => a.includes("validate"));
     const reloadAt = calls.findIndex((a) => a.includes("reload"));
     assert(validateAt >= 0 && reloadAt > validateAt);
+  });
+});
+
+test("a server that only carries a tunnel gets no private key, and one left from an earlier table is removed", async () => {
+  await withHost(async ({ layout, hostingDir }) => {
+    let unsealed = 0;
+    const deps = {
+      decryptSecrets: (envelopes: string[]) => {
+        unsealed++;
+        return decrypt(envelopes);
+      },
+      grantRead: noGrant,
+    };
+    // No peer sends here and nothing is forwarded: the key is never needed.
+    const only = table({
+      routes: [],
+      peerAddresses: [],
+      inbound: [{ hostname: "app.example.com", peers: [] }],
+    });
+    await applyTunnelRoutes(layout, only, deps);
+    const id = (await readTunnelState(hostingDir))!.peerId!;
+    const paths = tunnelPeerPaths(hostingDir, id);
+    assertEquals(unsealed, 0);
+    assertEquals(await exists(paths.key), false);
+    assertEquals(await exists(paths.certificate), true);
+    assertEquals(await exists(paths.trust), true);
+
+    // A table that carries peers needs it; the same folder is made again with it.
+    await applyTunnelRoutes(layout, table({ hash: HASH_2 }), deps);
+    assertEquals(unsealed, 1);
+    assertEquals(await exists(paths.key), true);
+
+    // Back to a table that never uses it: the key is gone from the disk.
+    await applyTunnelRoutes(layout, { ...only, hash: HASH_1 }, deps);
+    assertEquals(await exists(paths.key), false);
+    assertEquals(await exists(paths.certificate), true);
   });
 });
 

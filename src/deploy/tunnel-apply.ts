@@ -65,45 +65,72 @@ async function exists(path: string): Promise<boolean> {
   return await Deno.stat(path).then(() => true, () => false);
 }
 
+/**
+ * Whether the private key is needed at all: the peer-facing site presents it
+ * (a table with peer addresses), and a forward block presents it as a client
+ * key. A server that only carries a tunnel, with no peer addresses and no
+ * forwarded name, never uses it, so it is not written there.
+ */
+function peerKeyNeeded(
+  table: Pick<TunnelState, "peerAddresses" | "routes" | "presentCertificate">,
+): boolean {
+  return table.peerAddresses.length > 0 ||
+    (table.presentCertificate === true &&
+      table.routes.some((route) => !route.local));
+}
+
+/**
+ * The folder holds what the table needs: the certificate and the trust bundle
+ * always, the private key exactly when {@link peerKeyNeeded} (a key left from
+ * an earlier table that needed it is replaced by a folder without it).
+ */
 async function peerFilesPresent(
   hostingDir: string,
   id: string,
+  withKey: boolean,
 ): Promise<boolean> {
   const paths = tunnelPeerPaths(hostingDir, id);
-  const found = await Promise.all([
+  const [certificate, key, trust] = await Promise.all([
     exists(paths.certificate),
     exists(paths.key),
     exists(paths.trust),
   ]);
-  return found.every(Boolean);
+  return certificate && trust && key === withKey;
 }
 
 /**
- * Write the certificate, the unsealed key and the trust bundle into
- * `hosting/peer/<id>/` through a sibling folder renamed into place. Returns
- * true when the folder was made by this call. Mode 0640: the hosting Caddy
- * account reads it through the folder's access list, like the site files.
+ * Write the certificate, the trust bundle and, when the table uses it, the
+ * unsealed key into `hosting/peer/<id>/` through a sibling folder renamed into
+ * place. Returns true when the folder was made by this call. The certificate
+ * and trust bundle are 0640 (public, read by the hosting Caddy account through
+ * the folder's access list, like the site files). The key is 0600: only the
+ * daemon account and, through the access list the hosting grant adds, the
+ * hosting Caddy account can read it; its group class holds nothing.
  */
 async function ensurePeerMaterial(
   hostingDir: string,
   id: string,
   material: TunnelPeerMaterial,
   decryptSecrets: DecryptSecretsFn,
+  withKey: boolean,
 ): Promise<boolean> {
-  if (await peerFilesPresent(hostingDir, id)) return false;
-  const [key] = await decryptSecrets([material.privateKeyEnvelope]);
-  if (typeof key !== "string" || key.length === 0) {
-    throw new Error("could not unseal the peer certificate key");
+  if (await peerFilesPresent(hostingDir, id, withKey)) return false;
+  let key: string | null | undefined;
+  if (withKey) {
+    [key] = await decryptSecrets([material.privateKeyEnvelope]);
+    if (typeof key !== "string" || key.length === 0) {
+      throw new Error("could not unseal the peer certificate key");
+    }
   }
   const paths = tunnelPeerPaths(hostingDir, id);
   const staging = `${paths.dir}.tpnew`;
   await Deno.remove(staging, { recursive: true }).catch(() => {});
   await Deno.mkdir(staging, { recursive: true, mode: 0o750 });
-  const write = (name: string, text: string) =>
-    Deno.writeTextFile(join(staging, name), text, { mode: 0o640 });
-  await write("leaf.pem", material.certificatePem);
-  await write("leaf.key", key);
-  await write("ca.pem", material.caCertPem);
+  const write = (name: string, text: string, mode: number) =>
+    Deno.writeTextFile(join(staging, name), text, { mode });
+  await write("leaf.pem", material.certificatePem, 0o640);
+  if (typeof key === "string") await write("leaf.key", key, 0o600);
+  await write("ca.pem", material.caCertPem, 0o640);
   await Deno.remove(paths.dir, { recursive: true }).catch(() => {});
   await Deno.rename(staging, paths.dir);
   return true;
@@ -154,7 +181,7 @@ async function unchangedResult(
   ) return undefined;
   const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
   const filesOk = prior.peerId === undefined ||
-    await peerFilesPresent(hostingDir, prior.peerId);
+    await peerFilesPresent(hostingDir, prior.peerId, peerKeyNeeded(prior));
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
   // A site deployed since (or written by an older daemon) may hold other peers.
   if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
@@ -324,18 +351,19 @@ async function applyTunnelRoutesLocked(
   const peerId = material
     ? await peerMaterialId(material.certificatePem, material.caCertPem)
     : undefined;
+  const plan = planPeerClientAuth(
+    payload.peerClientAuth,
+    material?.certificatePem,
+  );
+  const state = tunnelStateFor(payload, peerId, plan);
   const createdMaterial = material !== undefined &&
     await ensurePeerMaterial(
       hostingDir,
       peerId!,
       material,
       deps.decryptSecrets,
+      peerKeyNeeded(state),
     );
-  const plan = planPeerClientAuth(
-    payload.peerClientAuth,
-    material?.certificatePem,
-  );
-  const state = tunnelStateFor(payload, peerId, plan);
 
   try {
     const rendered = await renderStoredTunnelFile(hostingDir, sitesDir, state);

@@ -39,6 +39,8 @@ async function withIo(
     ensureBinary: () =>
       Promise.resolve("/opt/turbopanel/vendor/cloudflared/x/cloudflared"),
     probe: () => Promise.resolve({ kind: "unreachable" }),
+    // The unit file is there unless a test says it is gone.
+    unitExists: () => Promise.resolve(true),
     run: (command, args): Promise<RunResult> => {
       calls.push([command, ...args].join(" "));
       return Promise.resolve({ success: true, stdout: "", stderr: "" });
@@ -145,6 +147,42 @@ for (const state of ["inactive", "failed"]) {
     });
   });
 }
+
+test("a connector whose unit file is gone is installed again from its token copy by a resend", async () => {
+  await withIo(async (io, calls) => {
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    const result = await handleTunnelConnectors(payload(), "now", {
+      io: {
+        ...io,
+        unitExists: () => Promise.resolve(false),
+        // No unit file on disk: the comparison with the new text fails.
+        run: (command, args) => {
+          calls.push([command, ...args].join(" "));
+          return Promise.resolve({
+            success: !args.includes("cmp"),
+            stdout: "",
+            stderr: "",
+          });
+        },
+      },
+      decryptSecrets: unseal(),
+    });
+    assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
+    const unit = `turbopanel-tunnel-${ID_A}.service`;
+    const at = (needle: string) => calls.findIndex((c) => c.includes(needle));
+    assert(at("cmp ") >= 0, calls.join("\n"));
+    assert(at("install ") > at("cmp "));
+    assert(at("daemon-reload") > at("install "));
+    assert(at(`enable ${unit}`) > at("daemon-reload"));
+    assert(at(`restart ${unit}`) > at(`enable ${unit}`));
+    // The stored token copy is reused: no new token copy is made.
+    assertEquals(calls.filter((c) => c.includes("tunnel-env-install")), []);
+  });
+});
 
 test("a stopped connector the host refuses to start fails the command so it is sent again", async () => {
   await withIo(async (io) => {
@@ -395,6 +433,8 @@ test("a tunnel moved to its second unit by an update is still present, so a rese
     await installConnector(io, ID_A, TOKEN);
     io.version = "2026.6.0";
     assertEquals((await updateConnector(io, ID_A)).kind, "updated");
+    // Only the second unit is on disk now.
+    io.unitExists = (path) => Promise.resolve(path.endsWith("-b.service"));
     calls.length = 0;
     const seen: string[][] = [];
     const result = await handleTunnelConnectors(payload(), "now", {
