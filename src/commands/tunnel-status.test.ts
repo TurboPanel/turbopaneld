@@ -3,6 +3,7 @@ import { join } from "@std/path";
 import type { RunResult } from "../deploy/ensure-principal.ts";
 import type { ConnectorIo } from "../tunnels/connector-service.ts";
 import { parseTunnelStatusResult } from "../contracts/commands-contracts.ts";
+import { writeTunnelState } from "../deploy/tunnel-state.ts";
 import { handleTunnelStatus } from "./tunnel-status.ts";
 
 /**
@@ -54,6 +55,48 @@ test("the status answer lists each connector with its version and the pinned ver
     });
     // What the handler writes is what the control plane's parser accepts.
     assertEquals(parseTunnelStatusResult(result), result);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the status answer reports what the hop does about client certificates, and a downgrade", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tunnel-status-" });
+  try {
+    const io: ConnectorIo = {
+      layout: { configDir: join(dir, "etc") },
+      workDir: dir,
+      version: "2026.11.0",
+      ensureBinary: () => Promise.resolve("/unused"),
+      probe: () => Promise.resolve({ kind: "ready", connections: 1 }),
+      readHostnames: () => Promise.resolve([]),
+      run: (): Promise<RunResult> =>
+        Promise.resolve({ success: true, stdout: "active", stderr: "" }),
+    };
+    const none = await handleTunnelStatus(new Date().toISOString(), { io });
+    assertEquals(none.peerClientAuth, undefined);
+    const hostingDir = join(io.layout.configDir, "hosting");
+    await Deno.mkdir(hostingDir, { recursive: true });
+    await writeTunnelState(hostingDir, {
+      hash: "h",
+      routes: [],
+      peerAddresses: [],
+      clientAuth: "verify",
+      clientAuthDowngraded: true,
+    });
+    const down = await handleTunnelStatus(new Date().toISOString(), { io });
+    assertEquals(down.peerClientAuth, "verify");
+    assertEquals(down.peerClientAuthDowngraded, true);
+    assertEquals(parseTunnelStatusResult(down), down);
+    await writeTunnelState(hostingDir, {
+      hash: "h",
+      routes: [],
+      peerAddresses: [],
+      clientAuth: "require",
+    });
+    const ok = await handleTunnelStatus(new Date().toISOString(), { io });
+    assertEquals(ok.peerClientAuth, "require");
+    assertEquals(ok.peerClientAuthDowngraded, undefined);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

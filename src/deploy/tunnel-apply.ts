@@ -263,6 +263,9 @@ function tunnelStateFor(
     ...(peerId !== undefined && plan.clientAuth
       ? { clientAuth: plan.clientAuth }
       : {}),
+    ...(peerId !== undefined && plan.clientAuth && plan.warnings.length > 0
+      ? { clientAuthDowngraded: true }
+      : {}),
     ...(peerId !== undefined && plan.presentCertificate
       ? { presentCertificate: true }
       : {}),

@@ -1193,6 +1193,41 @@ test("a require request falls back to verify, without a warning in the result, w
   });
 });
 
+test("a downgraded require is stored, and with a dedicated peer port a site lock admits no peer address", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    const peers = ["10.0.0.5", "10.0.0.6"];
+    await applyTunnelRoutes(
+      layout,
+      table({
+        routes: [],
+        peerAddresses: peers,
+        inbound: [{ hostname: "site.example.com", peers }],
+        peerClientAuth: "require",
+        peerMaterial: {
+          certificatePem: SERVER_ONLY_CERT,
+          privateKeyEnvelope: "tpdaemon.AAAA",
+          caCertPem: CERT,
+        },
+      }),
+      deps,
+    );
+    const state = await readTunnelState(hostingDir);
+    assertEquals(state?.clientAuth, "verify");
+    assertEquals(state?.clientAuthDowngraded, true);
+    const site = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    assertStringIncludes(site, `${LOCK_LINE}\n`);
+    assertEquals(site.includes("10.0.0.5"), false);
+    assertEquals(site.includes("10.0.0.6"), false);
+  });
+});
+
 test("a table with no peerClientAuth renders as before, whatever the certificate allows", async () => {
   await withHost(async ({ layout, sitesDir }) => {
     await applyTunnelRoutes(layout, table(), {

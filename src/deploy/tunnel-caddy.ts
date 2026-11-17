@@ -22,6 +22,7 @@ import {
   isValidHostname,
   isValidIpv4Literal,
   isValidIpv6Literal,
+  TUNNEL_PEER_PORT,
   TUNNEL_PEER_TLS_NAME,
   type TunnelPeerClientAuth,
   type TunnelRoute,
@@ -54,6 +55,20 @@ export const TUNNEL_ERROR_STATUS = 503;
 
 const LOOPBACK_RANGES = "127.0.0.0/8 ::1";
 const DEFAULT_PEER_PORT = 443;
+/**
+ * The port of the peer-facing server when the table sets `peerClientAuth`. It
+ * is separate from the hosting port on purpose: Caddy turns on strict SNI
+ * matching for a server that checks client certificates, and a certificate
+ * check that sat on a name of the shared server would not cover a connection
+ * that names a real hostname. The number is a contract constant (the control
+ * plane opens the same port in its firewall rule) and is reserved for apps in
+ * `RESERVED_HOST_PORT_RANGES`.
+ */
+export { TUNNEL_PEER_PORT };
+/** The header the peer-facing server sets on what it passes to the hosting sites. */
+export const TUNNEL_PEER_HOP_HEADER = "X-Tp-Peer-Hop";
+/** Carries the real Host from the sender to the peer-facing server. */
+export const TUNNEL_PEER_HOST_HEADER = "X-Tp-Peer-Host";
 /** Named matchers are per site block, and these names are used once in each. */
 const OUTSIDE_MATCHER = "@tp_outside";
 const PEER_MATCHER = "@tp_peer";
@@ -75,6 +90,14 @@ export type PeerUpstream = {
   trustedProxies: readonly string[];
   /** Certificate and key shown to the receiving server as a client certificate. */
   clientCertificate?: Readonly<{ certificate: string; key: string }>;
+  /**
+   * The receiver is a dedicated peer-facing server. It matches the Host header
+   * to the connecting name (Caddy does that on any server that checks client
+   * certificates), so the request names the fixed peer name as its Host and
+   * carries the real one in {@link TUNNEL_PEER_HOST_HEADER}, which the receiver
+   * puts back before handing the request to the sites.
+   */
+  carryHostInHeader?: true;
 };
 
 /** Where one folder of peer material sits and the paths its files get. */
@@ -149,8 +172,8 @@ export function tunnelLockLines(peers: readonly string[]): string {
  * `tls_server_name` is fixed: the receiving server presents the certificate it
  * loaded for that name, and the sender trusts only the organization's bundle.
  * With `clientCertificate` the sender also shows its own peer certificate
- * (`tls_client_auth`), so a receiver that checks client certificates can tell
- * a server of the organization from anyone else who reaches the address.
+ * (`tls_client_auth`), so the receiving server, which refuses a connection
+ * without a certificate of the organization's authority, lets it in.
  */
 export function peerUpstreamText(upstream: PeerUpstream): string {
   if (upstream.targets.length === 0) {
@@ -176,13 +199,15 @@ export function peerUpstreamText(upstream: PeerUpstream): string {
       )
     } ${assertPath("tunnel client key", upstream.clientCertificate.key)}\n`
     : "";
+  const hostLines = upstream.carryHostInHeader
+    ? `  header_up Host ${TUNNEL_PEER_TLS_NAME}\n  header_up ${TUNNEL_PEER_HOST_HEADER} {host}\n`
+    : "  header_up Host {host}\n";
   return `reverse_proxy ${targets.join(" ")} {
   lb_policy round_robin
   lb_try_duration 3s
   fail_duration 10s
   max_fails 1
-  header_up Host {host}
-  trusted_proxies ${upstream.trustedProxies.join(" ")}
+${hostLines}  trusted_proxies ${upstream.trustedProxies.join(" ")}
   transport http {
     tls
     tls_trust_pool file ${trust}
@@ -214,8 +239,9 @@ export type TunnelFileInputs = Readonly<{
   /** Absent when the table has nothing to receive or forward. */
   material?: Readonly<{ certificate: string; key: string; trust: string }>;
   /**
-   * What the peer-facing site does about client certificates. Absent = it asks
-   * for none. See {@link TunnelPeerClientAuth}.
+   * Set = the peer-facing server is its own server on {@link TUNNEL_PEER_PORT}
+   * and checks client certificates ({@link TunnelPeerClientAuth}), and forwards
+   * go to that port. Absent = the shared hosting port, no client certificate.
    */
   clientAuth?: TunnelPeerClientAuth;
   /**
@@ -237,13 +263,18 @@ function forwardBlock(route: TunnelRoute, inputs: TunnelFileInputs): string {
   }
   const targets = route.upstreams.flatMap((upstream) =>
     upstream.addresses.map((address) =>
-      formatTunnelTarget(address, upstream.port ?? DEFAULT_PEER_PORT)
+      formatTunnelTarget(
+        address,
+        upstream.port ??
+          (inputs.clientAuth ? TUNNEL_PEER_PORT : DEFAULT_PEER_PORT),
+      )
     )
   );
   const proxy = peerUpstreamText({
     kind: "peer",
     targets,
     trustFile: material.trust,
+    ...(inputs.clientAuth ? { carryHostInHeader: true as const } : {}),
     ...(inputs.presentCertificate
       ? {
         clientCertificate: {
@@ -257,9 +288,15 @@ function forwardBlock(route: TunnelRoute, inputs: TunnelFileInputs): string {
   // A request that came from a peer is never passed on again, so a moved site
   // with a stale table shows the error page instead of looping. A server that
   // only carries tunnels has no peers sending to it, so it has no such rule.
+  // With the dedicated peer port (`clientAuth`) a forwarded request reaches
+  // the sites over loopback and says where it came from in a header the
+  // peer-facing server always sets; otherwise it is told by its source address.
+  const peerMatch = inputs.clientAuth
+    ? `header ${TUNNEL_PEER_HOP_HEADER} 1`
+    : `remote_ip ${inputs.peerAddresses.join(" ")}`;
   const peerRule = inputs.peerAddresses.length === 0
     ? ""
-    : `  ${PEER_MATCHER} remote_ip ${inputs.peerAddresses.join(" ")}
+    : `  ${PEER_MATCHER} ${peerMatch}
   handle ${PEER_MATCHER} {
     error 421
   }
@@ -290,15 +327,10 @@ ${peerRule}${forward}  handle_errors {
 
 /**
  * The small site that makes this server present the peer certificate when
- * another server connects with the fixed name. Caddy picks a certificate by the
- * connecting name, not by the Host header, so without a site that loads the
- * certificate the sender would be shown the wrong one and refuse it. Only
- * listed peers get any answer.
- *
- * With `clientAuth` the site also checks the connecting server's client
- * certificate against the organization's bundle: `verify` when one is shown,
- * `require` always. The `remote_ip` check below stays as a second layer. The
- * check sits on this name only, so a visitor's own TLS never asks for one.
+ * another server connects with the fixed name (table without `peerClientAuth`).
+ * Caddy picks a certificate by the connecting name, not by the Host header, so
+ * without a site that loads the certificate the sender would be shown the
+ * wrong one and refuse it. Only listed peers get any answer.
  *
  * The site has no `bind`. Caddy makes one server per set of listen addresses,
  * so a site bound to this server's own address would become a server of its own
@@ -307,26 +339,14 @@ ${peerRule}${forward}  handle_errors {
  * a `bind` it shares the server of the other sites that listen everywhere, and
  * the `remote_ip` check below is what keeps everyone but the listed peers out.
  */
-function peerSite(inputs: TunnelFileInputs): string {
+function sharedPeerSite(inputs: TunnelFileInputs): string {
   const material = inputs.material!;
   const certificate = assertPath("tunnel certificate", material.certificate);
   const key = assertPath("tunnel key", material.key);
   const peers = inputs.peerAddresses.join(" ");
-  const mode = inputs.clientAuth === "require"
-    ? "require_and_verify"
-    : "verify_if_given";
-  const tls = inputs.clientAuth
-    ? `  tls ${certificate} ${key} {
-    client_auth {
-      mode ${mode}
-      trust_pool file ${assertPath("tunnel trust file", material.trust)}
-    }
-  }
-`
-    : `  tls ${certificate} ${key}
-`;
   return `${TUNNEL_PEER_TLS_NAME} {
-${tls}  ${OUTSIDE_MATCHER} not remote_ip ${peers}
+  tls ${certificate} ${key}
+  ${OUTSIDE_MATCHER} not remote_ip ${peers}
   handle ${OUTSIDE_MATCHER} {
     abort
   }
@@ -335,6 +355,59 @@ ${tls}  ${OUTSIDE_MATCHER} not remote_ip ${peers}
   }
 }
 `;
+}
+
+/**
+ * The peer-facing server (table with `peerClientAuth`): its own Caddy server on
+ * {@link TUNNEL_PEER_PORT}, so nothing about it touches the hosting sites on
+ * 443. A connection needs a client certificate of the organization's
+ * authority (`require`; `verify` only checks one that is shown) and a listed
+ * source address. What passes is handed to the hosting sites over loopback with
+ * the original Host, marked with {@link TUNNEL_PEER_HOP_HEADER} (set here, so a
+ * visitor cannot make it up on the way in), and so reaches the site, or its
+ * forward block, as local traffic. Locked sites therefore admit loopback only
+ * and nothing that connects to 443 with a peer address gets in on that alone.
+ */
+function dedicatedPeerSite(inputs: TunnelFileInputs): string {
+  const material = inputs.material!;
+  const certificate = assertPath("tunnel certificate", material.certificate);
+  const key = assertPath("tunnel key", material.key);
+  const trust = assertPath("tunnel trust file", material.trust);
+  const mode = inputs.clientAuth === "require"
+    ? "require_and_verify"
+    : "verify_if_given";
+  const peers = inputs.peerAddresses.join(" ");
+  return `https://:${TUNNEL_PEER_PORT} {
+  tls ${certificate} ${key} {
+    client_auth {
+      mode ${mode}
+      trust_pool file ${trust}
+    }
+  }
+  ${OUTSIDE_MATCHER} not remote_ip ${peers}
+  handle ${OUTSIDE_MATCHER} {
+    abort
+  }
+  handle {
+    reverse_proxy https://127.0.0.1:443 {
+      header_up Host {header.${TUNNEL_PEER_HOST_HEADER}}
+      header_up -${TUNNEL_PEER_HOST_HEADER}
+      header_up ${TUNNEL_PEER_HOP_HEADER} 1
+      trusted_proxies ${tunnelTrustedRanges(inputs.peerAddresses).join(" ")}
+      transport http {
+        tls_server_name {http.request.header.${TUNNEL_PEER_HOST_HEADER}}
+        tls_insecure_skip_verify
+        dial_timeout 2s
+        response_header_timeout 60s
+      }
+    }
+  }
+}
+`;
+}
+
+function peerSite(inputs: TunnelFileInputs): string {
+  return inputs.clientAuth ? dedicatedPeerSite(inputs) : sharedPeerSite(inputs);
 }
 
 /** What {@link renderTunnelFile} made and what it left out. */

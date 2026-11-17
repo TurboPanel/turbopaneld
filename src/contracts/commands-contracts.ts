@@ -7592,6 +7592,24 @@ function parseFolderRemoval(value: unknown): FolderRemoval {
 /** The fixed certificate name of the hop between servers. Same on both sides. */
 export const TUNNEL_PEER_TLS_NAME = "tp-peer.internal";
 
+/**
+ * The port of the peer-facing server on each server (table with
+ * `peerClientAuth`): senders dial it and the control plane's firewall rule
+ * opens it to the exact peer addresses. Not 7443 (Traefik, loopback). Same on
+ * both sides.
+ */
+export const TUNNEL_PEER_PORT = 9443;
+
+function parseTunnelPeerClientAuth(
+  value: unknown,
+  where: string,
+): TunnelPeerClientAuth {
+  if (value !== "verify" && value !== "require") {
+    throw new TypeError(`Invalid ${where} peerClientAuth`);
+  }
+  return value;
+}
+
 const MAX_TUNNEL_HOSTNAMES = 256;
 const MAX_TUNNEL_ADDRESSES = 64;
 const MAX_TUNNEL_ROUTES = 2000;
@@ -7996,12 +8014,10 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
     payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
   }
   if (value.peerClientAuth !== undefined) {
-    if (
-      value.peerClientAuth !== "verify" && value.peerClientAuth !== "require"
-    ) {
-      throw new TypeError("Invalid server.tunnel.routes peerClientAuth");
-    }
-    payload.peerClientAuth = value.peerClientAuth;
+    payload.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.routes",
+    );
   }
   if (value.inbound !== undefined) {
     payload.inbound = parseTunnelInboundList(value.inbound);
@@ -8172,6 +8188,10 @@ export type TunnelStatusResult = {
   /** The connector version this daemon is pinned to and moves every tunnel to. */
   pinnedVersion: string;
   connectors: TunnelStatusConnector[];
+  /** What the hop between servers does about client certificates here (feature `tunnel-peer-mtls-v1`); absent = nothing is checked. */
+  peerClientAuth?: TunnelPeerClientAuth;
+  /** True when `require` was asked for and `verify` is in force because this server's certificate cannot be shown. */
+  peerClientAuthDowngraded?: true;
 };
 
 const TUNNEL_STATUS_VALUES = new Set([
@@ -8279,10 +8299,25 @@ export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
   ) {
     throw new TypeError("Invalid server.tunnel.status result");
   }
-  return {
+  const result: TunnelStatusResult = {
     pinnedVersion: value.pinnedVersion,
     connectors: value.connectors.map(parseTunnelStatusConnector),
   };
+  if (value.peerClientAuth !== undefined) {
+    result.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.status",
+    );
+  }
+  if (value.peerClientAuthDowngraded !== undefined) {
+    if (value.peerClientAuthDowngraded !== true) {
+      throw new TypeError(
+        "Invalid server.tunnel.status peerClientAuthDowngraded",
+      );
+    }
+    result.peerClientAuthDowngraded = true;
+  }
+  return result;
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */

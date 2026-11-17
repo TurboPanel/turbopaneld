@@ -13,6 +13,7 @@ import { buildCaddyHostnameRoutes, caddyfile, siteSnippet } from "./ingress.ts";
 import {
   peerUpstreamText,
   renderTunnelFile,
+  TUNNEL_PEER_PORT,
   tunnelLockLines,
   tunnelPeerPaths,
   withTrustedProxies,
@@ -503,7 +504,7 @@ test("forward blocks show the certificate only when the inputs say it is fit", (
   assertEquals(without, GOLDEN_TUNNEL_FILE);
 });
 
-const REQUIRE_SITE = `tp-peer.internal {
+const DEDICATED_SITE = `https://:9443 {
   tls ${PEER_DIR.certificate} ${PEER_DIR.key} {
     client_auth {
       mode require_and_verify
@@ -515,23 +516,35 @@ const REQUIRE_SITE = `tp-peer.internal {
     abort
   }
   handle {
-    respond "" 404
+    reverse_proxy https://127.0.0.1:443 {
+      header_up Host {header.X-Tp-Peer-Host}
+      header_up -X-Tp-Peer-Host
+      header_up X-Tp-Peer-Hop 1
+      trusted_proxies 127.0.0.0/8 ::1 10.0.0.5 10.0.0.6 fd00::5
+      transport http {
+        tls_server_name {http.request.header.X-Tp-Peer-Host}
+        tls_insecure_skip_verify
+        dial_timeout 2s
+        response_header_timeout 60s
+      }
+    }
   }
 }
 `;
 
-test("the peer site requires and verifies a client certificate on request", () => {
+test("with client auth the peer hop is its own server on its own port, requiring a certificate", () => {
   const text = renderTunnelFile(
     ROUTES,
     { ...INPUTS, clientAuth: "require" },
     new Set(),
   ).contents;
-  assert(text.endsWith(REQUIRE_SITE));
-  // The address check stays as a second layer.
-  assertStringIncludes(text, "@tp_outside not remote_ip 10.0.0.5");
+  assert(text.endsWith(DEDICATED_SITE));
+  // The shared-port peer site is gone, and so is its name on 443.
+  assertEquals(text.includes("tp-peer.internal {"), false);
+  assertEquals(TUNNEL_PEER_PORT, 9443);
 });
 
-test("the peer site verifies a client certificate only when one is shown in verify mode", () => {
+test("in verify mode the peer server only checks a certificate that is shown", () => {
   const text = renderTunnelFile(
     ROUTES,
     { ...INPUTS, clientAuth: "verify" },
@@ -539,14 +552,37 @@ test("the peer site verifies a client certificate only when one is shown in veri
   ).contents;
   assert(
     text.endsWith(
-      REQUIRE_SITE.replace("require_and_verify", "verify_if_given"),
+      DEDICATED_SITE.replace("require_and_verify", "verify_if_given"),
     ),
   );
 });
 
-test("the peer site asks for no client certificate when none is requested", () => {
+test("senders dial the peer port unless an upstream names its own, and mark nothing else", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assertStringIncludes(
+    text,
+    "reverse_proxy 10.0.0.5:9443 [fd00::5]:9443 10.0.0.6:8443 {",
+  );
+  assertEquals(text.includes("10.0.0.5:443"), false);
+  // The receiver matches Host to the connecting name, so the real one rides in a header.
+  assertStringIncludes(text, "header_up Host tp-peer.internal");
+  assertStringIncludes(text, "header_up X-Tp-Peer-Host {host}");
+  // A forwarded request is told by the header the peer server sets, not by its address.
+  assertStringIncludes(text, "@tp_peer header X-Tp-Peer-Hop 1");
+  assertEquals(text.includes("@tp_peer remote_ip"), false);
+});
+
+test("without client auth nothing moves: port 443, the address rule and the shared peer site", () => {
   const text = renderTunnelFile(ROUTES, INPUTS, new Set()).contents;
+  assertStringIncludes(text, "10.0.0.5:443");
+  assertStringIncludes(text, "@tp_peer remote_ip 10.0.0.5 10.0.0.6 fd00::5");
+  assertStringIncludes(text, "tp-peer.internal {");
   assertEquals(text.includes("client_auth"), false);
+  assertEquals(text.includes("9443"), false);
 });
 
 // Real Caddy (TP_TEST_CADDY): the new directives must adapt to what is meant,

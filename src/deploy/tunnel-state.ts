@@ -38,6 +38,8 @@ export type TunnelState = {
   peerId?: string;
   /** What the peer-facing site does about client certificates (absent = nothing). */
   clientAuth?: TunnelPeerClientAuth;
+  /** `require` was asked for but this server's own certificate cannot be shown, so `verify` is in force. */
+  clientAuthDowngraded?: boolean;
   /** The peer certificate allows client use, so forward blocks show it. */
   presentCertificate?: boolean;
   /** Tunnel names that run here and who may forward them (absent from an older control plane). */
@@ -299,9 +301,15 @@ function relockWith(
   lockNames: ReadonlySet<string>,
 ): string {
   if (!state?.inbound) return contents;
+  // With the dedicated peer port, peers reach the sites over loopback and are
+  // checked there; no site admits a peer address on its own.
+  const peers = inboundPeers(state.inbound);
+  const loopbackOnly = state.clientAuth !== undefined
+    ? new Map([...peers.keys()].map((name) => [name, []]))
+    : peers;
   return relockSiteText(
     contents,
-    inboundPeers(state.inbound),
+    loopbackOnly,
     state.listenAddresses ?? [],
     lockNames,
   );
