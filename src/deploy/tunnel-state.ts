@@ -21,6 +21,7 @@ import {
   relockSiteText,
 } from "./tunnel-lock.ts";
 import {
+  canonicalAddress,
   type RenderedTunnelFile,
   renderTunnelFile,
   TUNNEL_SITE_FILE,
@@ -200,7 +201,7 @@ export function tunnelInputs(
 /** Every address on this host's interfaces, as Caddy would be asked to bind to. */
 function ownAddresses(): ReadonlySet<string> {
   return new Set(
-    Deno.networkInterfaces().map((entry) => entry.address.toLowerCase()),
+    Deno.networkInterfaces().map((entry) => canonicalAddress(entry.address)),
   );
 }
 
@@ -278,6 +279,8 @@ export async function plannedTunnelContents(
     state,
     own,
   );
+  // Logged, not returned, as in an apply.
+  for (const warning of rendered.warnings) logWarn("tunnels", warning);
   const live = await readTextIfPresent(join(sitesDir, TUNNEL_SITE_FILE));
   return rendered.contents === (live ?? "") ? undefined : rendered.contents;
 }

@@ -466,12 +466,7 @@ https://:${HOSTING_PORT} {
   respond "hosted {host}" 200
 }
 ${pinnedForward}
-${
-        unpinnedForward.replace(
-          `https://${HOST}:${SENDER_PORT + 1}`,
-          `https://${HOST}:${SENDER_PORT + 1}`,
-        )
-      }
+${unpinnedForward}
 ${receiver}`;
       const path = join(dir, "Caddyfile");
       await Deno.writeTextFile(path, caddyfile);

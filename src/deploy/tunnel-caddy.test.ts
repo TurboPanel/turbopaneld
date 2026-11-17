@@ -11,6 +11,7 @@ import type {
 import { ConfigValueError } from "../contracts/config-values.ts";
 import { buildCaddyHostnameRoutes, caddyfile, siteSnippet } from "./ingress.ts";
 import {
+  canonicalAddress,
   peerUpstreamText,
   renderTunnelFile,
   TUNNEL_PEER_PORT,
@@ -667,7 +668,9 @@ test("a source address is rendered as local_address when it is on this host", ()
     "reverse_proxy 10.0.0.5:443 10.0.0.6:443 {",
   );
   assertEquals(out.contents.includes("[fd00::5]:"), false);
-  assertEquals(out.warnings, []);
+  // Leaving a target out is said, not silent.
+  assertEquals(out.warnings.length, 1);
+  assertStringIncludes(out.warnings[0], "other address family");
 
   // Not checked when the host's addresses are not given.
   assertStringIncludes(
@@ -720,4 +723,26 @@ test("a source address that is not on this host, or that the carriers disagree o
   );
   assertEquals(v6only.contents.includes("local_address"), false);
   assertEquals(v6only.warnings.length, 1);
+});
+
+test("addresses compare by their canonical form", () => {
+  assertEquals(canonicalAddress("FD00:0:0:0:0:0:0:7"), "fd00::7");
+  assertEquals(canonicalAddress("fe80::1%eth0"), "fe80::1");
+  assertEquals(canonicalAddress("10.0.0.7"), "10.0.0.7");
+  const out = renderTunnelFile(
+    [{
+      hostname: "app.example.com",
+      local: false,
+      lock: false,
+      upstreams: [{
+        serverId: SERVER_A,
+        addresses: ["fd00::5"],
+        localAddress: "FD00::7",
+      }],
+    }],
+    { ...INPUTS, localAddresses: new Set(["fd00:0:0:0:0:0:0:7"]) },
+    new Set(),
+  );
+  assertStringIncludes(out.contents, "local_address fd00::7");
+  assertEquals(out.warnings, []);
 });

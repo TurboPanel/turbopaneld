@@ -270,6 +270,20 @@ export type TunnelFileInputs = Readonly<{
   localAddresses?: ReadonlySet<string>;
 }>;
 
+/**
+ * One spelling per address: IPv6 compressed and lower case, no zone, so
+ * `FD00:0:0::7` and `fd00::7` compare equal. Anything else is returned as is.
+ */
+export function canonicalAddress(address: string): string {
+  const bare = address.split("%")[0].toLowerCase();
+  if (!bare.includes(":")) return bare;
+  try {
+    return new URL(`http://[${bare}]`).hostname.slice(1, -1);
+  } catch {
+    return bare;
+  }
+}
+
 const familyOf = (address: string): 4 | 6 => address.includes(":") ? 6 : 4;
 
 /**
@@ -294,13 +308,18 @@ function pinnedSource(
     };
   }
   assertAddress(address);
-  if (inputs.localAddresses && !inputs.localAddresses.has(address)) {
+  if (
+    inputs.localAddresses &&
+    ![...inputs.localAddresses].some((own) =>
+      canonicalAddress(own) === canonicalAddress(address)
+    )
+  ) {
     return {
       warning:
         `${route.hostname}: source address ${address} is not on this server, so none is pinned`,
     };
   }
-  return { address };
+  return { address: canonicalAddress(address) };
 }
 
 /** One forward block for a site that runs on other servers. */
@@ -336,6 +355,16 @@ function forwardBlock(
   // none are left, the pin is dropped rather than the route.
   let pinned = source.address;
   let targets = allTargets(pinned);
+  if (pinned !== undefined) {
+    const all = allTargets(undefined).length;
+    if (targets.length > 0 && targets.length < all) {
+      warnings.push(
+        `${route.hostname}: ${
+          all - targets.length
+        } target(s) of the other address family than source address ${pinned} are left out`,
+      );
+    }
+  }
   if (pinned !== undefined && targets.length === 0) {
     warnings.push(
       `${route.hostname}: no target shares the family of source address ${pinned}, so none is pinned`,
