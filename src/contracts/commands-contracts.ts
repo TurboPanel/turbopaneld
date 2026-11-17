@@ -7764,6 +7764,12 @@ export type TunnelRouteUpstream = {
   addresses: string[];
   /** Port of the server's web server on those addresses. Default 443. */
   port?: number;
+  /**
+   * This server's own address to send from when it dials this server: the one
+   * the receiver's allowlist names for this pair. A bare address. Absent = the
+   * kernel picks the source address.
+   */
+  localAddress?: string;
 };
 
 export type TunnelRoute = {
@@ -7875,6 +7881,15 @@ function parseTunnelUpstream(value: unknown): TunnelRouteUpstream {
       throw new TypeError("Invalid server.tunnel.routes upstream port");
     }
     upstream.port = value.port;
+  }
+  if (value.localAddress !== undefined) {
+    const [localAddress] = parseTunnelAddressList(
+      [value.localAddress],
+      "server.tunnel.routes upstream localAddress",
+      1,
+      1,
+    );
+    upstream.localAddress = localAddress;
   }
   return upstream;
 }

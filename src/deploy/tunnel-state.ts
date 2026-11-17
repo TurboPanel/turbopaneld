@@ -21,6 +21,7 @@ import {
   relockSiteText,
 } from "./tunnel-lock.ts";
 import {
+  canonicalAddress,
   type RenderedTunnelFile,
   renderTunnelFile,
   TUNNEL_SITE_FILE,
@@ -193,7 +194,15 @@ export function tunnelInputs(
     ...(state.clientAuth ? { clientAuth: state.clientAuth } : {}),
     ...(state.presentCertificate ? { presentCertificate: true } : {}),
     ...(state.inbound ? { inbound: state.inbound } : {}),
+    localAddresses: ownAddresses(),
   };
+}
+
+/** Every address on this host's interfaces, as Caddy would be asked to bind to. */
+function ownAddresses(): ReadonlySet<string> {
+  return new Set(
+    Deno.networkInterfaces().map((entry) => canonicalAddress(entry.address)),
+  );
 }
 
 /**
@@ -271,7 +280,11 @@ export async function plannedTunnelContents(
     own,
   );
   const live = await readTextIfPresent(join(sitesDir, TUNNEL_SITE_FILE));
-  return rendered.contents === (live ?? "") ? undefined : rendered.contents;
+  if (rendered.contents === (live ?? "")) return undefined;
+  // Logged, not returned, as in an apply; only when the file changes, so a
+  // site deploy that leaves it alone stays quiet.
+  for (const warning of rendered.warnings) logWarn("tunnels", warning);
+  return rendered.contents;
 }
 
 /** The first 16 hex characters of the digest of the certificate and the trust bundle. */
