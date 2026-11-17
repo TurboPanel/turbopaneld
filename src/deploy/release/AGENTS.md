@@ -586,7 +586,7 @@ Concretely (`release/image-build.ts`, branch in `apply-source-releases.ts`):
   reports the redacted tail of BuildKit's own output.
 - **No private `buildkitd`.** The daemon runs as `tp`, and a non-root
   `buildkitd` demands rootless mode (rootlesskit, newuidmap/newgidmap,
-  subuid/subgid for `tp`): on adrastea it exited with "rootless mode requires to
+  subuid/subgid for `tp`): on host-a it exited with "rootless mode requires to
   be executed as the mapped root in a user namespace" and the lane only ever saw
   a readiness timeout. A root `buildkitd` socket would be a second privileged
   build API the Docker gate cannot observe. The Engine's builder already exists
