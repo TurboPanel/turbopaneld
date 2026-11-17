@@ -1577,6 +1577,10 @@ const SITES: CallSite[] = [
     { argv: ["tunnel-env-remove", TUNNEL_ID] },
     { argv: ["tunnel-env-remove", "instance"] },
   ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-present",id]',
+    { argv: ["tunnel-env-present", TUNNEL_ID] },
+  ),
   tpHost('src/tunnels/connector-service.ts|["-n","tunnel-loopback-sync"]', {
     argv: ["tunnel-loopback-sync"],
   }),
@@ -1584,6 +1588,27 @@ const SITES: CallSite[] = [
     'src/tunnels/connector-service.ts|["-n","rm","-f","--",tunnelUnitPath(id,undefined,slot)]',
     { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT}`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT_B}`] },
+  ),
+  // A resend that cannot start a reinstalled unit removes it again, on either slot.
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","rm","-f","--",tunnelUnitPath(record.id,undefined,slot)]',
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT}`] },
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT_B}`] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-enabled",unit])',
+    { argv: ["systemctl", "is-enabled", TUNNEL_UNIT] },
+    { argv: ["systemctl", "is-enabled", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["restart",unit])',
+    { argv: ["systemctl", "restart", TUNNEL_UNIT] },
+    { argv: ["systemctl", "restart", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["stop",unit])',
+    { argv: ["systemctl", "stop", TUNNEL_UNIT] },
+    { argv: ["systemctl", "stop", TUNNEL_UNIT_B] },
   ),
   tpHost(
     'src/tunnels/connector-service.ts|["-n","systemctl",...args]',

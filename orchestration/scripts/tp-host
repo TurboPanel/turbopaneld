@@ -6072,6 +6072,18 @@ tp_verb_tunnel_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# Says `present` or `absent` for a tunnel's token copy (the folder is closed to
+# every generic verb, and the daemon cannot read it).
+tp_verb_tunnel_env_present() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-present: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-present: refusing tunnel id $1"
+  if tp_pin_dir "$R_TUNNELENV" && [ -f "./$1.env" ] && [ ! -L "./$1.env" ]; then
+    echo present
+  else
+    echo absent
+  fi
+}
+
 # --- helper container ports (lib/tp-php-loopback) --------------------------
 # A helper container publishes one port on 127.0.0.1 for the Hosting Account of
 # its project, and lib/tp-php-loopback opens that port to that account only. The
@@ -7110,6 +7122,7 @@ case "$_verb" in
   site-env-remove) tp_verb_site_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  tunnel-env-present) tp_verb_tunnel_env_present "$@" ;;
   reach-ports-install) tp_verb_reach_ports_install "$@" ;;
   reach-ports-remove) tp_verb_reach_ports_remove "$@" ;;
   cache-prepare) tp_verb_cache_prepare "$@" ;;
