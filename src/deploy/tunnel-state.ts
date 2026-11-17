@@ -193,7 +193,15 @@ export function tunnelInputs(
     ...(state.clientAuth ? { clientAuth: state.clientAuth } : {}),
     ...(state.presentCertificate ? { presentCertificate: true } : {}),
     ...(state.inbound ? { inbound: state.inbound } : {}),
+    localAddresses: ownAddresses(),
   };
+}
+
+/** Every address on this host's interfaces, as Caddy would be asked to bind to. */
+function ownAddresses(): ReadonlySet<string> {
+  return new Set(
+    Deno.networkInterfaces().map((entry) => entry.address.toLowerCase()),
+  );
 }
 
 /**

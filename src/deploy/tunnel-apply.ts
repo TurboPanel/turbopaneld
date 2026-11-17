@@ -354,7 +354,9 @@ async function applyTunnelRoutesLocked(
     await settleGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
     // Logged, not returned: a warning makes the control plane send the table again.
-    for (const warning of plan.warnings) logWarn("tunnels", warning);
+    for (const warning of [...plan.warnings, ...rendered.warnings]) {
+      logWarn("tunnels", warning);
+    }
     logInfo(
       "tunnels",
       `tunnel forwarding now holds ${rendered.forwarded.length} name(s), ${rendered.dropped.length} served here; ${relocks.length} site file(s) took new tunnel peers`,
