@@ -131,6 +131,16 @@ async function waitFor(port: number): Promise<void> {
 
 type Reply = { code: number; status: string; body: string };
 
+/**
+ * `abort` closes the connection with no answer: curl reports no status (000)
+ * and an empty reply, a reset or an HTTP/2 stream reset (52, 56 or 92). A bind or connect failure, or an
+ * error page such as a 502, is a different result and must not pass.
+ */
+function assertAborted(reply: Reply, what: string): void {
+  assertEquals(reply.status, "000", `${what}: an HTTP status came back`);
+  assert([52, 56, 92].includes(reply.code), `${what}: curl exit ${reply.code}`);
+}
+
 async function curl(args: string[]): Promise<Reply> {
   const result = await run("curl", [
     "-sS",
@@ -196,13 +206,17 @@ test({
           presentCertificate: true,
           inbound: [
             { hostname: HOST, peers: ["127.0.0.1"] },
+            { hostname: "second.example.net", peers: ["127.0.0.2"] },
             { hostname: "elsewhere.example.net", peers: ["192.0.2.9"] },
             { hostname: "local.example.net", peers: [], lock: true },
           ],
         },
         new Set(),
       ).contents
-        .replace("https://127.0.0.1:443", `https://127.0.0.1:${HOSTING_PORT}`)
+        .replaceAll(
+          "https://127.0.0.1:443",
+          `https://127.0.0.1:${HOSTING_PORT}`,
+        )
         .replace(`https://:${TUNNEL_PEER_PORT}`, `https://:${PEER_PORT}`)
         .replace(
           `${HOST} {\n  tls internal`,
@@ -316,10 +330,7 @@ ${rendered}`;
         `${PEER_HOST_HEADER}: ${HOST}`,
         `https://tp-peer.internal:${PEER_PORT}/`,
       ]);
-      assert(
-        repeated.status !== "200" && !repeated.body.includes("hosted"),
-        "a repeated peer-host header was handed on",
-      );
+      assertAborted(repeated, "a repeated peer-host header");
 
       // A valid certificate from a source address the door does not list is
       // cut (127.0.0.2 is a peer of the server but not of this name).
@@ -332,10 +343,28 @@ ${rendered}`;
         join(dir, "peer.key"),
         ...peer,
       ]);
-      assert(
-        otherSource.status !== "200" && !otherSource.body.includes("hosted"),
-        "a source address outside the door was handed on",
-      );
+      assertAborted(otherSource, "a source address outside the door");
+
+      // Control: a door that lists 127.0.0.2 answers from that source, so the
+      // refusal above is the door and not the bind.
+      const listedSource = await curl([
+        "--interface",
+        "127.0.0.2",
+        "--cert",
+        join(dir, "peer.pem"),
+        "--key",
+        join(dir, "peer.key"),
+        "--resolve",
+        `tp-peer.internal:${PEER_PORT}:127.0.0.1`,
+        "--cacert",
+        join(dir, "org.pem"),
+        "-H",
+        `${PEER_HOST_HEADER}: second.example.net`,
+        `https://tp-peer.internal:${PEER_PORT}/`,
+      ]);
+      assertEquals(listedSource.code, 0);
+      assertEquals(listedSource.status, "200");
+      assertEquals(listedSource.body, "hosted second.example.net hop=1 spoof=");
 
       // No certificate, with the real hostname as the server name: refused.
       const named443 = await curl([
