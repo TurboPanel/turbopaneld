@@ -1,7 +1,9 @@
 import { assertEquals, assertExists, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/index.ts";
 import {
+  clearUpdateSkip,
   handleSelfUpdateAttachOutcome,
   readUpdateGuardArmed,
   readUpdateRollback,
@@ -10,6 +12,7 @@ import {
   updateGuardPath,
   updateRollbackPath,
   writeUpdateGuardDisarm,
+  writeUpdateSkip,
 } from "./update-guard.ts";
 
 /**
@@ -1106,5 +1109,22 @@ test("a rolled-back build is skipped by the daemon until another is asked for", 
         else Deno.env.set(key, value);
       }
     }
+  });
+});
+
+test("the skip record round-trips, ignores blanks and clears", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    assertEquals(await readUpdateSkip(layout), null);
+    await clearUpdateSkip(layout);
+    await writeUpdateSkip({ commit: " ", reason: "x", at: "t" }, layout);
+    assertEquals(await readUpdateSkip(layout), null);
+    await writeUpdateSkip(
+      { commit: "abc", reason: "deadline", at: "t" },
+      layout,
+    );
+    assertEquals((await readUpdateSkip(layout))?.commit, "abc");
+    await clearUpdateSkip(layout);
+    assertEquals(await readUpdateSkip(layout), null);
   });
 });

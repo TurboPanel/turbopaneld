@@ -67,7 +67,12 @@ import {
   readActiveUpgradeContext,
   writeActiveUpgradeContext,
 } from "./update-active-context.ts";
-import { updateGuardPath, updateRollbackPath } from "./update-guard.ts";
+import {
+  readUpdateSkip,
+  updateGuardPath,
+  updateRollbackPath,
+  writeUpdateSkip,
+} from "./update-guard.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import {
   setDrivetempDropinWriterForTests,
@@ -5199,6 +5204,77 @@ it({
     }
   },
 });
+
+for (const skipped of ["signed-aaa", "other-build"]) {
+  it({
+    name: skipped === "signed-aaa"
+      ? "update refuses a build the guard rolled back"
+      : "update clears a skip record when a different build is asked for",
+    permissions: {
+      env: true,
+      read: true,
+      write: true,
+      sys: ["hostname", "networkInterfaces"],
+    },
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
+      const runDir = await Deno.makeTempDir({ prefix: "tp-skip-run-" });
+      Deno.env.set("TURBOPANEL_RUN_DIR", runDir);
+      let reconcileCalls = 0;
+      const restoreHooks = installClientTestHooks({
+        getBuildInfo: () => ({
+          commit: "old",
+          buildId: "dev-old",
+          builtAt: "2026-08-01T00:00:00Z",
+          channel: "trunk",
+          sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+        }),
+        resolveUpdate: () => Promise.resolve(sampleUpdateInfo("signed-aaa")),
+        executeRunReconcile: () => {
+          reconcileCalls += 1;
+          return Promise.resolve();
+        },
+      });
+      const { socket, restore } = await startConnectedClient();
+      try {
+        await writeUpdateSkip({
+          commit: skipped,
+          reason: "deadline",
+          at: new Date().toISOString(),
+        });
+        socket.receive({
+          type: "update",
+          id: "upd-skip",
+          at: new Date().toISOString(),
+        });
+        const result = await waitFor(
+          "skip update-result",
+          () =>
+            framesOfType(socket, "update-result").find((f) =>
+              (f as { id?: string }).id === "upd-skip"
+            ) as { ok?: boolean; errorCode?: string } | undefined,
+        );
+        if (skipped === "signed-aaa") {
+          assertEquals(result.ok, false);
+          assertEquals(result.errorCode, "update_skipped_after_rollback");
+          assertEquals(reconcileCalls, 0);
+          assertEquals((await readUpdateSkip())?.commit, "signed-aaa");
+        } else {
+          assertEquals(await readUpdateSkip(), null);
+        }
+      } finally {
+        await restore();
+        restoreHooks();
+        if (originalRunDir === undefined) {
+          Deno.env.delete("TURBOPANEL_RUN_DIR");
+        } else Deno.env.set("TURBOPANEL_RUN_DIR", originalRunDir);
+        await Deno.remove(runDir, { recursive: true });
+      }
+    },
+  });
+}
 
 it({
   name:
