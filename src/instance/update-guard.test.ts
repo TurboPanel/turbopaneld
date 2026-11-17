@@ -586,7 +586,15 @@ test("run.sh and tp-update-guard share the documented version parser", async () 
 async function runGuardOnFailedDaemon(options: {
   record?: Parameters<typeof writeRootRecord>[1];
   prevCommit?: string;
-}): Promise<{ code: number; stderr: string; rolledBack: boolean }> {
+  /** A "rolled back from -> to" record root left from an earlier rollback. */
+  rolledBackRecord?: { from: string; to: string };
+}): Promise<{
+  code: number;
+  stderr: string;
+  rolledBack: boolean;
+  rolledBackRecord: string | null;
+  attention: string | null;
+}> {
   const root = await Deno.makeTempDir({ prefix: "tp-guard-root-record-" });
   try {
     const bin = join(root, "bin");
@@ -621,6 +629,13 @@ async function runGuardOnFailedDaemon(options: {
       '{"targetCommit":"newsha","deadlineAt":"2020-01-01T00:00:00Z","previousCommit":"oldsha"}\n',
     );
     if (options.record) await writeRootRecord(root, options.record);
+    if (options.rolledBackRecord) {
+      await Deno.mkdir(join(root, "lib"), { recursive: true });
+      await Deno.writeTextFile(
+        join(root, "lib", "update-guard-rolled-back"),
+        `fromCommit=${options.rolledBackRecord.from}\ntoCommit=${options.rolledBackRecord.to}\nat=2026-01-01T00:00:00Z\n`,
+      );
+    }
     const out = await new Deno.Command("sh", {
       args: [updateGuardSh],
       env: {
@@ -645,10 +660,18 @@ async function runGuardOnFailedDaemon(options: {
         false,
       );
     }
+    const readOrNull = (path: string) =>
+      Deno.readTextFile(path).catch(() => null);
     return {
       code: out.code,
       stderr: new TextDecoder().decode(out.stderr),
       rolledBack,
+      rolledBackRecord: await readOrNull(
+        join(root, "lib", "update-guard-rolled-back"),
+      ),
+      attention: await readOrNull(
+        join(stateDir, "update-guard-attention.json"),
+      ),
     };
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -898,4 +921,87 @@ test("early rollback: the deadline still rolls back a healthy-looking unit", asy
     }),
     true,
   );
+});
+
+test("a second automatic rollback for the same pair is refused and flags the host", async () => {
+  const bootId = await currentBootId();
+  const first = await runGuardOnFailedDaemon({
+    record: { target: "newsha", previous: "oldsha", bootId },
+  });
+  assertEquals(first.code, 0, first.stderr);
+  assertEquals(first.rolledBack, true);
+  assertStringIncludes(first.rolledBackRecord ?? "", "fromCommit=newsha");
+  assertStringIncludes(first.rolledBackRecord ?? "", "toCommit=oldsha");
+  assertEquals(first.attention, null);
+
+  const repeat = await runGuardOnFailedDaemon({
+    record: { target: "newsha", previous: "oldsha", bootId },
+    rolledBackRecord: { from: "newsha", to: "oldsha" },
+  });
+  assertEquals(repeat.code, 0, repeat.stderr);
+  assertEquals(repeat.rolledBack, false);
+  assertStringIncludes(repeat.attention ?? "", '"needsAttention":true');
+  assertStringIncludes(repeat.stderr, "already rolled back");
+
+  // Another build (or another previous one) is a new case: it rolls back.
+  const otherTarget = await runGuardOnFailedDaemon({
+    record: { target: "newsha", previous: "oldsha", bootId },
+    rolledBackRecord: { from: "othersha", to: "oldsha" },
+  });
+  assertEquals(otherTarget.rolledBack, true);
+  assertStringIncludes(otherTarget.rolledBackRecord ?? "", "fromCommit=newsha");
+});
+
+test("a build that comes up healthy clears the rolled-back record", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-guard-disarm-" });
+  try {
+    const stub = join(root, "stub");
+    const runDir = join(root, "run");
+    const stateDir = join(root, "state");
+    for (const dir of [stub, runDir, stateDir]) {
+      await Deno.mkdir(dir, { recursive: true });
+    }
+    await Deno.writeTextFile(join(stub, "id"), "#!/bin/sh\necho 0\n");
+    await Deno.writeTextFile(join(stub, "systemctl"), "#!/bin/sh\nexit 0\n");
+    for (const name of ["id", "systemctl"]) {
+      await Deno.chmod(join(stub, name), 0o755);
+    }
+    await writeRootRecord(root, { target: "newsha", previous: "oldsha" });
+    const rolledBack = join(root, "lib", "update-guard-rolled-back");
+    await Deno.writeTextFile(
+      rolledBack,
+      "fromCommit=newsha\ntoCommit=oldsha\nat=2026-01-01T00:00:00Z\n",
+    );
+    await Deno.writeTextFile(
+      join(stateDir, "update-guard-disarm.json"),
+      '{"targetCommit":"newsha"}\n',
+    );
+    const out = await new Deno.Command("sh", {
+      args: [updateGuardSh],
+      env: {
+        PATH: `${stub}:/usr/bin:/bin`,
+        TURBOPANEL_RUN_DIR: runDir,
+        TURBOPANEL_STATE_DIR: stateDir,
+        TURBOPANEL_INSTALL_ROOT: root,
+      },
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
+    assertEquals(await exists(rolledBack), false);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("a hanging previous build cannot hold the guard", async () => {
+  const guardSh = await Deno.readTextFile(updateGuardSh);
+  const runSh = await Deno.readTextFile(runShPath);
+  for (const source of [guardSh, runSh]) {
+    assertStringIncludes(
+      extractShellFunction(source, "tp_binary_version_line"),
+      "timeout ",
+    );
+    assertEquals(/"\$\{?_(native|js)_prev\}?" --version/.test(source), false);
+  }
 });

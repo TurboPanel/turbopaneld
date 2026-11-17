@@ -37,6 +37,14 @@ GUARD_PATH="$RUN_DIR/update-guard.json"
 # root-owned, so this is the only record the rollback decision is taken from:
 # the daemon owns RUN_DIR and STATE_DIR and could leave or keep a copy there.
 ROOT_RECORD="$INSTALL_ROOT/lib/update-guard-armed"
+# "Already rolled back from <target> to <previous>": root writes it after a
+# rollback restored a running daemon. A second automatic rollback for the same
+# pair is refused (the host is marked as needing attention instead), so a
+# daemon that fails every update cannot keep the host one release back. Any
+# successful update (disarm) clears it.
+ROLLED_BACK_RECORD="$INSTALL_ROOT/lib/update-guard-rolled-back"
+# `--version` runs the binary being judged: never wait on it for long.
+VERSION_READ_TIMEOUT_SEC=10
 # How long after the deadline an armed record still counts. Past it, a record
 # a stopped timer left behind is dropped instead of acted on.
 ROOT_RECORD_MAX_LATE_SEC=3600
@@ -95,6 +103,11 @@ tp_write_file() (
   cd ..
   rmdir -- "$_wf_priv" 2>/dev/null || true
 )
+
+# The `--version` line of a binary, or nothing when it hangs or fails.
+tp_binary_version_line() {
+  timeout "$VERSION_READ_TIMEOUT_SEC" "$1" --version 2>/dev/null | head -1 || true
+}
 
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
@@ -187,7 +200,7 @@ fi
 if [ -f "$DISARM_PATH" ]; then
   _disarm_commit="$(tp_read_json_field "$DISARM_PATH" targetCommit)"
   if [ -n "$_disarm_commit" ] && [ "$_disarm_commit" = "$_target" ]; then
-    rm -f "$GUARD_PATH" "$DISARM_PATH"
+    rm -f "$GUARD_PATH" "$DISARM_PATH" "$ROLLED_BACK_RECORD"
     tp_forget_armed
     exit 0
   fi
@@ -250,27 +263,41 @@ fi
 _from_commit="$_target"
 _to_commit="$_previous_commit"
 if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.prev" ]; then
-  if _prev_out="$("$BIN_DIR/turbopaneld.prev" --version 2>/dev/null)"; then
-    _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
-  fi
+  _prev_out="$(tp_binary_version_line "$BIN_DIR/turbopaneld.prev")"
+  _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
 fi
 if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.js.prev" ]; then
-  if _prev_out="$("$BIN_DIR/turbopaneld.js.prev" --version 2>/dev/null)"; then
-    _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
-  fi
+  _prev_out="$(tp_binary_version_line "$BIN_DIR/turbopaneld.js.prev")"
+  _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
 fi
 [ -n "$_to_commit" ] || _to_commit="unknown"
 
 # Move back only the build root recorded as the previous one when it armed.
 if [ -n "$_previous_commit" ] && [ -x "$BIN_DIR/turbopaneld.prev" ]; then
-  _prev_commit_now=""
-  if _prev_out="$("$BIN_DIR/turbopaneld.prev" --version 2>/dev/null)"; then
-    _prev_commit_now="$(tp_parse_daemon_commit_from_version "$_prev_out")"
-  fi
+  _prev_out="$(tp_binary_version_line "$BIN_DIR/turbopaneld.prev")"
+  _prev_commit_now="$(tp_parse_daemon_commit_from_version "$_prev_out")"
   if [ -n "$_prev_commit_now" ] && [ "$_prev_commit_now" != "$_previous_commit" ]; then
     tp_forget_armed
     tp_die "previous build is $_prev_commit_now, not the $_previous_commit recorded when the update was armed; not rolling back"
   fi
+fi
+
+# A second automatic rollback for the same pair: leave the build in place and
+# say the host needs attention. The first rollback restored a running daemon,
+# so a repeat means the failure is not a one-off a rollback fixes.
+if [ -f "$ROLLED_BACK_RECORD" ] && [ ! -L "$ROLLED_BACK_RECORD" ] &&
+  [ "$(sed -n 's/^fromCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_from_commit" ] &&
+  [ "$(sed -n 's/^toCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_to_commit" ]; then
+  _at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  mkdir -p "$STATE_DIR"
+  tp_write_file "$STATE_DIR/update-guard-attention.json" \
+    "$(printf '{"needsAttention":true,"targetCommit":"%s","attempts":"0","reason":"already rolled back from this build to %s","at":"%s"}' \
+      "$_from_commit" "$_to_commit" "$_at")" \
+    0640 "$(tp_daemon_file_group)" || true
+  tp_forget_armed
+  printf 'tp-update-guard: already rolled back from %s to %s once; not rolling back again, host needs attention\n' \
+    "$_from_commit" "$_to_commit" >&2
+  exit 0
 fi
 
 if [ -f "$BIN_DIR/turbopaneld.prev" ]; then
@@ -302,6 +329,11 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 
 if [ "$_restart_ok" = true ]; then
+  # Root's own record, written only once the restored daemon runs (a failed
+  # restore is retried and must not count as a repeat).
+  _rb_tmp="$(mktemp "$INSTALL_ROOT/lib/.update-guard-rolled-back.XXXXXX")" &&
+    printf 'fromCommit=%s\ntoCommit=%s\nat=%s\n' "$_from_commit" "$_to_commit" "$_at" > "$_rb_tmp" &&
+    chmod 0640 "$_rb_tmp" && mv -f "$_rb_tmp" "$ROLLED_BACK_RECORD" || rm -f "${_rb_tmp:-}"
   rm -f "$GUARD_PATH" "$DISARM_PATH"
   tp_forget_armed
   exit 0

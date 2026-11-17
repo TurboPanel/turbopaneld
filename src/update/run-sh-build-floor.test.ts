@@ -354,6 +354,7 @@ test("run.sh reads the build identity of a published manifest", async () => {
       "tp_resolve_linux_arch",
       "tp_manifest_compact",
       "tp_manifest_field",
+      "tp_manifest_top_field",
       "tp_manifest_artifact_field",
       "tp_manifest_binary_artifact_field",
       "tp_resolve_channel_manifest",
@@ -410,5 +411,25 @@ test("tp-orchestrate accepts the real installer and refuses one without the floo
     }
   } finally {
     await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a manifest without a version records the installed binary's base version", async () => {
+  const source = await Deno.readTextFile(
+    new URL("../../scripts/run.sh", import.meta.url),
+  );
+  const at = source.indexOf('_floor_version="${_manifest_version:-}"');
+  const write = source.indexOf(
+    'tp_write_daemon_build_floor "$DAEMON_BUILD_FLOOR"',
+  );
+  if (at < 0 || write < at) {
+    throw new TypeError("run.sh lost the floor version fallback");
+  }
+  const block = source.slice(at, write);
+  if (!block.includes("tp_binary_version_line")) {
+    throw new TypeError("floor version fallback must read the binary");
+  }
+  if (!source.includes('"${_manifest_commit:-}" "$_floor_version"')) {
+    throw new TypeError("the floor must record the fallback version");
   }
 });

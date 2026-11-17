@@ -118,6 +118,13 @@ its own floor:
   moves nothing. tp-host refuses every `systemctl` verb but `is-*` on
   `turbopaneld-update-guard*`. The guard never lowers the floor, so after a
   rollback the next update may only be the failed build again or newer.
+  After a successful restore the guard writes root's
+  `lib/update-guard-rolled-back` (from and to commit). A second automatic rollback for the same pair is
+  refused: the guard writes `update-guard-attention.json` (`needsAttention`)
+  and leaves the host on the failing build for an operator, so a daemon that
+  fails every update cannot hold the host one release back. A healthy build
+  clears the record. Every `--version` read by the guard and run.sh is bounded
+  by a 10 s timeout.
 - Not covered: the control plane and web interface packages
   (`update-instance`) have no root floor yet.
 
