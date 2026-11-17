@@ -1285,7 +1285,7 @@ addresses are trusted per `reverse_proxy` (loopback and peers), never
 server-wide. The error page of a forward block always answers 503 (a random
 502 would be replaced by the edge's own page), and the peer transport sets
 `dial_timeout 2s`, `response_header_timeout 60s` (first header only, so long
-responses are not cut) and `keepalive 15s`. A tunnel block never asks for a public certificate. All files are
+responses are not cut) and `keepalive 15s`. A hosting site block that forwards to a peer server (`siteSnippet` with a peer upstream) shares the transport timeouts and gets the same fixed 503 error page, merged into its one `handle_errors` block. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
 
 **The lock follows the table** (feature `tunnel-lock-follow-v1`). The table may

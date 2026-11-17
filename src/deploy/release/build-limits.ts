@@ -22,6 +22,7 @@ import {
   roundCores,
 } from "../../contracts/build-limits.ts";
 import { readProcFile } from "../../metrics/collector/proc-read.ts";
+import { errorText } from "../../util/logger.ts";
 
 export type { BuildLimits, BuildLimitSource };
 
@@ -91,15 +92,9 @@ export async function readHostCapacity(
 
 /** Say once per process why host memory is unknown (it stays 0 and tp-host decides). */
 function warnMeminfoOnce(reason: unknown): void {
-  let text: string;
-  if (reason instanceof Error) text = reason.message;
-  else if (typeof reason === "string") text = reason;
-  else text = JSON.stringify(reason) ?? "unknown error";
   if (warnedMeminfo) return;
   warnedMeminfo = true;
-  console.warn(
-    `build limits: host memory unknown (${text})`,
-  );
+  console.warn(`build limits: host memory unknown (${errorText(reason)})`);
 }
 
 /** The default memory limit for a host with this much RAM. */

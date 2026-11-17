@@ -588,6 +588,52 @@ const HIDE_HEADER_BLOCK = `  header {
   }
 `;
 
+const PEER_UPSTREAM = {
+  kind: "peer" as const,
+  targets: ["192.0.2.5:443"],
+  trustFile: "/etc/turbopanel/tunnel/ca.pem",
+  trustedProxies: ["127.0.0.0/8"],
+};
+
+test("siteSnippet answers a fixed 503 and times out a silent peer on the peer path", () => {
+  const base = {
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    upstream: PEER_UPSTREAM,
+  };
+  const snippet = siteSnippet(base);
+  const error = `  handle_errors {
+    respond "This site is not running right now." 503
+  }
+`;
+  // The HTTP block redirects, so only the HTTPS block carries the peer hop.
+  assertStringIncludes(snippet, error);
+  assertStringIncludes(snippet, "dial_timeout 2s");
+  assertStringIncludes(snippet, "response_header_timeout 60s");
+  assertStringIncludes(snippet, "keepalive 15s");
+
+  // With header removal the answer shares the one handle_errors block.
+  const hidden = siteSnippet({ ...base, hideWebServerNames: true });
+  assertEquals(hidden.split("handle_errors {").length - 1, 2);
+  assertStringIncludes(
+    hidden,
+    `  handle_errors {
+    header {
+      -Server
+      -Via
+      -X-Powered-By
+      defer
+    }
+    respond "This site is not running right now." 503
+  }
+`,
+  );
+
+  // A name served on this server keeps Caddy's own error answer.
+  const local = siteSnippet({ hostname: "app.example.com", tlsDir: TLS_DIR });
+  assertEquals(local.includes("handle_errors"), false);
+});
+
 test("siteSnippet strips server names from every block only when asked", () => {
   const base = { hostname: "app.example.com", tlsDir: TLS_DIR };
   assertEquals(siteSnippet(base).includes("-Server"), false);
