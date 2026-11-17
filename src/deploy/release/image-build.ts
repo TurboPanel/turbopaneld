@@ -57,8 +57,10 @@ import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import {
   type DockerCliResult,
+  dockerConfigEnv,
   runDockerStreamed,
   type RunDockerStreamedFn,
+  withDockerConfig,
 } from "../docker-cli.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
@@ -291,8 +293,11 @@ async function runDefault(
   args: string[],
   opts: { cwd?: string } = {},
 ): Promise<{ success: boolean; stderr: string }> {
+  // The docker client never runs bare: it needs the private config folder.
+  const isDocker = command === "docker";
   const result = await new Deno.Command(command, {
-    args,
+    args: isDocker ? withDockerConfig(args) : args,
+    ...(isDocker ? { env: dockerConfigEnv() } : {}),
     cwd: opts.cwd,
     stdin: "null",
     stdout: "piped",

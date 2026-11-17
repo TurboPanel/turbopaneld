@@ -23,6 +23,7 @@ import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
 const decoder = new TextDecoder();
 const SUDO_BIN = "/usr/bin/sudo";
 const DOCKER_BIN = "/usr/bin/docker";
+const ENV_BIN = "/usr/bin/env";
 
 function configuredRunDir(): string {
   try {
@@ -42,8 +43,12 @@ function configuredRunDir(): string {
  * every Compose or image build with it. The daemon already owns its run
  * folder (the control sockets live there), so the config goes in a folder of
  * its own under it: tmpfs, `0700`, nothing for the state root's mode to
- * decide. It is passed as the `--config` argument, not `DOCKER_CONFIG`, so it
- * survives the `sudo` rungs below, which reset the environment.
+ * decide. It is passed as the `--config` argument, which only the CLI and the
+ * plugin it runs see, and as `DOCKER_CONFIG`, which also reaches the helper
+ * processes a plugin starts on its own (`docker compose build` hands the build
+ * to the buildx plugin without forwarding `--config`, and that one then made
+ * `$HOME/.docker`). The `sudo` rungs below reset the environment, so they carry
+ * the variable through `env` instead.
  */
 export function dockerConfigDir(runDir: string = configuredRunDir()): string {
   return join(runDir, "docker-config");
@@ -146,6 +151,22 @@ export function withDockerConfig(args: string[]): string[] {
   return dir === undefined ? args : ["--config", dir, ...args];
 }
 
+/**
+ * `DOCKER_CONFIG=<folder>` for a docker process, when a trusted folder exists.
+ * Every spawn of the docker client must pass this next to
+ * {@link withDockerConfig}: a Compose plugin child never sees `--config`.
+ */
+export function dockerConfigEnv(): Record<string, string> {
+  const dir = ensureDockerConfigDir();
+  return dir === undefined ? {} : { DOCKER_CONFIG: dir };
+}
+
+/** `env DOCKER_CONFIG=<folder>` words that put the variable back after `sudo` resets it. */
+function sudoEnvPrefix(): string[] {
+  const dir = ensureDockerConfigDir();
+  return dir === undefined ? [] : [ENV_BIN, `DOCKER_CONFIG=${dir}`];
+}
+
 export type DockerCliResult = {
   success: boolean;
   code: number;
@@ -158,10 +179,15 @@ export type RunDockerOptions = {
   input?: string;
 };
 
+/** What the raw runner takes: stdin and the environment added to the child's. */
+export type RunRawOptions = RunDockerOptions & {
+  env?: Record<string, string>;
+};
+
 export type DockerCliRunRawFn = (
   command: string,
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ) => Promise<DockerCliResult>;
 
 /** Optional I/O override for host-free unit tests (never call real docker). */
@@ -192,7 +218,7 @@ export type DockerCliIo = {
   spawnStreaming?: (
     bin: string,
     args: string[],
-    options?: SpawnDockerStreamingOptions,
+    options?: SpawnDockerStreamingOptions & { env?: Record<string, string> },
   ) => Promise<Deno.ChildProcess>;
 };
 
@@ -330,12 +356,13 @@ function dockerResultFromChildOutput(
 async function runRawDefault(
   command: string,
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   try {
     const hasInput = options?.input !== undefined;
     const child = new Deno.Command(command, {
       args,
+      ...(options?.env === undefined ? {} : { env: options.env }),
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
@@ -360,7 +387,7 @@ async function runRawDefault(
 async function runRaw(
   command: string,
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   const impl = ioOverride?.runRaw ?? runRawDefault;
   return await impl(command, args, options);
@@ -393,6 +420,7 @@ async function runDockerWithFreshGroups(
       "-u",
       user,
       "--",
+      ...sudoEnvPrefix(),
       resolvedDockerBin(),
       ...args,
     ],
@@ -407,7 +435,7 @@ async function runDockerAsRoot(
 ): Promise<DockerCliResult> {
   return await runRaw(
     SUDO_BIN,
-    ["-n", "--", resolvedDockerBin(), ...args],
+    ["-n", "--", ...sudoEnvPrefix(), resolvedDockerBin(), ...args],
     options,
   );
 }
@@ -461,7 +489,10 @@ export async function runDocker(
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
   const args = withDockerConfig(userArgs);
-  const direct = await runRaw(resolvedDockerBin(), args, options);
+  const direct = await runRaw(resolvedDockerBin(), args, {
+    ...options,
+    env: dockerConfigEnv(),
+  });
   if (
     direct.success ||
     !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
@@ -508,7 +539,9 @@ const PROBE_ARGS = ["version", "--format", "{{.Server.Version}}"];
 async function probeDockerInvocation(): Promise<DockerInvocation> {
   const dockerBin = resolvedDockerBin();
   const probeArgs = withDockerConfig(PROBE_ARGS);
-  const direct = await runRaw(dockerBin, probeArgs);
+  const direct = await runRaw(dockerBin, probeArgs, {
+    env: dockerConfigEnv(),
+  });
   if (
     direct.success ||
     !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
@@ -521,7 +554,7 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
   // socket). Probing both keeps the streamed path's effective Docker access
   // identical to the buffered one.
   const user = await currentUsername();
-  const selfPrefix = ["-n", "-u", user, "--", dockerBin];
+  const selfPrefix = ["-n", "-u", user, "--", ...sudoEnvPrefix(), dockerBin];
   const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...probeArgs]);
   if (refreshed.success) return { bin: SUDO_BIN, prefixArgs: selfPrefix };
   // This process may not run sudo at all: keep the direct invocation so the
@@ -530,7 +563,7 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
     return { bin: dockerBin, prefixArgs: [] };
   }
 
-  const rootPrefix = ["-n", "--", dockerBin];
+  const rootPrefix = ["-n", "--", ...sudoEnvPrefix(), dockerBin];
   const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...probeArgs]);
   if (asRoot.success) return { bin: SUDO_BIN, prefixArgs: rootPrefix };
 
@@ -584,10 +617,14 @@ export async function spawnDockerStreaming(
   ];
   const spawnOverride = ioOverride?.spawnStreaming;
   if (spawnOverride) {
-    return await spawnOverride(invocation.bin, fullArgs, options);
+    return await spawnOverride(invocation.bin, fullArgs, {
+      ...options,
+      env: dockerConfigEnv(),
+    });
   }
   return new Deno.Command(invocation.bin, {
     args: fullArgs,
+    env: dockerConfigEnv(),
     stdin: options?.stdin ?? "null",
     stdout: options?.stdout ?? "piped",
     stderr: "piped",

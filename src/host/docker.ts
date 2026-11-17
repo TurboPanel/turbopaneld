@@ -8,7 +8,7 @@
  * Docker data-root discovery is CLI-free: it reads the Docker Engine API
  * (`GET /info`) over the Unix socket via {@link DockerClient}.
  */
-import { withDockerConfig } from "../deploy/docker-cli.ts";
+import { dockerConfigEnv, withDockerConfig } from "../deploy/docker-cli.ts";
 import { DockerClient, type DockerInfo } from "../docker/client.ts";
 
 export type HostDockerMetadata = {
@@ -45,6 +45,7 @@ function spawnText(cmd: string, args: string[]): string | undefined {
   try {
     const { code, stdout } = new Deno.Command(cmd, {
       args,
+      env: dockerConfigEnv(),
       stdout: "piped",
       stderr: "null",
     }).outputSync();
