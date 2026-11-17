@@ -484,7 +484,7 @@ mounts) rides inside them. They open only on the **build listener** (`build.ts`)
   builds too). The sandboxed build runner (`tp-host build-run`'s per-build throwaway users) never speaks Docker: its unit makes
   `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
   SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
-  `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
+  `/grpc` request buildx opens (seen on host-a, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
   So the kernel checks the caller at `connect()`: `TP_DOCKER_GATE_BUILD_SOCKET` (`/run/turbopanel-gate/build/docker.sock`)
   is `root:tpgatebuild 0660` in a `root:tpgatebuild 0750` directory of its own. `tpgatebuild`
   (`docker_gate_build_group`, its gid in `TP_DOCKER_GATE_BUILD_GID`) holds only `docker_gate_build_user` (`tp`): the
@@ -503,7 +503,7 @@ mounts) rides inside them. They open only on the **build listener** (`build.ts`)
   whose host is the build socket (`docker context create ... --docker host=unix://<build socket>`, then
   `--context`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
   `docker-container` builder that creates a privileged BuildKit container (refused).
-- **Proof (adrastea, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
+- **Proof (host-a, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
   and loaded an image; through the main socket `/grpc` was refused and the fallback BuildKit container's create too;
   tpbuild and uid 65534 with gid tp could not connect to the build socket; spoofed headers, and a container handed
   the main socket, got 403 on `/session` and `/grpc`; a create binding the build directory was refused
