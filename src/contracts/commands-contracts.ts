@@ -7761,6 +7761,15 @@ export type TunnelRoute = {
   upstreams: TunnelRouteUpstream[];
 };
 
+/**
+ * What the receiving side of the peer hop does about client certificates
+ * (feature `tunnel-peer-mtls-v1`). Absent = it asks for none (as before).
+ * `verify` checks a client certificate against the organization's CA when one
+ * is shown and lets a peer without one through; `require` also refuses a peer
+ * that shows none.
+ */
+export type TunnelPeerClientAuth = "verify" | "require";
+
 /** A leaf of the organization's CA for the peer hop; the key is sealed for this daemon. */
 export type TunnelPeerMaterial = {
   certificatePem: string;
@@ -7796,6 +7805,8 @@ export type TunnelRoutesPayload = {
   listenAddresses?: string[];
   /** Required when `routes` or `peerAddresses` is not empty. */
   peerMaterial?: TunnelPeerMaterial;
+  /** Client certificate policy of the peer-facing site (`tunnel-peer-mtls-v1`). */
+  peerClientAuth?: TunnelPeerClientAuth;
   /**
    * Every tunnel name whose site runs here, with who may forward it. Absent
    * (an older control plane) = the locks stay as the last deploy wrote them.
@@ -7983,6 +7994,14 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
   }
   if (value.peerMaterial !== undefined) {
     payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (value.peerClientAuth !== undefined) {
+    if (
+      value.peerClientAuth !== "verify" && value.peerClientAuth !== "require"
+    ) {
+      throw new TypeError("Invalid server.tunnel.routes peerClientAuth");
+    }
+    payload.peerClientAuth = value.peerClientAuth;
   }
   if (value.inbound !== undefined) {
     payload.inbound = parseTunnelInboundList(value.inbound);

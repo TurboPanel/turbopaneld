@@ -1288,6 +1288,22 @@ server-wide. The error page of a forward block always answers 503 (a random
 responses are not cut) and `keepalive 15s`. A hosting site block that forwards to a peer server (`siteSnippet` with a peer upstream) shares the transport timeouts and gets the same fixed 503 error page, merged into its one `handle_errors` block. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
 
+**Client certificates on the hop** (feature `tunnel-peer-mtls-v1`, `tunnel-peer-cert.ts`). The table may carry
+`peerClientAuth`: `verify` or `require`. The peer site then loads
+`client_auth { mode verify_if_given | require_and_verify; trust_pool file <ca.pem> }`
+on its one name (a visitor's TLS never asks for a certificate), and the
+`remote_ip` check and the firewall stay as further layers. A forward block shows
+this server's own peer certificate (`tls_client_auth <leaf.pem> <leaf.key>`)
+whenever that certificate lists client authentication among its extended key
+usages; the daemon reads that from the certificate itself (`certificateAllowsClientAuth`),
+not from a flag, so a certificate from before the change is never shown as a
+client certificate. `require` is kept only when this server's own certificate can
+be shown; otherwise it is applied as `verify` and logged (never returned as a
+warning: a warning makes the control plane send the table again). Absent
+`peerClientAuth` renders exactly as before. Safe order: every server runs the
+build that shows its certificate and holds a certificate that allows it, then
+the control plane sends `require`.
+
 **The lock follows the table** (feature `tunnel-lock-follow-v1`). The table may
 carry `inbound`: every tunnel name whose site runs here, with the exact
 addresses of the other servers that carry it (empty when none does). The

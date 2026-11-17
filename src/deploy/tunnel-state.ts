@@ -8,6 +8,7 @@
 import { join } from "@std/path";
 import type {
   TunnelInbound,
+  TunnelPeerClientAuth,
   TunnelRoute,
 } from "../contracts/commands-contracts.ts";
 import { errorText, logWarn } from "../util/logger.ts";
@@ -35,6 +36,10 @@ export type TunnelState = {
   peerAddresses: string[];
   listenAddresses?: string[];
   peerId?: string;
+  /** What the peer-facing site does about client certificates (absent = nothing). */
+  clientAuth?: TunnelPeerClientAuth;
+  /** The peer certificate allows client use, so forward blocks show it. */
+  presentCertificate?: boolean;
   /** Tunnel names that run here and who may forward them (absent from an older control plane). */
   inbound?: TunnelInbound[];
   /** Generation of the table this was applied from (`tunnel-table-generation-v1`). */
@@ -183,6 +188,8 @@ export function tunnelInputs(
       ? { listenAddresses: state.listenAddresses }
       : {}),
     ...(material ? { material } : {}),
+    ...(state.clientAuth ? { clientAuth: state.clientAuth } : {}),
+    ...(state.presentCertificate ? { presentCertificate: true } : {}),
   };
 }
 

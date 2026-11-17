@@ -12,6 +12,10 @@ import {
   rewriteHostingCaddySites,
   setIngressHostCommandForTest,
 } from "./ingress.ts";
+import {
+  SERVER_AND_CLIENT_CERT,
+  SERVER_ONLY_CERT,
+} from "../testing/tunnel-peer-certs.ts";
 import { applyTunnelRoutes } from "./tunnel-apply.ts";
 import { TUNNEL_SITE_FILE, tunnelPeerPaths } from "./tunnel-caddy.ts";
 import {
@@ -1134,5 +1138,69 @@ test("an identical table with no generation after a counter reset leaves nothing
       deps,
     );
     assertEquals(reset.applied, true);
+  });
+});
+
+test("a certificate fit for client use is shown by forward blocks and a require request is kept", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const result = await applyTunnelRoutes(
+      layout,
+      table({
+        peerClientAuth: "require",
+        peerMaterial: {
+          certificatePem: SERVER_AND_CLIENT_CERT,
+          privateKeyEnvelope: "tpdaemon.AAAA",
+          caCertPem: CERT,
+        },
+      }),
+      { decryptSecrets: decrypt, grantRead: noGrant },
+    );
+    assertEquals(result.warnings, []);
+    const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
+    const state = await readTunnelState(hostingDir);
+    const paths = tunnelPeerPaths(hostingDir, state!.peerId!);
+    assertEquals(state?.clientAuth, "require");
+    assertEquals(state?.presentCertificate, true);
+    assertStringIncludes(
+      file,
+      `tls_client_auth ${paths.certificate} ${paths.key}`,
+    );
+    assertStringIncludes(file, "mode require_and_verify");
+    assertStringIncludes(file, `trust_pool file ${paths.trust}`);
+  });
+});
+
+test("a require request falls back to verify, without a warning in the result, when the certificate is server-only", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const result = await applyTunnelRoutes(
+      layout,
+      table({
+        peerClientAuth: "require",
+        peerMaterial: {
+          certificatePem: SERVER_ONLY_CERT,
+          privateKeyEnvelope: "tpdaemon.AAAA",
+          caCertPem: CERT,
+        },
+      }),
+      { decryptSecrets: decrypt, grantRead: noGrant },
+    );
+    // A warning would make the control plane send the table again and again.
+    assertEquals(result.warnings, []);
+    const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
+    assertEquals(file.includes("tls_client_auth"), false);
+    assertStringIncludes(file, "mode verify_if_given");
+    assertEquals((await readTunnelState(hostingDir))?.clientAuth, "verify");
+  });
+});
+
+test("a table with no peerClientAuth renders as before, whatever the certificate allows", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    await applyTunnelRoutes(layout, table(), {
+      decryptSecrets: decrypt,
+      grantRead: noGrant,
+    });
+    const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
+    assertEquals(file.includes("client_auth"), false);
+    assertEquals(file.includes("tls_client_auth"), false);
   });
 });

@@ -323,3 +323,20 @@ test("a tunnel generation is optional and must be a non-negative safe integer", 
     TypeError,
   );
 });
+
+test("server.tunnel.routes parses peerClientAuth and refuses other values", () => {
+  for (const mode of ["verify", "require"] as const) {
+    const payload = { ...GOOD, peerClientAuth: mode };
+    assertEquals(parseTunnelRoutesPayload(payload), payload);
+  }
+  assertEquals(
+    "peerClientAuth" in parseTunnelRoutesPayload(GOOD),
+    false,
+  );
+  for (const value of ["off", "", true, null, 1]) {
+    assertThrows(
+      () => parseTunnelRoutesPayload({ ...GOOD, peerClientAuth: value }),
+      TypeError,
+    );
+  }
+});

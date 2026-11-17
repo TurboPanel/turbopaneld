@@ -8,6 +8,7 @@ import type {
   EnvironmentDeployHosting,
   TunnelRoute,
 } from "../contracts/commands-contracts.ts";
+import { ConfigValueError } from "../contracts/config-values.ts";
 import { buildCaddyHostnameRoutes, caddyfile, siteSnippet } from "./ingress.ts";
 import {
   peerUpstreamText,
@@ -452,5 +453,128 @@ test({
     assertEquals(serverOf("tp-peer.internal").length, 1);
     assertEquals(serverOf("plain.example.com"), serverOf("tp-peer.internal"));
     assertEquals(serverOf("app.example.com"), serverOf("tp-peer.internal"));
+  },
+});
+
+test("a sender with a fit certificate shows it in the peer transport", () => {
+  const text = peerUpstreamText({
+    kind: "peer",
+    targets: ["10.0.0.5:443"],
+    trustFile: PEER_DIR.trust,
+    trustedProxies: ["127.0.0.0/8"],
+    clientCertificate: { certificate: PEER_DIR.certificate, key: PEER_DIR.key },
+  });
+  assertStringIncludes(
+    text,
+    `    tls_trust_pool file ${PEER_DIR.trust}
+    tls_server_name tp-peer.internal
+    tls_client_auth ${PEER_DIR.certificate} ${PEER_DIR.key}
+    versions 2`,
+  );
+  assertThrows(
+    () =>
+      peerUpstreamText({
+        kind: "peer",
+        targets: ["10.0.0.5:443"],
+        trustFile: PEER_DIR.trust,
+        trustedProxies: [],
+        clientCertificate: { certificate: "leaf pem", key: PEER_DIR.key },
+      }),
+    ConfigValueError,
+  );
+});
+
+test("forward blocks show the certificate only when the inputs say it is fit", () => {
+  const withCert = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, presentCertificate: true },
+    new Set(),
+  ).contents;
+  assertEquals(withCert.split("tls_client_auth ").length - 1, 2);
+  assertStringIncludes(
+    withCert,
+    `tls_client_auth ${PEER_DIR.certificate} ${PEER_DIR.key}`,
+  );
+  const without = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, presentCertificate: false },
+    new Set(),
+  ).contents;
+  assertEquals(without, GOLDEN_TUNNEL_FILE);
+});
+
+const REQUIRE_SITE = `tp-peer.internal {
+  tls ${PEER_DIR.certificate} ${PEER_DIR.key} {
+    client_auth {
+      mode require_and_verify
+      trust_pool file ${PEER_DIR.trust}
+    }
+  }
+  @tp_outside not remote_ip 10.0.0.5 10.0.0.6 fd00::5
+  handle @tp_outside {
+    abort
+  }
+  handle {
+    respond "" 404
+  }
+}
+`;
+
+test("the peer site requires and verifies a client certificate on request", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assert(text.endsWith(REQUIRE_SITE));
+  // The address check stays as a second layer.
+  assertStringIncludes(text, "@tp_outside not remote_ip 10.0.0.5");
+});
+
+test("the peer site verifies a client certificate only when one is shown in verify mode", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "verify" },
+    new Set(),
+  ).contents;
+  assert(
+    text.endsWith(
+      REQUIRE_SITE.replace("require_and_verify", "verify_if_given"),
+    ),
+  );
+});
+
+test("the peer site asks for no client certificate when none is requested", () => {
+  const text = renderTunnelFile(ROUTES, INPUTS, new Set()).contents;
+  assertEquals(text.includes("client_auth"), false);
+});
+
+// Real Caddy (TP_TEST_CADDY): the new directives must adapt to what is meant,
+// a verifying peer site and a sender that shows its certificate.
+test({
+  name: "a real Caddy adapts the client certificate directives",
+  ignore: !Deno.env.get("TP_TEST_CADDY"),
+  fn: async () => {
+    const rendered = renderTunnelFile(
+      ROUTES,
+      { ...INPUTS, clientAuth: "require", presentCertificate: true },
+      new Set(),
+    ).contents;
+    const child = new Deno.Command(Deno.env.get("TP_TEST_CADDY")!, {
+      args: ["adapt", "--adapter", "caddyfile", "--config", "/dev/stdin"],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(rendered));
+    await writer.close();
+    const out = await child.output();
+    assertEquals(out.success, true, new TextDecoder().decode(out.stderr));
+    const json = new TextDecoder().decode(out.stdout);
+    assertStringIncludes(json, '"mode":"require_and_verify"');
+    assertStringIncludes(json, PEER_DIR.trust);
+    assertStringIncludes(json, '"client_certificate_file"');
+    assertStringIncludes(json, PEER_DIR.certificate);
   },
 });

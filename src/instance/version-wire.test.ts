@@ -56,6 +56,7 @@ import {
   TUNNEL_FORWARDING_FEATURE,
   TUNNEL_LOCK_ADD_FEATURE,
   TUNNEL_LOCK_FOLLOW_FEATURE,
+  TUNNEL_PEER_MTLS_FEATURE,
   TUNNEL_STATUS_FACTS_FEATURE,
   TUNNEL_STATUS_FEATURE,
   TUNNEL_TABLE_GENERATION_FEATURE,
@@ -600,12 +601,21 @@ test("tunnel-lock-add-v1 is advertised, right after project-cache-v1", () => {
   );
 });
 
-test("build-limits-v1 is advertised, is the last entry and raised no floor", () => {
+test("build-limits-v1 is advertised and raised no floor", () => {
   assertEquals(BUILD_LIMITS_FEATURE, "build-limits-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), BUILD_LIMITS_FEATURE);
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(BUILD_LIMITS_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(TUNNEL_LOCK_ADD_FEATURE) + 1,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("tunnel-peer-mtls-v1 is advertised, is the last entry and raised no floor", () => {
+  assertEquals(TUNNEL_PEER_MTLS_FEATURE, "tunnel-peer-mtls-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_PEER_MTLS_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_PEER_MTLS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(BUILD_LIMITS_FEATURE) + 1,
   );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

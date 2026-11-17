@@ -23,6 +23,7 @@ import {
   isValidIpv4Literal,
   isValidIpv6Literal,
   TUNNEL_PEER_TLS_NAME,
+  type TunnelPeerClientAuth,
   type TunnelRoute,
 } from "../contracts/commands-contracts.ts";
 import { ConfigValueError } from "../contracts/config-values.ts";
@@ -72,6 +73,8 @@ export type PeerUpstream = {
   trustFile: string;
   /** Source ranges whose visitor-address headers are kept (loopback and peers). */
   trustedProxies: readonly string[];
+  /** Certificate and key shown to the receiving server as a client certificate. */
+  clientCertificate?: Readonly<{ certificate: string; key: string }>;
 };
 
 /** Where one folder of peer material sits and the paths its files get. */
@@ -145,6 +148,9 @@ export function tunnelLockLines(peers: readonly string[]): string {
  * a short idle keepalive so a pooled connection to a silent peer is not reused.
  * `tls_server_name` is fixed: the receiving server presents the certificate it
  * loaded for that name, and the sender trusts only the organization's bundle.
+ * With `clientCertificate` the sender also shows its own peer certificate
+ * (`tls_client_auth`), so a receiver that checks client certificates can tell
+ * a server of the organization from anyone else who reaches the address.
  */
 export function peerUpstreamText(upstream: PeerUpstream): string {
   if (upstream.targets.length === 0) {
@@ -162,6 +168,14 @@ export function peerUpstreamText(upstream: PeerUpstream): string {
       throw new ConfigValueError("tunnel trusted range", "must be an address");
     }
   });
+  const clientAuth = upstream.clientCertificate
+    ? `    tls_client_auth ${
+      assertPath(
+        "tunnel client certificate",
+        upstream.clientCertificate.certificate,
+      )
+    } ${assertPath("tunnel client key", upstream.clientCertificate.key)}\n`
+    : "";
   return `reverse_proxy ${targets.join(" ")} {
   lb_policy round_robin
   lb_try_duration 3s
@@ -173,7 +187,7 @@ export function peerUpstreamText(upstream: PeerUpstream): string {
     tls
     tls_trust_pool file ${trust}
     tls_server_name ${TUNNEL_PEER_TLS_NAME}
-    versions 2
+${clientAuth}    versions 2
     dial_timeout 2s
     response_header_timeout 60s
     keepalive 15s
@@ -199,6 +213,17 @@ export type TunnelFileInputs = Readonly<{
   listenAddresses?: readonly string[];
   /** Absent when the table has nothing to receive or forward. */
   material?: Readonly<{ certificate: string; key: string; trust: string }>;
+  /**
+   * What the peer-facing site does about client certificates. Absent = it asks
+   * for none. See {@link TunnelPeerClientAuth}.
+   */
+  clientAuth?: TunnelPeerClientAuth;
+  /**
+   * True when the peer certificate allows client use: forward blocks then show
+   * it to the receiving server. False (a certificate from before the change)
+   * sends nothing, as before.
+   */
+  presentCertificate?: boolean;
 }>;
 
 /** One forward block for a site that runs on other servers. */
@@ -219,6 +244,14 @@ function forwardBlock(route: TunnelRoute, inputs: TunnelFileInputs): string {
     kind: "peer",
     targets,
     trustFile: material.trust,
+    ...(inputs.presentCertificate
+      ? {
+        clientCertificate: {
+          certificate: material.certificate,
+          key: material.key,
+        },
+      }
+      : {}),
     trustedProxies: tunnelTrustedRanges(inputs.peerAddresses),
   }).split("\n").map((line) => `    ${line}`).join("\n");
   // A request that came from a peer is never passed on again, so a moved site
@@ -262,6 +295,11 @@ ${peerRule}${forward}  handle_errors {
  * certificate the sender would be shown the wrong one and refuse it. Only
  * listed peers get any answer.
  *
+ * With `clientAuth` the site also checks the connecting server's client
+ * certificate against the organization's bundle: `verify` when one is shown,
+ * `require` always. The `remote_ip` check below stays as a second layer. The
+ * check sits on this name only, so a visitor's own TLS never asks for one.
+ *
  * The site has no `bind`. Caddy makes one server per set of listen addresses,
  * so a site bound to this server's own address would become a server of its own
  * that holds only this name, and a forwarded request for a real hostname that
@@ -274,9 +312,21 @@ function peerSite(inputs: TunnelFileInputs): string {
   const certificate = assertPath("tunnel certificate", material.certificate);
   const key = assertPath("tunnel key", material.key);
   const peers = inputs.peerAddresses.join(" ");
+  const mode = inputs.clientAuth === "require"
+    ? "require_and_verify"
+    : "verify_if_given";
+  const tls = inputs.clientAuth
+    ? `  tls ${certificate} ${key} {
+    client_auth {
+      mode ${mode}
+      trust_pool file ${assertPath("tunnel trust file", material.trust)}
+    }
+  }
+`
+    : `  tls ${certificate} ${key}
+`;
   return `${TUNNEL_PEER_TLS_NAME} {
-  tls ${certificate} ${key}
-  ${OUTSIDE_MATCHER} not remote_ip ${peers}
+${tls}  ${OUTSIDE_MATCHER} not remote_ip ${peers}
   handle ${OUTSIDE_MATCHER} {
     abort
   }
