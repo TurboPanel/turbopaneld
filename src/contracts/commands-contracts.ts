@@ -7592,6 +7592,24 @@ function parseFolderRemoval(value: unknown): FolderRemoval {
 /** The fixed certificate name of the hop between servers. Same on both sides. */
 export const TUNNEL_PEER_TLS_NAME = "tp-peer.internal";
 
+/**
+ * The port of the peer-facing server on each server (table with
+ * `peerClientAuth`): senders dial it and the control plane's firewall rule
+ * opens it to the exact peer addresses. Not 7443 (Traefik, loopback). Same on
+ * both sides.
+ */
+export const TUNNEL_PEER_PORT = 9443;
+
+function parseTunnelPeerClientAuth(
+  value: unknown,
+  where: string,
+): TunnelPeerClientAuth {
+  if (value !== "verify" && value !== "require") {
+    throw new TypeError(`Invalid ${where} peerClientAuth`);
+  }
+  return value;
+}
+
 const MAX_TUNNEL_HOSTNAMES = 256;
 const MAX_TUNNEL_ADDRESSES = 64;
 const MAX_TUNNEL_ROUTES = 2000;
@@ -7761,6 +7779,15 @@ export type TunnelRoute = {
   upstreams: TunnelRouteUpstream[];
 };
 
+/**
+ * What the receiving side of the peer hop does about client certificates
+ * (feature `tunnel-peer-mtls-v1`). Absent = it asks for none (as before).
+ * `verify` checks a client certificate against the organization's CA when one
+ * is shown and lets a peer without one through; `require` also refuses a peer
+ * that shows none.
+ */
+export type TunnelPeerClientAuth = "verify" | "require";
+
 /** A leaf of the organization's CA for the peer hop; the key is sealed for this daemon. */
 export type TunnelPeerMaterial = {
   certificatePem: string;
@@ -7796,6 +7823,8 @@ export type TunnelRoutesPayload = {
   listenAddresses?: string[];
   /** Required when `routes` or `peerAddresses` is not empty. */
   peerMaterial?: TunnelPeerMaterial;
+  /** Client certificate policy of the peer-facing site (`tunnel-peer-mtls-v1`). */
+  peerClientAuth?: TunnelPeerClientAuth;
   /**
    * Every tunnel name whose site runs here, with who may forward it. Absent
    * (an older control plane) = the locks stay as the last deploy wrote them.
@@ -7942,6 +7971,38 @@ function parseTunnelInboundList(value: unknown): TunnelInbound[] {
   return inbound;
 }
 
+/** The optional fields of `server.tunnel.routes`, parsed onto `payload`. */
+function readTunnelRoutesOptionals(
+  value: Record<string, unknown>,
+  payload: TunnelRoutesPayload,
+): void {
+  if (value.listenAddresses !== undefined) {
+    payload.listenAddresses = parseTunnelAddressList(
+      value.listenAddresses,
+      "server.tunnel.routes listenAddresses",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  if (value.peerMaterial !== undefined) {
+    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (value.peerClientAuth !== undefined) {
+    payload.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.routes",
+    );
+  }
+  if (value.inbound !== undefined) {
+    payload.inbound = parseTunnelInboundList(value.inbound);
+  }
+  const generation = parseTunnelGeneration(
+    value.generation,
+    "server.tunnel.routes generation",
+  );
+  if (generation !== undefined) payload.generation = generation;
+}
+
 /** Parse `server.tunnel.routes`. */
 export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
   if (!isRecord(value)) {
@@ -7973,25 +8034,7 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
     routes,
     peerAddresses,
   };
-  if (value.listenAddresses !== undefined) {
-    payload.listenAddresses = parseTunnelAddressList(
-      value.listenAddresses,
-      "server.tunnel.routes listenAddresses",
-      1,
-      MAX_TUNNEL_ADDRESSES,
-    );
-  }
-  if (value.peerMaterial !== undefined) {
-    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
-  }
-  if (value.inbound !== undefined) {
-    payload.inbound = parseTunnelInboundList(value.inbound);
-  }
-  const generation = parseTunnelGeneration(
-    value.generation,
-    "server.tunnel.routes generation",
-  );
-  if (generation !== undefined) payload.generation = generation;
+  readTunnelRoutesOptionals(value, payload);
   if (
     (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial
   ) {
@@ -8153,6 +8196,10 @@ export type TunnelStatusResult = {
   /** The connector version this daemon is pinned to and moves every tunnel to. */
   pinnedVersion: string;
   connectors: TunnelStatusConnector[];
+  /** What the hop between servers does about client certificates here (feature `tunnel-peer-mtls-v1`); absent = nothing is checked. */
+  peerClientAuth?: TunnelPeerClientAuth;
+  /** True when `require` was asked for and `verify` is in force because this server's certificate cannot be shown. */
+  peerClientAuthDowngraded?: true;
 };
 
 const TUNNEL_STATUS_VALUES = new Set([
@@ -8260,10 +8307,25 @@ export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
   ) {
     throw new TypeError("Invalid server.tunnel.status result");
   }
-  return {
+  const result: TunnelStatusResult = {
     pinnedVersion: value.pinnedVersion,
     connectors: value.connectors.map(parseTunnelStatusConnector),
   };
+  if (value.peerClientAuth !== undefined) {
+    result.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.status",
+    );
+  }
+  if (value.peerClientAuthDowngraded !== undefined) {
+    if (value.peerClientAuthDowngraded !== true) {
+      throw new TypeError(
+        "Invalid server.tunnel.status peerClientAuthDowngraded",
+      );
+    }
+    result.peerClientAuthDowngraded = true;
+  }
+  return result;
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */

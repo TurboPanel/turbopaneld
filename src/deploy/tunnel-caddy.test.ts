@@ -8,10 +8,12 @@ import type {
   EnvironmentDeployHosting,
   TunnelRoute,
 } from "../contracts/commands-contracts.ts";
+import { ConfigValueError } from "../contracts/config-values.ts";
 import { buildCaddyHostnameRoutes, caddyfile, siteSnippet } from "./ingress.ts";
 import {
   peerUpstreamText,
   renderTunnelFile,
+  TUNNEL_PEER_PORT,
   tunnelLockLines,
   tunnelPeerPaths,
   withTrustedProxies,
@@ -453,4 +455,187 @@ test({
     assertEquals(serverOf("plain.example.com"), serverOf("tp-peer.internal"));
     assertEquals(serverOf("app.example.com"), serverOf("tp-peer.internal"));
   },
+});
+
+test("a sender with a fit certificate shows it in the peer transport", () => {
+  const text = peerUpstreamText({
+    kind: "peer",
+    targets: ["10.0.0.5:443"],
+    trustFile: PEER_DIR.trust,
+    trustedProxies: ["127.0.0.0/8"],
+    clientCertificate: { certificate: PEER_DIR.certificate, key: PEER_DIR.key },
+  });
+  assertStringIncludes(
+    text,
+    `    tls_trust_pool file ${PEER_DIR.trust}
+    tls_server_name tp-peer.internal
+    tls_client_auth ${PEER_DIR.certificate} ${PEER_DIR.key}
+    versions 2`,
+  );
+  assertThrows(
+    () =>
+      peerUpstreamText({
+        kind: "peer",
+        targets: ["10.0.0.5:443"],
+        trustFile: PEER_DIR.trust,
+        trustedProxies: [],
+        clientCertificate: { certificate: "leaf pem", key: PEER_DIR.key },
+      }),
+    ConfigValueError,
+  );
+});
+
+test("forward blocks show the certificate only when the inputs say it is fit", () => {
+  const withCert = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, presentCertificate: true },
+    new Set(),
+  ).contents;
+  assertEquals(withCert.split("tls_client_auth ").length - 1, 2);
+  assertStringIncludes(
+    withCert,
+    `tls_client_auth ${PEER_DIR.certificate} ${PEER_DIR.key}`,
+  );
+  const without = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, presentCertificate: false },
+    new Set(),
+  ).contents;
+  assertEquals(without, GOLDEN_TUNNEL_FILE);
+});
+
+const DEDICATED_SITE = `https://:9443 {
+  tls ${PEER_DIR.certificate} ${PEER_DIR.key} {
+    client_auth {
+      mode require_and_verify
+      trust_pool file ${PEER_DIR.trust}
+    }
+  }
+  @tp_outside not remote_ip 10.0.0.5 10.0.0.6 fd00::5
+  handle @tp_outside {
+    abort
+  }
+  @tp_door_0 {
+    header X-Tp-Peer-Host app.example.com
+    remote_ip 10.0.0.5
+  }
+  handle @tp_door_0 {
+    reverse_proxy https://127.0.0.1:443 {
+      header_up Host {header.X-Tp-Peer-Host}
+      header_up -X-Tp-Peer-Host
+      header_up X-Tp-Peer-Hop 1
+      trusted_proxies 127.0.0.0/8 ::1 10.0.0.5 10.0.0.6 fd00::5
+      transport http {
+        tls_server_name {http.request.header.X-Tp-Peer-Host}
+        tls_insecure_skip_verify
+        dial_timeout 2s
+        response_header_timeout 60s
+      }
+    }
+  }
+  handle {
+    abort
+  }
+}
+`;
+
+/** One name with a peer, one local-only name (no peers): only the first gets a door. */
+const DEDICATED_INBOUND = [
+  { hostname: "App.Example.com", peers: ["10.0.0.5"] },
+  { hostname: "mine.example.com", peers: [], lock: true },
+];
+
+test("with client auth the peer hop is its own server on its own port, requiring a certificate", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require", inbound: DEDICATED_INBOUND },
+    new Set(),
+  ).contents;
+  assert(text.endsWith(DEDICATED_SITE));
+  // A local-only name gets no door, so a peer cannot ask for it.
+  assertEquals(text.includes("mine.example.com"), false);
+  // The shared-port peer site is gone, and so is its name on 443.
+  assertEquals(text.includes("tp-peer.internal {"), false);
+  assertEquals(TUNNEL_PEER_PORT, 9443);
+});
+
+test("in verify mode the peer server only checks a certificate that is shown", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "verify", inbound: DEDICATED_INBOUND },
+    new Set(),
+  ).contents;
+  assert(
+    text.endsWith(
+      DEDICATED_SITE.replace("require_and_verify", "verify_if_given"),
+    ),
+  );
+});
+
+test("senders dial the peer port unless an upstream names its own, and mark nothing else", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assertStringIncludes(
+    text,
+    "reverse_proxy 10.0.0.5:9443 [fd00::5]:9443 10.0.0.6:8443 {",
+  );
+  assertEquals(text.includes("10.0.0.5:443"), false);
+  // The receiver matches Host to the connecting name, so the real one rides in a header.
+  assertStringIncludes(text, "header_up Host tp-peer.internal");
+  assertStringIncludes(text, "header_up X-Tp-Peer-Host {host}");
+  // A forwarded request is told by the header the peer server sets, not by its address.
+  assertStringIncludes(text, "@tp_peer header X-Tp-Peer-Hop 1");
+  assertEquals(text.includes("@tp_peer remote_ip"), false);
+});
+
+test("without client auth nothing moves: port 443, the address rule and the shared peer site", () => {
+  const text = renderTunnelFile(ROUTES, INPUTS, new Set()).contents;
+  assertStringIncludes(text, "10.0.0.5:443");
+  assertStringIncludes(text, "@tp_peer remote_ip 10.0.0.5 10.0.0.6 fd00::5");
+  assertStringIncludes(text, "tp-peer.internal {");
+  assertEquals(text.includes("client_auth"), false);
+  assertEquals(text.includes("9443"), false);
+});
+
+// Real Caddy (TP_TEST_CADDY): the new directives must adapt to what is meant,
+// a verifying peer site and a sender that shows its certificate.
+test({
+  name: "a real Caddy adapts the client certificate directives",
+  ignore: !Deno.env.get("TP_TEST_CADDY"),
+  fn: async () => {
+    const rendered = renderTunnelFile(
+      ROUTES,
+      { ...INPUTS, clientAuth: "require", presentCertificate: true },
+      new Set(),
+    ).contents;
+    const child = new Deno.Command(Deno.env.get("TP_TEST_CADDY")!, {
+      args: ["adapt", "--adapter", "caddyfile", "--config", "/dev/stdin"],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(rendered));
+    await writer.close();
+    const out = await child.output();
+    assertEquals(out.success, true, new TextDecoder().decode(out.stderr));
+    const json = new TextDecoder().decode(out.stdout);
+    assertStringIncludes(json, '"mode":"require_and_verify"');
+    assertStringIncludes(json, PEER_DIR.trust);
+    assertStringIncludes(json, '"client_certificate_file"');
+    assertStringIncludes(json, PEER_DIR.certificate);
+  },
+});
+
+test("a peer server with no inbound names hands nothing on", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assertEquals(text.includes("@tp_door_"), false);
+  assertEquals(text.includes("reverse_proxy https://127.0.0.1:443"), false);
 });

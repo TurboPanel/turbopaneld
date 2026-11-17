@@ -1288,6 +1288,32 @@ server-wide. The error page of a forward block always answers 503 (a random
 responses are not cut) and `keepalive 15s`. A hosting site block that forwards to a peer server (`siteSnippet` with a peer upstream) shares the transport timeouts and gets the same fixed 503 error page, merged into its one `handle_errors` block. A tunnel block never asks for a public certificate. All files are
 under `/etc/turbopanel`, so `scripts/purge.sh` already removes them.
 
+**Client certificates on the hop** (feature `tunnel-peer-mtls-v1`, `tunnel-peer-cert.ts`). The table may carry
+`peerClientAuth`: `verify` or `require`. The peer hop is then its own Caddy
+server on `TUNNEL_PEER_PORT` (9443, a contract constant, reserved for apps),
+`client_auth { mode verify_if_given | require_and_verify; trust_pool file <ca.pem> }`
+on the organization CA only. It is separate from :443 because Caddy turns on
+strict SNI matching for a server that checks client certificates, and a check on
+one name of the shared server would not cover a connection that names a real
+hostname. The peer server keeps the `remote_ip` check, sets `X-Tp-Peer-Hop 1`
+and proxies to the hosting server on loopback. The sender cannot send the real
+Host (the strict SNI match would answer 421 for it), so it sends the fixed Host
+`tp-peer.internal` and the real one in `X-Tp-Peer-Host`; the peer server puts it
+back as Host and SNI for the hop to hosting and removes the header. Hosting
+stays on :443 with no client certificate. The peer server hands a request on only through a door per `inbound` name that has peers (`header X-Tp-Peer-Host <name>` and `remote_ip <that name's peers>`); a name not listed, a listed name from an unlisted peer and a local-only name (`peers: []`) are aborted, because the sites admit loopback only and a valid certificate alone must not reach them. In this mode the site locks and
+`trusted_proxies` are loopback-only (peer traffic arrives from loopback) and the
+forward block's loop guard is the hop header. A forward block shows this
+server's own peer certificate (`tls_client_auth`) and targets the peer port
+whenever that certificate lists client authentication among its extended key
+usages; the daemon reads that from the certificate (`certificateAllowsClientAuth`).
+`require` is kept only when this server's own certificate can be shown;
+otherwise it is applied as `verify`, logged, stored as `clientAuthDowngraded` and
+reported in `server.tunnel.status` (`peerClientAuth`, `peerClientAuthDowngraded`);
+never as a warning, which would make the control plane send the table again.
+Absent `peerClientAuth` renders exactly as before (shared :443 peer site). A
+tunnel between a server in this mode and one not yet updated does not work until
+both are updated.
+
 **The lock follows the table** (feature `tunnel-lock-follow-v1`). The table may
 carry `inbound`: every tunnel name whose site runs here, with the exact
 addresses of the other servers that carry it (empty when none does). The

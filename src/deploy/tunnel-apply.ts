@@ -15,7 +15,7 @@ import type {
   TunnelRoutesResult,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { errorText, logInfo } from "../util/logger.ts";
+import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import { grantHostingCaddyRead } from "./ensure-hosting-caddy.ts";
 import {
@@ -42,6 +42,10 @@ import {
   type TunnelState,
   writeTunnelState,
 } from "./tunnel-state.ts";
+import {
+  type PeerClientAuthPlan,
+  planPeerClientAuth,
+} from "./tunnel-peer-cert.ts";
 
 export type ApplyTunnelRoutesDeps = {
   decryptSecrets: DecryptSecretsFn;
@@ -246,6 +250,7 @@ function settleGeneration(
 function tunnelStateFor(
   payload: TunnelRoutesPayload,
   peerId: string | undefined,
+  plan: PeerClientAuthPlan,
 ): TunnelState {
   return {
     hash: payload.hash,
@@ -255,6 +260,15 @@ function tunnelStateFor(
       ? { listenAddresses: payload.listenAddresses }
       : {}),
     ...(peerId === undefined ? {} : { peerId }),
+    ...(peerId !== undefined && plan.clientAuth
+      ? { clientAuth: plan.clientAuth }
+      : {}),
+    ...(peerId !== undefined && plan.clientAuth && plan.warnings.length > 0
+      ? { clientAuthDowngraded: true }
+      : {}),
+    ...(peerId !== undefined && plan.presentCertificate
+      ? { presentCertificate: true }
+      : {}),
     ...(payload.inbound ? { inbound: payload.inbound } : {}),
     ...(payload.generation === undefined
       ? {}
@@ -317,7 +331,11 @@ async function applyTunnelRoutesLocked(
       material,
       deps.decryptSecrets,
     );
-  const state = tunnelStateFor(payload, peerId);
+  const plan = planPeerClientAuth(
+    payload.peerClientAuth,
+    material?.certificatePem,
+  );
+  const state = tunnelStateFor(payload, peerId, plan);
 
   try {
     const rendered = await renderStoredTunnelFile(hostingDir, sitesDir, state);
@@ -335,6 +353,8 @@ async function applyTunnelRoutesLocked(
       : writeTunnelState(hostingDir, state));
     await settleGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
+    // Logged, not returned: a warning makes the control plane send the table again.
+    for (const warning of plan.warnings) logWarn("tunnels", warning);
     logInfo(
       "tunnels",
       `tunnel forwarding now holds ${rendered.forwarded.length} name(s), ${rendered.dropped.length} served here; ${relocks.length} site file(s) took new tunnel peers`,

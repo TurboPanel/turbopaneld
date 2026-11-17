@@ -8,6 +8,7 @@
 import { join } from "@std/path";
 import type {
   TunnelInbound,
+  TunnelPeerClientAuth,
   TunnelRoute,
 } from "../contracts/commands-contracts.ts";
 import { errorText, logWarn } from "../util/logger.ts";
@@ -35,6 +36,12 @@ export type TunnelState = {
   peerAddresses: string[];
   listenAddresses?: string[];
   peerId?: string;
+  /** What the peer-facing site does about client certificates (absent = nothing). */
+  clientAuth?: TunnelPeerClientAuth;
+  /** `require` was asked for but this server's own certificate cannot be shown, so `verify` is in force. */
+  clientAuthDowngraded?: boolean;
+  /** The peer certificate allows client use, so forward blocks show it. */
+  presentCertificate?: boolean;
   /** Tunnel names that run here and who may forward them (absent from an older control plane). */
   inbound?: TunnelInbound[];
   /** Generation of the table this was applied from (`tunnel-table-generation-v1`). */
@@ -183,6 +190,9 @@ export function tunnelInputs(
       ? { listenAddresses: state.listenAddresses }
       : {}),
     ...(material ? { material } : {}),
+    ...(state.clientAuth ? { clientAuth: state.clientAuth } : {}),
+    ...(state.presentCertificate ? { presentCertificate: true } : {}),
+    ...(state.inbound ? { inbound: state.inbound } : {}),
   };
 }
 
@@ -292,9 +302,15 @@ function relockWith(
   lockNames: ReadonlySet<string>,
 ): string {
   if (!state?.inbound) return contents;
+  // With the dedicated peer port, peers reach the sites over loopback and are
+  // checked there; no site admits a peer address on its own.
+  const peers = inboundPeers(state.inbound);
+  const loopbackOnly = state.clientAuth !== undefined
+    ? new Map([...peers.keys()].map((name) => [name, []]))
+    : peers;
   return relockSiteText(
     contents,
-    inboundPeers(state.inbound),
+    loopbackOnly,
     state.listenAddresses ?? [],
     lockNames,
   );

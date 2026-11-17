@@ -135,6 +135,7 @@ export const DAEMON_WIRE_FEATURES = [
   "project-cache-v1",
   "tunnel-lock-add-v1",
   "build-limits-v1",
+  "tunnel-peer-mtls-v1",
 ] as const;
 
 /**
@@ -843,3 +844,14 @@ export const TUNNEL_LOCK_ADD_FEATURE: DaemonWireFeature = "tunnel-lock-add-v1";
  * field and builds with its fixed limit. Additive; no floor moved.
  */
 export const BUILD_LIMITS_FEATURE: DaemonWireFeature = "build-limits-v1";
+
+/**
+ * `server.tunnel.routes` may carry `peerClientAuth`, and the daemon presents
+ * its peer certificate as a client certificate on the hop between servers
+ * when that certificate allows it. `verify` checks a client certificate when
+ * one is shown; `require` refuses a peer that shows none. Without the feature
+ * the field is ignored and the receiving side stays as it was. Additive; no
+ * floor moved.
+ */
+export const TUNNEL_PEER_MTLS_FEATURE: DaemonWireFeature =
+  "tunnel-peer-mtls-v1";

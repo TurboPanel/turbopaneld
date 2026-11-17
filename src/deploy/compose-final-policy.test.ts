@@ -214,7 +214,7 @@ test("the reserved host port refusal names who reserves them and lists the ports
   assertThrows(
     () => assertComposePolicy(doc, {}),
     Error,
-    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 18080-18999, 19100-19799",
+    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 9443, 18080-18999, 19100-19799",
   );
 });
 
