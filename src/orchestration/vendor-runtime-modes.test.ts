@@ -28,9 +28,7 @@ async function tasks(role: string, file = "main.yml"): Promise<Task[]> {
 
 /** Where a role's main.yml imports another task file (-1 when it does not). */
 function importIndex(list: Task[], file: string): number {
-  return list.findIndex((t) =>
-    t["ansible.builtin.import_tasks"] === file
-  );
+  return list.findIndex((t) => t["ansible.builtin.import_tasks"] === file);
 }
 
 function args(task: Task, module: string): Record<string, unknown> {
