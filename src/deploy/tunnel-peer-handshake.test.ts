@@ -13,6 +13,8 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   renderTunnelFile,
+  TUNNEL_ERROR_STATUS,
+  TUNNEL_ERROR_TEXT,
   TUNNEL_PEER_HOST_HEADER as PEER_HOST_HEADER,
   TUNNEL_PEER_PORT,
 } from "./tunnel-caddy.ts";
@@ -426,6 +428,159 @@ ${rendered}`;
       ]);
       assertEquals(viaSender.status, "200");
       assertEquals(viaSender.body, `hosted ${HOST} hop=1 spoof=`);
+    } finally {
+      try {
+        child?.kill();
+        await child?.status;
+      } catch {
+        // Already gone.
+      }
+      if (Deno.env.get("TP_TEST_CADDY_LOG")) console.log(await logs);
+      await Deno.remove(dir, { recursive: true });
+    }
+  },
+});
+
+/**
+ * The sender pins its source address with `local_address`: the receiver's door
+ * allows only 127.0.0.3, so the request gets through only when the sender
+ * dials from it. Without the field the kernel picks 127.0.0.1 and the door
+ * refuses.
+ */
+test({
+  name:
+    "a real Caddy: the sender's local_address is the source the receiver's door allows",
+  ignore: CADDY === undefined,
+  fn: async () => {
+    const dir = await Deno.makeTempDir({ prefix: "tp-peer-src-" });
+    let child: Deno.ChildProcess | undefined;
+    let logs: Promise<string> | undefined;
+    try {
+      await makeCa(dir, "org");
+      await makeLeaf(
+        dir,
+        "org",
+        "server",
+        "DNS:tp-peer.internal,IP:127.0.0.1",
+      );
+      await makeLeaf(dir, "org", "hosting", `DNS:${HOST}`);
+      const upstream = (localAddress?: string) => ({
+        serverId: "0192f0a4-1c2b-7d3e-8f40-5a6b7c8d9e01",
+        addresses: ["127.0.0.1"],
+        port: PEER_PORT,
+        ...(localAddress ? { localAddress } : {}),
+      });
+      const render = (name: string, port: number, localAddress?: string) =>
+        renderTunnelFile(
+          [{
+            hostname: name,
+            local: false,
+            lock: false,
+            upstreams: [upstream(localAddress)],
+          }],
+          {
+            peerAddresses: ["127.0.0.1", "127.0.0.3"],
+            material: {
+              certificate: join(dir, "server.pem"),
+              key: join(dir, "server.key"),
+              trust: join(dir, "org.pem"),
+            },
+            clientAuth: "require",
+            presentCertificate: true,
+            localAddresses: new Set(["127.0.0.1", "127.0.0.3"]),
+            inbound: [{ hostname: HOST, peers: ["127.0.0.3"] }],
+          },
+          new Set(),
+        ).contents
+          .replace(
+            `${name} {\n  tls internal`,
+            `https://${name}:${port} {\n  tls internal`,
+          );
+      const pinned = render(HOST, SENDER_PORT, "127.0.0.3");
+      const unpinned = render(HOST, SENDER_PORT + 1);
+      assertStringIncludes(pinned, "local_address 127.0.0.3");
+      assertEquals(unpinned.includes("local_address"), false);
+      // One file holds the receiver once; the second sender block is only the forward.
+      const receiverAt = unpinned.indexOf(`https://:${TUNNEL_PEER_PORT} {`);
+      const unpinnedForward = unpinned.slice(0, receiverAt);
+      const receiver = pinned.slice(
+        pinned.indexOf(`https://:${TUNNEL_PEER_PORT} {`),
+      )
+        .replace(`https://:${TUNNEL_PEER_PORT}`, `https://:${PEER_PORT}`)
+        .replace("https://127.0.0.1:443", `https://127.0.0.1:${HOSTING_PORT}`);
+      const pinnedForward = pinned.slice(
+        0,
+        pinned.indexOf(`https://:${TUNNEL_PEER_PORT} {`),
+      );
+      const caddyfile = `{
+  admin off
+  auto_https disable_redirects
+  skip_install_trust
+}
+https://:${HOSTING_PORT} {
+  tls ${join(dir, "hosting.pem")} ${join(dir, "hosting.key")}
+  respond "hosted {host}" 200
+}
+${pinnedForward}
+${unpinnedForward}
+${receiver}`;
+      const path = join(dir, "Caddyfile");
+      await Deno.writeTextFile(path, caddyfile);
+      child = new Deno.Command(CADDY!, {
+        args: ["run", "--config", path, "--adapter", "caddyfile"],
+        env: { XDG_DATA_HOME: dir, XDG_CONFIG_HOME: dir, HOME: dir },
+        stdout: "null",
+        stderr: "piped",
+      }).spawn();
+      logs = new Response(child.stderr).text();
+      await waitFor(HOSTING_PORT);
+      await waitFor(PEER_PORT);
+      await waitFor(SENDER_PORT);
+      await waitFor(SENDER_PORT + 1);
+
+      const viaPinned = await curl([
+        "-k",
+        "--resolve",
+        `${HOST}:${SENDER_PORT}:127.0.0.1`,
+        `https://${HOST}:${SENDER_PORT}/`,
+      ]);
+      assertEquals(viaPinned.code, 0);
+      assertEquals(viaPinned.status, "200");
+      assertEquals(viaPinned.body, `hosted ${HOST}`);
+
+      // Missing field: the kernel's choice (127.0.0.1) is not on the door's list.
+      const viaKernel = await curl([
+        "-k",
+        "--resolve",
+        `${HOST}:${SENDER_PORT + 1}:127.0.0.1`,
+        `https://${HOST}:${SENDER_PORT + 1}/`,
+      ]);
+      // The sender cannot get through, so the visitor sees the fixed error page.
+      assertEquals(viaKernel.status, String(TUNNEL_ERROR_STATUS));
+      assertStringIncludes(viaKernel.body, TUNNEL_ERROR_TEXT);
+
+      // The refusal itself is the door aborting the connection: straight to the
+      // peer port, 127.0.0.1 (the kernel's choice) is cut and 127.0.0.3 is let in.
+      const direct = (from: string) =>
+        curl([
+          "--interface",
+          from,
+          "--cert",
+          join(dir, "server.pem"),
+          "--key",
+          join(dir, "server.key"),
+          "--resolve",
+          `tp-peer.internal:${PEER_PORT}:127.0.0.1`,
+          "--cacert",
+          join(dir, "org.pem"),
+          "-H",
+          `${PEER_HOST_HEADER}: ${HOST}`,
+          `https://tp-peer.internal:${PEER_PORT}/`,
+        ]);
+      assertAborted(await direct("127.0.0.1"), "an unpinned source");
+      const listed = await direct("127.0.0.3");
+      assertEquals(listed.status, "200");
+      assertEquals(listed.body, `hosted ${HOST}`);
     } finally {
       try {
         child?.kill();

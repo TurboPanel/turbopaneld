@@ -41,6 +41,34 @@ test("server.tunnel.routes parses a table and an empty table", () => {
   assertEquals(parseTunnelRoutesPayload(empty), empty);
 });
 
+test("server.tunnel.routes parses an upstream source address, and refuses a bad one", () => {
+  const withSource = (localAddress: unknown) => ({
+    ...GOOD,
+    routes: [{
+      ...GOOD.routes[0],
+      upstreams: [{ ...GOOD.routes[0].upstreams[0], localAddress }],
+    }],
+  });
+  const parsed = parseTunnelRoutesPayload(withSource("10.0.0.7"));
+  assertEquals(parsed.routes[0].upstreams[0].localAddress, "10.0.0.7");
+  assertEquals(
+    parseTunnelRoutesPayload(withSource("fd00::7")).routes[0].upstreams[0]
+      .localAddress,
+    "fd00::7",
+  );
+  // Absent stays absent.
+  assertEquals(
+    "localAddress" in parseTunnelRoutesPayload(GOOD).routes[0].upstreams[0],
+    false,
+  );
+  for (const bad of ["10.0.0.0/24", "not-an-address", 7, null, ""]) {
+    assertThrows(
+      () => parseTunnelRoutesPayload(withSource(bad)),
+      TypeError,
+    );
+  }
+});
+
 test("server.tunnel.routes refuses bad tables", () => {
   const bad: unknown[] = [
     null,
