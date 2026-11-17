@@ -516,6 +516,12 @@ const DEDICATED_SITE = `https://:9443 {
   handle @tp_outside {
     abort
   }
+  @tp_repeated_host {
+    vars_regexp {http.request.header.X-Tp-Peer-Host} ,
+  }
+  handle @tp_repeated_host {
+    abort
+  }
   @tp_door_0 {
     header X-Tp-Peer-Host app.example.com
     remote_ip 10.0.0.5

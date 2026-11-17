@@ -279,10 +279,12 @@ export async function plannedTunnelContents(
     state,
     own,
   );
-  // Logged, not returned, as in an apply.
-  for (const warning of rendered.warnings) logWarn("tunnels", warning);
   const live = await readTextIfPresent(join(sitesDir, TUNNEL_SITE_FILE));
-  return rendered.contents === (live ?? "") ? undefined : rendered.contents;
+  if (rendered.contents === (live ?? "")) return undefined;
+  // Logged, not returned, as in an apply; only when the file changes, so a
+  // site deploy that leaves it alone stays quiet.
+  for (const warning of rendered.warnings) logWarn("tunnels", warning);
+  return rendered.contents;
 }
 
 /** The first 16 hex characters of the digest of the certificate and the trust bundle. */
