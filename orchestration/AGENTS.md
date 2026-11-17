@@ -538,8 +538,11 @@ bump, `deno-runtime/tasks/restart-dependents.yml` restarts every
 instance units, whose restarts the update flow owns. The control-plane units
 (caddy, dbstudio, ui, website, redis) set `StartLimitIntervalSec=0` and
 `RestartSteps`/`RestartMaxDelaySec`, so a burst never leaves one stopped; the
-redis unit is not re-rendered by an update playbook, so it only changes on a
-fresh install.
+redis unit is not re-rendered by an update playbook, so an updated host gets
+the same settings from a drop-in (`redis/tasks/retry-dropin.yml`, written by
+daemon-converge and the co-located refresh; daemon-reload only). `RestartSteps`
+needs systemd 254; an older systemd ignores it with a warning. A unit that
+fails to restart after a Deno bump is reported, never failing the play.
 
 `playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
 when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or

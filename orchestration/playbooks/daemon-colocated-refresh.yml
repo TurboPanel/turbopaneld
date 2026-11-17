@@ -113,6 +113,10 @@
       ansible.builtin.import_role:
         name: turbopanel-user
         tasks_from: vendor-locks.yml
+    - name: Give the cache unit its retry settings
+      ansible.builtin.import_role:
+        name: redis
+        tasks_from: retry-dropin.yml
     - name: Keep the state directory shared with the instance
       # daemon-layout and daemon-config pin this directory 0750. The instance
       # still writes the co-located license here. Directory mode only — never

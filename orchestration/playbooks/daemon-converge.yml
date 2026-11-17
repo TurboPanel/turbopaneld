@@ -108,6 +108,10 @@
       ansible.builtin.import_role:
         name: turbopanel-user
         tasks_from: vendor-locks.yml
+    - name: Give the cache unit its retry settings
+      ansible.builtin.import_role:
+        name: redis
+        tasks_from: retry-dropin.yml
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh

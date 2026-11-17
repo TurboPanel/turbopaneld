@@ -45,8 +45,11 @@ Docker Compose. The daemon:
    uses. The patched text must equal what the renderers write (the tests pin
    that). It is idempotent and recorded once per daemon version in
    `<stateDir>/sites/.apache-walls-repair.json`, and only when no site failed.
-   A shared-pool vhost has no single runtime to key and is logged as needing a
-   redeploy.
+   The vhost is read again under the environment lock before it is patched (a
+   deploy may have rewritten it since the listing); without a runtime record
+   the lock is taken on every environment id the file name could hold. A static
+   or shared-pool vhost gets the unset lines only; a shared-pool one has no
+   single runtime to key and is also logged as needing a redeploy.
 
    **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
    socket path is no boundary. Every Apache PHP runtime therefore has a site

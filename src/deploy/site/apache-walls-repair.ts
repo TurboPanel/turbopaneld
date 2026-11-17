@@ -25,7 +25,7 @@
  * next time the daemon starts.
  */
 
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { DAEMON_VERSION } from "../../version.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
@@ -81,7 +81,6 @@ export function patchApacheVhost(
   text: string,
   siteKey: string | null,
 ): string {
-  if (!PHP_HANDLER_RE.test(text)) return text;
   const wall = apacheWallLines(siteKey);
   const lines = text.split("\n");
   const first = lines.findIndex((line) => WALL_VAR_RE.test(line));
@@ -236,6 +235,7 @@ async function runtimeFiles(
   if (service === null) return "unit not found";
   const user = /^User=(\S+)$/m.exec(service)?.[1];
   if (user === undefined) return "unit has no User=";
+  const group = /^Group=(\S+)$/m.exec(service)?.[1] ?? user;
   const mode = MODE_BY_TAG[match[1]];
   const dir = sitePhpConfigDir(io.layout.configDir, id);
   const guardPath = sitePhpGuardPath(io.layout.configDir, id);
@@ -268,7 +268,7 @@ async function runtimeFiles(
         mode,
         series: `${match[2]}.${match[3]}`,
         user,
-        group: user,
+        group,
         home: "",
         configDir: io.layout.configDir,
         libDir: "",
@@ -324,6 +324,80 @@ async function installAndCommit(c: RepairContext): Promise<void> {
   }
 }
 
+type SiteOutcome = "repaired" | "current" | "needs-redeploy";
+
+/**
+ * The environment lock keys a deploy of this vhost could hold: the record's
+ * environment when there is one, else every way to read the environment id out
+ * of `tp-<environment>-<service>.conf` (both parts may hold dashes). A key
+ * nobody holds costs nothing, and only this repair takes more than one.
+ */
+function lockKeysFor(
+  file: string,
+  record: PhpRuntimeRecord | undefined,
+): string[] {
+  if (record !== undefined) return [environmentLockKey(record.environmentId)];
+  const match = /^tp-(.+)\.conf$/.exec(basename(file));
+  if (match === null) return [];
+  const rest = match[1];
+  const keys: string[] = [];
+  for (let at = rest.indexOf("-"); at > 0; at = rest.indexOf("-", at + 1)) {
+    keys.push(environmentLockKey(rest.slice(0, at)));
+  }
+  return keys;
+}
+
+function withLocks<T>(keys: string[], run: () => Promise<T>): Promise<T> {
+  return keys.reduceRight<() => Promise<T>>(
+    (inner, key) => () => withKeyedLock(key, inner),
+    run,
+  )();
+}
+
+/** The vhost as it is now, read under the lock a deploy also takes. */
+async function freshVhost(
+  io: ApacheWallsRepairIo,
+  file: string,
+  ids: string[],
+): Promise<string> {
+  const cat = await sudoText(io, ["cat", "--", file]);
+  if (!cat.ok) throw new Error(cat.stderr.trim() || "unreadable");
+  const now = [...new Set(sitePhpRuntimeIdsIn(cat.stdout))];
+  if (now.length !== ids.length || now.some((id, i) => id !== ids[i])) {
+    throw new Error("the vhost changed while it was being repaired");
+  }
+  return cat.stdout;
+}
+
+/** A vhost with no per-site runtime: only its walls (no key to set). */
+async function repairWallsOnly(
+  io: ApacheWallsRepairIo,
+  file: string,
+  text: string,
+): Promise<boolean> {
+  const staged = await APACHE_DRIVER.stageSiteConfig(
+    io.run,
+    file,
+    patchApacheVhost(text, null),
+  );
+  if (staged === null) return false;
+  const rollout = await openSiteRollout({
+    run: io.run,
+    layout: io.layout as LayoutPaths,
+    target: APACHE_DRIVER,
+    restart: false,
+    staged: [staged],
+    validationTargets: [],
+  });
+  try {
+    await rollout.commit();
+  } catch (err) {
+    await rollout.rollback();
+    throw err;
+  }
+  return true;
+}
+
 /** One site: its vhost, then its runtime. Returns what it did. */
 async function repairSite(
   io: ApacheWallsRepairIo,
@@ -332,9 +406,17 @@ async function repairSite(
   records: ReadonlyMap<string, PhpRuntimeRecord>,
   existing: Awaited<ReturnType<typeof listSitePhpUnits>>,
   runtimeIo: SitePhpRuntimeIo,
-): Promise<"repaired" | "current" | "needs-redeploy"> {
+): Promise<SiteOutcome> {
   const ids = [...new Set(sitePhpRuntimeIdsIn(text))];
-  if (ids.length !== 1) return "needs-redeploy";
+  const hasHandler = PHP_HANDLER_RE.test(text);
+  if (ids.length !== 1) {
+    return await withLocks(lockKeysFor(file, undefined), async () => {
+      const now = await freshVhost(io, file, ids);
+      const changed = await repairWallsOnly(io, file, now);
+      if (hasHandler) return "needs-redeploy";
+      return changed ? "repaired" : "current";
+    });
+  }
   const id = ids[0];
   const key = await phpSiteKey(await io.secret(), id);
   const record = records.get(id);
@@ -348,10 +430,12 @@ async function repairSite(
     if (typeof runtime === "string") {
       throw new TypeError(`runtime ${id}: ${runtime}`);
     }
+    // Read again under the lock: a deploy may have written it since the list.
+    const now = await freshVhost(io, file, ids);
     const staged = await APACHE_DRIVER.stageSiteConfig(
       io.run,
       file,
-      patchApacheVhost(text, key),
+      patchApacheVhost(now, key),
     );
     if (staged === null && runtime.files === null) return "current";
     const rollout = staged === null ? null : await openSiteRollout({
@@ -376,9 +460,7 @@ async function repairSite(
   };
   const release = holdSitePhpRuntime(id);
   try {
-    return await (record === undefined
-      ? run()
-      : withKeyedLock(environmentLockKey(record.environmentId), run));
+    return await withLocks(lockKeysFor(file, record), run);
   } finally {
     release();
   }
@@ -427,7 +509,6 @@ export async function repairApacheWalls(
       try {
         const cat = await sudoText(io, ["cat", "--", file]);
         if (!cat.ok) throw new Error(cat.stderr.trim() || "unreadable");
-        if (!PHP_HANDLER_RE.test(cat.stdout)) return;
         const outcome = await repairSite(
           io,
           file,

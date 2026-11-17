@@ -32,7 +32,15 @@
       done
       for unit in $units; do
         echo "restarting $unit (was running a replaced Deno)"
-        systemctl restart "$unit"
+        systemctl restart "$unit" || echo "WARNING: restarting $unit failed"
       done
   register: _deno_dependents_restart
   changed_when: "'restarting ' in _deno_dependents_restart.stdout"
+  # One unit that will not restart must not fail the rest of the update; it is
+  # reported below and keeps its own restart policy.
+  failed_when: false
+
+- name: Report units that did not restart after a Deno replacement
+  ansible.builtin.debug:
+    msg: "{{ _deno_dependents_restart.stdout_lines | select('search', 'WARNING') | list }}"
+  when: "'WARNING' in (_deno_dependents_restart.stdout | default(''))"

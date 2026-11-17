@@ -69,11 +69,21 @@ test("an old vhost gets exactly the wall lines and key a deploy writes", async (
     patchApacheVhost(without(current, (l) => l.includes('TP_SITE_KEY "')), key),
     current,
   );
-  // Already complete, or no PHP at all: left as it is.
+  // Already complete: left as it is.
   assertEquals(patchApacheVhost(current, key), current);
-  const plain = "<VirtualHost *:80>\n  DocumentRoot /x\n</VirtualHost>\n";
-  assertEquals(patchApacheVhost(plain, key), plain);
   assertEquals(apacheWallLines(key).length, 6);
+});
+
+test("a static vhost gets the unset lines a deploy writes, and no key", () => {
+  const site: SiteApplySpec = { ...SITE, php: undefined };
+  const current = apacheSiteConfig(site, `${HOME}/sites/shop/current/public`, {
+    phpSiteKey: null,
+  });
+  assert(current.includes('ProxyFCGISetEnvIf "true" !PHP_VALUE'));
+  assert(!current.includes('TP_SITE_KEY "'));
+  const old = without(current, isWall);
+  assertEquals(patchApacheVhost(old, null), current);
+  assertEquals(patchApacheVhost(current, null), current);
 });
 
 test("php.ini patched equals the ini a deploy renders with the guard", async () => {
@@ -330,7 +340,7 @@ test("a runtime that cannot be read leaves its vhost alone", async () => {
   }
 });
 
-test("a host without Apache, or with a shared-pool site, is recorded without a change", async () => {
+test("a host without Apache, or with a shared-pool site, is recorded; the shared site gets the unset lines", async () => {
   const host = await makeHost();
   try {
     assertEquals((await repairApacheWalls(host.io)).failed, []);
@@ -341,7 +351,105 @@ test("a host without Apache, or with a shared-pool site, is recorded without a c
     const result = await repairApacheWalls({ ...host.io, version: "9.9.10" });
     assertEquals(result.needsRedeploy, ["tp-s.conf"]);
     assertEquals(result.failed, []);
-    assertEquals(await host.read(path), shared);
+    assertEquals(
+      await host.read(path),
+      patchApacheVhost(shared, null),
+    );
+    assert((await host.read(path)).includes("!TP_SITE_KEY"));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a vhost a deploy rewrote after the listing is patched from its new text", async () => {
+  const host = await makeHost();
+  try {
+    const site = await seedOldSite(host);
+    const rewritten = `${site.oldVhost}# written by a deploy\n`;
+    let reads = 0;
+    const run = host.io.run;
+    const io: ApacheWallsRepairIo = {
+      ...host.io,
+      run: async (command, args) => {
+        const result = await run(command, args);
+        const argv = bareSudoArgs(args).slice(1);
+        if (
+          argv[0] === "cat" && argv.at(-1) === site.vhostPath && ++reads === 1
+        ) {
+          await Deno.writeTextFile(site.vhostPath, rewritten);
+        }
+        return result;
+      },
+    };
+    const result = await repairApacheWalls(io);
+    assertEquals(result.failed, []);
+    const final = await host.read(site.vhostPath);
+    assert(final.includes("# written by a deploy"), final);
+    assertEquals(
+      final,
+      patchApacheVhost(rewritten, await phpSiteKey(SECRET, ID)),
+    );
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("an fpm runtime gets its pool config patched and the unit's own group", async () => {
+  const host = await makeHost();
+  try {
+    const { configDir } = host.io.layout;
+    const key = await phpSiteKey(SECRET, FPM_ID);
+    const guardPath = sitePhpGuardPath(configDir, FPM_ID);
+    const spec: SitePhpRuntimeSpec = {
+      id: FPM_ID,
+      mode: "fpm",
+      series: "8.4",
+      user: "alice",
+      group: "websites",
+      home: HOME,
+      configDir,
+      libDir: "/opt/turbopanel/lib",
+      runtimesDir: "/opt/turbopanel/vendor",
+      webAccount: "tpapache",
+    };
+    const site = { ...SITE, php: { version: "8.4", mode: "fpm" as const } };
+    const newVhost = apacheSiteConfig(
+      site,
+      `${HOME}/sites/shop/current/public`,
+      {
+        phpFpmSocket: sitePhpSocketPath(FPM_ID),
+        phpSiteKey: key,
+      },
+    );
+    const vhostPath = join(configDir, "apache", "sites", "tp-e1-shop.conf");
+    const dir = join(configDir, "php", "sites", FPM_ID);
+    const admin = [{ key: "memory_limit", value: "256M" }];
+    await writeAt(vhostPath, without(newVhost, isWall));
+    await writeAt(join(dir, "php.ini"), sitePhpIni(VALUES, HOME));
+    await writeAt(
+      join(dir, "php-fpm.conf"),
+      sitePhpFpmConf(spec, { pool: [], admin }),
+    );
+    await writeAt(
+      join(host.io.unitDir, sitePhpServiceName(FPM_ID)),
+      "[Service]\nUser=alice\nGroup=websites\n",
+    );
+    const result = await repairApacheWalls(host.io);
+    assertEquals(result.failed, []);
+    assertEquals(result.repaired, ["tp-e1-shop.conf"]);
+    assertEquals(
+      await host.read(join(dir, "php-fpm.conf")),
+      sitePhpFpmConf(spec, {
+        pool: [],
+        admin,
+        guard: { key, path: guardPath },
+      }),
+    );
+    assertEquals(await host.read(vhostPath), newVhost);
+    assert(
+      host.calls.some((c) => c.includes("-g websites")),
+      host.calls.join("\n"),
+    );
   } finally {
     await host.cleanup();
   }
