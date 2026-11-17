@@ -859,8 +859,35 @@ test("grantHostingCaddyRead sets rX on files, rX plus a default on folders, skip
   }
 });
 
+const KEY_ACL = (p: string) =>
+  p.endsWith("leaf.key")
+    ? `user:tpedge:r--\t#effective:r--\ngroup::---`
+    : OK_ACL(p);
+
+test("grantHostingCaddyRead refuses a peer key whose group entry stayed open", async () => {
+  const host = fakeHost({
+    acl: (p) =>
+      p.endsWith("leaf.key")
+        ? `user:tpedge:r--\t#effective:r--\ngroup::r--`
+        : OK_ACL(p),
+  });
+  const dir = await plantHostingTree();
+  try {
+    const keyDir = join(dir, "peer", "abc");
+    await Deno.mkdir(keyDir, { recursive: true, mode: 0o750 });
+    await Deno.writeTextFile(join(keyDir, "leaf.key"), "k", { mode: 0o600 });
+    await assertRejects(
+      () => grantHostingCaddyRead(dir, host.run),
+      Error,
+      "still readable by its group",
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
 test("grantHostingCaddyRead empties the group entry of a peer key and leaves the web server's read", async () => {
-  const host = fakeHost({ acl: OK_ACL });
+  const host = fakeHost({ acl: KEY_ACL });
   const dir = await plantHostingTree();
   try {
     const keyDir = join(dir, "peer", "abc");

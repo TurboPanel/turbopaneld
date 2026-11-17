@@ -187,6 +187,16 @@ async function listHostingEntries(root: string): Promise<HostingEntry[]> {
   return out.concat(...nested);
 }
 
+/** The paths whose `getfacl` block shows an empty group entry (`group::---`). */
+function closedGroupPaths(text: string): Set<string> {
+  const closed = new Set<string>();
+  for (const block of text.split(/\n\s*\n/)) {
+    const file = /^# file: (.+)$/m.exec(block)?.[1];
+    if (file && /^group::---$/m.test(block)) closed.add(file);
+  }
+  return closed;
+}
+
 /** `getfacl` blocks as `path -> [permissions, effective]` for `user`. */
 function parseUserEntries(
   text: string,
@@ -257,12 +267,9 @@ export async function grantHostingCaddyRead(
   // folder's default entries give a new file `group::r-x`, which the entry
   // above would turn into a group read; empty the group entry again (the mask
   // stays at what the web server needs).
-  await apply(
-    entries.filter((e) => !e.dir && PEER_KEY_PATH.test(e.path)).map((e) =>
-      e.path
-    ),
-    ["g::---"],
-  );
+  const keyPaths = entries.filter((e) => !e.dir && PEER_KEY_PATH.test(e.path))
+    .map((e) => e.path);
+  await apply(keyPaths, ["g::---"]);
 
   // The read-back decides, not setfacl's exit code.
   const shown = await runCommand("getfacl", [
@@ -271,12 +278,23 @@ export async function grantHostingCaddyRead(
     ...entries.map((e) => e.path),
   ]).catch(() => ({ success: false, stderr: "", stdout: "" }));
   const have = parseUserEntries(shown.stdout ?? "", user);
+  const closed = closedGroupPaths(shown.stdout ?? "");
   const unreadable = entries.filter((entry) => {
     const got = have.get(entry.path);
     const needs = entry.dir ? "r-x" : "r--";
     return got === undefined ||
       ![...needs].every((c, k) => c === "-" || got[1][k] === c);
   }).map((e) => e.path);
+  // The read-back decides here too: a key whose group entry stayed open is
+  // readable by the whole group.
+  const openKeys = keyPaths.filter((path) => !closed.has(path));
+  if (openKeys.length > 0) {
+    throw new Error(
+      `the peer certificate key is still readable by its group: ${
+        openKeys.join(", ")
+      }; the next apply retries it`,
+    );
+  }
   if (unreadable.length > 0) {
     logWarn(
       "deploy",

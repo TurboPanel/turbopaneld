@@ -508,6 +508,25 @@ export async function connectorTokenChanged(
 }
 
 /**
+ * Is the stored run token copy there? Only root can look (the folder is closed
+ * to the daemon), so `tp-host` answers. Null when it could not say.
+ */
+async function tokenCopyPresent(
+  io: ConnectorIo,
+  id: string,
+): Promise<boolean | null> {
+  const result = await io.run(
+    "sudo",
+    hostSudoArgs(["-n", "tunnel-env-present", id]),
+  );
+  if (!result.success) return null;
+  const said = result.stdout.trim();
+  if (said === "present") return true;
+  if (said === "absent") return false;
+  return null;
+}
+
+/**
  * Put a connector's unit file back when the record is still here but the unit
  * is gone (removed by hand, or lost with the host's unit folder). The unit is
  * written from the record (same port, slot and pinned program) and points at
@@ -544,10 +563,24 @@ async function reinstallMissingUnit(
   // refuses a missing environment file), and then nothing is left enabled.
   const started = await systemctl(io, ["restart", unit]);
   if (!started.success) {
-    const result = await systemctl(io, ["show", "--property=Result", unit]);
+    // Leave nothing half done: the unit is stopped and its file removed, so
+    // the next resend reinstalls it (and enables it) instead of starting a
+    // unit that would not survive a reboot.
     await systemctl(io, ["stop", unit]);
+    const copy = await tokenCopyPresent(io, record.id);
+    await io.run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "rm",
+        "-f",
+        "--",
+        tunnelUnitPath(record.id, undefined, slot),
+      ]),
+    );
+    await systemctl(io, ["daemon-reload"]);
     throw new Error(
-      result.stdout.includes("Result=resources")
+      copy === false
         ? `the stored run token copy for tunnel ${record.id} is missing, so its connector was not started or enabled; the run token must be installed again`
         : `systemctl restart failed: ${started.stderr || "no detail"}`,
     );
@@ -563,7 +596,7 @@ async function reinstallMissingUnit(
  * hand, or given up on by systemd after repeated crashes), or whose unit file
  * is gone (it is written again from the record and the stored token copy). A
  * unit that is running or still starting is left alone, so a resend never
- * bounces it. Says what it did: `reinstalled`, `started`, or `null` when the
+ * bounces it (it is enabled if it was not). Says what it did: `reinstalled`, `started`, or `null` when the
  * connector was left alone.
  */
 export async function startStoppedConnector(
@@ -582,6 +615,11 @@ export async function startStoppedConnector(
     const unit = tunnelUnitName(id, record.slot);
     const state = await systemctl(io, ["is-active", unit]);
     const status = mapConnectorStatus(state.stdout.split("\n")[0] ?? "", null);
+    // A unit that is not enabled would not come back after a reboot.
+    const enabled = await systemctl(io, ["is-enabled", unit]);
+    if (enabled.stdout.trim() !== "enabled") {
+      await mustSystemctl(io, ["enable", unit]);
+    }
     if (status !== "stopped" && status !== "failed") return null;
     await systemctl(io, ["reset-failed", unit]);
     await mustSystemctl(io, ["start", unit]);

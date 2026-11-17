@@ -88,16 +88,26 @@ test("a new tunnel gets its connector, and the token is on no command line", asy
   });
 });
 
-/** The same io, with `systemctl is-active` answering `state`. */
-function unitIn(io: ConnectorIo, calls: string[], state: string): ConnectorIo {
+/** The same io, with `systemctl is-active` answering `state` and `is-enabled` answering `enabled`. */
+function unitIn(
+  io: ConnectorIo,
+  calls: string[],
+  state: string,
+  enabled = true,
+): ConnectorIo {
   return {
     ...io,
     run: (command, args): Promise<RunResult> => {
       calls.push([command, ...args].join(" "));
       const active = args.includes("is-active");
+      const asked = args.includes("is-enabled");
       return Promise.resolve({
         success: !active || state === "active",
-        stdout: active ? `${state}\n` : "",
+        stdout: active
+          ? `${state}\n`
+          : asked
+          ? (enabled ? "enabled\n" : "disabled\n")
+          : "",
         stderr: "",
       });
     },
@@ -119,9 +129,12 @@ test("a connector that already runs on the same token is left alone: no token co
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
     // Unsealed only to compare it; nothing is written or restarted.
     assertEquals(seen, [[ENVELOPE]]);
-    // Only asked whether it runs: nothing started, stopped or restarted.
-    assertEquals(calls.length, 1);
-    assert(calls[0]!.includes("is-active"));
+    // Only asked whether it runs and is enabled: nothing started, stopped or restarted.
+    assert(calls.some((c) => c.includes("is-active")));
+    assertEquals(
+      calls.filter((c) => /\b(start|stop|restart|enable) /.test(c)),
+      [],
+    );
   });
 });
 
@@ -164,18 +177,24 @@ function unitRecorder(base: ConnectorIo, calls: string[]) {
     run: async (command, args) => {
       calls.push([command, ...args].join(" "));
       const verb = args.find((a) =>
-        ["cmp", "install", "restart", "show"].includes(a)
+        ["cmp", "install", "restart", "rm", "tunnel-env-present"].includes(a)
       );
       if (verb === "install") {
         units.push(await Deno.readTextFile(args.at(-2)!));
+        lost.unit = false;
+      }
+      if (verb === "rm") lost.unit = true;
+      if (verb === "tunnel-env-present") {
+        return {
+          success: true,
+          stdout: lost.tokenCopy ? "absent\n" : "present\n",
+          stderr: "",
+        };
       }
       // The unit on disk never equals the new text (a fresh or a lost unit).
       if (verb === "cmp") return { success: false, stdout: "", stderr: "" };
       if (verb === "restart" && lost.tokenCopy) {
         return { success: false, stdout: "", stderr: "Job failed" };
-      }
-      if (verb === "show") {
-        return { success: true, stdout: "Result=resources\n", stderr: "" };
       }
       return { success: true, stdout: "", stderr: "" };
     },
@@ -220,9 +239,9 @@ test("a connector whose unit file is gone is written again like a fresh install,
   });
 });
 
-test("a missing token copy fails the repair, names the token and leaves the unit not enabled", async () => {
+test("a missing token copy fails the repair, names the token, removes the unit and leaves it not enabled; the next resend reinstalls it", async () => {
   await withIo(async (base, calls) => {
-    const { io, lost } = unitRecorder(base, calls);
+    const { io, units, lost } = unitRecorder(base, calls);
     await handleTunnelConnectors(payload(), "now", {
       io,
       decryptSecrets: unseal(),
@@ -239,6 +258,61 @@ test("a missing token copy fails the repair, names the token and leaves the unit
     assertStringIncludes(String(error), "run token copy");
     assertStringIncludes(String(error), ID_A);
     assertEquals(calls.filter((c) => c.includes(" enable ")), []);
+    // The half-installed unit file is gone again and systemd was told.
+    assert(calls.some((c) => c.includes(" rm ") && c.includes(".service")));
+    assert(calls.at(-1)!.includes("daemon-reload"));
+    assertEquals(lost.unit, true);
+    // The token is installed again, then a resend goes through reinstall, not a plain start.
+    lost.tokenCopy = false;
+    calls.length = 0;
+    const installsBefore = units.length;
+    const result = await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
+    assertEquals(units.length, installsBefore + 1);
+    assert(calls.some((c) => c.includes(` enable turbopanel-tunnel-${ID_A}`)));
+  });
+});
+
+test("a failed restart with the token copy in place says so, not that the token is missing", async () => {
+  await withIo(async (base, calls) => {
+    const { io, lost } = unitRecorder(base, calls);
+    await handleTunnelConnectors(payload(), "now", {
+      io,
+      decryptSecrets: unseal(),
+    });
+    lost.unit = true;
+    const failing: ConnectorIo = {
+      ...io,
+      run: (command, args) =>
+        args.includes("restart")
+          ? Promise.resolve({ success: false, stdout: "", stderr: "boom" })
+          : io.run(command, args),
+    };
+    const error = await assertRejects(() =>
+      handleTunnelConnectors(payload(), "now", {
+        io: failing,
+        decryptSecrets: unseal(),
+      })
+    );
+    assertStringIncludes(String(error), "systemctl restart failed: boom");
+  });
+});
+
+test("a connector that is installed but not enabled is enabled by a resend", async () => {
+  await withIo(async (base, calls) => {
+    await handleTunnelConnectors(payload(), "now", {
+      io: base,
+      decryptSecrets: unseal(),
+    });
+    calls.length = 0;
+    await handleTunnelConnectors(payload(), "now", {
+      io: unitIn(base, calls, "active", false),
+      decryptSecrets: unseal(),
+    });
+    assert(calls.some((c) => c.includes(` enable turbopanel-tunnel-${ID_A}`)));
   });
 });
 
@@ -478,7 +552,11 @@ function updatable(io: ConnectorIo, calls: string[]): ConnectorIo {
       calls.push([command, ...args].join(" "));
       return Promise.resolve({
         success: true,
-        stdout: args.includes("is-active") ? "active" : "",
+        stdout: args.includes("is-active")
+          ? "active"
+          : args.includes("is-enabled")
+          ? "enabled"
+          : "",
         stderr: "",
       });
     },
@@ -502,9 +580,12 @@ test("a tunnel moved to its second unit by an update is still present, so a rese
     assertEquals(result, { installed: [], unchanged: [ID_A], removed: [] });
     // Unsealed only to compare it; nothing is written or restarted.
     assertEquals(seen, [[ENVELOPE]]);
-    // Only asked whether the unit it runs on now (the second one) runs.
-    assertEquals(calls.length, 1);
+    // Only asked about the unit it runs on now (the second one): is it running, is it enabled.
+    assertEquals(calls.length, 2);
     assert(calls[0]!.includes(`is-active turbopanel-tunnel-${ID_A}-b.service`));
+    assert(
+      calls[1]!.includes(`is-enabled turbopanel-tunnel-${ID_A}-b.service`),
+    );
   });
 });
 

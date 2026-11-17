@@ -1552,6 +1552,10 @@ const SITES: CallSite[] = [
     { argv: ["tunnel-env-remove", TUNNEL_ID] },
     { argv: ["tunnel-env-remove", "instance"] },
   ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-present",id]',
+    { argv: ["tunnel-env-present", TUNNEL_ID] },
+  ),
   tpHost('src/tunnels/connector-service.ts|["-n","tunnel-loopback-sync"]', {
     argv: ["tunnel-loopback-sync"],
   }),

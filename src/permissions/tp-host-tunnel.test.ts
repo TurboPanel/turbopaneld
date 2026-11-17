@@ -453,6 +453,20 @@ test("tunnel-env-remove deletes only that tunnel's copy, and is fine with nothin
   });
 });
 
+test("tunnel-env-present says whether that tunnel's copy is there", async () => {
+  await withHost(async (host) => {
+    const said = async (id: string) =>
+      (await host.run(["tunnel-env-present", id])).stdout.trim();
+    assertEquals(await said(ID), "absent");
+    await stageToken(host, renderTunnelEnvFile(TOKEN));
+    assertEquals((await host.run(["tunnel-env-install", ID])).code, 0);
+    assertEquals(await said(ID), "present");
+    assertEquals(await said(OTHER_ID), "absent");
+    await refused(host, ["tunnel-env-present", "../x"]);
+    await refused(host, ["tunnel-env-present"]);
+  });
+});
+
 test("no generic verb reaches the token copies", async () => {
   await withHost(async (host) => {
     await stageToken(host, renderTunnelEnvFile(TOKEN));

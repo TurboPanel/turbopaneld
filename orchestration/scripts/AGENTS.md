@@ -123,7 +123,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
     staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
     `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
-    <id>`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
+    <id>`; `tunnel-env-present <id>` prints `present` or `absent`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
     sync`, which lets only root and the daemon account reach the connector
     metrics band on loopback, see `src/tunnels/AGENTS.md`); a project's helper
     container ports work the same way in `<config>/reach-ports/<environment
