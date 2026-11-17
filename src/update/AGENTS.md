@@ -119,12 +119,17 @@ its own floor:
   `turbopaneld-update-guard*`. The guard never lowers the floor, so after a
   rollback the next update may only be the failed build again or newer.
   After a successful restore the guard writes root's
-  `lib/update-guard-rolled-back` (from and to commit). A second automatic rollback for the same pair is
-  refused: the guard writes `update-guard-attention.json` (`needsAttention`)
-  and leaves the host on the failing build for an operator, so a daemon that
-  fails every update cannot hold the host one release back. A healthy build
-  clears the record. Every `--version` read by the guard and run.sh is bounded
-  by a 10 s timeout.
+  `lib/update-guard-rolled-back` (from and to commit). A second automatic
+  rollback for the same pair is refused only while the daemon unit runs
+  steadily on the failing build: the guard then writes
+  `update-guard-attention.json` (`needsAttention`) and leaves the host for an
+  operator. A failed or crash-looping unit is always rolled back, so the host
+  never ends with no working daemon. The daemon stops the retry loop by
+  writing `update-skip-target.json` when it reports `rolled-back` and refusing
+  that build (`update_skipped_after_rollback`) until another is asked for. A
+  healthy build clears the record. Every `--version` read by the guard and
+  run.sh is bounded by `timeout -k 2 10`, so a binary that ignores SIGTERM is
+  killed.
 - Not covered: the control plane and web interface packages
   (`update-instance`) have no root floor yet.
 

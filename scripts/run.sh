@@ -1378,7 +1378,7 @@ tp_read_daemon_build_floor() {
   if [ ! -x "$_rdf_bin" ] || [ -L "$_rdf_bin" ]; then
     return 0
   fi
-  _rdf_line="$(timeout 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
+  _rdf_line="$(timeout -k 2 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
   # turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
   printf '%s' "$_rdf_line" | sed -n 's/^turbopaneld v\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}(.*,[[:space:]]*\([^,)[:space:]]\{1,\}\))[[:space:]]*$/\2\t\1\t\3/p' | head -1
 }
@@ -1807,7 +1807,20 @@ tp_emit_update_stage() {
 # The `--version` line of a binary, or nothing when it hangs (10 s) or fails.
 tp_binary_version_line() {
   _vl_bin="$1"
-  timeout 10 "$_vl_bin" --version 2>/dev/null | head -1 || true
+  timeout -k 2 10 "$_vl_bin" --version 2>/dev/null | head -1 || true
+}
+
+# The version the build floor records. The canary drop's signed manifest has no
+# version, so the installed binary names its own (base version only, labels
+# dropped); a release manifest's version is used as is.
+tp_floor_version() {
+  _fv_manifest="$1"
+  _fv_bin="$2"
+  if [ -n "$_fv_manifest" ]; then
+    printf '%s' "$_fv_manifest"
+    return 0
+  fi
+  tp_binary_version_line "$_fv_bin" | sed -n 's/^turbopaneld v\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\).*/\1/p' | head -1
 }
 
 # Documented `turbopaneld --version` line:
@@ -2217,7 +2230,7 @@ tp_probe_native_daemon() {
   if [ ! -x "$_bin" ]; then
     return 1
   fi
-  if timeout 10 "$_bin" --version >/dev/null 2>&1; then
+  if timeout -k 2 10 "$_bin" --version >/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -4140,12 +4153,7 @@ if ! tp_install_verified_binary_and_orchestration; then
   tp_print_error "Failed to install daemon release artifacts"
   exit 1
 fi
-# A manifest without a version still gets a floor that orders by version: the
-# installed binary names its own (base version only, labels dropped).
-_floor_version="${_manifest_version:-}"
-if [ -z "$_floor_version" ]; then
-  _floor_version="$(tp_binary_version_line "$(tp_daemon_binary_path)" | sed -n 's/^turbopaneld v\([0-9]\{1,\}\.[0-9]\{1,\}\.[0-9]\{1,\}\).*/\1/p' | head -1)"
-fi
+_floor_version="$(tp_floor_version "${_manifest_version:-}" "$(tp_daemon_binary_path)")"
 if ! tp_write_daemon_build_floor "$DAEMON_BUILD_FLOOR" \
   "${_manifest_commit:-}" "$_floor_version" "${_manifest_built_at:-}"; then
   tp_print_error "Failed to record the installed daemon build in $DAEMON_BUILD_FLOOR"

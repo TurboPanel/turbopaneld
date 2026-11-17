@@ -418,18 +418,27 @@ test("a manifest without a version records the installed binary's base version",
   const source = await Deno.readTextFile(
     new URL("../../scripts/run.sh", import.meta.url),
   );
-  const at = source.indexOf('_floor_version="${_manifest_version:-}"');
-  const write = source.indexOf(
-    'tp_write_daemon_build_floor "$DAEMON_BUILD_FLOOR"',
-  );
-  if (at < 0 || write < at) {
-    throw new TypeError("run.sh lost the floor version fallback");
-  }
-  const block = source.slice(at, write);
-  if (!block.includes("tp_binary_version_line")) {
-    throw new TypeError("floor version fallback must read the binary");
-  }
-  if (!source.includes('"${_manifest_commit:-}" "$_floor_version"')) {
-    throw new TypeError("the floor must record the fallback version");
+  const dir = await Deno.makeTempDir({ prefix: "tp-floor-version-" });
+  try {
+    const bin = `${dir}/turbopaneld`;
+    await Deno.writeTextFile(
+      bin,
+      "#!/bin/sh\nprintf 'turbopaneld v0.1.18-canary.4 abc1234 (canary, b9, 2026-11-01T00:00:00Z)\\n'\n",
+    );
+    await Deno.chmod(bin, 0o755);
+    const script = [
+      topLevelFunction(source, "tp_binary_version_line"),
+      topLevelFunction(source, "tp_floor_version"),
+      'printf "%s|%s" "$(tp_floor_version "" "$1")" "$(tp_floor_version 0.1.19 "$1")"',
+    ].join("\n");
+    const out = await new Deno.Command("sh", {
+      args: ["-c", script, "sh", bin],
+      env: { PATH: "/usr/bin:/bin" },
+      stdout: "piped",
+    }).output();
+    // No manifest version: the binary's base version. A manifest version wins.
+    assertEquals(new TextDecoder().decode(out.stdout), "0.1.18|0.1.19");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

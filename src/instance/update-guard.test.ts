@@ -5,6 +5,7 @@ import {
   handleSelfUpdateAttachOutcome,
   readUpdateGuardArmed,
   readUpdateRollback,
+  readUpdateSkip,
   updateGuardDisarmPath,
   updateGuardPath,
   updateRollbackPath,
@@ -588,6 +589,8 @@ async function runGuardOnFailedDaemon(options: {
   prevCommit?: string;
   /** A "rolled back from -> to" record root left from an earlier rollback. */
   rolledBackRecord?: { from: string; to: string };
+  /** The daemon unit is up and steady on the failing build (default: failed). */
+  unitSteady?: boolean;
 }): Promise<{
   code: number;
   stderr: string;
@@ -617,7 +620,21 @@ async function runGuardOnFailedDaemon(options: {
     await Deno.writeTextFile(join(stub, "id"), "#!/bin/sh\necho 0\n");
     await Deno.writeTextFile(
       join(stub, "systemctl"),
-      '#!/bin/sh\ncase "$1" in is-failed|reset-failed|restart|is-active) exit 0 ;; esac\nexit 0\n',
+      options.unitSteady
+        ? `#!/bin/sh
+case "$1" in
+  show)
+    case "$4" in
+      NRestarts) echo 0 ;;
+      ActiveState) echo active ;;
+      SubState) echo running ;;
+      ActiveEnterTimestampMonotonic) echo 1000000 ;;
+    esac
+    exit 0 ;;
+esac
+exit 0
+`
+        : '#!/bin/sh\ncase "$1" in is-failed|reset-failed|restart|is-active) exit 0 ;; esac\nexit 0\n',
     );
     await Deno.writeTextFile(join(stub, "systemd-run"), "#!/bin/sh\nexit 0\n");
     for (const name of ["id", "systemctl", "systemd-run"]) {
@@ -937,16 +954,28 @@ test("a second automatic rollback for the same pair is refused and flags the hos
   const repeat = await runGuardOnFailedDaemon({
     record: { target: "newsha", previous: "oldsha", bootId },
     rolledBackRecord: { from: "newsha", to: "oldsha" },
+    unitSteady: true,
   });
   assertEquals(repeat.code, 0, repeat.stderr);
   assertEquals(repeat.rolledBack, false);
   assertStringIncludes(repeat.attention ?? "", '"needsAttention":true');
   assertStringIncludes(repeat.stderr, "already rolled back");
 
+  // A failed or crash-looping unit is always rolled back: a host with no
+  // working daemon could take no next build and report nothing.
+  const failedUnit = await runGuardOnFailedDaemon({
+    record: { target: "newsha", previous: "oldsha", bootId },
+    rolledBackRecord: { from: "newsha", to: "oldsha" },
+  });
+  assertEquals(failedUnit.code, 0, failedUnit.stderr);
+  assertEquals(failedUnit.rolledBack, true);
+  assertEquals(failedUnit.attention, null);
+
   // Another build (or another previous one) is a new case: it rolls back.
   const otherTarget = await runGuardOnFailedDaemon({
     record: { target: "newsha", previous: "oldsha", bootId },
     rolledBackRecord: { from: "othersha", to: "oldsha" },
+    unitSteady: true,
   });
   assertEquals(otherTarget.rolledBack, true);
   assertStringIncludes(otherTarget.rolledBackRecord ?? "", "fromCommit=newsha");
@@ -994,14 +1023,88 @@ test("a build that comes up healthy clears the rolled-back record", async () => 
   }
 });
 
-test("a hanging previous build cannot hold the guard", async () => {
+test("a previous build that ignores SIGTERM cannot hold the guard or run.sh", async () => {
   const guardSh = await Deno.readTextFile(updateGuardSh);
   const runSh = await Deno.readTextFile(runShPath);
-  for (const source of [guardSh, runSh]) {
-    assertStringIncludes(
-      extractShellFunction(source, "tp_binary_version_line"),
-      "timeout ",
-    );
-    assertEquals(/"\$\{?_(native|js)_prev\}?" --version/.test(source), false);
+  const dir = await Deno.makeTempDir({ prefix: "tp-hang-" });
+  try {
+    // Ignores SIGTERM (the ignore survives the exec) and sleeps for a minute.
+    const hang = join(dir, "turbopaneld.prev");
+    await Deno.writeTextFile(hang, "#!/bin/sh\ntrap '' TERM\nexec sleep 60\n");
+    await Deno.chmod(hang, 0o755);
+    const cases: Array<[string, string]> = [
+      [
+        "guard",
+        `VERSION_READ_TIMEOUT_SEC=1\n${
+          extractShellFunction(guardSh, "tp_binary_version_line")
+        }`,
+      ],
+      [
+        "run.sh",
+        extractShellFunction(runSh, "tp_binary_version_line").replace(
+          "-k 2 10",
+          "-k 1 1",
+        ),
+      ],
+    ];
+    for (const [name, fn] of cases) {
+      assertEquals(
+        fn.includes("-k "),
+        true,
+        `${name} must send SIGKILL after the timeout`,
+      );
+      const started = performance.now();
+      const out = await new Deno.Command("sh", {
+        args: [
+          "-c",
+          `${fn}\ntp_binary_version_line "$1"\necho done`,
+          "sh",
+          hang,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const seconds = (performance.now() - started) / 1000;
+      assertEquals(new TextDecoder().decode(out.stdout), "done\n", name);
+      assertEquals(seconds < 10, true, `${name} took ${seconds}s`);
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
+  // Every other --version read in both scripts goes through that helper or
+  // carries the same kill.
+  assertEquals(
+    /(?<!-k 2 10 )"\$\{?_(native|js)_prev\}?" --version/.test(guardSh),
+    false,
+  );
+  assertEquals(/\btimeout 10 /.test(runSh), false);
+});
+
+test("a rolled-back build is skipped by the daemon until another is asked for", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const key of Object.keys(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, fixture.env[key]);
+    }
+    try {
+      await Deno.writeTextFile(
+        updateRollbackPath(),
+        '{"fromCommit":"badnew","toCommit":"restored","reason":"deadline","at":"2026-09-24T12:00:00Z"}\n',
+      );
+      await handleSelfUpdateAttachOutcome({
+        currentCommit: "restored",
+        reportStage: () => {},
+      });
+      const skip = await readUpdateSkip();
+      assertEquals(skip?.commit, "badnew");
+      assertEquals(skip?.reason, "deadline");
+    } finally {
+      for (const key of Object.keys(fixture.env)) {
+        const value = prior[key];
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
 });

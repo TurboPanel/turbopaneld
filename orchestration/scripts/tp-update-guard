@@ -104,10 +104,11 @@ tp_write_file() (
   rmdir -- "$_wf_priv" 2>/dev/null || true
 )
 
-# The `--version` line of a binary, or nothing when it hangs or fails.
+# The `--version` line of a binary, or nothing when it hangs or fails. A binary
+# that ignores SIGTERM is killed 2 s after the timeout.
 tp_binary_version_line() {
   _vl_bin="$1"
-  timeout "$VERSION_READ_TIMEOUT_SEC" "$_vl_bin" --version 2>/dev/null | head -1 || true
+  timeout -k 2 "$VERSION_READ_TIMEOUT_SEC" "$_vl_bin" --version 2>/dev/null | head -1 || true
 }
 
 # Documented `turbopaneld --version` line:
@@ -283,12 +284,16 @@ if [ -n "$_previous_commit" ] && [ -x "$BIN_DIR/turbopaneld.prev" ]; then
   fi
 fi
 
-# A second automatic rollback for the same pair: leave the build in place and
-# say the host needs attention. The first rollback restored a running daemon,
-# so a repeat means the failure is not a one-off a rollback fixes.
+# A second automatic rollback for the same pair, while the daemon runs steadily
+# on the failing build (a missed deadline or a disarm that never came): leave
+# the build in place and say the host needs attention. A failed or crash-looping
+# unit is always rolled back, whatever the record says: a host with no working
+# daemon cannot take the next good build or report anything. The daemon stops
+# the retry loop by skipping the target named in update-rollback.json.
 if [ -f "$ROLLED_BACK_RECORD" ] && [ ! -L "$ROLLED_BACK_RECORD" ] &&
   [ "$(sed -n 's/^fromCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_from_commit" ] &&
-  [ "$(sed -n 's/^toCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_to_commit" ]; then
+  [ "$(sed -n 's/^toCommit=//p' "$ROLLED_BACK_RECORD" | head -1)" = "$_to_commit" ] &&
+  command -v systemctl >/dev/null 2>&1 && tp_unit_running_steadily; then
   _at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   mkdir -p "$STATE_DIR"
   tp_write_file "$STATE_DIR/update-guard-attention.json" \
