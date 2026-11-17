@@ -375,17 +375,17 @@ test("standby seed window and census SQL stay credential-free", () => {
 
 test("account builders scope cross-host client sources per host", () => {
   const monitor = ensureProxySqlMonitorAccountSql("tp_monitor_ab", "mon", [
-    "10.10.1.171",
+    "10.50.1.171",
   ]);
   assertEquals(monitor.includes("'172.16.0.0/255.240.0.0'"), true);
-  assertEquals(monitor.includes("'10.10.1.171'"), true);
+  assertEquals(monitor.includes("'10.50.1.171'"), true);
   assertEquals(
     monitor.includes("GRANT USAGE, PROCESS, REPLICATION CLIENT"),
     true,
   );
 
-  const client = createClientAccountSql("appuser", "pw", ["10.10.1.171"]);
-  assertEquals(client.includes("'10.10.1.171'"), true);
+  const client = createClientAccountSql("appuser", "pw", ["10.50.1.171"]);
+  assertEquals(client.includes("'10.50.1.171'"), true);
   assertEquals(client.includes("'localhost'"), true);
 });
 

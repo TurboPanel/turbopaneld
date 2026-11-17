@@ -426,7 +426,7 @@ async function runUpdateVerb(
 
 const PUBLIC_PIN = "host=https://panel.example.com\ndl_base=\ninstance_ca=\n";
 const OVERLAY_PIN =
-  "host=https://huey.lan:8443\ndl_base=https://huey.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
+  "host=https://server-a.example.lan:8443\ndl_base=https://server-a.example.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
 
 for (
   const [channel, host] of [
@@ -674,9 +674,9 @@ test("tp-orchestrate update uses the pinned overlay host with the pinned Platfor
     [
       "--license-stdin",
       "--host",
-      "https://huey.lan:8443",
+      "https://server-a.example.lan:8443",
       "--dl-base",
-      "https://huey.lan:8443/downloads",
+      "https://server-a.example.lan:8443/downloads",
       "--no-start",
     ],
     OVERLAY_PIN,

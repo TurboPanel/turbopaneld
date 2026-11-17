@@ -7182,14 +7182,20 @@ it({
     const emptyConfigDir = await Deno.makeTempDir({ prefix: "tp-no-ca-" });
     // A private-network overlay origin: run.sh comes from the instance host,
     // which is neither publicly trusted nor backed by a CA file here.
-    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://huey.lan:8443");
-    Deno.env.set("TURBOPANEL_DL_BASE", "https://huey.lan:8443/downloads");
+    Deno.env.set(
+      "TURBOPANEL_INSTANCE_URL",
+      "https://server-a.example.lan:8443",
+    );
+    Deno.env.set(
+      "TURBOPANEL_DL_BASE",
+      "https://server-a.example.lan:8443/downloads",
+    );
     Deno.env.set("TURBOPANEL_CONFIG_DIR", emptyConfigDir);
     Deno.env.delete("TURBOPANEL_INSTANCE_CA");
     // Even an operator-set release-insecure flag must not reach this path.
     Deno.env.set("TURBOPANEL_RELEASE_TLS_INSECURE", "1");
     const { socket, restore } = await startConnectedClient({
-      instanceBaseUrl: "https://huey.lan:8443",
+      instanceBaseUrl: "https://server-a.example.lan:8443",
     });
     try {
       socket.receive({
@@ -7245,12 +7251,18 @@ it({
     const caDir = await Deno.makeTempDir({ prefix: "tp-ca-" });
     const caPath = `${caDir}/instance-ca.pem`;
     await Deno.writeTextFile(caPath, "-----BEGIN CERTIFICATE-----\n");
-    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://huey.lan:8443");
-    Deno.env.set("TURBOPANEL_DL_BASE", "https://huey.lan:8443/downloads");
+    Deno.env.set(
+      "TURBOPANEL_INSTANCE_URL",
+      "https://server-a.example.lan:8443",
+    );
+    Deno.env.set(
+      "TURBOPANEL_DL_BASE",
+      "https://server-a.example.lan:8443/downloads",
+    );
     Deno.env.set("TURBOPANEL_INSTANCE_CA", caPath);
     Deno.env.set("TURBOPANEL_RELEASE_TLS_INSECURE", "1");
     const { socket, restore } = await startConnectedClient({
-      instanceBaseUrl: "https://huey.lan:8443",
+      instanceBaseUrl: "https://server-a.example.lan:8443",
     });
     try {
       socket.receive({
@@ -7267,7 +7279,10 @@ it({
       );
       assertEquals(result.ok, true, result.error);
       assertEquals(downloads.length, 1);
-      assertEquals(downloads[0]?.url, "https://huey.lan:8443/run.sh");
+      assertEquals(
+        downloads[0]?.url,
+        "https://server-a.example.lan:8443/run.sh",
+      );
       assertEquals(downloads[0]?.opts, { insecureTls: false, caPath });
     } finally {
       await restore();

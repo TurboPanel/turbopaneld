@@ -240,16 +240,16 @@ test("planLanRoutes skips a range that contains a connected subnet and names a r
 
 // The exact connected route of the hosted testing servers: DHCP made it.
 const DHCP_SUBNET =
-  "10.10.0.0/22 dev eth0 proto dhcp scope link src 10.10.3.85"; // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+  "10.50.0.0/22 dev eth0 proto dhcp scope link src 10.50.3.85"; // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
 
 test("a connected subnet counts whatever made it: dhcp, static or kernel", () => {
   for (
     const proto of ["dhcp", "static", "kernel", "boot"]
   ) {
     const routes = table(
-      `10.10.0.0/22 dev eth0 proto ${proto} scope link src 10.10.3.85`, // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+      `10.50.0.0/22 dev eth0 proto ${proto} scope link src 10.50.3.85`, // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
     );
-    assertEquals(connectedDevFor("10.10.3.86", routes), "eth0", proto); // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+    assertEquals(connectedDevFor("10.50.3.86", routes), "eth0", proto); // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
   }
   const v6 = parseRouteShow(
     "fd00:9::/64 dev eth1 proto ra metric 1024 expires 86000sec pref medium",
@@ -268,25 +268,25 @@ test("a connected subnet counts whatever made it: dhcp, static or kernel", () =>
 test("routes that are not connected networks never hold a next hop", () => {
   for (
     const line of [
-      "10.10.0.0/22 via 10.10.0.1 dev eth0 proto dhcp scope link", // NOSONAR typescript:S1313 — sample route for this test fixture, not a reachable host
+      "10.50.0.0/22 via 10.50.0.1 dev eth0 proto dhcp scope link", // NOSONAR typescript:S1313 — sample route for this test fixture, not a reachable host
       "default dev eth0 proto dhcp scope link",
-      "blackhole 10.10.0.0/22 proto static",
-      "10.10.0.0/22 dev eth0 proto static scope global",
-      "10.10.0.0/22 dev eth0 proto static scope host",
-      "10.10.0.0/22 dev tp0 proto boot scope link", // a route the daemon made
+      "blackhole 10.50.0.0/22 proto static",
+      "10.50.0.0/22 dev eth0 proto static scope global",
+      "10.50.0.0/22 dev eth0 proto static scope host",
+      "10.50.0.0/22 dev tp0 proto boot scope link", // a route the daemon made
     ]
   ) {
-    assertEquals(connectedDevFor("10.10.3.86", table(line)), null, line); // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+    assertEquals(connectedDevFor("10.50.3.86", table(line)), null, line); // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
   }
 });
 
 test("planLanRoutes installs through a DHCP connected subnet and still refuses its overlap", () => {
   const plan = planLanRoutes({
     desired: [
-      { cidr: "10.194.0.0/16", via: "10.10.3.86" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
-      { cidr: "10.10.0.0/24", via: "10.10.3.86" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      { cidr: "10.194.0.0/16", via: "10.50.3.86" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+      { cidr: "10.50.0.0/24", via: "10.50.3.86" }, // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
     ],
-    table: table(DHCP_SUBNET, "default via 10.10.0.1 dev eth0 proto dhcp"), // NOSONAR typescript:S1313 — sample gateway for this test fixture, not a reachable host
+    table: table(DHCP_SUBNET, "default via 10.50.0.1 dev eth0 proto dhcp"), // NOSONAR typescript:S1313 — sample gateway for this test fixture, not a reachable host
     bridgeSubnets: [],
     installed: [],
   });
@@ -304,11 +304,11 @@ test("the skip reason says no network is connected and lists what was checked", 
   });
   assertEquals(
     plan.skipped[0]?.reason,
-    "no directly connected network holds 10.20.3.86 as a host address (checked: eth0 10.10.0.0/22)",
+    "no directly connected network holds 10.20.3.86 as a host address (checked: eth0 10.50.0.0/22)",
   );
   const none = planLanRoutes({
     desired: [{ cidr: "10.194.0.0/16", via: "10.20.3.86" }], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
-    table: table("default via 10.10.0.1 dev eth0"), // NOSONAR typescript:S1313 — sample gateway for this test fixture, not a reachable host
+    table: table("default via 10.50.0.1 dev eth0"), // NOSONAR typescript:S1313 — sample gateway for this test fixture, not a reachable host
     bridgeSubnets: [],
     installed: [],
   });

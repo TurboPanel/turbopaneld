@@ -391,10 +391,10 @@ test("collectServerIps prefers a later CIDR and omits empty or overlong interfac
       {
         name: "eth1",
         family: "IPv4",
-        address: "10.10.0.1",
-        cidr: "10.10.0.1/24",
+        address: "10.100.0.1",
+        cidr: "10.100.0.1/24",
       },
-      { name: "eth1", family: "IPv4", address: "10.10.0.1" },
+      { name: "eth1", family: "IPv4", address: "10.100.0.1" },
       { name: "   ", family: "IPv4", address: "10.11.0.1" },
       { name: longName, family: "IPv4", address: "10.12.0.1" },
       { name: maxName, family: "IPv4", address: "10.13.0.1" },
@@ -402,10 +402,10 @@ test("collectServerIps prefers a later CIDR and omits empty or overlong interfac
     () => {
       assertEquals(collectServerIps(), [
         {
-          address: "10.10.0.1",
+          address: "10.100.0.1",
           version: 4,
           scope: "private",
-          cidr: "10.10.0.1/24",
+          cidr: "10.100.0.1/24",
           interface: "eth1",
         },
         {

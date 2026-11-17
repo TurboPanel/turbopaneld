@@ -210,11 +210,11 @@ test("devInstanceExtraArgs passes forwarded LAN hosts as certificate public URLs
       TURBOPANEL_TLS_EXTRA_SANS: "extra.lan",
     }),
     undefined,
-    () => "192.0.2.10\nlab.lan\n",
+    () => "192.0.2.10\nserver-d.example.lan\n",
   );
   assertEquals(
     args.includes(
-      "turbopanel_public_urls=https://panel.lan:8443,192.0.2.10,lab.lan",
+      "turbopanel_public_urls=https://panel.lan:8443,192.0.2.10,server-d.example.lan",
     ),
     true,
   );

@@ -200,7 +200,7 @@ function refusedDevHolding(
   return route?.dev ?? null;
 }
 
-/** The usable connected networks, for the warning: `checked: eth0 10.10.0.0/22`. */
+/** The usable connected networks, for the warning: `checked: eth0 10.50.0.0/22`. */
 function connectedList(table: readonly ObservedRoute[]): string {
   const seen = table.filter((route) =>
     route.connected && route.dev !== null && !route.linkdown &&

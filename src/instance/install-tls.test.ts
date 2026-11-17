@@ -19,11 +19,17 @@ test("installOriginNeedsInsecureTls trusts public HTTPS on 443", () => {
 
 test("installOriginNeedsInsecureTls flags platform-CA listeners", () => {
   assertEquals(
-    installOriginNeedsInsecureTls("https://studio.lan:8443"),
+    installOriginNeedsInsecureTls("https://dev-workstation.example.lan:8443"),
     true,
   );
-  assertEquals(installOriginNeedsInsecureTls("https://studio.lan"), true);
-  assertEquals(installOriginNeedsInsecureTls("http://studio.lan"), false);
+  assertEquals(
+    installOriginNeedsInsecureTls("https://dev-workstation.example.lan"),
+    true,
+  );
+  assertEquals(
+    installOriginNeedsInsecureTls("http://dev-workstation.example.lan"),
+    false,
+  );
 });
 
 test("installOriginNeedsInsecureTls flags RFC1918 and loopback IPv4 on 443", () => {
