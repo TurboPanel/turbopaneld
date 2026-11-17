@@ -26,6 +26,8 @@ import {
 import {
   type PeerUpstream,
   peerUpstreamText,
+  TUNNEL_ERROR_STATUS,
+  TUNNEL_ERROR_TEXT,
   TUNNEL_SITE_FILE,
   tunnelLockLines,
   tunnelTrustedRanges,
@@ -2094,17 +2096,37 @@ function headerDeletionBlock(names: readonly string[], indent: string): string {
  * 502 when the upstream is down, for one) skip that block, so `handle_errors`
  * repeats it; it writes nothing itself, so the status and the empty body stay
  * as Caddy sends them.
+ *
+ * `peerErrorPage` is the one answer a block that forwards to a peer server
+ * gives when that server cannot answer (see {@link peerErrorPageLines}); it
+ * shares the `handle_errors` block with the header removal.
  */
 function headerDeletions(
   choices: HostingHeaderChoices,
   errors = true,
+  peerErrorPage = "",
 ): string {
   const names = deletedHeaders(choices);
-  if (names.length === 0) return "";
-  if (!errors) return headerDeletionBlock(names, "  ");
-  return `${headerDeletionBlock(names, "  ")}  handle_errors {
-${headerDeletionBlock(names, "    ")}  }
+  const hasNames = names.length > 0;
+  if (!errors) return hasNames ? headerDeletionBlock(names, "  ") : "";
+  if (!hasNames && peerErrorPage === "") return "";
+  const outer = hasNames ? headerDeletionBlock(names, "  ") : "";
+  const inner = hasNames ? headerDeletionBlock(names, "    ") : "";
+  return `${outer}  handle_errors {
+${inner}${peerErrorPage}  }
 `;
+}
+
+/**
+ * The error answer of a site block that forwards to a peer server: always 503
+ * with the tunnel error text, as a tunnel forward block does. With one
+ * upstream and a retry window the error is 502 or 503 at random, and the edge
+ * replaces a 502 with its own page.
+ */
+function peerErrorPageLines(routes: readonly CaddySiteRoute[]): string {
+  return routes.some((route) => route.upstream.kind === "peer")
+    ? `    respond "${TUNNEL_ERROR_TEXT}" ${TUNNEL_ERROR_STATUS}\n`
+    : "";
 }
 
 /** A deletion line for `name` anywhere in a written site file. */
@@ -2219,9 +2241,10 @@ ${hide}${page}}
 function siteBlockPreamble(
   bindAddress: string | readonly string[] | undefined,
   choices: HostingHeaderChoices,
+  peerErrorPage = "",
 ): string {
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
-  return bindLine + headerDeletions(choices);
+  return bindLine + headerDeletions(choices, true, peerErrorPage);
 }
 
 /** The import line for a host's proof handler, or "" when the block takes none. */
@@ -2320,6 +2343,7 @@ export function siteSnippet(options: SiteSnippetOptions): string {
   const bindLine = siteBlockPreamble(
     tunnelBindAddresses(bindAddress, tunnel),
     options,
+    peerErrorPageLines(effectiveRoutes),
   );
   // The connector speaks HTTPS to localhost, so a tunnel name always has an
   // HTTPS site; a locked one has no HTTP site at all (the catch-all answers

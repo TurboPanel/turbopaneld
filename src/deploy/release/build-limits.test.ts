@@ -261,3 +261,18 @@ test("host memory is read through cat when Deno blocks the direct /proc read", a
   assertEquals(catRan, true);
   assertEquals(host.memoryBytes, 2 * GIB);
 });
+
+test("readHostCapacity survives a failure that cannot be turned into text", async () => {
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    for (const reason of [cycle, 10n]) {
+      const host = await readHostCapacity(() => Promise.reject(reason));
+      assertEquals(host.memoryBytes, 0);
+    }
+  } finally {
+    console.warn = originalWarn;
+  }
+});
