@@ -191,11 +191,11 @@ test("registerSealingKey posts kid, pub and sig", async () => {
   }
 });
 
-test("a 404 from an older control plane is tolerated and registration is retried later", async () => {
+test("a failed registration answers false so it is retried later", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
-    // Nothing is scripted for the path, so the fake answers 404.
+    // Nothing is scripted for the path, so the fake answers 404 (a failure).
     const client = clientWith();
     const signing = await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
@@ -487,7 +487,7 @@ test("the sealing key is registered again after a plaintext answer, at most once
     register: () => Promise.resolve(outcomes[attempts++] ?? true),
     now: () => clock,
   });
-  // Connect: the older control plane answered 404.
+  // Connect: the registration did not take.
   await registration.atConnect();
   assertEquals(attempts, 1);
   // Plaintext answer right away: still inside the interval.

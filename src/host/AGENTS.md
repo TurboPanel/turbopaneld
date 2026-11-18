@@ -133,7 +133,7 @@ change-detected heartbeats.
   (compose `serviceKind: site`); engines are vendored under
   `/opt/turbopanel/vendor/{nginx,apache,openlitespeed}`. nginx/Apache PHP is the
   one exception to vendoring: php-fpm comes from the sury Debian repo, run under
-  `turbopanel-php-fpm.service` against TurboPanel's own config — see
+  `turbopanel-php-fpm@.service` against TurboPanel's own config — see
   `src/deploy/AGENTS.md` and `orchestration/AGENTS.md`.
   **Runtime inventory** rides the presence snapshot (`src/host/runtimes.ts` →
   `idle-presence.ts`), not a command: `COMMAND_TYPES` is a downward rail with no

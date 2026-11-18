@@ -47,7 +47,7 @@ export function createSealingContext(
 
 /**
  * Tell the control plane which key to seal to, signed with the Ed25519 server
- * key. Best effort: an older control plane answers 404 and keeps sending
+ * key. Best effort: until the key is on file the control plane keeps sending
  * plaintext, which the daemon still accepts until it has seen a sealed answer.
  * Returns true once the key is registered.
  * Only the key id is ever logged.
@@ -69,13 +69,6 @@ export async function registerSealingKey(params: {
     logInfo("instance", "registered sealing key", sanitizeForLog(kid));
     return true;
   } catch (err) {
-    if (err instanceof DaemonApiError && err.status === 404) {
-      logInfo(
-        "instance",
-        "control plane does not take sealing keys yet; secrets stay as they are",
-      );
-      return false;
-    }
     logWarn(
       "instance",
       "could not register the sealing key; will retry on the next connect or plaintext answer",
@@ -101,11 +94,12 @@ export const SEALING_REREGISTER_INTERVAL_MS = 60 * 1000;
  * in plaintext only when it has no key on file for this server, so a
  * plaintext answer means the key is not there, whatever this process
  * registered before. Two cases: a control plane upgraded while this socket
- * stayed open (the older one answered the connect-time registration with
- * 404), and an administrator who cleared the key (Clear Sealing Key). After a
- * failed attempt the next one waits {@link SEALING_RETRY_INTERVAL_MS}; after
- * one that worked, {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt at a
- * time; a caller that arrives during one waits for it.
+ * stayed open (before the upgrade it did not take the connect-time
+ * registration), and an administrator who cleared the key (Clear Sealing
+ * Key). After a failed attempt the next one waits
+ * {@link SEALING_RETRY_INTERVAL_MS}; after one that worked,
+ * {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt at a time; a caller
+ * that arrives during one waits for it.
  * `afterPlaintextAnswer` resolves true only when an attempt it started or
  * joined put the key on file.
  */

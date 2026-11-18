@@ -101,7 +101,7 @@ FHS layout:
 | `/var/log/turbopanel/php/` | `tpapache:tpapache` | `0750` | `php-fpm.log` / `php-error.log` |
 | `/run/turbopanel/php/` | `tpapache:tp` | `0750` | pidfile + unix sockets |
 
-Driven by **`turbopanel-php-fpm.service`**. The FPM master, its bootstrap pool,
+Driven by **`turbopanel-php-fpm@.service`**. The FPM master, its bootstrap pool,
 and the FHS config/log dirs are owned by **tpapache** (provisioned by
 `web-service-user` before this role) — that stays true on an nginx-only host,
 which is why `site-nginx-apply.yml` provisions the `apache` identity before
