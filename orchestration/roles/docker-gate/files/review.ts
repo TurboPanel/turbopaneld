@@ -123,10 +123,6 @@ async function applyApproval(
 ): Promise<Violation[]> {
   const found = approvalTokenOf(labels);
   if (found === undefined) return violations;
-  if ("ambiguous" in found) {
-    logApproval(deps, { ok: false, reason: "ambiguous-approval" }, []);
-    return violations;
-  }
   const token = found.token;
   const nowSec = (deps.nowSec ?? defaultNowSec)();
   const verified = await verifyApproval(
@@ -205,8 +201,7 @@ async function applyStartApproval(
   deps: ReviewDeps,
 ): Promise<Violation[]> {
   const label = approvalTokenOf(doc.labels);
-  // Both labels present relaxes nothing.
-  if (found.length === 0 || label === undefined || "ambiguous" in label) {
+  if (found.length === 0 || label === undefined) {
     return [...found];
   }
   const token = label.token;

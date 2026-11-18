@@ -78,8 +78,6 @@ import {
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
-  legacyLabelKey,
-  readLabel,
   traefikLabelConstraint,
 } from "./labels.ts";
 import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
@@ -823,7 +821,7 @@ export function serviceIngressComposePath(
  * Joins `ingressNetwork` (the `hosting-ingress` component's allocated
  * `serviceId`, supplied by the caller from the deploy payload's
  * `hostingIngressNetwork`), constrains the Docker provider to
- * `io.turbopanel.service=<serviceId>` **and** `io.turbopanel.raw-port=true` (either prefix)
+ * `io.turbopanel.service=<serviceId>` **and** `io.turbopanel.raw-port=true`
  * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
@@ -876,9 +874,6 @@ export function serviceTraefikCompose(
     "    labels:",
     `      ${LABEL_ROLE}: ${LABEL_ROLE_INGRESS}`,
     `      ${LABEL_SERVICE_ID}: ${quoteYamlScalar(identity.serviceId)}`,
-    `      ${legacyLabelKey(LABEL_SERVICE_ID)}: ${
-      quoteYamlScalar(identity.serviceId)
-    }`,
     ...gateVolumeLines(docker),
     "    networks:",
     `      - ${ingressNetwork}`,
@@ -1302,7 +1297,7 @@ export async function legacyHttpContainersPresent(
   if (!inspect.success) return true;
   return inspect.stdout.split("\n").some((line) => {
     const labels = parseLabelsLine(line);
-    if (labels === undefined || readLabel(labels, LABEL_ROUTED) === "true") {
+    if (labels === undefined || labels[LABEL_ROUTED] === "true") {
       return false;
     }
     return Object.keys(labels).some((k) => k.startsWith("traefik.http."));
@@ -1587,7 +1582,7 @@ export async function ensureHostingIngress(
  * True when the compose-ps row carries the allowlisted platform labels for
  * the shared hosting-ingress Traefik (`turbopanel.role=ingress`,
  * `io.turbopanel.system.component=hosting-ingress`, and
- * `io.turbopanel.service=<serviceId>`, either prefix). Unlabelled / legacy rows fail.
+ * `io.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
  */
 function hasHostingIngressLabels(
   entry: Record<string, unknown>,
@@ -1596,9 +1591,9 @@ function hasHostingIngressLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    readLabel(labels, LABEL_SYSTEM_COMPONENT) ===
+    labels[LABEL_SYSTEM_COMPONENT] ===
       SYSTEM_HOSTING_INGRESS_COMPONENT &&
-    readLabel(labels, LABEL_SERVICE_ID) === serviceId
+    labels[LABEL_SERVICE_ID] === serviceId
   );
 }
 

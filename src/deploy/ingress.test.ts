@@ -1249,7 +1249,7 @@ test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel",
   );
   assertStringIncludes(
     compose,
-    `(Label(\`io.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) || Label(\`com.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`)) && (Label(\`io.turbopanel.raw-port\`,\`true\`) || Label(\`com.turbopanel.raw-port\`,\`true\`))`,
+    `Label(\`io.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) && Label(\`io.turbopanel.raw-port\`,\`true\`)`,
   );
   assertStringIncludes(compose, HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("entrypoints.web"), false);
@@ -4246,10 +4246,9 @@ test("gate mode: a service Traefik mounts the read-only socket directory and kee
   assertStringIncludes(yaml, GATE_ENDPOINT);
   assertStringIncludes(yaml, `      - ${GATE_MOUNT}`);
   assertStringIncludes(yaml, "--providers.docker.constraints=");
-  // Containers of the previous release carry the old prefix and stay routed.
   assertStringIncludes(
     yaml,
-    "(Label(`io.turbopanel.raw-port`,`true`) || Label(`com.turbopanel.raw-port`,`true`))",
+    "Label(`io.turbopanel.raw-port`,`true`)",
   );
   assertEquals(yaml.includes("docker-socket-proxy"), false);
 });

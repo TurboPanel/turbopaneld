@@ -1,8 +1,4 @@
-import {
-  LABEL_PROJECT,
-  LABEL_SERVICE_ID,
-  readLabel,
-} from "../deploy/labels.ts";
+import { LABEL_PROJECT, LABEL_SERVICE_ID } from "../deploy/labels.ts";
 import type {
   ContainerInspect,
   ContainerSummary,
@@ -14,8 +10,7 @@ import type {
 } from "./protocol.ts";
 
 /**
- * Optional docker label keys for project/service mapping (new prefix; the
- * reader also accepts the old prefix, see `readLabel`).
+ * Optional docker label keys for project/service mapping.
  */
 export const TURBOPANEL_LABEL_KEYS = {
   project: LABEL_PROJECT,
@@ -242,8 +237,8 @@ export function normalizeContainer(
 
   if (labels) {
     state.labels = labels;
-    const projectId = readLabel(labels, TURBOPANEL_LABEL_KEYS.project);
-    const serviceId = readLabel(labels, TURBOPANEL_LABEL_KEYS.service);
+    const projectId = labels[TURBOPANEL_LABEL_KEYS.project];
+    const serviceId = labels[TURBOPANEL_LABEL_KEYS.service];
     if (projectId) state.projectId = projectId;
     if (serviceId) state.serviceId = serviceId;
   }

@@ -759,8 +759,7 @@ test({
 });
 
 test({
-  name:
-    "a token under the old label prefix still verifies; both labels at once cover nothing",
+  name: "a token under another label prefix covers nothing",
   sanitizeOps: false,
   sanitizeResources: false,
   fn: () =>
@@ -772,37 +771,15 @@ test({
           bodyDigest: await privilegedDigest(),
         }),
       );
-      const forged = "v2.Zm9yZ2Vk.Zm9yZ2Vk";
-      const create = (labels: Record<string, string>) => ({
+      await sendCreate(h, {
         ...privilegedCreate(""),
-        Labels: { "com.docker.compose.project": "tenantapp", ...labels },
+        Labels: {
+          "com.docker.compose.project": "tenantapp",
+          "com.turbopanel.approval": token,
+        },
       });
-      // Old label only: accepted, both findings covered.
-      await sendCreate(h, create({ "com.turbopanel.approval": token }));
-      assertEquals(wouldDeny(h.logs), []);
-      assertEquals(approvalLogs(h.logs).at(-1)?.result, "accepted");
-      // A valid token under one prefix and a forged one under the other:
-      // refused whichever way round, and the findings stand.
-      for (
-        const labels of [
-          {
-            "io.turbopanel.approval": token,
-            "com.turbopanel.approval": forged,
-          },
-          {
-            "com.turbopanel.approval": token,
-            "io.turbopanel.approval": forged,
-          },
-          { "io.turbopanel.approval": token, "com.turbopanel.approval": token },
-        ]
-      ) {
-        h.logs.length = 0;
-        await sendCreate(h, create(labels));
-        assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
-        const [line] = approvalLogs(h.logs);
-        assertEquals(line.result, "rejected");
-        assertEquals(line.reason, "ambiguous-approval");
-      }
+      assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
+      assertEquals(approvalLogs(h.logs), []);
     }),
 });
 
@@ -919,7 +896,7 @@ e2e(
 
 const PLATFORM = {
   "turbopanel.role": "ingress",
-  "com.turbopanel.system.component": "managed-ingress",
+  "io.turbopanel.system.component": "managed-ingress",
   "com.docker.compose.project": "p",
 };
 
@@ -1065,14 +1042,14 @@ e2e(
         status: 200,
         labels: {
           "turbopanel.role": "ingress",
-          "com.turbopanel.system.component": "managed-ingress",
+          "io.turbopanel.system.component": "managed-ingress",
         },
       },
       traefik: {
         status: 200,
         labels: {
           "turbopanel.role": "ingress",
-          "com.turbopanel.system.component": "hosting-ingress",
+          "io.turbopanel.system.component": "hosting-ingress",
         },
       },
       engine: { status: 200, labels: { "tp.managed.engine": "postgres" } },
@@ -1081,7 +1058,7 @@ e2e(
         status: 200,
         labels: {
           "turbopanel.role": "turbopanel",
-          "com.turbopanel.system.component": "backup-copy",
+          "io.turbopanel.system.component": "backup-copy",
         },
       },
     });

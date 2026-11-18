@@ -17,7 +17,6 @@ import {
   LABEL_ROLE,
   LABEL_ROLE_SYSTEM,
   LABEL_SYSTEM_COMPONENT,
-  readLabel,
 } from "../deploy/labels.ts";
 import {
   parseComposePsEntries,
@@ -658,7 +657,7 @@ export function hasOrchestratorLabels(
   if (typeof labels !== "object" || labels === null) return false;
   const record = labels as Record<string, unknown>;
   return record[LABEL_ROLE] === LABEL_ROLE_SYSTEM &&
-    readLabel(record, LABEL_SYSTEM_COMPONENT) ===
+    record[LABEL_SYSTEM_COMPONENT] ===
       SYSTEM_MANAGED_HA_COMPONENT;
 }
 

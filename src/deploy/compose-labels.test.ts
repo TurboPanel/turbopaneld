@@ -595,24 +595,21 @@ test("buildHostingLabelsFragment routes the names a www mode serves", () => {
   );
 });
 
-test("identity labels are stamped under both prefixes with equal values, over a tenant's own old-prefix label", () => {
+test("identity labels are stamped over a tenant's own label of the same key", () => {
   const fragment = buildHostingLabelsFragment({
     payload,
     hostings: payload.hostings,
     resolved: resolvedFromServices({
       app: {
         image: "nginx:alpine",
-        labels: { "com.turbopanel.service": "someone-else" },
+        labels: { "io.turbopanel.service": "someone-else" },
       },
     }),
   });
   const labels = fragment.services?.app?.labels as Record<string, string>;
   assertEquals(labels["io.turbopanel.service"], "service_123");
-  assertEquals(labels["com.turbopanel.service"], "service_123");
   assertEquals(labels["io.turbopanel.project"], "project_123");
-  assertEquals(labels["com.turbopanel.project"], "project_123");
   assertEquals(labels["io.turbopanel.environment"], "env_123");
-  assertEquals(labels["com.turbopanel.environment"], "env_123");
 });
 
 test("buildHostingLabelsFragment stamps project and environment on every service, overriding the tenant's", () => {
@@ -623,8 +620,6 @@ test("buildHostingLabelsFragment stamps project and environment on every service
       labels: {
         "io.turbopanel.project": "victim_project",
         "io.turbopanel.environment": "victim_env",
-        "com.turbopanel.project": "victim_project",
-        "com.turbopanel.environment": "victim_env",
       },
     },
   });
@@ -637,14 +632,10 @@ test("buildHostingLabelsFragment stamps project and environment on every service
     const labels = fragment.services?.[name]?.labels as Record<string, string>;
     assertEquals(labels["io.turbopanel.project"], "project_123", name);
     assertEquals(labels["io.turbopanel.environment"], "env_123", name);
-    assertEquals(labels["com.turbopanel.project"], "project_123", name);
-    assertEquals(labels["com.turbopanel.environment"], "env_123", name);
   }
   // A non-hosted service gets identity only: no routing, no service id.
   const worker = fragment.services?.worker?.labels as Record<string, string>;
   assertEquals(Object.keys(worker).sort(), [
-    "com.turbopanel.environment",
-    "com.turbopanel.project",
     "io.turbopanel.environment",
     "io.turbopanel.project",
   ]);

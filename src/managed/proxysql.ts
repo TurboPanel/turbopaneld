@@ -20,7 +20,6 @@ import {
   LABEL_ROLE,
   LABEL_ROLE_INGRESS,
   LABEL_SYSTEM_COMPONENT,
-  readLabel,
 } from "../deploy/labels.ts";
 import {
   PROXYSQL_COMPOSE_SERVICE_NAME,
@@ -1963,7 +1962,7 @@ function hasProxySqlLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    readLabel(labels, LABEL_SYSTEM_COMPONENT) ===
+    labels[LABEL_SYSTEM_COMPONENT] ===
       SYSTEM_MANAGED_INGRESS_COMPONENT
   );
 }

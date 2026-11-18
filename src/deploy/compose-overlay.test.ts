@@ -368,7 +368,7 @@ test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-f
       web: {
         labels: {
           "io.turbopanel.project": "p1",
-          "com.turbopanel.project": "p1",
+          "io.turbopanel.environment": "e1",
         },
       },
     },
@@ -379,8 +379,8 @@ test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-f
     "    image: nginx",
     "    labels:",
     "      - io.turbopanel.project=forged",
-    "      - com.turbopanel.project=forged",
-    "      - com.turbopanel.service=web",
+    "      - io.turbopanel.environment=forged",
+    "      - io.turbopanel.service=web",
     "      - tenant.keep=yes",
     "      - bare.key",
     "",
@@ -390,8 +390,8 @@ test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-f
   };
   assertEquals(listOut.services.web.labels, {
     "io.turbopanel.project": "p1",
-    "com.turbopanel.project": "p1",
-    "com.turbopanel.service": "web",
+    "io.turbopanel.environment": "e1",
+    "io.turbopanel.service": "web",
     "tenant.keep": "yes",
     "bare.key": "",
   });
@@ -410,7 +410,7 @@ test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-f
   };
   assertEquals(mapOut.services.web.labels, {
     "io.turbopanel.project": "p1",
-    "com.turbopanel.project": "p1",
+    "io.turbopanel.environment": "e1",
     "tenant.keep": "yes",
   });
 });
@@ -425,7 +425,7 @@ test("mergeOverlayIntoComposeYaml never reads an object or array list entry as a
     "    image: nginx",
     "    labels:",
     "      - io.turbopanel.environment: forged",
-    "      - [com.turbopanel.environment=forged]",
+    "      - [io.turbopanel.project=forged]",
     "      - 8080",
     "",
   ].join("\n");

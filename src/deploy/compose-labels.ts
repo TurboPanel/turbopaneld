@@ -11,7 +11,6 @@ import {
   LABEL_RAW_PORT,
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
-  legacyLabelKey,
 } from "./labels.ts";
 
 const ROUTER_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -293,10 +292,7 @@ function serviceLabels(
   return {};
 }
 
-/**
- * Stamps the deploy's project and environment identity, under both label
- * prefixes, on every service of the resolved model.
- */
+/** Stamps the deploy's project and environment identity on every service of the resolved model. */
 function stampIdentityLabels(
   services: Record<string, Record<string, unknown>>,
   resolved: ResolvedComposeModel,
@@ -311,7 +307,6 @@ function stampIdentityLabels(
       ]
     ) {
       addLabel(labels, key, value);
-      addLabel(labels, legacyLabelKey(key), value);
     }
     services[name] = { labels };
   }
@@ -335,7 +330,7 @@ export function buildHostingLabelsFragment(input: {
   const ingressNetwork = payload.hostingIngressNetwork!;
 
   // Every service of the deploy carries the project and environment it was
-  // deployed for, under both prefixes, whatever the tenant wrote: the Docker
+  // deployed for, whatever the tenant wrote: the Docker
   // gate ties a container's generated secret and config files to these labels.
   // The overlay merges after the tenant's compose files, so these win.
   stampIdentityLabels(services, resolved, payload);
@@ -367,9 +362,8 @@ export function buildHostingLabelsFragment(input: {
       addLabel(labels, LABEL_ROUTED, "true");
     }
     // The service id is per hosting; the project and environment identity is
-    // stamped on every service below. Both prefixes carry the same value.
+    // stamped on every service below.
     addLabel(labels, LABEL_SERVICE_ID, hosting.serviceId);
-    addLabel(labels, legacyLabelKey(LABEL_SERVICE_ID), hosting.serviceId);
 
     services[name] = {
       ...services[name],

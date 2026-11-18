@@ -36,26 +36,12 @@
 import type { Violation } from "./policy.ts";
 
 export const APPROVAL_LABEL = "io.turbopanel.approval";
-/**
- * The old-prefix spelling. Nothing signs a token under it today; it is
- * recognised only so it can never be used to sneak past the gate (see
- * {@link approvalTokenOf}). Removed together with the old label prefix.
- */
-export const LEGACY_APPROVAL_LABEL = "com.turbopanel.approval";
 
-/**
- * The approval token of a container's labels. Exactly one of the two labels
- * present gives its value; both present is `ambiguous` (the caller refuses on
- * create and relaxes nothing on start): the gate never picks one, so a forged
- * second label can neither hide behind nor replace a signed one.
- */
+/** The approval token of a container's labels, if it carries one. */
 export function approvalTokenOf(
   labels: Readonly<Record<string, string>>,
-): { token: string } | { ambiguous: true } | undefined {
-  const current = labels[APPROVAL_LABEL];
-  const legacy = labels[LEGACY_APPROVAL_LABEL];
-  if (current !== undefined && legacy !== undefined) return { ambiguous: true };
-  const token = current ?? legacy;
+): { token: string } | undefined {
+  const token = labels[APPROVAL_LABEL];
   return token === undefined ? undefined : { token };
 }
 export const APPROVAL_VERSION = "v2";
@@ -141,7 +127,6 @@ export async function approvalBodyDigest(body: unknown): Promise<string> {
     const labels = (copy as Record<string, unknown>).Labels;
     if (typeof labels === "object" && labels !== null) {
       delete (labels as Record<string, unknown>)[APPROVAL_LABEL];
-      delete (labels as Record<string, unknown>)[LEGACY_APPROVAL_LABEL];
     }
   }
   const bytes = new TextEncoder().encode(canonicalJson(copy));

@@ -117,7 +117,7 @@ routed() {
 }
 
 traefik_id() {
-  { docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress; docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress; } | sed -n 1p
+  docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress | sed -n 1p
   return 0
 }
 

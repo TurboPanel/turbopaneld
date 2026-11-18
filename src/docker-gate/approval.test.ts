@@ -322,10 +322,6 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
   const withToken = structuredClone(body);
   Object.assign(withToken.Labels, { "io.turbopanel.approval": token });
   assertEquals(await approvalBodyDigest(withToken), digest);
-  // The old-prefix label is removed from the digested body too.
-  const withOld = structuredClone(body);
-  Object.assign(withOld.Labels, { "com.turbopanel.approval": token });
-  assertEquals(await approvalBodyDigest(withOld), digest);
   for (
     const other of [
       { ...body, Image: "busybox" },
@@ -460,27 +456,10 @@ test("a token for one container name is refused for another, or for none", async
   );
 });
 
-test("approvalTokenOf reads exactly one of the two labels and refuses both", () => {
+test("approvalTokenOf reads only the io.turbopanel approval label", () => {
   assertEquals(approvalTokenOf({}), undefined);
   assertEquals(approvalTokenOf({ "io.turbopanel.approval": "t" }), {
     token: "t",
   });
-  // The old prefix is read only, for a container the previous release made.
-  assertEquals(approvalTokenOf({ "com.turbopanel.approval": "t" }), {
-    token: "t",
-  });
-  assertEquals(
-    approvalTokenOf({
-      "io.turbopanel.approval": "t",
-      "com.turbopanel.approval": "t",
-    }),
-    { ambiguous: true },
-  );
-  assertEquals(
-    approvalTokenOf({
-      "io.turbopanel.approval": "good",
-      "com.turbopanel.approval": "forged",
-    }),
-    { ambiguous: true },
-  );
+  assertEquals(approvalTokenOf({ "com.turbopanel.approval": "t" }), undefined);
 });

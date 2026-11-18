@@ -6,7 +6,7 @@ account `tp`). This role is **stage 3 of 5** of closing it.
 
 ## Label prefix (`io.turbopanel.`)
 
-The gate reads labels under `io.turbopanel.`; the old `com.turbopanel.` prefix is read only, for containers the previous release made, and goes away in a later release. `platform.ts` `componentOf` takes the new component label first and the old one as the fallback. For the signed approval, `approvalTokenOf` accepts exactly one of the two approval labels; a container carrying both is refused on create (`ambiguous-approval`) and relaxes nothing on start or restart, and the body digest removes both labels, so a forged second label can neither hide behind nor replace a signed one.
+The gate reads labels under `io.turbopanel.` only. `platform.ts` `componentOf` reads the component label; for the signed approval, `approvalTokenOf` reads `io.turbopanel.approval`, and the body digest removes that label. A container that carries only labels of another prefix has no TurboPanel identity.
 
 ## What exists today (stages 1-3: observe mode, plus Traefik's read-only socket)
 
@@ -106,7 +106,7 @@ built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
 (`policy.ts` `isGeneratedFileBind`, allowance `generated-file-bind`). Both ids
 are UUIDs, `<name>` is one segment of the deploy's plan-name rule
 (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`, not `.tmp`), and the authored source
-must already be the resolved one, so a symlink never qualifies. The two ids must also equal the container's own `io.turbopanel.project` and `io.turbopanel.environment` labels exactly (old `com.turbopanel.` prefix as the fallback, new one first); a container missing either label is refused. The daemon stamps both on every service of a deploy (`buildHostingLabelsFragment`), overriding tenant-written values. Anything else
+must already be the resolved one, so a symlink never qualifies. The two ids must also equal the container's own `io.turbopanel.project` and `io.turbopanel.environment` labels exactly; a container missing either label is refused. The daemon stamps both on every service of a deploy (`buildHostingLabelsFragment`), overriding tenant-written values. Anything else
 under `/run` stays `bind-forbidden-path`. `runDir` is the policy config's
 `/run/turbopanel` (the layout's `PROD_RUN_DIR_DEFAULT`, repeated because the
 gate imports nothing).
@@ -396,7 +396,7 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   as Tecnativa did: redacting it needs response rewriting (a separate change).
 - The `ingress-socket` allowance trusts `turbopanel.role=ingress`, a label the
   daemon (and possibly tenant Compose) can set; enforcement needs tenant
-  Compose to be refused `turbopanel.*` / `io.turbopanel.*` / `com.turbopanel.*` labels.
+  Compose to be refused `turbopanel.*` / `io.turbopanel.*` labels.
 
 ## Lockouts to expect when enforcement arrives (stage 4; none bite in stage 2)
 

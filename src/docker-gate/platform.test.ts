@@ -105,15 +105,15 @@ test("ownerOf separates platform, compose / TurboPanel workloads and the rest", 
   );
   assertEquals(ownerOf({ [LABEL_MANAGED_ENGINE]: "postgres" }), "platform");
   assertEquals(ownerOf({ [LABEL_COMPOSE_PROJECT]: "app" }), "tenant");
-  assertEquals(ownerOf({ "com.turbopanel.service": "x" }), "tenant");
   assertEquals(ownerOf({ "io.turbopanel.service": "x" }), "tenant");
-  // The old component label still identifies the platform (previous release).
+  // Labels of another prefix identify nothing.
+  assertEquals(ownerOf({ "com.turbopanel.service": "x" }), "unlabeled");
   assertEquals(
     ownerOf({
       "turbopanel.role": "turbopanel",
       "com.turbopanel.system.component": "database",
     }),
-    "platform",
+    "tenant",
   );
   // A role without a known component is not platform.
   assertEquals(ownerOf({ "turbopanel.role": "turbopanel" }), "tenant");

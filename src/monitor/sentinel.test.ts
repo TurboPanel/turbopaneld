@@ -603,7 +603,7 @@ function serviceInspect(
   return {
     ...base,
     RestartCount: options.restartCount ?? 0,
-    Config: { Labels: { "com.turbopanel.service": "svc-1" } },
+    Config: { Labels: { "io.turbopanel.service": "svc-1" } },
     State: {
       ...base.State,
       Restarting: status === "restarting",
@@ -695,7 +695,7 @@ test("sentinel ignores ingress containers and survives a failing log fetch", asy
   const ingress = serviceInspect("exited", { exitCode: 1 });
   ingress.Config = {
     Labels: {
-      "com.turbopanel.service": "svc-ingress",
+      "io.turbopanel.service": "svc-ingress",
       "turbopanel.role": "ingress",
     },
   };

@@ -23,7 +23,6 @@ import {
   ownerOf,
   platformBindVerdict,
   type PlatformRoots,
-  readIdentityLabel,
 } from "./platform.ts";
 
 export type Violation = {
@@ -489,9 +488,9 @@ function isGeneratedFileBind(
   const id = new RegExp(`^${UUID}$`);
   // The ids must be this container's own (labels the daemon stamps on every
   // service of a deploy), so one tenant cannot bind another's files. A missing
-  // label refuses; the old prefix is the fallback (`readLabel` rule).
-  const ownProject = readIdentityLabel(ctx.labels, LABEL_PROJECT);
-  const ownEnvironment = readIdentityLabel(ctx.labels, LABEL_ENVIRONMENT);
+  // label refuses.
+  const ownProject = ctx.labels[LABEL_PROJECT];
+  const ownEnvironment = ctx.labels[LABEL_ENVIRONMENT];
   return rest.length === 0 && id.test(project ?? "") &&
     id.test(environment ?? "") && ownProject === project &&
     ownEnvironment === environment &&

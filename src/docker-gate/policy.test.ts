@@ -729,7 +729,7 @@ test("container create breadth: fields that reach the host are findings, deny by
 test("the orchestrator's numeric group_add is fine for a platform container only", async () => {
   const labels = {
     "turbopanel.role": "turbopanel",
-    "com.turbopanel.system.component": "managed-ha",
+    "io.turbopanel.system.component": "managed-ha",
   };
   const create = async (groups: string[], withLabels: boolean) => {
     const body = baseCreate() as Record<string, unknown>;
@@ -1149,25 +1149,14 @@ test("a generated file bind must match the container's own project and environme
     "label case differs",
   );
   assertEquals(await generatedBind(source, { labels: TENANT_LABELS }), []);
-  // Containers the previous release made carry the old prefix only.
-  assertEquals(
-    await generatedBind(source, {
-      labels: {
-        ...base,
-        "com.turbopanel.project": PROJECT,
-        "com.turbopanel.environment": ENVIRONMENT,
-      },
-    }),
-    [],
-  );
-  // The new label wins over a differing old one.
+  // Labels of another prefix are no identity.
   await refuse(
     {
-      ...TENANT_LABELS,
-      "io.turbopanel.project": OTHER_PROJECT,
+      ...base,
       "com.turbopanel.project": PROJECT,
+      "com.turbopanel.environment": ENVIRONMENT,
     },
-    "new label wins",
+    "other prefix only",
   );
 });
 

@@ -44,7 +44,7 @@ test("a running HTTP container without the routed label holds the constraint off
 test("labelled HTTP containers and TCP-only containers do not", async () => {
   assertEquals(
     await legacyHttpContainersPresent(fakeDocker({
-      c1: { ...HTTP, "com.turbopanel.system.routed": "true" },
+      c1: { ...HTTP, "io.turbopanel.system.routed": "true" },
       c2: {
         "traefik.enable": "true",
         "traefik.tcp.routers.x.rule": "HostSNI(`*`)",
@@ -79,10 +79,9 @@ test("the shared Traefik renders the constraint only when asked", () => {
     false,
   );
   assertStringIncludes(on, "providers.docker.constraints=");
-  // Containers of the previous release carry the old prefix and stay routed.
   assertStringIncludes(
     on,
-    "(Label(`io.turbopanel.system.routed`,`true`) || Label(`com.turbopanel.system.routed`,`true`))",
+    "Label(`io.turbopanel.system.routed`,`true`)",
   );
   assertEquals(off.includes("providers.docker.constraints"), false);
 });

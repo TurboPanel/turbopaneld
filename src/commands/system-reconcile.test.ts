@@ -496,8 +496,8 @@ test({
                       State: "running",
                       Labels: {
                         "turbopanel.role": "ingress",
-                        "com.turbopanel.system.component": "hosting-ingress",
-                        "com.turbopanel.service": SERVICE_ID,
+                        "io.turbopanel.system.component": "hosting-ingress",
+                        "io.turbopanel.service": SERVICE_ID,
                       },
                     }),
                     stderr: "",

@@ -8,43 +8,9 @@
 /** Prefix of every label the daemon writes. */
 export const LABEL_PREFIX = "io.turbopanel.";
 
-/**
- * Prefix earlier releases wrote. READ ONLY: nothing stamps it any more, but
- * containers created by the previous release still carry it, so every reader
- * (docker filters, inspect lookups, cleanup, reconcile, the Traefik provider
- * constraints) accepts it until a later release removes it.
- */
-export const LEGACY_LABEL_PREFIX = "com.turbopanel.";
-
-/** The old-prefix spelling of a label key (the key itself when it has no `io.turbopanel.` prefix). */
-export function legacyLabelKey(key: string): string {
-  return key.startsWith(LABEL_PREFIX)
-    ? LEGACY_LABEL_PREFIX + key.slice(LABEL_PREFIX.length)
-    : key;
-}
-
-/**
- * Value of a label by its new key: the new label wins, the old-prefix one is
- * the fallback for containers made by the previous release.
- */
-export function readLabel(
-  labels: Readonly<Record<string, unknown>> | undefined,
-  key: string,
-): string | undefined {
-  const value = labels?.[key];
-  if (typeof value === "string") return value;
-  const old = labels?.[legacyLabelKey(key)];
-  return typeof old === "string" ? old : undefined;
-}
-
-/**
- * A Traefik provider constraint that matches `key=value` under either prefix,
- * so containers made by the previous release stay routed.
- */
+/** A Traefik provider constraint that matches `key=value`. */
 export function traefikLabelConstraint(key: string, value: string): string {
-  return `(Label(\`${key}\`,\`${value}\`) || Label(\`${
-    legacyLabelKey(key)
-  }\`,\`${value}\`))`;
+  return `Label(\`${key}\`,\`${value}\`)`;
 }
 
 /**
