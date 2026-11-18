@@ -30,7 +30,6 @@ import {
   tunnelPeerPaths,
 } from "./tunnel-caddy.ts";
 import {
-  clearTunnelGeneration,
   isStaleTunnelGeneration,
   type OwnSiteFile,
   peerMaterialId,
@@ -201,7 +200,7 @@ async function unchangedResult(
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
   // A site deployed since (or written by an older daemon) may hold other peers.
   if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
-  await settleGeneration(hostingDir, payload.generation);
+  await tryRecordTunnelGeneration(hostingDir, payload.generation);
   return {
     hash: payload.hash,
     applied: false,
@@ -280,16 +279,6 @@ async function swapTunnelFile(
   }
 }
 
-/** After a table is in place: keep its generation, or forget the record when it has none. */
-function settleGeneration(
-  hostingDir: string,
-  generation: number | undefined,
-): Promise<void> {
-  return generation === undefined
-    ? clearTunnelGeneration(hostingDir)
-    : tryRecordTunnelGeneration(hostingDir, generation);
-}
-
 function tunnelStateFor(
   payload: TunnelRoutesPayload,
   peerId: string | undefined,
@@ -313,9 +302,7 @@ function tunnelStateFor(
       ? { presentCertificate: true }
       : {}),
     ...(payload.inbound ? { inbound: payload.inbound } : {}),
-    ...(payload.generation === undefined
-      ? {}
-      : { generation: payload.generation }),
+    generation: payload.generation,
   };
 }
 
@@ -395,7 +382,7 @@ async function applyTunnelRoutesLocked(
     await (empty
       ? removeTunnelState(hostingDir)
       : writeTunnelState(hostingDir, state));
-    await settleGeneration(hostingDir, payload.generation);
+    await tryRecordTunnelGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
     if (peerId !== undefined && !peerKeyNeeded(state)) {
       await dropUnusedKey(hostingDir, peerId);

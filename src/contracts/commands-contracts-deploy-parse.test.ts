@@ -44,6 +44,7 @@ const DEPLOY_BASE = {
 const SOURCE_ENTRY = {
   sourceId: "00000000-0000-4000-8000-000000000001",
   composeServiceName: "web",
+  releaseServiceId: "svc-web",
   provider: "github",
   cloneUrl: "https://gitlab.test/acme/app.git",
   ref: "main",

@@ -156,6 +156,7 @@ function baseSource(
   return {
     sourceId: "src-1",
     composeServiceName: "web",
+    releaseServiceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000ff",
     provider: "github",
     cloneUrl: "https://github.com/example/repo.git",
     ref: "main",
@@ -1596,6 +1597,7 @@ async function applyStandaloneRelease(
       }],
       sourceMaterial: [
         baseSource({
+          releaseServiceId: serviceId,
           releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000013",
           principal: {
             principalId: "pr-3",
