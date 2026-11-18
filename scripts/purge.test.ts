@@ -1608,6 +1608,14 @@ test("look-alike -ha names are not merged from the pre-purge inventory", async (
   assertStringIncludes(result.stdout, "no_removals", result.stderr);
 });
 
+test("the container listing format asks only for the io.turbopanel labels", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const fmt = source.match(/_dc_fmt='([^']*)'/);
+  assert(fmt !== null, "_dc_fmt is missing from purge.sh");
+  assertStringIncludes(fmt[1], "io.turbopanel.system.component");
+  assert(!fmt[1].includes("com.turbopanel"), "_dc_fmt reads an old label");
+});
+
 test("container removal merges the pre-purge inventory and removes every name", async () => {
   const stub = await stubBin(
     "docker",
@@ -1615,12 +1623,24 @@ test("container removal merges the pre-purge inventory and removes every name", 
       'case "$1" in',
       "  ps)",
       '    if [ "$2" = "-a" ]; then',
-      '      printf "%s\\n" "turbopanel-database|turbopanel.role|database|-|-|-|-"',
-      `      printf "%s\\\\n" "${TP_TEST_UUID}-ha|-|managed-ha|-|-|-|-"`,
-      // A container labelled for a system component (column 3).
-      '      printf "%s\\n" "queuebox|-|queue|-|-|-|-"',
-      // A container with only the old com.turbopanel.* labels reads as unlabelled and is left alone.
-      '      printf "%s\\n" "oldlabelbox|-|-|-|-|-|-"',
+      // Render each row from the label keys the format string asks for, so a
+      // container only shows a label when purge.sh looks up that exact key.
+      `      awk -v fmt="$4" 'BEGIN { FS = ":" } {`,
+      `        n = split($2, kv, ","); delete L`,
+      `        for (i = 1; i <= n; i++) { split(kv[i], p, "="); L[p[1]] = p[2] }`,
+      `        m = split(fmt, f, "|"); out = ""`,
+      `        for (j = 1; j <= m; j++) {`,
+      `          if (f[j] == "{{.Names}}") v = $1; else { split(f[j], q, "\\""); v = L[q[2]] }`,
+      `          out = out (j > 1 ? "|" : "") v`,
+      `        }`,
+      `        print out`,
+      `      }' <<'ROWS'`,
+      "turbopanel-database:turbopanel.role=database",
+      `${TP_TEST_UUID}-ha:io.turbopanel.system.component=managed-ha`,
+      "queuebox:io.turbopanel.system.component=queue",
+      // Only the old com.turbopanel.* labels: purge.sh no longer asks for them.
+      "oldlabelbox:com.turbopanel.system.component=queue,com.turbopanel.service=queue",
+      "ROWS",
       "    fi",
       "    ;;",
       '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
