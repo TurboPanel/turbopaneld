@@ -4,7 +4,7 @@
  * A control plane test run once replaced a dev box's real license files and
  * `server.id` and took the co-located daemon offline. The daemon writes the
  * same kind of files (`server.id`, the server key and its id, the sealing
- * key, the CA pin, `trust-level`) through `writeDaemonFile` /
+ * key, the CA pin) through `writeDaemonFile` /
  * `removeDaemonFile`, and keeps its in-flight command journal and update
  * progress queue in the same state dir. Those writers call
  * {@link assertTestRunMayWrite} first: in a `deno test` run a path that is not

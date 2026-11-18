@@ -8470,6 +8470,63 @@ it({
 
 it({
   name:
+    "public-urls-update refuses a plaintext keyPem, without applying or opening anything",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient({
+      decrypt: openSealedFixtures,
+    });
+    try {
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-plain-key",
+        hostnames: [{
+          host: "uploaded.example.test",
+          source: "uploaded",
+          uploadedCertId: "cert-1",
+          certPem: "uploaded-cert-pem",
+          keyPem: "plain-key-pem",
+        }],
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "plaintext-key public-urls-update-result",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-plain-key"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(
+        String(result.error).includes(
+          "certificate key for uploaded.example.test arrived unsealed",
+        ),
+        true,
+      );
+      assertEquals(applyCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
     "public-urls-update without hostnames fails, without applying, and one with hostnames applies",
   permissions: {
     env: true,
@@ -8585,7 +8642,16 @@ it({
       const empty = await resultFor("tun-empty");
       assertEquals(empty.ok, false);
 
-      assertEquals(written, [OPENED_TUNNEL_TOKEN]);
+      // The empty plain token is the teardown: accepted and written as "".
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-teardown",
+        token: "",
+        at: new Date().toISOString(),
+      });
+      assertEquals((await resultFor("tun-teardown")).ok, true);
+
+      assertEquals(written, [OPENED_TUNNEL_TOKEN, ""]);
     } finally {
       await restore();
       restoreHooks();

@@ -79,8 +79,8 @@ export type TopologySizes = {
 export const MEMORY_TOTAL_TOLERANCE_BYTES = 32 * 1024 * 1024;
 
 /**
- * Sizes reach the wire only with both features (a panel listing the sizes
- * without `metrics-v8` gets stamp 6 and no sizes), so both gate the fingerprint.
+ * Sizes reach the wire only with both features (`metrics-v8` and
+ * `metrics-v8-sizes`), so both gate the fingerprint.
  */
 export function sizesFeaturesNegotiated(features: readonly string[]): boolean {
   return features.includes("metrics-v8") &&
@@ -99,8 +99,8 @@ let generationOptional = false;
 /**
  * Set from the control-plane attach (and cleared on close): `true` once it
  * lists `topology-generation-optional-v1`. The generation is still tracked;
- * it just stays off the wire (samples, `topology-report`, the
- * `topology_generation_changed` event).
+ * it just stays off the wire (`topology-report` and the
+ * `topology_generation_changed` event). Samples never carry it.
  */
 export function setTopologyGenerationOptional(value: boolean): void {
   generationOptional = value;
