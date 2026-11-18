@@ -1085,10 +1085,7 @@ export type DaemonMessage =
   | {
     type: "public-urls-update";
     id: string;
-    /** Flat compatibility list. Daemons below the per-hostname floor read only this. */
-    urls: string[];
-    /** Present when the daemon can render per-hostname certificate sources. */
-    hostnames?: InstanceHostnameWireEntry[];
+    hostnames: InstanceHostnameWireEntry[];
     /** Present when any hostname uses `lets-encrypt`. */
     instanceAcme?: InstanceAcmeWireSettings;
     /** Present only when this daemon advertises `instance-edge-trust-v1`. */

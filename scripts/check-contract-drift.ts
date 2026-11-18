@@ -15,7 +15,7 @@
  * control plane's, and each side is checked against the other repository's
  * trunk (never another pull request's branch). So the rule is one-way:
  *
- *   - lists and maps (DAEMON_WIRE_FEATURES, DAEMON_FEATURE_MIN_VERSIONS,
+ *   - lists and maps (DAEMON_WIRE_FEATURES,
  *     INSTANCE_FEATURE_MIN_VERSIONS, UPDATE_CHANNELS, the ServerReportedIp
  *     field names) and the field snapshot: every control plane entry must be
  *     in the daemon's, unchanged. The daemon may have more (a daemon-only
@@ -1444,7 +1444,6 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
   if (floors) fail(floors);
   for (
     const name of [
-      "DAEMON_FEATURE_MIN_VERSIONS",
       "INSTANCE_FEATURE_MIN_VERSIONS",
     ]
   ) {

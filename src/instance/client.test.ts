@@ -3713,7 +3713,7 @@ it({
           socket.receive({
             type: "public-urls-update",
             id: "urls-1",
-            urls: ["https://203.0.113.50"],
+            hostnames: [{ host: "203.0.113.50", source: "platform-ca" }],
             at: new Date().toISOString(),
           });
           socket.receive({
@@ -6841,7 +6841,7 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-ok",
-        urls: ["https://203.0.113.50"],
+        hostnames: [{ host: "203.0.113.50", source: "platform-ca" }],
         at: new Date().toISOString(),
       });
       const urls = await waitFor(
@@ -8370,7 +8370,6 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-sealed",
-        urls: ["https://panel.example.test"],
         hostnames: [
           { host: "panel.example.test", source: "platform-ca" },
           {
@@ -8435,7 +8434,6 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-unopenable",
-        urls: ["https://uploaded.example.test"],
         hostnames: [{
           host: "uploaded.example.test",
           source: "uploaded",
@@ -8685,7 +8683,6 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-not-host",
-        urls: ["https://panel.example.test"],
         hostnames: [{ host: "panel.example.test", source: "platform-ca" }],
         at: new Date().toISOString(),
       });

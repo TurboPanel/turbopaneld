@@ -5,7 +5,6 @@ import {
   BUILD_LIMITS_FEATURE,
   COMMAND_RECOVERY_FEATURE,
   CUSTOM_NODE_APP_MODE_FEATURE,
-  DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
   DAEMON_SEALED_SECRETS_FEATURE,
   DAEMON_WIRE_FEATURES,
@@ -41,7 +40,6 @@ import {
   PHP_SITE_MODES_FEATURE,
   PROJECT_CACHE_FEATURE,
   REPO_KEY_REPORT_FEATURE,
-  resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
   SERVER_NETWORK_CHECK_FEATURE,
@@ -69,8 +67,6 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
-
-const CERT_SOURCES = "instance-cert-sources-per-hostname";
 
 test("resolveInstanceSupport: at or above the floor is supported, below is unsupported, absent is unknown", () => {
   const cases: Array<{
@@ -122,27 +118,6 @@ test("the instance floor is a plain semver on the control plane's line", () => {
 });
 
 test("capability gates: above and equal open, below and unknown stay closed", () => {
-  const floors = { [CERT_SOURCES]: "0.1.1" };
-  assertEquals(resolveDaemonCapabilities("0.1.2", floors)[CERT_SOURCES], true);
-  assertEquals(resolveDaemonCapabilities("0.1.1", floors)[CERT_SOURCES], true);
-  assertEquals(resolveDaemonCapabilities("0.1.0", floors)[CERT_SOURCES], false);
-  assertEquals(
-    resolveDaemonCapabilities("0.1.1-rc.1", floors)[CERT_SOURCES],
-    false,
-  );
-  assertEquals(
-    resolveDaemonCapabilities(undefined, floors)[CERT_SOURCES],
-    false,
-  );
-  assertEquals(
-    resolveDaemonCapabilities("unstamped", floors)[CERT_SOURCES],
-    false,
-  );
-  assertEquals(
-    resolveDaemonCapabilities("0.1.1")[CERT_SOURCES],
-    true,
-  );
-  assertEquals(DAEMON_FEATURE_MIN_VERSIONS[CERT_SOURCES], "0.1.1");
   assertEquals(resolveInstanceCapabilities(undefined), {});
   assertEquals(
     resolveInstanceCapabilities("9.9.9", {

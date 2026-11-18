@@ -523,13 +523,12 @@ logs once:
 `instance-version: control plane version <version> is below the supported minimum <floor>; flagged — the daemon keeps reconnecting (update the control plane)`
 
 That is a flag, not `#enterParkedState`: the socket stays up and reconnect
-continues. Capability gates (`resolveDaemonCapabilities` /
-`resolveInstanceCapabilities`, map `DAEMON_FEATURE_MIN_VERSIONS`) are separate
-and default **closed** when the peer version is unknown. The first key is
-`instance-cert-sources-per-hostname` (daemon `0.1.1`, the control-plane
-Caddyfile per-hostname certificate-source release,
-`orchestration/roles/instance-launch/templates/Caddyfile.j2`). A panel feature gated on a daemon
-artifact adds its entry to that map; the UI calls the helper.
+continues. Instance capability gates (`resolveInstanceCapabilities`,
+map `INSTANCE_FEATURE_MIN_VERSIONS`) are separate and default **closed** when
+the peer version is unknown. The daemon-side semver map
+(`DAEMON_FEATURE_MIN_VERSIONS`, `resolveDaemonCapabilities`) is gone: every
+supported daemon renders per-hostname certificate sources, and a new
+daemon-rendered feature is gated on the advertised `features[]`.
 
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime
 backstop is the instance cell's **single-writer lease** on attach
@@ -1038,16 +1037,9 @@ when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
 
-`DAEMON_FEATURE_MIN_VERSIONS` (every control plane entry must be here with the
-same value; this daemon may have more, since it merges first) is
-the peer-version feature gate — not the metrics hardware-profile capability
-plan. A panel-visible admin feature that depends on a daemon-rendered artifact
-adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does
-not re-implement semver comparison. An unknown peer version is not supported
-for a feature. The first entry is `instance-cert-sources-per-hostname` at
-daemon **`0.1.1`**, the release that renders per-hostname certificate sources
-in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
-the rest of this file.
+`public-urls-update` carries `hostnames` only; the flat `urls` list and the
+daemon-version fallback to it are gone. Operational detail: the rest of this
+file.
 
 ## Scope Summary (Former Root Index Entry)
 

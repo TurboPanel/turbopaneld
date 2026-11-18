@@ -25,10 +25,8 @@
  *
  * `DAEMON_WIRE_FEATURES` is the advertised feature set: this daemon lists it
  * on `hello`, and the control plane lists it on the attach `version` frame.
- * `instanceSupports` reads the peer's list. That is distinct from
- * `DAEMON_FEATURE_MIN_VERSIONS`, which infers support from a semver floor.
- * A new wire message is gated on the advertisement. It does not raise
- * either floor.
+ * `instanceSupports` reads the peer's list. A new wire message is gated on
+ * the advertisement. It does not raise either floor.
  */
 
 export const INSTANCE_VERSION_HEADER = "x-turbopanel-version";
@@ -46,25 +44,11 @@ export const INSTANCE_VERSION_HEADER = "x-turbopanel-version";
 export const MIN_SUPPORTED_INSTANCE_VERSION = "0.1.22";
 
 /**
- * Panel features that need a daemon at or above a semver (the daemon renders
- * the artifact). `instance-cert-sources-per-hostname` opens when the connected
- * daemon is the release that renders per-hostname certificate sources in
- * `orchestration/roles/caddy/templates/Caddyfile.j2` — currently the 0.1.1
- * daemon line. The UI gate calls `resolveDaemonCapabilities` in the instance
- * twin; do not re-implement the comparison.
- */
-export const DAEMON_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> = {
-  "instance-cert-sources-per-hostname": "0.1.1",
-};
-
-/**
  * Features this process advertises on the cell wire. Twin of
  * `DAEMON_WIRE_FEATURES` in `turbopanel/src/lib/version-wire.ts` —
  * contract-drift keeps them equal.
  *
- * This list is what the peer says it supports. `DAEMON_FEATURE_MIN_VERSIONS`
- * is the semver-floor inference for daemon-rendered artifacts. Do not treat
- * them as the same gate.
+ * This list is what the peer says it supports.
  */
 export const DAEMON_WIRE_FEATURES = [
   "managed-upgrade-v1",
@@ -755,14 +739,6 @@ function resolvePeerCapabilities(
     out[feature] = peerSupportsFeature(parsed, minVersion);
   }
   return out;
-}
-
-/** Which daemon-rendered features a reported daemon version can serve. */
-export function resolveDaemonCapabilities(
-  reportedVersion: string | undefined | null,
-  floors: Readonly<Record<string, string>> = DAEMON_FEATURE_MIN_VERSIONS,
-): Record<string, boolean> {
-  return resolvePeerCapabilities(reportedVersion, floors);
 }
 
 /** Which instance-side features a reported control-plane version can serve. */
