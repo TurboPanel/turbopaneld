@@ -344,7 +344,7 @@ test("the certificate and tunnel id checks refuse a value with a second line", a
       JSON.stringify(value),
     );
   }
-  for (const value of ["instance\n", "default\nx", "x\ninstance"]) {
+  for (const value of ["instance\n", "default", "default\nx", "x\ninstance"]) {
     assertEquals(await idCheck("tp_tunnel_id_ok", value), false, value);
   }
 });
