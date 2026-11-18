@@ -1,4 +1,5 @@
 import { it } from "@std/testing/bdd";
+import { sealedDecryptResponse } from "../testing/sealed-decrypt-response.ts";
 import { assert, assertEquals, assertExists } from "@std/assert";
 import {
   connectInstance,
@@ -484,10 +485,7 @@ it({
       scriptStandardAuth(api, signing, authToken, enroll);
       api.script(
         "/api/daemon/v1/secrets/decrypt",
-        () =>
-          new Response(JSON.stringify({ plaintexts: ["repo-token"] }), {
-            status: 200,
-          }),
+        () => sealedDecryptResponse(["repo-token"]),
       );
       api.script(
         "/api/daemon/v1/deployments/secrets/rehydrate",

@@ -7,10 +7,6 @@ import {
 } from "../crypto/sealing-key.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { DaemonApiError, type DaemonSealingContext } from "./api-client.ts";
-import {
-  isSecretsTrustSealed,
-  markSecretsTrustSealed,
-} from "./trust-level-file.ts";
 
 const textDecoder = new TextDecoder();
 
@@ -40,16 +36,14 @@ export function createSealingContext(
         await openFromSender(privateRaw, identity.serverId, envelope),
       );
     },
-    isTrustSealed: () => isSecretsTrustSealed(identity.stateDir),
-    markTrustSealed: () => markSecretsTrustSealed(identity.stateDir),
   };
 }
 
 /**
  * Tell the control plane which key to seal to, signed with the Ed25519 server
- * key. Best effort: until the key is on file the control plane keeps sending
- * plaintext, which the daemon still accepts until it has seen a sealed answer.
- * Returns true once the key is registered.
+ * key. Best effort: until the key is on file the control plane refuses to
+ * answer a decrypt (`sealing_key_required`). Returns true once the key is
+ * registered.
  * Only the key id is ever logged.
  */
 export async function registerSealingKey(params: {
@@ -71,7 +65,7 @@ export async function registerSealingKey(params: {
   } catch (err) {
     logWarn(
       "instance",
-      "could not register the sealing key; will retry on the next connect or plaintext answer",
+      "could not register the sealing key; will retry on the next connect or refused decrypt",
       sanitizeForLog(err instanceof DaemonApiError ? err.status : "error"),
     );
     return false;
@@ -82,26 +76,23 @@ export async function registerSealingKey(params: {
 export const SEALING_RETRY_INTERVAL_MS = 10 * 60 * 1000;
 
 /**
- * After a registration that worked, wait at least this long before a
- * plaintext answer registers the key again: that bounds the posts something
- * answering in plaintext over and over can cause.
+ * After a registration that worked, wait at least this long before a refused
+ * decrypt registers the key again: that bounds the posts something
+ * refusing over and over can cause.
  */
 export const SEALING_REREGISTER_INTERVAL_MS = 60 * 1000;
 
 /**
  * When to register the sealing key: at every connect until it is on file, and
- * again when a decrypt answer arrives in plaintext. The control plane answers
- * in plaintext only when it has no key on file for this server, so a
- * plaintext answer means the key is not there, whatever this process
- * registered before. Two cases: a control plane upgraded while this socket
- * stayed open (before the upgrade it did not take the connect-time
- * registration), and an administrator who cleared the key (Clear Sealing
- * Key). After a failed attempt the next one waits
- * {@link SEALING_RETRY_INTERVAL_MS}; after one that worked,
- * {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt at a time; a caller
- * that arrives during one waits for it.
- * `afterPlaintextAnswer` resolves true only when an attempt it started or
- * joined put the key on file.
+ * again when a decrypt is refused with `sealing_key_required`. The control
+ * plane refuses only when it has no key on file for this server, so the
+ * refusal means the key is not there, whatever this process registered
+ * before (for instance a control plane restored from an older backup). After
+ * a failed attempt the next one waits {@link SEALING_RETRY_INTERVAL_MS};
+ * after one that worked, {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt
+ * at a time; a caller that arrives during one waits for it.
+ * `afterKeyRequired` resolves true only when an attempt it started or joined
+ * put the key on file.
  */
 export function createSealingRegistration(params: {
   register: () => Promise<boolean>;
@@ -111,7 +102,7 @@ export function createSealingRegistration(params: {
 }): {
   isRegistered(): boolean;
   atConnect(): Promise<void>;
-  afterPlaintextAnswer(): Promise<boolean>;
+  afterKeyRequired(): Promise<boolean>;
 } {
   const now = params.now ?? Date.now;
   const retryIntervalMs = params.retryIntervalMs ?? SEALING_RETRY_INTERVAL_MS;
@@ -145,10 +136,10 @@ export function createSealingRegistration(params: {
   return {
     isRegistered: () => registered,
     atConnect: () => registered ? Promise.resolve() : attempt(),
-    afterPlaintextAnswer: async () => {
+    afterKeyRequired: async () => {
       if (running === null) {
         if (!waitedLongEnough()) return false;
-        // The answer says the key is not on file: a failed attempt now
+        // The refusal says the key is not on file: a failed attempt now
         // leaves the next connect to try again.
         registered = false;
       }

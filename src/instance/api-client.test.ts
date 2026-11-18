@@ -13,6 +13,8 @@ import {
   sessionResponse,
   staleIdentityErrorResponse,
 } from "../testing/fake-instance-api.ts";
+import { decodeBase64Url } from "@std/encoding/base64url";
+import { sealingKid } from "../crypto/hpke.ts";
 import { createTestSigningKey } from "../testing/jwks-test-helpers.ts";
 import {
   DaemonApiClient,
@@ -22,6 +24,10 @@ import {
   MAX_SECRETS_DECRYPT_CIPHERTEXT_CHARS,
   readTextCapped,
 } from "./api-client.ts";
+import {
+  STUB_SEALING_CONTEXT,
+  stubSealedAnswer,
+} from "../testing/stub-sealed-answer.ts";
 import { classifyConnectFailure } from "./connect-failure.ts";
 import { KEYSET_CHAIN_MAX_BYTES } from "./keyset-chain.ts";
 import { IDENTITY_DOCUMENT_MAX_BYTES } from "./panel-identity-cache.ts";
@@ -114,7 +120,7 @@ test({
           "/api/daemon/v1/secrets/decrypt",
           captures,
           () =>
-            new Response(JSON.stringify({ plaintexts: ["a"] }), {
+            new Response(JSON.stringify(stubSealedAnswer(["a"])), {
               status: 200,
             }),
         ),
@@ -131,7 +137,22 @@ test({
         ),
       );
 
+      const panelPair = await crypto.subtle.generateKey(
+        { name: "X25519" },
+        true,
+        ["deriveBits"],
+      ) as CryptoKeyPair;
+      const panelPub = decodeBase64Url(
+        (await crypto.subtle.exportKey("jwk", panelPair.publicKey))
+          .x as string,
+      );
       const client = new DaemonApiClient({
+        sealing: STUB_SEALING_CONTEXT,
+        panelSealKey: async () => ({
+          kid: await sealingKid(panelPub),
+          pub: panelPub,
+          panelFingerprint: "P".repeat(43),
+        }),
         config: INSTANCE_CONFIG,
         getToken: () => Promise.resolve("tok"),
       });
@@ -225,12 +246,13 @@ test({
         decryptHits += 1;
         const auth = new Headers(init?.headers).get("authorization");
         assertEquals(auth, "Bearer initial");
-        return new Response(JSON.stringify({ plaintexts: ["ok"] }), {
+        return new Response(JSON.stringify(stubSealedAnswer(["ok"])), {
           status: 200,
         });
       });
 
       const client = new DaemonApiClient({
+        sealing: STUB_SEALING_CONTEXT,
         config: INSTANCE_CONFIG,
         getToken,
       });
@@ -262,7 +284,7 @@ function rateLimited(headers?: HeadersInit): Response {
 }
 
 function decryptOk(): Response {
-  return new Response(JSON.stringify({ ok: true, plaintexts: ["plain"] }), {
+  return new Response(JSON.stringify(stubSealedAnswer(["plain"])), {
     status: 200,
   });
 }
@@ -273,6 +295,7 @@ function clientWithWaits(
   getToken: DaemonApiClientGetToken = () => Promise.resolve("tok"),
 ): DaemonApiClient {
   return new DaemonApiClient({
+    sealing: STUB_SEALING_CONTEXT,
     config: INSTANCE_CONFIG,
     getToken,
     sleep: (ms) => {
@@ -707,7 +730,7 @@ test({
       api.script("/api/daemon/v1/secrets/decrypt", () => {
         if (mode === "ok") {
           return new Response(
-            JSON.stringify({ plaintexts: ["ok", 12, null] }),
+            JSON.stringify(stubSealedAnswer(["ok", null, null])),
             {
               status: 200,
             },
@@ -716,6 +739,7 @@ test({
         return new Response(JSON.stringify({ ok: true }), { status: 200 });
       });
       const client = new DaemonApiClient({
+        sealing: STUB_SEALING_CONTEXT,
         config: INSTANCE_CONFIG,
         getToken: () => Promise.resolve("tok"),
       });

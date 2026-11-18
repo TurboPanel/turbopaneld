@@ -1,6 +1,7 @@
 import { type DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { it } from "@std/testing/bdd";
 import { join } from "@std/path";
+import { sealedDecryptResponse } from "../testing/sealed-decrypt-response.ts";
 import {
   assert,
   assertEquals,
@@ -3558,7 +3559,10 @@ it({
       );
       api.script(
         "/api/daemon/v1/secrets/decrypt",
-        () => new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
+        () =>
+          new Response(JSON.stringify({ ok: true, sealed: [] }), {
+            status: 200,
+          }),
       );
       api.script(
         "/api/daemon/v1/deployments/secrets/rehydrate",
@@ -8319,16 +8323,20 @@ it({
   },
 });
 
-/** `/secrets/decrypt` for `startConnectedClient`: opens via `decrypt`, or to nothing. */
-function fakeDecryptResponse(
+/**
+ * `/secrets/decrypt` for `startConnectedClient`: opens via `decrypt`, or to
+ * nothing, and seals each answer to the client's own sealing key (read from
+ * its state folder), as the control plane does.
+ */
+async function fakeDecryptResponse(
   init: RequestInit | undefined,
   decrypt: ((ciphertexts: string[]) => (string | null)[]) | undefined,
-): Response {
+): Promise<Response> {
   const body = JSON.parse(String(init?.body ?? "{}")) as {
     ciphertexts?: string[];
   };
   const plaintexts = decrypt ? decrypt(body.ciphertexts ?? []) : [];
-  return new Response(JSON.stringify({ plaintexts }), { status: 200 });
+  return await sealedDecryptResponse(plaintexts);
 }
 
 const SEALED_KEY_ENVELOPE = "tpdaemon.v1.server.key.sealed-uploaded-key";
@@ -8520,7 +8528,7 @@ it({
 
 it({
   name:
-    "tunnel-token opens a sealed token, still takes a legacy one, and refuses an empty message",
+    "tunnel-token opens a sealed token, refuses a plaintext one and an empty message",
   permissions: {
     env: true,
     read: true,
@@ -8559,13 +8567,14 @@ it({
       });
       assertEquals((await resultFor("tun-sealed")).ok, true);
 
+      // A plaintext token is refused and never written.
       socket.receive({
         type: "tunnel-token",
         id: "tun-legacy",
         token: "legacy-plaintext-token",
         at: new Date().toISOString(),
       });
-      assertEquals((await resultFor("tun-legacy")).ok, true);
+      assertEquals((await resultFor("tun-legacy")).ok, false);
 
       // Neither field: a failure, never an empty token that tears the tunnel down.
       socket.receive({
@@ -8576,7 +8585,7 @@ it({
       const empty = await resultFor("tun-empty");
       assertEquals(empty.ok, false);
 
-      assertEquals(written, [OPENED_TUNNEL_TOKEN, "legacy-plaintext-token"]);
+      assertEquals(written, [OPENED_TUNNEL_TOKEN]);
     } finally {
       await restore();
       restoreHooks();

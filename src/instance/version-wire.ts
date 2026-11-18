@@ -320,7 +320,7 @@ export const PANEL_KEYSET_KEY_SIGNATURE_FEATURE: DaemonWireFeature =
  * signed by its server key) and opens the `sealed` answer of
  * `POST /api/daemon/v1/secrets/decrypt`. A control plane that sees the feature
  * seals every decrypt answer, and the Hosting Account password hash, to that
- * key; once the daemon has opened one it refuses a plaintext answer.
+ * key; the daemon refuses a plaintext answer.
  */
 export const DAEMON_SEALED_SECRETS_FEATURE: DaemonWireFeature =
   "daemon-sealed-secrets-v1";
@@ -336,7 +336,7 @@ export const DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE: DaemonWireFeature =
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`
  * (`keyEnvelope`) and `tunnel-token` (`tokenEnvelope`), so the control plane
- * seals those instance secrets instead of sending plaintext.
+ * seals those instance secrets.
  */
 export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
   "sealed-instance-secrets-v1";
