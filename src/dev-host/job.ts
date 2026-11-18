@@ -681,13 +681,8 @@ function readHostParam(
   return { host };
 }
 
-/**
- * Parse a Postgres URL the way the control plane's
- * `scripts/resolve-postgres-url.mjs` does, including the Unix-socket form
- * (user and password, then `@/db?host=/run/...`) that `new URL()` rejects:
- * an empty host with credentials. Null when it is neither form.
- */
-export function parsePostgresUrl(url: string): PostgresUrlParts | null {
+/** The Unix-socket form: parts, null when malformed, undefined when the URL is not that form. */
+function parseSocketUrl(url: string): PostgresUrlParts | null | undefined {
   const socket = SOCKET_URL_RE.exec(url);
   if (socket) {
     const [, userEnc, passwordEnc = "", dbEnc, query = ""] = socket;
@@ -709,6 +704,18 @@ export function parsePostgresUrl(url: string): PostgresUrlParts | null {
       host: isSocket ? "" : hostParam.replace(/^\[|\]$/g, ""),
     };
   }
+  return undefined;
+}
+
+/**
+ * Parse a Postgres URL the way the control plane's
+ * `scripts/resolve-postgres-url.mjs` does, including the Unix-socket form
+ * (user and password, then `@/db?host=/run/...`) that `new URL()` rejects:
+ * an empty host with credentials. Null when it is neither form.
+ */
+export function parsePostgresUrl(url: string): PostgresUrlParts | null {
+  const fromSocket = parseSocketUrl(url);
+  if (fromSocket !== undefined) return fromSocket;
   let parsed: URL;
   try {
     parsed = new URL(url);

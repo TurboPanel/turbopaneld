@@ -211,7 +211,7 @@ export async function withReleaseLock(
       file.close();
     });
     if (hooks.onDrain) hooks.onDrain(drain);
-    else void drain;
+    else drain.catch(() => undefined);
     return false;
   }
   try {
