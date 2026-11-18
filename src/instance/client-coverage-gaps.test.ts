@@ -1,4 +1,5 @@
 import { it } from "@std/testing/bdd";
+import { sealedDecryptResponse } from "../testing/sealed-decrypt-response.ts";
 import { assertEquals } from "@std/assert";
 import {
   DEFAULT_INITIAL_BACKOFF_MS,
@@ -822,12 +823,9 @@ it({
         "/api/daemon/v1/secrets/decrypt",
         () => {
           decryptCalls += 1;
-          return new Response(
-            JSON.stringify({
-              plaintexts: [decryptCalls === 1 ? null : "ssh-key-material"],
-            }),
-            { status: 200 },
-          );
+          return sealedDecryptResponse([
+            decryptCalls === 1 ? null : "ssh-key-material",
+          ]);
         },
       );
       api.script(

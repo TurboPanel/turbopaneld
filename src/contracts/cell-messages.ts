@@ -264,8 +264,8 @@ export type CommandProgressMessage = {
  * One control-plane hostname on `public-urls-update`. For an `uploaded`
  * source the key arrives as `keyEnvelope`, a `tpdaemon` envelope this daemon
  * opens through `POST /api/daemon/v1/secrets/decrypt` (it advertises
- * `sealed-instance-secrets-v1`); an older control plane sends the legacy
- * plaintext `keyPem`, still accepted. The daemon writes the pair under the
+ * `sealed-instance-secrets-v1`); the legacy
+ * plaintext `keyPem` is refused. The daemon writes the pair under the
  * instance certs dir and does not echo it back.
  */
 export type InstanceHostnameCertSource =
@@ -301,9 +301,8 @@ export type InstanceEdgeTrustWire = {
 
 /**
  * Instance → daemon: start (or, with an empty `token`, stop) the Cloudflare
- * tunnel. A non-empty token arrives as `tokenEnvelope` (`tpdaemon`) from a
- * control plane that sees `sealed-instance-secrets-v1`; `token` is the legacy
- * plaintext field. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ * tunnel. A non-empty token arrives as `tokenEnvelope` (`tpdaemon`); only the
+ * empty teardown `token` is accepted as plaintext. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
  */
 export type TunnelTokenMessage = {
   type: "tunnel-token";

@@ -2052,8 +2052,8 @@ export class InstanceClient {
       panelSealKey: () => panelSealKeys.get(),
       signRequest: (request) =>
         this.#signRequestWithDaemonKey(daemonSigningKey, request),
-      onPlaintextSecretsAnswer: () =>
-        this.#sealingRegistration?.afterPlaintextAnswer() ??
+      onSealingKeyRequired: () =>
+        this.#sealingRegistration?.afterKeyRequired() ??
           Promise.resolve(false),
       ...this.#apiClientHooks(),
     });
@@ -3180,37 +3180,40 @@ export class InstanceClient {
 
   /**
    * The plaintext tunnel token: opened from `tokenEnvelope` through the same
-   * `/secrets/decrypt` path every deploy secret uses, or the legacy `token`
-   * from an older control plane. An envelope that cannot be opened fails the
-   * request rather than tearing the tunnel down.
+   * `/secrets/decrypt` path every deploy secret uses. An envelope that cannot
+   * be opened fails the request rather than tearing the tunnel down. An empty
+   * `token` with no envelope is the teardown; any other plaintext token is
+   * refused.
    */
   async #resolveTunnelToken(
     message: Extract<DaemonMessage, { type: "tunnel-token" }>,
   ): Promise<string> {
-    if (message.tokenEnvelope !== undefined) {
-      const [plaintext] = await this.#openSealedSecrets([
-        message.tokenEnvelope,
-      ]);
-      if (typeof plaintext !== "string") {
-        throw new TypeError("tunnel token envelope could not be opened");
-      }
-      return plaintext;
+    if (message.tokenEnvelope === undefined) {
+      if (message.token === "") return "";
+      throw new TypeError("tunnel-token carries no token envelope");
     }
-    if (typeof message.token !== "string") {
-      throw new TypeError("tunnel-token carries no token");
+    const [plaintext] = await this.#openSealedSecrets([message.tokenEnvelope]);
+    if (typeof plaintext !== "string") {
+      throw new TypeError("tunnel token envelope could not be opened");
     }
-    return message.token;
+    return plaintext;
   }
 
   /**
    * Replace every `keyEnvelope` with the opened `keyPem`, in one
-   * `/secrets/decrypt` call. Entries from an older control plane already
-   * carry `keyPem` and pass through.
+   * `/secrets/decrypt` call. An entry that carries a plaintext `keyPem` is
+   * refused.
    */
   async #openHostnameKeys(
     hostnames: InstanceHostnameWireEntry[],
   ): Promise<InstanceHostnameWireEntry[]> {
     const sealed = hostnames.filter((entry) => entry.keyEnvelope !== undefined);
+    const plain = hostnames.find((entry) => entry.keyPem !== undefined);
+    if (plain) {
+      throw new TypeError(
+        `certificate key for ${plain.host} arrived unsealed and was refused`,
+      );
+    }
     if (sealed.length === 0) return hostnames;
     const opened = await this.#openSealedSecrets(
       sealed.map((entry) => entry.keyEnvelope as string),

@@ -61,7 +61,7 @@ tp-host's generic verbs refuse every path in it except that pin file and the
 state root is still `tp`-writable (`2770`), so there the folder's owner alone
 does not stop it being renamed. The few files that
 live at the root itself (`instance-ca.pem`, `firewall*.v4|v6`, `server.id`,
-the server key and key-id files, the sealing key (`sealing-key.json`) and the secrets trust mark (`trust-level`), `update-guard-disarm.json`,
+the server key and key-id files, the sealing key (`sealing-key.json`), `update-guard-disarm.json`,
 `release-link-scan.json`) go through
 `writeDaemonFile` / `removeDaemonFile` / `ensureDaemonDir`
 (`src/permissions/daemon-files.ts`): rename in directly when the folder is
