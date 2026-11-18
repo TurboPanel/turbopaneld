@@ -112,12 +112,11 @@ export async function readTunnelGeneration(
   return undefined;
 }
 
-/** Keep `generation` when it is higher than the one on record; `undefined` changes nothing. */
+/** Keep `generation` when it is higher than the one on record. */
 export async function recordTunnelGeneration(
   hostingDir: string,
-  generation: number | undefined,
+  generation: number,
 ): Promise<void> {
-  if (generation === undefined) return;
   const last = await readTunnelGeneration(hostingDir);
   if (last !== undefined && last >= generation) return;
   const path = join(hostingDir, TUNNEL_GENERATION_FILE);
@@ -131,7 +130,7 @@ export async function recordTunnelGeneration(
 /** Best effort: a record that cannot be written only costs the ordering guard. */
 export async function tryRecordTunnelGeneration(
   hostingDir: string,
-  generation: number | undefined,
+  generation: number,
 ): Promise<void> {
   try {
     await recordTunnelGeneration(hostingDir, generation);
@@ -141,11 +140,6 @@ export async function tryRecordTunnelGeneration(
       `tunnel table generation not recorded: ${errorText(err)}`,
     );
   }
-}
-
-/** Forget the high-water record (a table with no generation: the way back from a reset counter). */
-export async function clearTunnelGeneration(hostingDir: string): Promise<void> {
-  await Deno.remove(join(hostingDir, TUNNEL_GENERATION_FILE)).catch(() => {});
 }
 
 /** The highest generation known: the record, or the stored table's own after a crash between the two writes. */
@@ -160,15 +154,13 @@ export async function knownTunnelGeneration(
 }
 
 /**
- * Whether a table of `generation` is older than what was applied. Without a
- * generation on either side nothing is older.
+ * Whether a table of `generation` is older than what was applied.
  */
 export async function isStaleTunnelGeneration(
   hostingDir: string,
-  generation: number | undefined,
+  generation: number,
   state: TunnelState | undefined,
 ): Promise<boolean> {
-  if (generation === undefined) return false;
   const known = await knownTunnelGeneration(hostingDir, state);
   return known !== undefined && generation < known;
 }

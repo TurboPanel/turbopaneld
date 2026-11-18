@@ -3786,7 +3786,9 @@ async function rewriteHostingCaddySitesLocked(
       : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),
   ]);
 
-  await tryRecordTunnelGeneration(hostingDir, tunnelGeneration);
+  if (tunnelGeneration !== undefined) {
+    await tryRecordTunnelGeneration(hostingDir, tunnelGeneration);
+  }
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry

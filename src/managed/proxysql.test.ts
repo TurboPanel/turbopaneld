@@ -84,6 +84,7 @@ function clusterDesired(
     managedId: "m1",
     engine: "postgres",
     protocolPort: 15432,
+    family: "pgsql",
     writerHostgroup: 0,
     readerHostgroup: 1,
     backends: [
@@ -1423,7 +1424,7 @@ test("an explicit cluster family wins over the port number", () => {
   assertEquals(listenerInterface(cnf, "mysql"), "0.0.0.0:15432");
 });
 
-test("protocolFamilyForCluster prefers the payload family, then engine, then port", () => {
+test("protocolFamilyForCluster is the payload family, not the engine or port", () => {
   assertEquals(
     protocolFamilyForCluster(clusterDesired({
       engine: "mysql",
@@ -1431,26 +1432,6 @@ test("protocolFamilyForCluster prefers the payload family, then engine, then por
       family: "pgsql",
     })),
     "pgsql",
-  );
-  // No family on the wire (older control plane): the engine decides.
-  assertEquals(
-    protocolFamilyForCluster(
-      clusterDesired({ engine: "mariadb", protocolPort: 15432 }),
-    ),
-    "mysql",
-  );
-  // Unknown engine and no family: fall back to the port.
-  assertEquals(
-    protocolFamilyForCluster(
-      clusterDesired({ engine: "percona", protocolPort: 13306 }),
-    ),
-    "mysql",
-  );
-  assertEquals(
-    protocolFamilyForCluster(
-      clusterDesired({ engine: "percona", protocolPort: 9999 }),
-    ),
-    null,
   );
 });
 

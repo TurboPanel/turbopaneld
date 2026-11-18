@@ -141,7 +141,7 @@ function desiredStateFromPayload(
         ? { engineVersion: cluster.engineVersion }
         : {}),
       protocolPort: cluster.protocolPort,
-      ...(cluster.family !== undefined ? { family: cluster.family } : {}),
+      family: cluster.family,
       writerHostgroup: cluster.writerHostgroup,
       readerHostgroup: cluster.readerHostgroup,
       backends: cluster.backends.map((backend) => ({ ...backend })),

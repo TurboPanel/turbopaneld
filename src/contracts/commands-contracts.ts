@@ -1494,10 +1494,9 @@ export type EnvironmentDeploySource = {
   /**
    * Release-tree directory segment for this sourced service: the environment's
    * TurboPanel `service.id`. Hosting, native units, cron, and stop reclaim all
-   * use this value; older daemons ignore the field and fall back to the compose
-   * key when it is absent.
+   * use this value.
    */
-  releaseServiceId?: string;
+  releaseServiceId: string;
   /**
    * Which control-plane provider resolved this entry. Informational only — the
    * daemon never branches on it; `cloneUrl`, `credential`, and `credentialKind`
@@ -1525,8 +1524,8 @@ export type EnvironmentDeploySource = {
   /**
    * How `credential` reaches git: an HTTPS `token` through the private askpass
    * helper, or an `ssh_key` private key materialized as a temporary identity
-   * file for an `ssh://…` / `git@host:path` clone. Absent means `token` — a
-   * pre-`credentialKind` payload keeps its old behavior.
+   * file for an `ssh://…` / `git@host:path` clone. Required whenever
+   * `credential` is present.
    */
   credentialKind?: EnvironmentDeploySourceCredentialKind;
   /**
@@ -2764,10 +2763,9 @@ export type ProxySqlClusterPayload = {
   protocolPort: number;
   /**
    * Protocol module this cluster is served by. Explicit because a configurable
-   * port no longer identifies the family; absent payloads fall back to the
-   * engine name.
+   * port no longer identifies the family.
    */
-  family?: ManagedIngressFamilyPayload;
+  family: ManagedIngressFamilyPayload;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendPayload[];
@@ -6683,8 +6681,9 @@ function parseSourceCredential(value: unknown): string | undefined {
 /** Which of the two credential lanes this entry travels on. */
 function parseSourceCredentialKind(
   value: unknown,
+  hasCredential: boolean,
 ): EnvironmentDeploySource["credentialKind"] {
-  if (value === undefined) return undefined;
+  if (value === undefined && !hasCredential) return undefined;
   if (value !== "token" && value !== "ssh_key") {
     throw new TypeError("Invalid sourceMaterial credentialKind");
   }
@@ -6700,8 +6699,7 @@ function parseSourceCredentialUsername(value: unknown): string | undefined {
   return value;
 }
 
-function parseOptionalReleaseServiceId(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
+function parseReleaseServiceId(value: unknown): string {
   if (typeof value !== "string" || !NATIVE_APP_SERVICE_ID_RE.test(value)) {
     throw new TypeError("Invalid sourceMaterial releaseServiceId");
   }
@@ -6760,13 +6758,11 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
   if (!SOURCE_RELEASE_ID_RE.test(releaseId)) {
     throw new TypeError("Invalid sourceMaterial releaseId");
   }
-  const releaseServiceId = parseOptionalReleaseServiceId(
-    value.releaseServiceId,
-  );
+  const credential = parseSourceCredential(value.credential);
   return definedFields({
     sourceId: parseNonEmptyString(value, "sourceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    ...(releaseServiceId === undefined ? {} : { releaseServiceId }),
+    releaseServiceId: parseReleaseServiceId(value.releaseServiceId),
     provider: value.provider as EnvironmentDeploySource["provider"],
     cloneUrl,
     ref: value.ref,
@@ -6780,8 +6776,11 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
     // commit caption is not worth refusing to ship a build over.
     commitMessage: parseCommitMetadataField(value.commitMessage),
     commitAuthor: parseCommitMetadataField(value.commitAuthor),
-    credential: parseSourceCredential(value.credential),
-    credentialKind: parseSourceCredentialKind(value.credentialKind),
+    credential,
+    credentialKind: parseSourceCredentialKind(
+      value.credentialKind,
+      credential !== undefined,
+    ),
     credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
     rollbackToReleaseId: parseRollbackToReleaseId(value.rollbackToReleaseId),
     principal: parseSitePrincipal(value.principal) ?? undefined,
@@ -7670,20 +7669,15 @@ export type EnvironmentDeployHostingTunnel = {
   /**
    * Generation of the organization tunnel table these peers were taken from
    * (feature `tunnel-table-generation-v1`). A daemon that already applied a
-   * higher generation keeps its stored peers. Absent = as before.
+   * higher generation keeps its stored peers.
    *
-   * The control plane sends `max(previous + 1, current Unix time in milliseconds)`, so the counter survives a restore or reset;
-   * a table with no generation clears the daemon's record.
+   * The control plane sends `max(previous + 1, current Unix time in milliseconds)`, so the counter survives a restore or reset.
    */
-  generation?: number;
+  generation: number;
 };
 
-/** A table generation: a non-negative safe integer, or `undefined` when absent. */
-function parseTunnelGeneration(
-  value: unknown,
-  label: string,
-): number | undefined {
-  if (value === undefined) return undefined;
+/** A table generation: a non-negative safe integer. */
+function parseTunnelGeneration(value: unknown, label: string): number {
   if (
     typeof value !== "number" || !Number.isSafeInteger(value) || value < 0
   ) {
@@ -7715,6 +7709,10 @@ function parseHostingTunnel(
       1,
       MAX_TUNNEL_ADDRESSES,
     ),
+    generation: parseTunnelGeneration(
+      value.generation,
+      "hostings[].tunnel generation",
+    ),
   };
   if (value.openHostnames !== undefined) {
     const open = parseTunnelHostnameList(
@@ -7735,11 +7733,6 @@ function parseHostingTunnel(
       MAX_TUNNEL_ADDRESSES,
     );
   }
-  const generation = parseTunnelGeneration(
-    value.generation,
-    "hostings[].tunnel generation",
-  );
-  if (generation !== undefined) tunnel.generation = generation;
   return tunnel;
 }
 
@@ -7825,10 +7818,9 @@ export type TunnelRoutesPayload = {
   /**
    * Monotonic per organization tunnel table (one counter for the whole table,
    * not per tunnel; `tunnel-table-generation-v1`). A table lower than the last
-   * applied generation is ignored; equal or higher applies. Absent = applied
-   * as before.
+   * applied generation is ignored; equal or higher applies.
    */
-  generation?: number;
+  generation: number;
 };
 
 /** Must stay in sync with the instance `server.tunnel.routes` shape. */
@@ -7997,11 +7989,6 @@ function readTunnelRoutesOptionals(
   if (value.inbound !== undefined) {
     payload.inbound = parseTunnelInboundList(value.inbound);
   }
-  const generation = parseTunnelGeneration(
-    value.generation,
-    "server.tunnel.routes generation",
-  );
-  if (generation !== undefined) payload.generation = generation;
 }
 
 /** Parse `server.tunnel.routes`. */
@@ -8034,6 +8021,10 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
     hash: value.hash,
     routes,
     peerAddresses,
+    generation: parseTunnelGeneration(
+      value.generation,
+      "server.tunnel.routes generation",
+    ),
   };
   readTunnelRoutesOptionals(value, payload);
   if (
@@ -11339,7 +11330,7 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
       "Invalid managed.ingress.reconcile cluster requireTls",
     );
   }
-  if (value.family !== undefined && !isManagedIngressFamily(value.family)) {
+  if (!isManagedIngressFamily(value.family)) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster family");
   }
   if (
@@ -11354,12 +11345,12 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     managedId: value.managedId,
     engine: value.engine,
     protocolPort: value.protocolPort,
+    family: value.family,
     writerHostgroup: value.writerHostgroup,
     readerHostgroup: value.readerHostgroup,
     backends: value.backends.map(parseProxySqlBackendPayload),
     users: value.users.map(parseProxySqlUserPayload),
   };
-  if (value.family !== undefined) cluster.family = value.family;
   if (value.engineVersion !== undefined) {
     cluster.engineVersion = value.engineVersion;
   }
