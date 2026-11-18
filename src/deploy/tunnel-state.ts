@@ -43,7 +43,7 @@ export type TunnelState = {
   clientAuthDowngraded?: boolean;
   /** The peer certificate allows client use, so forward blocks show it. */
   presentCertificate?: boolean;
-  /** Tunnel names that run here and who may forward them (absent from an older control plane). */
+  /** Tunnel names that run here and who may forward them. */
   inbound?: TunnelInbound[];
   /** Generation of the table this was applied from (`tunnel-table-generation-v1`). */
   generation?: number;
@@ -292,7 +292,7 @@ export async function peerMaterialId(
 
 /**
  * The highest tunnel `generation` among a deploy's hostings, or `undefined`
- * when none carries one (an older control plane).
+ * when none carries one (no tunnel hosting).
  */
 export function deployTunnelGeneration(
   hostings: readonly { tunnel?: { generation?: number } }[],
