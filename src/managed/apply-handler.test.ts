@@ -143,7 +143,6 @@ test("handleManagedApply requires decryptSecrets", async () => {
           new Date().toISOString(),
           {
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: () => Promise.resolve(dockerOk()),
           },
         ),
@@ -173,7 +172,6 @@ test("handleManagedApply requires a root credential after decrypt", async () => 
           {
             decryptSecrets: decryptOk,
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: primaryPostgresRun,
           },
         ),
@@ -194,7 +192,6 @@ test("handleManagedApply primary path composes up and applies credentials", asyn
       {
         decryptSecrets: decryptOk,
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: primaryPostgresRun,
       },
     );
@@ -224,7 +221,6 @@ test("handleManagedApply creates the managed network before any compose up", asy
       {
         decryptSecrets: decryptOk,
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: (args, options) => {
           argv.push([...args]);
           if (args[0] === "network" && args[1] === "inspect") {
@@ -265,7 +261,6 @@ test("handleManagedApply uses the payload's managed network, never a constant", 
       {
         decryptSecrets: decryptOk,
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: (args, options) => {
           argv.push([...args]);
           return primaryPostgresRun(args, options);
@@ -286,43 +281,6 @@ test("handleManagedApply uses the payload's managed network, never a constant", 
   });
 });
 
-test("handleManagedApply ensures ProxySQL monitor role after host prep seeds monitor.cnf", async () => {
-  await withApplyEnv(async () => {
-    const sql: string[] = [];
-    let hostPrepCalls = 0;
-    await handleManagedApply(
-      basePayload(),
-      new Date().toISOString(),
-      {
-        decryptSecrets: decryptOk,
-        ensureDocker: () => Promise.resolve(),
-        runHostPrep: async () => {
-          hostPrepCalls += 1;
-          const layout = resolveLayout(Deno.env.toObject());
-          await Deno.mkdir(`${layout.configDir}/proxysql`, { recursive: true });
-          await Deno.writeTextFile(
-            `${layout.configDir}/proxysql/admin.cnf`,
-            "[client]\nuser=admin\npassword=admin-secret\n",
-          );
-          await Deno.writeTextFile(
-            `${layout.configDir}/proxysql/monitor.cnf`,
-            "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
-          );
-        },
-        runDocker: (args, options) => {
-          if (args[0] === "exec" && args.includes("psql") && options?.input) {
-            sql.push(options.input);
-          }
-          return primaryPostgresRun(args, options);
-        },
-      },
-    );
-    assertEquals(hostPrepCalls, 1);
-    assertEquals(sql.some((part) => part.includes("tp_monitor")), true);
-    assertEquals(sql.some((part) => part.includes("GRANT pg_monitor")), true);
-  });
-});
-
 test("handleManagedApply throws when compose up fails", async () => {
   await withApplyEnv(async () => {
     await assertRejects(
@@ -333,7 +291,6 @@ test("handleManagedApply throws when compose up fails", async () => {
           {
             decryptSecrets: decryptOk,
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: (args) => {
               if (args[0] === "compose" && args.includes("up")) {
                 return Promise.resolve(dockerFail("compose up denied"));
@@ -361,7 +318,6 @@ test("handleManagedApply retries compose up after docker-setup on socket permiss
       {
         decryptSecrets: decryptOk,
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDockerSetup: () => {
           dockerSetupCalls += 1;
           return Promise.resolve();
@@ -424,7 +380,6 @@ test("handleManagedApply standby needs_resync returns early without compose up",
         decryptSecrets: (ciphertexts) =>
           Promise.resolve(ciphertexts.map(() => "repl-s3cret")),
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: (args) => {
           if (args[0] === "compose" && args.includes("up")) {
             sawComposeUp = true;
@@ -499,7 +454,6 @@ test("a replica needs_resync apply keeps the demoted marker", async () => {
         decryptSecrets: (ciphertexts) =>
           Promise.resolve(ciphertexts.map((_, index) => `decrypted-${index}`)),
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: (args) => {
           if (
             args[0] === "run" &&
@@ -564,7 +518,6 @@ test("a demoted member whose fence standby.signal makes it look like a standby i
         decryptSecrets: (ciphertexts) =>
           Promise.resolve(ciphertexts.map((_, index) => `decrypted-${index}`)),
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: (args) => {
           if (
             args[0] === "run" &&
@@ -601,7 +554,6 @@ test("handleManagedApply redacts decrypted secrets from thrown errors", async ()
           {
             decryptSecrets: decryptOk,
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: (args, _options) => {
               if (args[0] === "compose" && args.includes("up")) {
                 return Promise.resolve(dockerOk());
@@ -689,7 +641,6 @@ test("handleManagedApply primary mysql path composes up and applies credentials"
       {
         decryptSecrets: decryptOk,
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: primaryMysqlRun,
       },
     );
@@ -711,7 +662,6 @@ test("handleManagedApply rejects a decryptSecrets length mismatch", async () => 
           {
             decryptSecrets: () => Promise.resolve([]),
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: primaryPostgresRun,
           },
         ),
@@ -731,7 +681,6 @@ test("handleManagedApply rejects an empty decrypted credential password", async 
           {
             decryptSecrets: () => Promise.resolve([""]),
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: primaryPostgresRun,
           },
         ),
@@ -758,7 +707,6 @@ test("handleManagedApply applies payload monitorUsers after decrypt", async () =
         decryptSecrets: (ciphertexts) =>
           Promise.resolve(ciphertexts.map(() => "mon-s3cret")),
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: (args, options) => {
           if (args[0] === "exec" && args.includes("psql") && options?.input) {
             sql.push(options.input);
@@ -795,7 +743,6 @@ test("handleManagedApply rejects a monitorUsers decrypt length mismatch", async 
               return Promise.resolve([]);
             },
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: primaryPostgresRun,
           },
         ),
@@ -829,7 +776,6 @@ test("handleManagedApply rejects an empty decrypted monitor password", async () 
               return Promise.resolve([""]);
             },
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: primaryPostgresRun,
           },
         ),
@@ -879,7 +825,6 @@ test("handleManagedApply forceResync removes the engine container before bootstr
             decryptSecrets: (ciphertexts) =>
               Promise.resolve(ciphertexts.map(() => "repl-s3cret")),
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: (args) => {
               argv.push([...args]);
               if (args[0] === "run" && args.includes("0")) {
@@ -932,7 +877,6 @@ test("handleManagedApply refuses a stale switchover re-seed before touching dock
           new Date().toISOString(),
           {
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: (args) => {
               calls.push([...args]);
               return Promise.resolve(dockerOk());
@@ -978,7 +922,6 @@ test("handleManagedApply primary replication collects member health", async () =
       {
         decryptSecrets: decryptOk,
         ensureDocker: () => Promise.resolve(),
-        runHostPrep: () => Promise.resolve(),
         runDocker: primaryPostgresRun,
       },
     );
@@ -1026,7 +969,6 @@ test("handleManagedApply standby mysql requires replication credential", async (
           {
             decryptSecrets: decryptOk,
             ensureDocker: () => Promise.resolve(),
-            runHostPrep: () => Promise.resolve(),
             runDocker: primaryMysqlRun,
           },
         ),

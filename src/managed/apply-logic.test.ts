@@ -446,7 +446,7 @@ test("primary applyManagedEngineState skips drop when only the root username is 
   assertEquals(state.appliedUsers, ["postgres"]);
 });
 
-test("primary applyManagedEngineState skips ProxySQL monitor when monitor.cnf is missing", async () => {
+test("primary applyManagedEngineState skips ProxySQL monitor roles when the payload has no monitorUsers", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {

@@ -232,34 +232,6 @@ export async function loadProxySqlAdminCredentials(
   return parseProxySqlAdminCnf(adminContents);
 }
 
-/**
- * Load backend monitor credentials from host `monitor.cnf` when present.
- * Returns `null` when the file is missing (pre-upgrade hosts) so reconcile /
- * apply can proceed; health-check noise continues until proxysql-setup runs.
- */
-export async function loadProxySqlMonitorCredentials(
-  layout: LayoutPaths,
-): Promise<ProxySqlMonitorCredentials | null> {
-  const path = proxysqlMonitorCnfPath(layout);
-  let info: Deno.FileInfo;
-  try {
-    info = await Deno.stat(path);
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return null;
-    throw err;
-  }
-  if (info.isDirectory) {
-    throw new TypeError(
-      "proxysql monitor.cnf is a directory (Docker bind-mount scar when compose ran before host prep); remove it and re-run proxysql-setup",
-    );
-  }
-  if (!info.isFile) {
-    throw new TypeError("proxysql monitor.cnf must be a regular file");
-  }
-  const contents = await Deno.readTextFile(path);
-  return parseProxySqlMonitorCnf(contents);
-}
-
 type ProxySqlAdminRunOptions = {
   runDocker?: ProxySqlAdminDeps["runDocker"];
   layout?: LayoutPaths;
