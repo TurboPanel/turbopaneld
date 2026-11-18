@@ -250,9 +250,7 @@ import { AcmeIssueHandler } from "./acme-issue-handler.ts";
 import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
-import { DAEMON_VERSION } from "../version.ts";
 import {
-  resolveDaemonCapabilities,
   SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
   TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
@@ -3259,28 +3257,14 @@ export class InstanceClient {
       return;
     }
     try {
-      const capable = resolveDaemonCapabilities(DAEMON_VERSION)[
-        "instance-cert-sources-per-hostname"
-      ] === true;
-      const hostnames = capable && message.hostnames
-        ? await this.#openHostnameKeys(message.hostnames)
-        : null;
-      if (!hostnames) {
-        logInfo(
-          "public-urls",
-          "instance-cert-sources: public-urls-update degrading to the flat urls list",
-        );
+      if (!Array.isArray(message.hostnames)) {
+        throw new TypeError("public-urls-update carried no hostnames");
       }
-      await clientTestHooks.applyPublicUrls(
-        hostnames ?? message.urls.map((host) => ({
-          host,
-          source: "platform-ca" as const,
-        })),
-        {
-          ...(hostnames ? { instanceAcme: message.instanceAcme } : {}),
-          ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
-        },
-      );
+      const hostnames = await this.#openHostnameKeys(message.hostnames);
+      await clientTestHooks.applyPublicUrls(hostnames, {
+        instanceAcme: message.instanceAcme,
+        ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
+      });
       ok = true;
       await this.#instanceAcmeRenewal?.check();
     } catch (err) {
