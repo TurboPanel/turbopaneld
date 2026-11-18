@@ -29,9 +29,6 @@ export type ProxySqlAdminCredentials = {
   password: string;
 };
 
-/** Same shape as admin; host-wide engine health-check principal. */
-export type ProxySqlMonitorCredentials = ProxySqlAdminCredentials; // NOSONAR typescript:S6564 — distinct semantic type for monitor vs admin
-
 /**
  * Stable monitor login on every engine behind ProxySQL on this host.
  * Password is only in `monitor.cnf` (never committed).
@@ -160,15 +157,6 @@ export function parseProxySqlAdminCnf(
   contents: string,
 ): ProxySqlAdminCredentials {
   return parseProxySqlClientCnf(contents, "proxysql admin.cnf");
-}
-
-/**
- * Parse host `monitor.cnf` (backend health-check principal).
- */
-export function parseProxySqlMonitorCnf(
-  contents: string,
-): ProxySqlMonitorCredentials {
-  return parseProxySqlClientCnf(contents, "proxysql monitor.cnf");
 }
 
 /**

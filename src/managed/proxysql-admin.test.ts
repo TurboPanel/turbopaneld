@@ -17,7 +17,6 @@ import {
   loadProxySqlAdminCredentials,
   parseProxySqlAdminCnf,
   parseProxySqlClientCnf,
-  parseProxySqlMonitorCnf,
   PROXYSQL_ADMIN_DEFAULTS_PATH,
   PROXYSQL_MONITOR_USERNAME,
   proxySqlHostPrepPresent,
@@ -43,14 +42,6 @@ test("parseProxySqlAdminCnf reads [client] user/password", () => {
   );
   assertEquals(creds.user, "admin");
   assertEquals(creds.password, "s3cret");
-});
-
-test("parseProxySqlMonitorCnf reads [client] user/password", () => {
-  const creds = parseProxySqlMonitorCnf(
-    "[client]\nuser=tp_monitor\npassword=mon-pass\n",
-  );
-  assertEquals(creds.user, "tp_monitor");
-  assertEquals(creds.password, "mon-pass");
 });
 
 test("PROXYSQL_MONITOR_USERNAME is the stable host monitor login", () => {

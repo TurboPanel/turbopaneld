@@ -692,16 +692,14 @@ async function ensureProxySqlMonitorRoles(
   if (!engine.ensureProxySqlMonitor) return;
 
   const monitorUsers = deps?.monitorUsers;
-  if (monitorUsers && monitorUsers.length > 0) {
-    await forEachSequential(monitorUsers, async (monitor) => {
-      await engine.ensureProxySqlMonitor?.(ctx, monitor);
-    });
-    logInfo(
-      "managed",
-      `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,
-    );
-    return;
-  }
+  if (!monitorUsers?.length) return;
+  await forEachSequential(monitorUsers, async (monitor) => {
+    await engine.ensureProxySqlMonitor?.(ctx, monitor);
+  });
+  logInfo(
+    "managed",
+    `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,
+  );
 }
 
 function buildManagedApplyResult(
