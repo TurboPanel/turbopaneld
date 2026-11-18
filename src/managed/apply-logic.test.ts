@@ -235,30 +235,13 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
         engine as never,
         payload,
         credentials,
-        {
-          runHostPrep: async () => {
-            calls.push("hostPrep");
-            const layout = resolveLayout(Deno.env.toObject());
-            await Deno.mkdir(`${layout.configDir}/proxysql`, {
-              recursive: true,
-            });
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/admin.cnf`,
-              "[client]\nuser=admin\npassword=admin-secret\n",
-            );
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/monitor.cnf`,
-              "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
-            );
-          },
-        },
+        { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
       );
 
       assertEquals(calls, [
         "waitReady",
         "applyDatabases",
         "applyCredentials",
-        "hostPrep",
         "ensure:tp_monitor",
         "readVersion",
       ]);

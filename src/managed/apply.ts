@@ -78,8 +78,6 @@ import {
   managedSecretsDir,
 } from "./engine-paths.ts";
 import {
-} from "./proxysql-admin.ts";
-import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
 } from "./needs-resync.ts";

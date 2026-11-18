@@ -807,7 +807,8 @@ test({
           },
         );
         assertEquals(result.appliedUsers, []);
-        assertEquals(decryptCalls, 1);
+        // The TLS private key and the monitor credential; no user passwords.
+        assertEquals(decryptCalls, 2);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

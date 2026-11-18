@@ -81,7 +81,6 @@ async function withEnv(
 
 const applyDeps = {
   ensureDocker: () => Promise.resolve(),
-  runHostPrep: () => Promise.resolve(),
   runDocker: quietDocker,
 };
 

@@ -1090,6 +1090,7 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
       { name: SEGMENT_A, subnet: "10.90.1.0/24" },
       { name: SEGMENT_B, subnet: "10.90.2.0/24" },
     ],
+    monitor: { username: "tp_monitor", password: "tpdaemon.v1.mon-secret" },
   };
   if (bindAddress !== undefined) payload.bindAddresses = [bindAddress];
 
