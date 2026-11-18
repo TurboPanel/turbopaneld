@@ -46,7 +46,8 @@ async function plantVendorCaddy(
 }
 
 test({
-  name: "ensureHostingCaddy returns the existing vendor binary without running setup",
+  name:
+    "ensureHostingCaddy returns the existing vendor binary without running setup",
   permissions: { read: true, write: true, run: ["ln"] },
   fn: async () => {
     await withTempLayout(async (fixture) => {
