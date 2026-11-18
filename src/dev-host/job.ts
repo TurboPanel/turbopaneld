@@ -676,18 +676,20 @@ export function parsePostgresUrl(url: string): PostgresUrlParts | null {
   const socket = SOCKET_URL_RE.exec(url);
   if (socket) {
     const [, userEnc, passwordEnc = "", dbEnc, query = ""] = socket;
-    const socketDir = new URLSearchParams(query).get("host")?.trim() || null;
+    const hostParam = new URLSearchParams(query).get("host")?.trim() || null;
     const user = safeDecode(userEnc);
     const database = safeDecode(dbEnc);
     const password = safeDecode(passwordEnc);
-    if (!socketDir || !user || !database || password === null) return null;
+    if (!hostParam || !user || !database || password === null) return null;
+    // Only an absolute path is a socket folder; anything else is a network host.
+    const isSocket = hostParam.startsWith("/");
     return {
       user,
       database,
       password,
       passwordRaw: passwordEnc,
-      socketDir,
-      host: "",
+      socketDir: isSocket ? hostParam : null,
+      host: isSocket ? "" : hostParam.replace(/^\[|\]$/g, ""),
     };
   }
   let parsed: URL;
@@ -703,14 +705,17 @@ export function parsePostgresUrl(url: string): PostgresUrlParts | null {
   const database = safeDecode(parsed.pathname.replace(/^\//, ""));
   const password = safeDecode(parsed.password);
   if (!user || !database || password === null) return null;
-  const socketDir = parsed.searchParams.get("host")?.trim() || null;
+  const hostParam = parsed.searchParams.get("host")?.trim() || null;
+  const socketDir = hostParam?.startsWith("/") ? hostParam : null;
+  // A non-path `?host=` overrides the URL host for database clients.
+  const host = hostParam && !socketDir ? hostParam : parsed.hostname;
   return {
     user,
     database,
     password,
     passwordRaw: parsed.password,
     socketDir,
-    host: socketDir ? "" : parsed.hostname.replace(/^\[|\]$/g, ""),
+    host: socketDir ? "" : host.replace(/^\[|\]$/g, ""),
   };
 }
 

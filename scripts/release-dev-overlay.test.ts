@@ -5,6 +5,7 @@ import {
   runCompileAll,
   runReleaseDevOverlay,
   stampBuildInfo,
+  withReleaseLock,
 } from "./release-dev-overlay.ts";
 import {
   ambientCheckoutIsGitRepo,
@@ -280,5 +281,63 @@ test("resolveOverlayGitShortSha defaults error and exit on git failure", async (
   } finally {
     console.error = originalError;
     Deno.exit = originalExit;
+  }
+});
+
+test("withReleaseLock runs once, holds the lock meanwhile and frees it after", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/dist/.release-dev.lock`;
+    let nested: boolean | undefined;
+    const ran = await withReleaseLock(path, async () => {
+      assertEquals((await Deno.readTextFile(path)).trim(), "100");
+      nested = await withReleaseLock(path, () => Promise.resolve(), {
+        pid: 200,
+        pidAlive: () => Promise.resolve(true),
+      });
+    }, { pid: 100 });
+    assertEquals(ran, true);
+    assertEquals(nested, false);
+    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("withReleaseLock takes over a dead pid's lock and frees it when the run fails", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/.release-dev.lock`;
+    await Deno.writeTextFile(path, "999\n");
+    await assertRejects(
+      () =>
+        withReleaseLock(path, () => Promise.reject(new Error("boom")), {
+          pid: 100,
+          pidAlive: () => Promise.resolve(false),
+        }),
+      Error,
+      "boom",
+    );
+    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("withReleaseLock refuses while a live pid holds the lock", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/.release-dev.lock`;
+    await Deno.writeTextFile(path, "999\n");
+    let ran = false;
+    const ok = await withReleaseLock(path, () => {
+      ran = true;
+      return Promise.resolve();
+    }, { pid: 100, pidAlive: () => Promise.resolve(true) });
+    assertEquals(ok, false);
+    assertEquals(ran, false);
+    assertEquals((await Deno.readTextFile(path)).trim(), "999");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

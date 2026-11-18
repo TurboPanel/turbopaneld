@@ -170,6 +170,80 @@ export async function runReleaseDevOverlay(
   if (failed) exit(1);
 }
 
+export type ReleaseLockHooks = {
+  pid?: number;
+  pidAlive?: (pid: number) => Promise<boolean>;
+};
+
+const RELEASE_LOCK_PATH = join(ROOT, "dist", ".release-dev.lock");
+
+async function procAlive(pid: number): Promise<boolean> {
+  try {
+    await Deno.stat(`/proc/${pid}`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function createReleaseLock(path: string, pid: number): Promise<boolean> {
+  try {
+    const file = await Deno.open(path, {
+      createNew: true,
+      write: true,
+      mode: 0o640,
+    });
+    await file.write(new TextEncoder().encode(`${pid}\n`));
+    file.close();
+    return true;
+  } catch (err) {
+    if (err instanceof Deno.errors.AlreadyExists) return false;
+    throw err;
+  }
+}
+
+/**
+ * Hold an exclusive lock file (holding the pid) around `run`, so the console
+ * rebuild and the web Build and Push never write `dist/` together. A lock
+ * whose pid is gone is taken over. Returns false, without running, when a live
+ * build holds it.
+ */
+export async function withReleaseLock(
+  path: string,
+  run: () => Promise<void>,
+  hooks: ReleaseLockHooks = {},
+): Promise<boolean> {
+  const pid = hooks.pid ?? Deno.pid;
+  const alive = hooks.pidAlive ?? procAlive;
+  await Deno.mkdir(dirname(path), { recursive: true });
+  if (!(await createReleaseLock(path, pid))) {
+    const owner = Number.parseInt(
+      (await Deno.readTextFile(path).catch(() => "")).trim(),
+      10,
+    );
+    if (Number.isFinite(owner) && owner !== pid && await alive(owner)) {
+      return false;
+    }
+    await Deno.remove(path).catch(() => undefined);
+    if (!(await createReleaseLock(path, pid))) return false;
+  }
+  try {
+    await run();
+  } finally {
+    await Deno.remove(path).catch(() => undefined);
+  }
+  return true;
+}
+
 if (import.meta.main) {
-  await runReleaseDevOverlay();
+  const ran = await withReleaseLock(
+    RELEASE_LOCK_PATH,
+    () => runReleaseDevOverlay(),
+  );
+  if (!ran) {
+    console.error(
+      "release-dev-overlay: another daemon build is running (dist/.release-dev.lock); try again when it finishes",
+    );
+    Deno.exit(1);
+  }
 }

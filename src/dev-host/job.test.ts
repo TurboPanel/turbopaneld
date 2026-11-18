@@ -530,6 +530,21 @@ test("the instance unit's socket URL is read; its password is blanked", () => {
   assertEquals(parsePostgresUrl(dbUrl("postgresql", "u", "x", "/db")), null);
 });
 
+test("a ?host= value that is not an absolute path is a network host, not a socket", () => {
+  for (const base of ["/db", "localhost/db"]) {
+    const url = dbUrl("postgres", "u", "x", `${base}?host=db.example.com`);
+    const parts = parsePostgresUrl(url);
+    assertEquals(parts?.socketDir, null);
+    assertEquals(parts?.host, "db.example.com");
+    assertEquals(buildBackupCommand(url, "/b", "c"), {
+      error: "the database is not on this machine (host db.example.com)",
+    });
+  }
+  // A loopback name in `?host=` still counts as this machine.
+  const loop = dbUrl("postgres", "u", "x", "/db?host=localhost");
+  assert("command" in buildBackupCommand(loop, "/b", "c"));
+});
+
 test("the backup refuses a database that is not on this machine", () => {
   for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
     const plan = buildBackupCommand(
