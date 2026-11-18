@@ -1257,6 +1257,7 @@ tp_resolve_channel_manifest() {
   fi
   # Every published manifest carries a version: the build floor records it.
   if [ -z "$_manifest_version" ]; then
+    tp_print_error "signed manifest has no version; refusing to install (the build floor needs it)"
     return 1
   fi
   if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \

@@ -120,8 +120,8 @@ its own floor:
   rollback the next update may only be the failed build again or newer.
   The guard always rolls back a failed build. The daemon stops the retry loop
   by writing `update-skip-target.json` when it reports `rolled-back` and
-  refusing that build (`update_skipped_after_rollback`) until another is asked for. A
-  healthy build clears the record. Every `--version` read by the guard and
+  refusing that build (`update_skipped_after_rollback`) until another is asked for, which
+  clears the skip record. Every `--version` read by the guard and
   run.sh is bounded by `timeout -k 2 10`, so a binary that ignores SIGTERM is
   killed.
 - Not covered: the control plane and web interface packages
