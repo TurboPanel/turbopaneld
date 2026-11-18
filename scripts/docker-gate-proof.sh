@@ -283,7 +283,7 @@ if docker ps --format '{{.Image}}' | grep -q 'docker-socket-proxy'; then PROXY_R
 if [[ -f "$INGRESS_SWITCH" ]]; then
   if docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "$RO_DIR"; then pass "a Traefik mounts $RO_DIR (switch on)"; else fail "switch on but no container mounts $RO_DIR (deploy once to re-render ingress)"; fi
   if [[ "$PROXY_RUNNING" == true ]]; then echo "NOTE  the socket-proxy is still running: a TCP/UDP service Traefik rendered before the switch still uses it (redeploy that service)"; else pass "no socket-proxy container is running"; fi
-  SHARED_TRAEFIK=$({ docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress; docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress; } | sed -n 1p)
+  SHARED_TRAEFIK=$(docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress | sed -n 1p)
   if [[ -n "$SHARED_TRAEFIK" ]] && docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$SHARED_TRAEFIK" | grep -q "$RO_DIR"; then
     SHARED_NET=$(docker inspect --format '{{range $net, $cfg := .NetworkSettings.Networks}}{{$net}} {{end}}' "$SHARED_TRAEFIK" | awk '{print $1}')
   else

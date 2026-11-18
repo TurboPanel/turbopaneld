@@ -146,7 +146,7 @@ function runningProxySqlPsStdout(): string {
     State: "running",
     Labels: {
       "turbopanel.role": "ingress",
-      "com.turbopanel.system.component": "managed-ingress",
+      "io.turbopanel.system.component": "managed-ingress",
     },
   });
 }

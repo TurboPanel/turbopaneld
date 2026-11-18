@@ -144,15 +144,15 @@ test({
 const platformEngine = { "tp.managed.engine": "postgres" };
 const proxysql = {
   "turbopanel.role": "ingress",
-  "com.turbopanel.system.component": "managed-ingress",
+  "io.turbopanel.system.component": "managed-ingress",
 };
 const traefik = {
   "turbopanel.role": "ingress",
-  "com.turbopanel.system.component": "hosting-ingress",
+  "io.turbopanel.system.component": "hosting-ingress",
 };
 const database = {
   "turbopanel.role": "turbopanel",
-  "com.turbopanel.system.component": "database",
+  "io.turbopanel.system.component": "database",
 };
 const tenant = { "com.docker.compose.project": "app" };
 
@@ -191,7 +191,7 @@ test({
     for (const component of HELPER_COMPONENTS) {
       const labels = {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": component,
+        "io.turbopanel.system.component": component,
       };
       for (const path of ["attach", "attach/ws"]) {
         assertEquals(
