@@ -79,10 +79,10 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    `hostingIngress` and have not yet run `system.reconcile`, so tenant deploys
    cannot orphan an allocated inventory row by rewriting anonymous compose
    over an identity-bearing Traefik.
-3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`
-   then direct GitHub download) when
+3. Ensure vendored hosting Caddy (`ensureHostingCaddy` — Ansible `caddy-setup`,
+   a failed playbook fails the step) when
    `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
-   runs as is missing (only the playbook can create the account). On-demand like
+   runs as is missing (only the playbook installs either). On-demand like
    Docker on deploy.
    Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
