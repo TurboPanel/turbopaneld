@@ -530,6 +530,41 @@ test("the instance unit's socket URL is read; its password is blanked", () => {
   assertEquals(parsePostgresUrl(dbUrl("postgresql", "u", "x", "/db")), null);
 });
 
+test("a ?host= value that is not an absolute path is a network host, not a socket", () => {
+  for (const base of ["/db", "localhost/db"]) {
+    const url = dbUrl("postgres", "u", "x", `${base}?host=db.example.com`);
+    const parts = parsePostgresUrl(url);
+    assertEquals(parts?.socketDir, null);
+    assertEquals(parts?.host, "db.example.com");
+    assertEquals(buildBackupCommand(url, "/b", "c"), {
+      error: "the database is not on this machine (host db.example.com)",
+    });
+  }
+  // A loopback name in `?host=` still counts as this machine.
+  const loop = dbUrl("postgres", "u", "x", "/db?host=localhost");
+  assert("command" in buildBackupCommand(loop, "/b", "c"));
+});
+
+test("a host list, a repeated host, or a hostaddr or service override is refused", () => {
+  for (
+    const rest of [
+      "/db?host=/run/postgresql,db.example.com",
+      "localhost/db?host=localhost,db.example.com",
+      "/db?host=/run/postgresql&hostaddr=192.0.2.7",
+      "localhost/db?hostaddr=192.0.2.7",
+      // libpq takes the last `host`, so a repeated one hides the real target.
+      "/db?host=/run/postgresql&host=db.example.com",
+      "localhost/db?host=localhost&host=db.example.com",
+      "/db?host=/run/postgresql&service=other",
+      "localhost/db?service=other",
+    ]
+  ) {
+    const url = dbUrl("postgres", "u", "x", rest);
+    assertEquals(parsePostgresUrl(url), null, rest);
+    assert("error" in buildBackupCommand(url, "/b", "c"), rest);
+  }
+});
+
 test("the backup refuses a database that is not on this machine", () => {
   for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
     const plan = buildBackupCommand(

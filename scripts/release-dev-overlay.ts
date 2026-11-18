@@ -170,6 +170,68 @@ export async function runReleaseDevOverlay(
   if (failed) exit(1);
 }
 
+export type ReleaseLockHooks = {
+  /** How long to wait for another build to let go (default 2 seconds). */
+  waitMs?: number;
+  /** Receives the cleanup of a refused taker, which ends when the holder lets go. */
+  onDrain?: (drain: Promise<void>) => void;
+};
+
+const RELEASE_LOCK_PATH = join(ROOT, "dist", ".release-dev.lock");
+
+/**
+ * Hold a kernel `flock` on `path` around `run`, so the console rebuild and the
+ * web Build and Push never write `dist/` together. The kernel drops the lock
+ * when the process ends for any reason (exit, signal, crash), so nothing can
+ * go stale. Returns false, without running, when another build still holds it
+ * after `waitMs`.
+ */
+export async function withReleaseLock(
+  path: string,
+  run: () => Promise<void>,
+  hooks: ReleaseLockHooks = {},
+): Promise<boolean> {
+  await Deno.mkdir(dirname(path), { recursive: true });
+  const file = await Deno.open(path, {
+    create: true,
+    write: true,
+    mode: 0o640,
+  });
+  const locking = file.lock(true).then(() => true, () => false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), hooks.waitMs ?? 2000);
+  });
+  const got = await Promise.race([locking, timedOut]);
+  clearTimeout(timer);
+  if (!got) {
+    // The pending lock call finishes when the holder lets go; free it then.
+    const drain = locking.then(async (late) => {
+      if (late) await file.unlock().catch(() => undefined);
+      file.close();
+    });
+    if (hooks.onDrain) hooks.onDrain(drain);
+    else drain.catch(() => undefined);
+    return false;
+  }
+  try {
+    await run();
+  } finally {
+    await file.unlock().catch(() => undefined);
+    file.close();
+  }
+  return true;
+}
+
 if (import.meta.main) {
-  await runReleaseDevOverlay();
+  const ran = await withReleaseLock(
+    RELEASE_LOCK_PATH,
+    () => runReleaseDevOverlay(),
+  );
+  if (!ran) {
+    console.error(
+      "release-dev-overlay: another release:dev is running (dist/.release-dev.lock); try again when it finishes",
+    );
+    Deno.exit(1);
+  }
 }
