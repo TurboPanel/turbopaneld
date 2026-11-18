@@ -8462,6 +8462,64 @@ it({
 
 it({
   name:
+    "public-urls-update without hostnames fails, without applying, and one with hostnames applies",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    const resultFor = (id: string) =>
+      waitFor(
+        `public-urls-update-result ${id}`,
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === id
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+    try {
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-no-hostnames",
+        at: new Date().toISOString(),
+      });
+      const refused = await resultFor("urls-no-hostnames");
+      assertEquals(refused.ok, false);
+      assertEquals(
+        String(refused.error).includes("carried no hostnames"),
+        true,
+      );
+      assertEquals(applyCalls, 0);
+
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-with-hostnames",
+        hostnames: [{ host: "203.0.113.50", source: "platform-ca" }],
+        at: new Date().toISOString(),
+      });
+      const accepted = await resultFor("urls-with-hostnames");
+      assertEquals(accepted.ok, true);
+      assertEquals(applyCalls, 1);
+    } finally {
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
     "tunnel-token opens a sealed token, still takes a legacy one, and refuses an empty message",
   permissions: {
     env: true,

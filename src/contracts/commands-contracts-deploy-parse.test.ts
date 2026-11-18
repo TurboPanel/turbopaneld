@@ -2010,3 +2010,40 @@ test("parseEnvironmentDeployPayload carries optional build limits, deploy-wide a
     "Invalid sourceMaterial buildLimits memory",
   );
 });
+
+function withoutKey(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const copy = { ...record };
+  delete copy[key];
+  return copy;
+}
+
+test("parseEnvironmentDeployPayload rejects a source entry without releaseServiceId", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      sourceMaterial: [SOURCE_ENTRY],
+    }).sourceMaterial?.[0]?.releaseServiceId,
+    "svc-web",
+  );
+  rejectDeploy(
+    { sourceMaterial: [withoutKey(SOURCE_ENTRY, "releaseServiceId")] },
+    "Invalid sourceMaterial releaseServiceId",
+  );
+});
+
+test("parseEnvironmentDeployPayload rejects a credential without credentialKind", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      sourceMaterial: [SOURCE_ENTRY],
+    }).sourceMaterial?.[0]?.credentialKind,
+    "token",
+  );
+  rejectDeploy(
+    { sourceMaterial: [withoutKey(SOURCE_ENTRY, "credentialKind")] },
+    "Invalid sourceMaterial credentialKind",
+  );
+});

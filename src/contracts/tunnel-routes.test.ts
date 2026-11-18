@@ -215,6 +215,25 @@ test("hostings[].tunnel is optional, checked, and never combined with acme on a 
   }));
 });
 
+test("hostings[].tunnel without generation is refused, and one with it passes", () => {
+  const tunnel = {
+    hostnames: ["app.example.com"],
+    peers: ["192.0.2.10"],
+    generation: 3,
+  };
+  assertEquals(
+    parseEnvironmentDeployPayload(deploy({ tunnel })).hostings[0]?.tunnel
+      ?.generation,
+    3,
+  );
+  const { generation: _generation, ...noGeneration } = tunnel;
+  assertThrows(
+    () => parseEnvironmentDeployPayload(deploy({ tunnel: noGeneration })),
+    TypeError,
+    "Invalid hostings[].tunnel generation",
+  );
+});
+
 test("server.tunnel.routes: material, peers and size limits", () => {
   const route = (n: number) => ({
     hostname: `n${n}.example.com`,
