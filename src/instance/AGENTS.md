@@ -78,7 +78,7 @@ fields. Detail: `src/deploy/site/AGENTS.md`.
 
 **Topology generation off the wire (`topology-generation-optional-v1`).** A
 control plane that lists it no longer needs the topology generation numbers.
-The daemon then leaves `metadata.topologyGeneration` off metrics samples,
+Metrics samples never carry a topology generation. The daemon then leaves
 `generation` and `bootGeneration` off `topology-report` (and its snapshot),
 and stops sending the `topology_generation_changed` event; it keeps tracking
 the generation itself. The flag is set on attach and cleared on close

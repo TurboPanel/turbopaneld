@@ -495,11 +495,8 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
   "managed-ha-boot-hold-v1";
 
 /**
- * Metrics schema wire version 8. This daemon can produce wire version 8 samples (`metadata.version`
- * 8: the `extended` section and the `durable` flag). It stamps
- * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
- * lists this feature, so a daemon updated ahead of the control plane keeps
- * sending samples the old control plane accepts.
+ * Metrics schema wire version 8: `metadata.version` 8, the `extended` section
+ * and the `durable` flag. It is the only version the daemon sends.
  */
 export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
 
@@ -515,8 +512,7 @@ export const METRICS_V8_SIZES_FEATURE: DaemonWireFeature = "metrics-v8-sizes";
  * The control plane no longer needs this daemon's topology generation numbers:
  * it matches a sample to the stored topology by the entity ids the sample
  * names and tells topology reports apart by their content. Once it is listed
- * the daemon leaves `metadata.topologyGeneration` off its samples,
- * `generation` and `bootGeneration` off its `topology-report` (and its
+ * the daemon leaves `generation` and `bootGeneration` off its `topology-report` (and its
  * snapshot), and stops sending the `topology_generation_changed` event. The
  * generation is still tracked here: the topology reporter and the event
  * collector use it to notice a change.

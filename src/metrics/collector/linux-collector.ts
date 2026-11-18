@@ -31,14 +31,13 @@ import {
   type HostMetrics,
   MAX_METRIC_EVENTS_PER_SAMPLE,
   type MetricEvent,
-  METRICS_LEGACY_WIRE_VERSION,
+  METRICS_SCHEMA_VERSION,
   type MetricsExtended,
   type RouterSample,
   type StorageSample,
 } from "../../contracts/metrics-contract.ts";
 import { truncateSampleToCapabilityPlan } from "../capability-plan-truncate.ts";
 import { backsServiceDevice } from "../topology/block-topology.ts";
-import { topologyGenerationOptional } from "../topology/generation.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
 import {
   EMPTY_TOPOLOGY_OVERRIDES,
@@ -969,13 +968,10 @@ export class LinuxMetricsCollector implements MetricsCollector {
 
     const sample = buildMetricsSample({
       metadata: {
-        version: METRICS_LEGACY_WIRE_VERSION,
+        version: METRICS_SCHEMA_VERSION,
         sampledAt: new Date(nowMs).toISOString(),
         intervalSeconds: seconds,
         sequence,
-        ...(topologyGenerationOptional()
-          ? {}
-          : { topologyGeneration: snapshot.generation }),
         bootGeneration,
       },
       host: buildHostMetrics({
@@ -1087,9 +1083,8 @@ export class LinuxMetricsCollector implements MetricsCollector {
   /**
    * Everything v12 adds rides in the contract's `extended` block: host text,
    * container health, Docker reclaimable bytes, TLS expiry and the largest
-   * sites. The scheduler strips `extended` (and stamps v6) unless metrics-v8
-   * is negotiated. Added after plan truncation, so no plan gates it. A failure
-   * here drops only the wire version 8 block, never the good v6 sample around it.
+   * sites. Added after plan truncation, so no plan gates it. A failure here
+   * drops only the `extended` block, never the good sample around it.
    */
   #buildExtended(input: {
     outgoing: { extended?: MetricsExtended };

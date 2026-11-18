@@ -3,13 +3,10 @@ import {
   buildMetricsSample,
   clampPercent,
   isHardwareHealthEventKind,
-  isMetricsWireVersion,
   MAX_METRICS_TEXT_LENGTH,
   METRIC_EVENT_KINDS,
   type MetricEvent,
-  METRICS_LEGACY_WIRE_VERSION,
   METRICS_SCHEMA_VERSION,
-  METRICS_WIRE_VERSIONS,
   type MetricsSampleInput,
   sanitizeFinite,
   storageEngineFieldName,
@@ -23,15 +20,8 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
-test("METRICS_SCHEMA_VERSION is 8 and v6 samples are still accepted on the wire", () => {
+test("METRICS_SCHEMA_VERSION is 8, the only wire version", () => {
   assertEquals(METRICS_SCHEMA_VERSION, 8);
-  assertEquals(METRICS_LEGACY_WIRE_VERSION, 6);
-  assertEquals([...METRICS_WIRE_VERSIONS], [6, 8]);
-  assertEquals(isMetricsWireVersion(6), true);
-  assertEquals(isMetricsWireVersion(8), true);
-  assertEquals(isMetricsWireVersion(7), false);
-  assertEquals(isMetricsWireVersion(5), false);
-  assertEquals(isMetricsWireVersion("8"), false);
 });
 
 test("METRIC_EVENT_KINDS has no duplicates", () => {
@@ -97,11 +87,10 @@ test("storageEngineFieldName flattens engine + field into a camelCase leaf", () 
 function fixtureInput(): MetricsSampleInput {
   return {
     metadata: {
-      version: METRICS_LEGACY_WIRE_VERSION,
+      version: METRICS_SCHEMA_VERSION,
       sampledAt: "2020-01-01T00:00:00.000Z",
       intervalSeconds: 60,
       sequence: 1,
-      topologyGeneration: 1,
       bootGeneration: 1,
     },
     host: {
@@ -190,7 +179,7 @@ test("buildMetricsSample sanitizes the shared cross-repo fixture", () => {
   const sample = buildMetricsSample(fixtureInput());
 
   assertEquals(sample.type, "metrics");
-  assertEquals(sample.metadata.version, 6);
+  assertEquals(sample.metadata.version, 8);
   assertEquals("extended" in sample, false);
   assertEquals(sample.host.cpu.pressureSomePercent, 100);
   assertEquals(sample.host.cpu.processCount, 42);
@@ -311,16 +300,14 @@ test("buildMetricsSample keeps the v12 sizes, drops non-finite ones and caps the
   );
 });
 
-test("buildMetricsSample rejects a metadata.version that is not an accepted wire version", () => {
+test("buildMetricsSample rejects a metadata.version that is not the wire version", () => {
   const input = fixtureInput();
   // deno-lint-ignore no-explicit-any
   input.metadata.version = 3 as any;
   assertThrows(
     () => buildMetricsSample(input),
     TypeError,
-    `metrics metadata.version must be one of ${
-      METRICS_WIRE_VERSIONS.join(", ")
-    }`,
+    "metrics metadata.version must be 8",
   );
 });
 
@@ -336,21 +323,13 @@ test("buildMetricsSample rejects non-positive intervalSeconds", () => {
   }
 });
 
-test("buildMetricsSample rejects negative sequence/topologyGeneration/bootGeneration", () => {
+test("buildMetricsSample rejects negative sequence/bootGeneration", () => {
   const sequenceInput = fixtureInput();
   sequenceInput.metadata.sequence = -1;
   assertThrows(
     () => buildMetricsSample(sequenceInput),
     TypeError,
     "metrics metadata.sequence must be a finite non-negative number",
-  );
-
-  const topologyInput = fixtureInput();
-  topologyInput.metadata.topologyGeneration = -1;
-  assertThrows(
-    () => buildMetricsSample(topologyInput),
-    TypeError,
-    "metrics metadata.topologyGeneration must be a finite non-negative number",
   );
 
   const bootInput = fixtureInput();
@@ -362,14 +341,12 @@ test("buildMetricsSample rejects negative sequence/topologyGeneration/bootGenera
   );
 });
 
-test("buildMetricsSample accepts a zero sequence/topologyGeneration/bootGeneration", () => {
+test("buildMetricsSample accepts a zero sequence/bootGeneration", () => {
   const input = fixtureInput();
   input.metadata.sequence = 0;
-  input.metadata.topologyGeneration = 0;
   input.metadata.bootGeneration = 0;
   const sample = buildMetricsSample(input);
   assertEquals(sample.metadata.sequence, 0);
-  assertEquals(sample.metadata.topologyGeneration, 0);
   assertEquals(sample.metadata.bootGeneration, 0);
 });
 

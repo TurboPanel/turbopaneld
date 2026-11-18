@@ -23,33 +23,13 @@
  */
 
 /**
- * The schema version the control plane stores (`blob3` on every row, dataset
- * `turbopanel_server_metrics_v12`). A sample on the wire may still be stamped
- * with an older {@link METRICS_WIRE_VERSIONS} entry; the control plane writes
- * v12 rows for all of them.
+ * The one metrics wire version: a sample is stamped with it and the control
+ * plane stores it (`blob3` on every row, dataset
+ * `turbopanel_server_metrics_v12`). Any other version is rejected.
  */
 export const METRICS_SCHEMA_VERSION = 8 as const;
 
-/**
- * The wire version a daemon stamps until the control plane advertises the
- * `metrics-v8` wire feature (`DAEMON_WIRE_FEATURES`). v6-shaped samples carry
- * no {@link MetricsExtended} section and no `durable` flag.
- */
-export const METRICS_LEGACY_WIRE_VERSION = 6 as const;
-
-/** Sample versions the control plane accepts from a daemon during the v6 -> wire version 8 transition. */
-export const METRICS_WIRE_VERSIONS = [
-  METRICS_LEGACY_WIRE_VERSION,
-  METRICS_SCHEMA_VERSION,
-] as const;
-
-export type MetricsWireVersion = (typeof METRICS_WIRE_VERSIONS)[number];
-
-export function isMetricsWireVersion(
-  value: unknown,
-): value is MetricsWireVersion {
-  return (METRICS_WIRE_VERSIONS as readonly unknown[]).includes(value);
-}
+export type MetricsWireVersion = typeof METRICS_SCHEMA_VERSION;
 
 /** Maps every non-string field of `T` to `number | null` — the sanitized-output shape for a raw input `T`. */
 type RawNumeric<T> = {
@@ -832,20 +812,11 @@ export type MetricsSampleMetadata = {
   sampledAt: string;
   intervalSeconds: number;
   sequence: number;
-  /**
-   * Deprecated: the daemon's own topology change counter. The control plane
-   * no longer reads it (it matches a sample against the stored topology by
-   * the entity ids the sample names), so a daemon stops sending it once the
-   * control plane lists the `topology-generation-optional-v1` wire feature.
-   * Accepted while older daemons still send it.
-   */
-  topologyGeneration?: number;
   bootGeneration: number;
   /**
-   * Wire version 8 daemons only. `false` marks a 10 s live-lease sample that feeds the
+   * `false` marks a 10 s live-lease sample that feeds the
    * live overlay and is never stored; the parallel 60 s baseline sample is
-   * `true`. Absent means durable (every v6 sample, and wire version 8 samples outside a
-   * lease), so a v6 daemon's lease samples keep being stored.
+   * `true`. Absent means durable (a sample outside a lease).
    */
   durable?: boolean;
 };
@@ -866,7 +837,7 @@ export type MetricsSample = {
   router?: RouterSample;
   storage?: StorageSample;
   dockerUsage?: DockerUsageSample;
-  /** Wire version 8 additions. Absent on a v6 daemon's sample. */
+  /** Wire version 8 additions. */
   extended?: MetricsExtended;
 };
 
@@ -1388,11 +1359,9 @@ function sanitizeEvent(event: MetricEvent): MetricEvent {
 export function buildMetricsSample(
   input: MetricsSampleInput,
 ): MetricsSample {
-  if (!isMetricsWireVersion(input.metadata.version)) {
+  if (input.metadata.version !== METRICS_SCHEMA_VERSION) {
     throw new TypeError(
-      `metrics metadata.version must be one of ${
-        METRICS_WIRE_VERSIONS.join(", ")
-      }`,
+      `metrics metadata.version must be ${METRICS_SCHEMA_VERSION}`,
     );
   }
   // intervalSeconds is divisor-bearing downstream — zero is never valid.
@@ -1401,12 +1370,6 @@ export function buildMetricsSample(
     input.metadata.intervalSeconds,
   );
   assertFiniteNonNegative("metadata.sequence", input.metadata.sequence);
-  if (input.metadata.topologyGeneration !== undefined) {
-    assertFiniteNonNegative(
-      "metadata.topologyGeneration",
-      input.metadata.topologyGeneration,
-    );
-  }
   assertFiniteNonNegative(
     "metadata.bootGeneration",
     input.metadata.bootGeneration,
