@@ -8141,7 +8141,7 @@ export function parseTunnelConnectorsResult(
 
 /** Must stay in sync with the instance `server.tunnel.status` shape. */
 export type TunnelStatusConnector = {
-  /** A lower-case UUID, or `instance` / `default` for the instance's own tunnel. */
+  /** A lower-case UUID, or `instance` for the instance's own tunnel. */
   tunnelId: string;
   status: "not-installed" | "connected" | "connecting" | "stopped" | "failed";
   /** Connector program version the carrying unit runs. */
