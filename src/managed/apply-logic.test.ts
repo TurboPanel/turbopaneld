@@ -175,7 +175,7 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
   ]);
 });
 
-test("primary applyManagedEngineState runs host prep then ensures ProxySQL monitor", async () => {
+test("primary applyManagedEngineState ensures the payload ProxySQL monitor roles", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {
@@ -235,30 +235,13 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
         engine as never,
         payload,
         credentials,
-        {
-          runHostPrep: async () => {
-            calls.push("hostPrep");
-            const layout = resolveLayout(Deno.env.toObject());
-            await Deno.mkdir(`${layout.configDir}/proxysql`, {
-              recursive: true,
-            });
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/admin.cnf`,
-              "[client]\nuser=admin\npassword=admin-secret\n",
-            );
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/monitor.cnf`,
-              "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
-            );
-          },
-        },
+        { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
       );
 
       assertEquals(calls, [
         "waitReady",
         "applyDatabases",
         "applyCredentials",
-        "hostPrep",
         "ensure:tp_monitor",
         "readVersion",
       ]);
@@ -446,7 +429,7 @@ test("primary applyManagedEngineState skips drop when only the root username is 
   assertEquals(state.appliedUsers, ["postgres"]);
 });
 
-test("primary applyManagedEngineState skips ProxySQL monitor when monitor.cnf is missing", async () => {
+test("primary applyManagedEngineState skips ProxySQL monitor roles when the payload has no monitorUsers", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {

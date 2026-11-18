@@ -15,10 +15,8 @@ import {
   applyProxySqlAdminStatements,
   formatMysqlClientCnf,
   loadProxySqlAdminCredentials,
-  loadProxySqlMonitorCredentials,
   parseProxySqlAdminCnf,
   parseProxySqlClientCnf,
-  parseProxySqlMonitorCnf,
   PROXYSQL_ADMIN_DEFAULTS_PATH,
   PROXYSQL_MONITOR_USERNAME,
   proxySqlHostPrepPresent,
@@ -46,55 +44,12 @@ test("parseProxySqlAdminCnf reads [client] user/password", () => {
   assertEquals(creds.password, "s3cret");
 });
 
-test("parseProxySqlMonitorCnf reads [client] user/password", () => {
-  const creds = parseProxySqlMonitorCnf(
-    "[client]\nuser=tp_monitor\npassword=mon-pass\n",
-  );
-  assertEquals(creds.user, "tp_monitor");
-  assertEquals(creds.password, "mon-pass");
-});
-
 test("PROXYSQL_MONITOR_USERNAME is the stable host monitor login", () => {
   assertEquals(PROXYSQL_MONITOR_USERNAME, "tp_monitor");
 });
 
 test("PROXYSQL_ADMIN_DEFAULTS_PATH is the compose-mounted admin.cnf path", () => {
   assertEquals(PROXYSQL_ADMIN_DEFAULTS_PATH, "/etc/proxysql-admin.cnf");
-});
-
-test("loadProxySqlMonitorCredentials returns null when monitor.cnf is missing", async () => {
-  const fixture = await createTempLayout();
-  try {
-    const layout = resolveLayout(fixture.env);
-    await Deno.mkdir(layout.configDir + "/proxysql", {
-      recursive: true,
-      mode: 0o750,
-    });
-    const creds = await loadProxySqlMonitorCredentials(layout);
-    assertEquals(creds, null);
-  } finally {
-    await fixture.cleanup();
-  }
-});
-
-test("loadProxySqlMonitorCredentials reads monitor.cnf", async () => {
-  const fixture = await createTempLayout();
-  try {
-    const layout = resolveLayout(fixture.env);
-    await Deno.mkdir(layout.configDir + "/proxysql", {
-      recursive: true,
-      mode: 0o750,
-    });
-    await Deno.writeTextFile(
-      proxysqlMonitorCnfPath(layout),
-      "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
-      { mode: 0o600 },
-    );
-    const creds = await loadProxySqlMonitorCredentials(layout);
-    assertEquals(creds, { user: "tp_monitor", password: "mon-s3cret" });
-  } finally {
-    await fixture.cleanup();
-  }
 });
 
 test("loadProxySqlAdminCredentials rejects directory scar at admin.cnf path", async () => {
@@ -320,21 +275,6 @@ test("parseProxySqlClientCnf rejects missing password", () => {
     TypeError,
     "missing [client] user/password",
   );
-});
-
-test("loadProxySqlMonitorCredentials rejects monitor.cnf directory scar", async () => {
-  const fixture = await createTempLayout();
-  try {
-    const layout = resolveLayout(fixture.env);
-    await Deno.mkdir(proxysqlMonitorCnfPath(layout), { recursive: true });
-    await assertRejects(
-      () => loadProxySqlMonitorCredentials(layout),
-      TypeError,
-      "monitor.cnf is a directory",
-    );
-  } finally {
-    await fixture.cleanup();
-  }
 });
 
 test("applyProxySqlAdminStatements requires layout and containerName", async () => {

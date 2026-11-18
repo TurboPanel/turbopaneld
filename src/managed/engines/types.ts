@@ -185,7 +185,7 @@ export type ManagedEngineRuntime = {
     options?: ManagedApplyCredentialsOptions,
   ): Promise<string[]>;
   /**
-   * Optional: host-wide ProxySQL health-check principal (from `monitor.cnf`).
+   * Optional: host-wide ProxySQL health-check principal (from `monitorUsers`).
    * Primary/writable members only — physical standbys receive the role via WAL.
    */
   ensureProxySqlMonitor?(

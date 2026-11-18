@@ -37,7 +37,6 @@ import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   runDockerSetup as defaultRunDockerSetup,
-  runProxySqlSetup,
 } from "../orchestration/ansible.ts";
 import {
   assertPublicPrivateListenerTls,
@@ -79,10 +78,6 @@ import {
   managedSecretsDir,
 } from "./engine-paths.ts";
 import {
-  loadProxySqlMonitorCredentials,
-  proxySqlHostPrepPresent,
-} from "./proxysql-admin.ts";
-import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
 } from "./needs-resync.ts";
@@ -105,8 +100,6 @@ export type ManagedApplyHandlerDeps = {
   ensureDocker?: () => Promise<void>;
   /** Test seam — defaults to {@link defaultRunDockerSetup}. */
   runDockerSetup?: () => Promise<void>;
-  /** Test seam — defaults to {@link runProxySqlSetup}. */
-  runHostPrep?: () => Promise<void>;
 };
 
 /**
@@ -577,7 +570,6 @@ export async function applyManagedEngineState(
   payload: ManagedApplyPayload,
   credentials: ManagedApplyCredential[],
   deps?: {
-    runHostPrep?: () => Promise<void>;
     /** Decrypted per-fronting-server monitor roles from payload.monitorUsers. */
     monitorUsers?: Array<{ user: string; password: string }>;
     topologyUser?: { user: string; password: string };
@@ -674,7 +666,6 @@ async function configureStandbyIfSupported(
  * Control-plane-minted per-server monitor roles: one per fronting server
  * (members + bound consumers), so every server's ProxySQL can monitor this
  * engine with its own identity. Standbys inherit the roles via WAL replay.
- * Legacy fallback: host-seeded monitor.cnf (older control planes).
  */
 async function ensureOrchestratorTopologyRole(
   ctx: ManagedEngineContext,
@@ -694,7 +685,6 @@ async function ensureProxySqlMonitorRoles(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   deps?: {
-    runHostPrep?: () => Promise<void>;
     monitorUsers?: Array<{ user: string; password: string }>;
     topologyUser?: { user: string; password: string };
   },
@@ -702,32 +692,14 @@ async function ensureProxySqlMonitorRoles(
   if (!engine.ensureProxySqlMonitor) return;
 
   const monitorUsers = deps?.monitorUsers;
-  if (monitorUsers && monitorUsers.length > 0) {
-    await forEachSequential(monitorUsers, async (monitor) => {
-      await engine.ensureProxySqlMonitor?.(ctx, monitor);
-    });
-    logInfo(
-      "managed",
-      `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,
-    );
-    return;
-  }
-
-  const layout = resolveLayout(Deno.env.toObject());
-  const prepPresent = await proxySqlHostPrepPresent(layout);
-  if (!prepPresent && deps?.runHostPrep) {
-    await deps.runHostPrep();
-  }
-  const monitor = await loadProxySqlMonitorCredentials(layout);
-  if (monitor) {
-    await engine.ensureProxySqlMonitor(ctx, monitor);
-    logInfo("managed", "managed.apply ensured ProxySQL monitor role");
-  } else {
-    logInfo(
-      "managed",
-      "managed.apply skipped ProxySQL monitor role (monitor.cnf missing)",
-    );
-  }
+  if (!monitorUsers?.length) return;
+  await forEachSequential(monitorUsers, async (monitor) => {
+    await engine.ensureProxySqlMonitor?.(ctx, monitor);
+  });
+  logInfo(
+    "managed",
+    `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,
+  );
 }
 
 function buildManagedApplyResult(
@@ -924,7 +896,6 @@ async function applyManagedEngine(
   logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   const runDockerSetup = deps?.runDockerSetup ?? defaultRunDockerSetup;
-  const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
 
   await ensureDocker();
   // Before any `compose up` (engine or bootstrap `docker run --network …`):
@@ -1057,7 +1028,7 @@ async function applyManagedEngine(
       engine,
       payload,
       decrypted.credentials,
-      { runHostPrep, monitorUsers, topologyUser },
+      { monitorUsers, topologyUser },
     );
 
     const member = await collectMemberHealth(
