@@ -126,3 +126,19 @@ test("server.tunnel.status carries what the hop does about client certificates",
     parseTunnelStatusResult({ ...GOOD, peerClientAuthDowngraded: false })
   );
 });
+
+test("a status answer naming the retired tunnel id default is refused", () => {
+  assertThrows(
+    () =>
+      parseTunnelStatusResult({
+        pinnedVersion: "2026.5.2",
+        connectors: [{
+          tunnelId: "default",
+          status: "connected",
+          version: "2026.5.2",
+          slot: "a",
+        }],
+      }),
+    TypeError,
+  );
+});

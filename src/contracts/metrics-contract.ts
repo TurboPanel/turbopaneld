@@ -457,10 +457,10 @@ export type DockerUsageSample = {
 };
 
 // ---------------------------------------------------------------------------
-// Metrics v12 extension (wire version 8) — everything the v12 layout stores that the v6 groups above do
-// not carry. One optional, self-contained section so a v6 daemon's sample
-// stays valid byte for byte: every field is optional, `null` is "unknown",
-// and a missing section reads exactly like a section of nulls.
+// Metrics v12 extension (wire version 8) — everything the v12 layout stores that the groups above do
+// not carry. One optional, self-contained section: every field is optional,
+// `null` is "unknown", and a missing section reads exactly like a section of
+// nulls.
 // ---------------------------------------------------------------------------
 
 /** Host-wide readings added in v12 (kernel limits, OOM kills, root disk queue/IOPS, health counters). */

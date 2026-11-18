@@ -259,9 +259,7 @@ from pathlib import Path
 PATH = "/api/daemon/v1/instance/identity"
 body_path, header, out, expected = sys.argv[1:5]
 out = Path(out)
-# No tok.sig.txt: a document checked on its own.
-tok_file = out / "tok.sig.txt"
-tok_sig = tok_file.read_text().strip() if tok_file.exists() else None
+tok_sig = (out / "tok.sig.txt").read_text().strip()
 
 def b64d(text):
     try:
@@ -301,13 +299,12 @@ head_kid, _, head_sig = header.strip().partition(":")
 if head_kid != kid:
     raise SystemExit("signature header names another key")
 sig = b64d(head_sig)
-tsig = b64d(tok_sig) if tok_sig is not None else bytes(64)
+tsig = b64d(tok_sig)
 if len(sig) != 64 or len(tsig) != 64:
     raise SystemExit("signature is not 64 bytes")
 (out / "doc.msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
 (out / "doc.sig").write_bytes(sig)
-if tok_sig is not None:
-    (out / "tok.sig").write_bytes(tsig)
+(out / "tok.sig").write_bytes(tsig)
 (out / "kid").write_text(kid)
 der = bytes.fromhex("302a300506032b6570032100") + pub
 pem = base64.b64encode(der).decode()

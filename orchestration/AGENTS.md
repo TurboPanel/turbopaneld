@@ -159,7 +159,7 @@ roles that need it. The role
   pools too.
 - **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, installed as `/opt/turbopanel/lib/docker-egress`, unit
   `turbopanel-docker-egress.service`, var `turbopanel_docker_egress_guard`, default true; audit P1-4): chain `TP-EGRESS`
-  hung off `DOCKER-USER` and `INPUT` for traffic entering on `docker0` / `br-+` only. Drops 169.254.0.0/16,
+  hung off `DOCKER-USER` and `INPUT` for forwarded traffic entering on any interface (`DOCKER-USER`) and for host-bound traffic entering on `docker0` / `br-+` (`INPUT`). Drops 169.254.0.0/16,
   168.63.129.16, 100.100.100.200 (IPv4) and fe80::/10 (ICMPv6 allowed), fd00:ec2::254 (IPv6), with a DNS (53)
   exception for link-local resolvers. Independent of the opt-in host firewall (`TP-FWD`/`TP-INPUT`). Re-applied after
   every docker.service restart (`PartOf`/`After`), never removed on stop; purge removes unit, script, chain and jumps.

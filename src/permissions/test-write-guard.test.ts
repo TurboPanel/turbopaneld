@@ -107,7 +107,7 @@ const REPO = join(dirname(fromFileUrl(import.meta.url)), "..", "..");
 
 /** A quoted daemon identity or trust file name. */
 const NAMES_IDENTITY =
-  /["'`/](?:license\.id|license\.token|server\.id|server-key\.json|server-key-id|sealing-key\.json|instance-ca\.pem|trust-level)["'`]/;
+  /["'`/](?:license\.id|license\.token|server\.id|server-key\.json|server-key-id|sealing-key\.json|instance-ca\.pem)["'`]/;
 
 /** Deno calls that change the filesystem. */
 const WRITES =
