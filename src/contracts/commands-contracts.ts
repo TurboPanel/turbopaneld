@@ -4677,25 +4677,6 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
-/**
- * An older control plane sends `wwwRedirect: true` ("send the other spelling
- * to the name as written"). Honour it as the mode that keeps the first typed
- * name the site rather than dropping the redirect without a word.
- */
-function parseLegacyHostingWwwRedirect(
-  value: unknown,
-  hostnames: unknown,
-): EnvironmentDeployHosting["www"] {
-  if (value === undefined || value === false) return undefined;
-  if (value !== true) {
-    throw new TypeError("hostings[].wwwRedirect must be a boolean");
-  }
-  const first = Array.isArray(hostnames) ? hostnames[0] : undefined;
-  return typeof first === "string" && first.startsWith(WWW_PREFIX)
-    ? "root-to-www"
-    : "www-to-root";
-}
-
 function parseHostingWww(
   value: unknown,
 ): EnvironmentDeployHosting["www"] {
@@ -4833,9 +4814,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
-  const www = value.www === undefined
-    ? parseLegacyHostingWwwRedirect(value.wwwRedirect, value.hostnames)
-    : parseHostingWww(value.www);
+  const www = parseHostingWww(value.www);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
