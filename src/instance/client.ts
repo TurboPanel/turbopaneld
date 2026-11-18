@@ -250,7 +250,6 @@ import { AcmeIssueHandler } from "./acme-issue-handler.ts";
 import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
-import { DAEMON_VERSION } from "../version.ts";
 import {
   SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
