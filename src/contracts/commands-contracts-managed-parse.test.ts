@@ -82,6 +82,7 @@ const VALID_INGRESS = {
     {
       managedId: MANAGED_ID,
       engine: "postgres",
+      family: "pgsql",
       protocolPort: 5432,
       writerHostgroup: 0,
       readerHostgroup: 1,

@@ -10,11 +10,8 @@
  * {@link resolveReleaseServiceId} — never pick hosting before native or mix
  * sources for one service.
  *
- * **Backward compatibility:** payloads without `releaseServiceId` (older control
- * planes) fall back to `nativeAppServices[].serviceId` when present, then
- * matching `hostings[]` / `ingressServices[]` `serviceId`, then the compose
- * service key. Older daemons ignore `releaseServiceId` and keep that same
- * fallback shape, so nothing breaks mid-rollout.
+ * A service with no source row (a native unit, a hosting, an ingress row) falls
+ * back to its own `serviceId` in that order, then the compose service key.
  *
  * The folder of every such service comes from `serviceFolders[]`, which the
  * control plane always sends; a payload without it is refused.

@@ -198,6 +198,7 @@ function cluster(
   return {
     managedId: "m1",
     engine: "postgres",
+    family: "pgsql",
     protocolPort: 15432,
     writerHostgroup: 0,
     readerHostgroup: 1,

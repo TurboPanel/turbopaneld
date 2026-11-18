@@ -1067,6 +1067,7 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
       {
         managedId: "33333333-3333-4333-8333-333333333333",
         engine: "postgres",
+        family: "pgsql",
         protocolPort: 5432,
         writerHostgroup: 0,
         readerHostgroup: 1,

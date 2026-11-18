@@ -33,6 +33,7 @@ function cluster(
   return {
     managedId: "m1",
     engine: family,
+    family: family === "postgres" ? "pgsql" : "mysql",
     protocolPort: family === "postgres" ? 15432 : 13306,
     writerHostgroup: 0,
     readerHostgroup: 1,

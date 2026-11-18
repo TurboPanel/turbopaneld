@@ -360,6 +360,7 @@ test("only the names a hosting lists as tunnel names are locked, and open ones a
         hostnames: ["app.example.com", "pub.example.com"],
         openHostnames: ["pub.example.com"],
         peers: ["10.0.0.5"],
+        generation: 1,
         extraBind: ["10.0.0.7"],
       },
     })],

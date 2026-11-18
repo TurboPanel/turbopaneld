@@ -139,6 +139,7 @@ function table(
       privateKeyEnvelope: "tpdaemon.AAAA",
       caCertPem: CERT,
     },
+    generation: 1,
     ...overrides,
   };
 }
@@ -471,7 +472,7 @@ test("an empty table removes the file, the stored table and the peer material", 
     await applyTunnelRoutes(layout, table(), deps);
     const result = await applyTunnelRoutes(
       layout,
-      { hash: HASH_2, routes: [], peerAddresses: [] },
+      { hash: HASH_2, routes: [], peerAddresses: [], generation: 1 },
       deps,
     );
     assertEquals(result.applied, true);
@@ -486,7 +487,7 @@ test("an empty table on a host that never had one touches nothing", async () => 
   await withHost(async ({ layout, calls }) => {
     const result = await applyTunnelRoutes(
       layout,
-      { hash: HASH_1, routes: [], peerAddresses: [] },
+      { hash: HASH_1, routes: [], peerAddresses: [], generation: 1 },
       { decryptSecrets: decrypt, grantRead: noGrant },
     );
     assertEquals(result.applied, true);
@@ -649,6 +650,7 @@ test("a removed carrier is shut out, and a table naming only the site's own name
         hash: HASH_2,
         routes: [],
         peerAddresses: [],
+        generation: 1,
         inbound: [{ hostname: "site.example.com", peers: [] }],
       },
       deps,
@@ -748,6 +750,7 @@ test("a refusal caused by a relocked site file names that file and changes nothi
             hash: HASH_2,
             routes: [],
             peerAddresses: [],
+            generation: 1,
             inbound: [{ hostname: "site.example.com", peers: ["10.0.0.6"] }],
           },
           { decryptSecrets: decrypt, grantRead: noGrant },
@@ -947,33 +950,6 @@ test("a table older than the one applied is ignored, an equal or newer one appli
   });
 });
 
-test("a table without a generation applies as before and clears the record", async () => {
-  await withHost(async ({ layout, hostingDir }) => {
-    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
-    await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_1, TWO_PEERS, 9),
-      deps,
-    );
-    const result = await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_2, ["10.0.0.5"]),
-      deps,
-    );
-    assertEquals(result.applied, true);
-    assertEquals((await readTunnelState(hostingDir))?.hash, HASH_2);
-    assertEquals(await readTunnelGeneration(hostingDir), undefined);
-    // A reset counter starts below the old record and is accepted again.
-    const reset = await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_1, TWO_PEERS, 3),
-      deps,
-    );
-    assertEquals(reset.applied, true);
-    assertEquals(await readTunnelGeneration(hostingDir), 3);
-  });
-});
-
 test("the applied generation outlives a reload and an emptied table", async () => {
   await withHost(async ({ layout, hostingDir }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };
@@ -1062,7 +1038,7 @@ test("a deploy older than the applied table takes the table's peers, and its gen
 });
 
 test("the highest generation of a deploy's hostings is used, and a record only goes up", async () => {
-  assertEquals(deployTunnelGeneration([{}, { tunnel: {} }]), undefined);
+  assertEquals(deployTunnelGeneration([{}]), undefined);
   assertEquals(
     deployTunnelGeneration([
       { tunnel: { generation: 3 } },
@@ -1073,7 +1049,6 @@ test("the highest generation of a deploy's hostings is used, and a record only g
   );
   const dir = await Deno.makeTempDir({ prefix: "tp-tunnel-gen-" });
   try {
-    await recordTunnelGeneration(dir, undefined);
     assertEquals(await readTunnelGeneration(dir), undefined);
     await recordTunnelGeneration(dir, 4);
     await recordTunnelGeneration(dir, 2);
@@ -1185,26 +1160,6 @@ test("the same table resent with a higher generation raises the record", async (
     assertEquals(again.applied, true);
     assertEquals(await readTunnelGeneration(hostingDir), 8);
     assertEquals((await readTunnelState(hostingDir))?.generation, 8);
-  });
-});
-
-test("an identical table with no generation after a counter reset leaves nothing stuck", async () => {
-  await withHost(async ({ layout, hostingDir }) => {
-    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
-    await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_1, TWO_PEERS, 9),
-      deps,
-    );
-    await applyTunnelRoutes(layout, generationTable(HASH_1, TWO_PEERS), deps);
-    assertEquals(await readTunnelGeneration(hostingDir), undefined);
-    assertEquals((await readTunnelState(hostingDir))?.generation, undefined);
-    const reset = await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_2, ["10.0.0.5"], 3),
-      deps,
-    );
-    assertEquals(reset.applied, true);
   });
 });
 

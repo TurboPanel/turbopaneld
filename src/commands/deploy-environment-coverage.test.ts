@@ -1947,6 +1947,7 @@ test({
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
+            releaseServiceId: "svc-web",
             provider: "github",
             cloneUrl: "https://example.test/repo.git",
             ref: "main",
@@ -2051,6 +2052,7 @@ async function deployWithDroppedRelease(
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
+            releaseServiceId: "svc-web",
             provider: "github",
             cloneUrl: "https://example.test/repo.git",
             ref: "main",

@@ -2712,6 +2712,7 @@ const VALID_MANAGED_INGRESS_RECONCILE = {
     {
       managedId: "00000000-0000-4000-8000-000000000001",
       engine: "postgres",
+      family: "pgsql",
       protocolPort: 5432,
       writerHostgroup: 0,
       readerHostgroup: 1,
@@ -2939,12 +2940,6 @@ test("managed.ingress.reconcile round-trips the explicit cluster family", () => 
       clusters: [{ ...base, engine: "mariadb", family: "mysql" }],
     }).clusters[0]?.family,
     "mysql",
-  );
-  // Absent on an older control plane: the daemon falls back to the engine.
-  assertEquals(
-    parseManagedIngressReconcilePayload(VALID_MANAGED_INGRESS_RECONCILE)
-      .clusters[0]?.family,
-    undefined,
   );
   assertThrows(
     () =>
@@ -3198,6 +3193,7 @@ const DEPLOY_BASE = {
 const SOURCE_ENTRY = {
   sourceId: "00000000-0000-4000-8000-000000000001",
   composeServiceName: "web",
+  releaseServiceId: "svc-web",
   provider: "gitlab",
   cloneUrl: "https://gitlab.test/acme/app.git",
   ref: "main",
