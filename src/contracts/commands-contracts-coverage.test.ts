@@ -339,7 +339,7 @@ test("parseEnvironmentDeployPayload round-trips release sourceKind site", () => 
   assertEquals(payload.sites?.[0]?.sourceKind, "release");
 });
 
-test("parseEnvironmentDeployPayload round-trips railpack sourceMaterial options", () => {
+test("parseEnvironmentDeployPayload round-trips image sourceMaterial options", () => {
   const payload = parseEnvironmentDeployPayload({
     ...DEPLOY_BASE,
     sourceMaterial: [{
@@ -352,7 +352,7 @@ test("parseEnvironmentDeployPayload round-trips railpack sourceMaterial options"
       commitMessage: "Deploy build",
       commitAuthor: "ci@203.0.113.1",
       build: {
-        kind: "railpack",
+        kind: "image",
         installCommand: "npm ci",
         buildCommand: "npm run build",
         startCommand: "node server.js",
@@ -364,7 +364,7 @@ test("parseEnvironmentDeployPayload round-trips railpack sourceMaterial options"
   const source = payload.sourceMaterial?.[0];
   assertEquals(source?.credentialKind, "ssh_key");
   assertEquals(source?.rollbackToReleaseId, "prev-rel");
-  assertEquals(source?.build.kind, "railpack");
+  assertEquals(source?.build.kind, "image");
   assertEquals(source?.subdirectory, "apps/web");
 });
 
@@ -375,7 +375,7 @@ test("parseEnvironmentDeployPayload accepts the image build kind", () => {
   });
   assertEquals(payload.sourceMaterial?.[0]?.build.kind, "image");
   assertEquals(isImageBuildKind("image"), true);
-  assertEquals(isImageBuildKind("railpack"), true);
+  assertEquals(isImageBuildKind("railpack"), false);
   assertEquals(isImageBuildKind("native"), false);
 });
 

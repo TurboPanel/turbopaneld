@@ -883,10 +883,14 @@ test("parseEnvironmentDeployPayload rejects sourceMaterial parse errors", () => 
     "Invalid sourceMaterial build kind",
   );
   rejectDeploy(
+    { sourceMaterial: [{ ...SOURCE_ENTRY, build: { kind: "railpack" } }] },
+    "Invalid sourceMaterial build kind",
+  );
+  rejectDeploy(
     {
       sourceMaterial: [{
         ...SOURCE_ENTRY,
-        build: { kind: "railpack", installCommand: "x".repeat(1001) },
+        build: { kind: "image", installCommand: "x".repeat(1001) },
       }],
     },
     "Invalid sourceMaterial build installCommand",

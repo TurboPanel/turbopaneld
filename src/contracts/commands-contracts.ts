@@ -1328,11 +1328,10 @@ export type EnvironmentDeploySite = {
  * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
  * for `image` and is ignored rather than rejected, so a stale value left by
  * a mode switch still parses. `kind: 'static'` is reserved for the
- * site release phase and is not produced today. The old value of
- * `image` is still accepted and means the same thing.
+ * site release phase and is not produced today.
  */
 export type EnvironmentDeploySourceBuild = {
-  kind: "native" | "static" | "image" | "railpack";
+  kind: "native" | "static" | "image";
   /**
    * Package manager for a `kind: 'native'` node-app install. Omitted means
    * auto-detect from the lockfile after checkout. An explicit
@@ -1898,9 +1897,9 @@ export type EnvironmentDeployContainer = {
   role: "service" | "ingress" | "turbopanel";
 };
 
-/** True for the image-build kind, under its new value and the old one. */
+/** True for the image-build kind. */
 export function isImageBuildKind(kind: string): boolean {
-  return kind === "image" || kind === "railpack";
+  return kind === "image";
 }
 
 /**
@@ -6511,9 +6510,7 @@ const SOURCE_RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const SOURCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 
 const SOURCE_PROVIDERS = new Set(["github", "gitlab", "git"]);
-// The old spelling of `image` is still accepted while the control plane sends
-// it.
-const SOURCE_BUILD_KINDS = new Set(["native", "static", "image", "railpack"]);
+const SOURCE_BUILD_KINDS = new Set(["native", "static", "image"]);
 
 /** Cap mirrors compose `SOURCE_COMMAND_MAX_LENGTH`. */
 const MAX_SOURCE_COMMAND_CHARS = 1000;

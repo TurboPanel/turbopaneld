@@ -1288,7 +1288,7 @@ test("applySourceReleases rolls back image-build releases from daemon record man
               releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000006",
               rollbackToReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000d",
               releaseServiceId: serviceId,
-              build: { kind: "railpack" },
+              build: { kind: "image" },
             }),
           ],
         }),
@@ -1326,11 +1326,10 @@ test("applySourceReleases rolls back image-build releases from daemon record man
 
 for (
   const [label, names] of [
-    ["old", ["railpackFrontendVersion", "railpackPlanVersion"]],
     ["new", ["builderFrontendVersion", "builderPlanVersion"]],
   ] as const
 ) {
-  test(`applySourceReleases reports only the new version names from a manifest with the ${label} names`, async () => {
+  test(`applySourceReleases reports the version names from a manifest with the ${label} names`, async () => {
     await createTempLayout().then(async (fixture) => {
       try {
         const layout = layoutFromFixture(fixture);
@@ -1392,8 +1391,6 @@ for (
         if (!row) throw new TypeError("expected image-build rollback row");
         assertEquals(row.builderFrontendVersion, "0.2.0");
         assertEquals(row.builderPlanVersion, "0.1.0");
-        assertEquals("railpackFrontendVersion" in row, false);
-        assertEquals("railpackPlanVersion" in row, false);
       } finally {
         await fixture.cleanup();
       }

@@ -958,9 +958,9 @@ test({
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async ({ stateDir }) => {
-      const environmentId = "env-railpack1";
+      const environmentId = "env-image1";
       const projectId = "proj-1";
-      const projectName = "tp-demo-railpack";
+      const projectName = "tp-demo-image";
       const serviceId = "00000000-0000-4000-8000-0000000000cc";
       const rollbackReleaseId = "rel-old";
       const imageTag = "registry.example.test/web:rel-old";
@@ -1019,7 +1019,7 @@ test({
             commitSha: "a".repeat(40),
             releaseId: "rel-new",
             rollbackToReleaseId: rollbackReleaseId,
-            build: { kind: "railpack" },
+            build: { kind: "image" },
           }],
         } as unknown as EnvironmentDeployPayload,
         new Date().toISOString(),

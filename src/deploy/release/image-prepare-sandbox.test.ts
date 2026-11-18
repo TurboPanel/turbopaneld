@@ -192,7 +192,7 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     const scratchDir = join(root, "scratch");
     const result = await runImageBuildBuild({
       build: {
-        kind: "railpack",
+        kind: "image",
         installCommand: "npm ci",
         env: {
           FOO: "bar",
