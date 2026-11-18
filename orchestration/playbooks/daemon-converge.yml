@@ -63,8 +63,7 @@
     - role: time-sync
     # Debian security updates on their own; never restarts the server.
     - role: os-security-updates
-    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
-    # (and the retired shared tpbuild account removed).
+    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds.
     - role: build-user
 
   # Entering one task file of a role needs import_role: Ansible ignores
@@ -86,18 +85,6 @@
     - name: Docker gate (no-op without Docker, observe mode)
       ansible.builtin.import_role:
         name: docker-gate
-    # Orchestrator host prep is normally lazy on managed.ha.reconcile; backfill
-    # host-prep.ok on hosts that already have root-only libexec wait-ready.
-    - name: Backfill the Orchestrator host prep marker
-      ansible.builtin.import_role:
-        name: orchestrator
-        tasks_from: backfill-host-prep-marker.yml
-    # Hosting Caddy edge (tpedge + ingress guard) is normally lazy on deploy;
-    # backfill enrolled/updated hosts before their first compose deploy.
-    - name: Backfill the hosting Caddy edge account
-      ansible.builtin.import_role:
-        name: hosting-caddy
-        tasks_from: backfill-edge-account.yml
     # Repairs that a fresh install makes but an update never reached. Both are
     # idempotent and skip what is absent (no Caddy vendored yet, no uv locks).
     - name: Repair the Caddy runtime directory modes

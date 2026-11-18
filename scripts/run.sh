@@ -32,7 +32,7 @@
 # installs the control plane. It prints a short welcome (and, on a non-release
 # channel, a yellow non-stable warning) then proceeds; Ctrl-C or q at the
 # continue prompt backs out. Daemon arguments without a license
-# (--host, --tunnel-token, --instance-ca, TURBOPANEL_HOST …) still mean "you
+# (--host, --instance-ca, TURBOPANEL_HOST …) still mean "you
 # meant to enrol a daemon and forgot the license" and stop with that error.
 # Downloads the daemon package for its orchestration tree, then the instance
 # and UI release packages from the same channel (default: release), verifies
@@ -3236,7 +3236,6 @@ HOST_URL=""
 DL_BASE=""
 INSTANCE_CA=""
 CA_PIN=""
-TUNNEL_TOKEN=""
 INSECURE_TLS=false
 NO_START=false
 INSTANCE_INSTALL=false
@@ -3275,9 +3274,6 @@ while [ $# -gt 0 ]; do
     --instance-ca-fingerprint)
       [ $# -ge 2 ] || { tp_print_error "--instance-ca-fingerprint requires an argument"; exit 1; }
       CA_PIN="$2"; shift 2 ;;
-    --tunnel-token)
-      [ $# -ge 2 ] || { tp_print_error "--tunnel-token requires an argument"; exit 1; }
-      TUNNEL_TOKEN="$2"; shift 2 ;;
     --dev-allow-unsigned)
       export TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1; shift ;;
     --allow-downgrade)
@@ -3365,7 +3361,6 @@ if [ -n "$PANEL_FINGERPRINT" ] && ! tp_panel_fingerprint_ok "$PANEL_FINGERPRINT"
   exit 1
 fi
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
-[ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 [ -n "$CA_PIN" ] || CA_PIN="${TURBOPANEL_INSTANCE_CA_FINGERPRINT:-}"
@@ -3455,7 +3450,7 @@ fi
 # non-stable-channel warning) print from tp_print_header once privileges are
 # settled, so a sudo re-exec does not show the banner twice.
 if [ "$DAEMON_ONLY" != true ] && [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
-  && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$CA_PIN" ] && [ -z "$DL_BASE" ] \
+  && [ -z "$INSTANCE_CA" ] && [ -z "$CA_PIN" ] && [ -z "$DL_BASE" ] \
   && [ -z "$MANIFEST_URL" ] && [ -z "$INSTANCE_MANIFEST_URL" ] \
   && [ -z "$UI_MANIFEST_URL" ]; then
   INSTANCE_INSTALL=true
@@ -3493,8 +3488,8 @@ if [ "$INSTANCE_INSTALL" = true ]; then
   # no control-plane URL (this host becomes one), and the packages only exist
   # on the GitHub rail — so the channel defaults to release, not trunk.
   [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] || export TURBOPANEL_UPDATE_CHANNEL=release
-  if [ -n "$LICENSE" ] || [ -n "$TUNNEL_TOKEN" ] || [ -n "$INSTANCE_CA" ]; then
-    tp_print_error "--instance installs a control plane: it takes no --license, --tunnel-token or --instance-ca (the co-located daemon is installed with it and enrols itself once the wizard has issued the first license)"
+  if [ -n "$LICENSE" ] || [ -n "$INSTANCE_CA" ]; then
+    tp_print_error "--instance installs a control plane: it takes no --license or --instance-ca (the co-located daemon is installed with it and enrols itself once the wizard has issued the first license)"
     exit 1
   fi
   if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
@@ -3564,10 +3559,6 @@ if ! tp_is_root; then
   if [ -n "$INSTALL_TOKEN" ]; then
     export TURBOPANEL_INSTALL_TOKEN="$INSTALL_TOKEN"
     _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_INSTALL_TOKEN"
-  fi
-  if [ -n "$TUNNEL_TOKEN" ]; then
-    export TURBOPANEL_TUNNEL_TOKEN="$TUNNEL_TOKEN"
-    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_TUNNEL_TOKEN"
   fi
   # Not secrets, but sudo resets the environment and the last step
   # (tp-kernel-features installer-step) reads them on the root side.
@@ -4256,9 +4247,6 @@ trap 'rm -f "$VARS_FILE"' EXIT
   fi
   if [ -n "$UI_MANIFEST_URL" ]; then
     printf 'turbopanel_ui_manifest_url: %s\n' "$UI_MANIFEST_URL"
-  fi
-  if [ -n "$TUNNEL_TOKEN" ]; then
-    printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
   fi
 } > "$VARS_FILE"
 

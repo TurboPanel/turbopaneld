@@ -663,11 +663,9 @@ function openlitespeedMainConfigPath(layout: LayoutPaths): string {
 }
 
 /**
- * php-fpm series pin. Must match `php_fpm_series` in
- * `orchestration/roles/php-fpm/defaults/main.yml`, and is re-exported as
- * `DEFAULT_PHP_SERIES` from `../site.ts` so there is one literal. It is a
- * default, not a pin: several series co-install and `resolveSitePhpSeries`
- * picks per site.
+ * The default php-fpm series, re-exported as `DEFAULT_PHP_SERIES` from
+ * `../site.ts` so there is one literal. It is a default, not a pin: several
+ * series co-install and `resolveSitePhpSeries` picks per site.
  */
 export const DEFAULT_PHP_FPM_SERIES = "8.4";
 

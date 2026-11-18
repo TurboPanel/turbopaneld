@@ -4,9 +4,7 @@
  * 0600, written by the daemon account and renamed into place). The file holds
  * the account key PEM and the account address the authority gave it.
  *
- * It sits beside the per-request folders that `sweepTenantAcme` clears at
- * start-up (`requests/`, `caddy/certificates/`), never inside them, so the
- * account survives restarts. `scripts/purge.sh` removes the state tree whole.
+ * It survives restarts. `scripts/purge.sh` removes the state tree whole.
  */
 import { createHash } from "node:crypto";
 import { join } from "@std/path";

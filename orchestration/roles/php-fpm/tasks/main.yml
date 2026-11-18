@@ -58,11 +58,6 @@
     repo_key_fingerprints: "{{ php_fpm_sury_key_fingerprints }}"
     repo_key_policy: "{{ php_fpm_key_policy }}"
 
-- name: Remove any legacy sury sources.list entry
-  ansible.builtin.file:
-    path: /etc/apt/sources.list.d/sury-php.list
-    state: absent
-
 # deb822 format with an explicit Signed-By — apt-key and `[signed-by=]` one-liners
 # are both deprecated.
 - name: Configure sury PHP apt repository

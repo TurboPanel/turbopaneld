@@ -50,7 +50,6 @@ export const HOST_PROGRAM_VERBS: ReadonlySet<string> = new Set([
   "ip",
   "wg",
   "groupadd",
-  "groupmod",
   "useradd",
   "usermod",
   "gpasswd",

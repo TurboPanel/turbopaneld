@@ -37,7 +37,6 @@ import {
   SAFE_MANAGED_ID_RE,
 } from "./engine-paths.ts";
 import {
-  clearManagedIntent,
   isHeldIntent,
   lookupManagedIntent,
   recordManagedIntent,
@@ -96,13 +95,10 @@ export function bootHoldPath(layout: LayoutPaths, managedId: string): string {
 
 /**
  * A primary with at least one other member: someone may have replaced it.
- * A record without `peerCount` (written before the field) falls back to
- * `replicaPeerCount`, so a primary that had replicas is still held; only a
- * lone primary is never held.
+ * A lone primary is never held.
  */
 export function isHoldablePrimary(record: ManagedHaMemberRecord): boolean {
-  return record.role === "primary" &&
-    (record.peerCount ?? record.replicaPeerCount) > 0;
+  return record.role === "primary" && record.peerCount > 0;
 }
 
 function parseHold(text: string, managedId: string): BootHoldRecord | null {
@@ -352,43 +348,6 @@ export async function ensureHoldStopped(
     );
   }
   return next;
-}
-
-/**
- * Release a hold ourselves (the control plane cannot answer): clear the held
- * marker, remove the file, start the engine again.
- */
-export async function releaseBootHoldLocally(
-  record: BootHoldRecord,
-  deps: Pick<BootHoldDeps, "layout" | "run">,
-  reason: string,
-): Promise<void> {
-  if (
-    await isManagedMemberDemoted(deps.layout, record.managedId)
-  ) {
-    logWarn(
-      "managed",
-      `boot hold: not releasing demoted member managedId=${record.managedId}`,
-    );
-    return;
-  }
-  await clearManagedIntent(deps.layout.stateDir, record.managedId, reason);
-  await Deno.remove(bootHoldPath(deps.layout, record.managedId)).catch(() =>
-    undefined
-  );
-  const started = await deps.run([
-    "compose",
-    "-p",
-    managedComposeProject(record.managedId),
-    "start",
-  ]);
-  if (!started.success) {
-    logWarn(
-      "managed",
-      `boot hold release: compose start failed managedId=${record.managedId}:`,
-      sanitizeForLog(started.stderr || started.stdout),
-    );
-  }
 }
 
 /**

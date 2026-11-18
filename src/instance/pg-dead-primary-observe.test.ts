@@ -33,6 +33,7 @@ const PRIMARY: ManagedHaMemberRecord = {
   role: "primary",
   containerName: "svc-1",
   replicaPeerCount: 1,
+  peerCount: 1,
   updatedAt: "2026-10-01T00:00:00Z",
 };
 
@@ -74,7 +75,6 @@ function harness(
       sent.push(message);
       return true;
     },
-    peerSupportsProbe: () => true,
     config: { intervalMs: 3_600_000 },
     monoMs: () => clock.now,
     wallMs: () => clock.now,
@@ -199,12 +199,6 @@ test("daemon shutdown: a tick in flight when detach() runs never sends", async (
   assertEquals(h.sent.length, 0);
 });
 
-test("control plane without managed-ha-probe-v1: detected but never sent", async () => {
-  const h = harness({ peerSupportsProbe: () => false });
-  await withAttached(h, () => pollTicks(h, 50));
-  assertEquals(h.sent.length, 0);
-});
-
 test("an undelivered event is retried on the next tick", async () => {
   let open = false;
   const sent: PgDeadPrimaryEventMessage[] = [];
@@ -305,7 +299,6 @@ test("a wall-clock step does not shorten graces (monotonic clock drives the dete
       sent.push(m);
       return true;
     },
-    peerSupportsProbe: () => true,
     config: { intervalMs: 3_600_000 },
     monoMs: () => mono,
     wallMs: () => wall,

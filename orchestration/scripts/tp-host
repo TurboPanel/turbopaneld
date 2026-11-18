@@ -1560,13 +1560,12 @@ tp_site_lifecycle_ok() {
     [ "$_sl_dev" -eq 1 ]
 }
 
-# A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
-# names the daemon has always used for the instance's own tunnel (`instance`,
-# and `default` from the installer's --tunnel-token). Kept equal to
-# isTunnelId in src/tunnels/connector-unit.ts.
+# A Cloudflare tunnel connector's id: a lower-case UUID, or `instance` (the
+# control plane's own tunnel). Kept equal to isTunnelId in
+# src/tunnels/connector-unit.ts.
 tp_tunnel_id_ok() {
   case "$1" in
-    instance|default) return 0 ;;
+    instance) return 0 ;;
   esac
   tp_uuid_ok "$1"
 }
@@ -4046,8 +4045,7 @@ tp_reserved_name() {
 }
 
 tp_new_name_ok() {
-  # Never <name>-grp: that is an older site owner's group name (groupmod
-  # renames it). Never all digits: getent would read it as an id.
+  # Never all digits: getent would read it as an id.
   case "$1" in *[!0-9]*) ;; *) return 1 ;; esac
   tp_owner_shape_ok "$1" || return 1
   ! tp_reserved_new_name "$1" || return 1
@@ -4163,24 +4161,6 @@ tp_verb_usermod() {
     *) tp_die "usermod: unsupported form" ;;
   esac
   tp_exec usermod "$@"
-}
-
-# groupmod -n NAME NAME-grp: a site owner's group from before the group took
-# the owner's own name is renamed in place, so everything keyed on its gid
-# (files, memberships) keeps working. Only for a principal NAME whose primary
-# group is NAME-grp in the principal band, with no group NAME yet, and only to
-# a name a new site owner could take.
-tp_verb_groupmod() {
-  [ "$#" -eq 3 ] && [ "$1" = "-n" ] && [ "$3" = "$2-grp" ] ||
-    tp_die "groupmod: only -n NAME NAME-grp"
-  tp_retire_name_ok "$2" || tp_die "groupmod: refusing name $2"
-  ! tp_reserved_name "$2" || tp_die "groupmod: refusing name $2"
-  tp_is_principal "$2" || tp_die "groupmod: $2 is not a principal"
-  ! tp_getent group "$2" >/dev/null 2>&1 || tp_die "groupmod: group $2 exists"
-  _gm_gid="$(tp_band_group_gid "$3")" || tp_die "groupmod: no group $3 in the principal band"
-  [ "$(tp_getent passwd "$2" | cut -d: -f4)" = "$_gm_gid" ] ||
-    tp_die "groupmod: $3 is not $2's primary group"
-  tp_exec groupmod -n "$2" "$3"
 }
 
 tp_verb_gpasswd() {
@@ -7092,7 +7072,6 @@ case "$_verb" in
   ip) tp_verb_ip "$@" ;;
   wg) tp_verb_wg "$@" ;;
   groupadd) tp_verb_groupadd "$@" ;;
-  groupmod) tp_verb_groupmod "$@" ;;
   useradd) tp_verb_useradd "$@" ;;
   usermod) tp_verb_usermod "$@" ;;
   gpasswd) tp_verb_gpasswd "$@" ;;

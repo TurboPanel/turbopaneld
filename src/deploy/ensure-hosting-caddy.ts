@@ -2,10 +2,8 @@
  * Ensure the hosting Caddy binary and its account exist.
  *
  * Called from `environment.deploy` and from the pre-validate hook in
- * `ingress.ts` (deploy paths and boot guard). `daemon-converge` backfills
- * {@link HOSTING_CADDY_USER}, the vendored binary, and the ingress guard on
- * enrolled hosts via `hosting-caddy/tasks/backfill-edge-account.yml`. Managed
- * hosts often have no Caddy until the first deploy that needs hostname ingress.
+ * `ingress.ts` (deploy paths and boot guard). Managed hosts often have no
+ * Caddy until the first deploy that needs hostname ingress.
  * The `caddy-setup` playbook (root) vendors the binary and provisions
  * {@link HOSTING_CADDY_USER} with read access to what Caddy loads; it runs
  * whenever any of those pieces is missing, so a host that already has the

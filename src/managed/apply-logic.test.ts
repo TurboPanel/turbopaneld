@@ -20,7 +20,6 @@ import {
   provisionManagedRootPasswordFile,
   writeManagedRootPasswordFile,
 } from "./apply.ts";
-import { normalizeManagedCompose } from "./compose.ts";
 import {
   managedDir,
   managedEnvFilePath,
@@ -844,7 +843,7 @@ test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-
   }
 });
 
-test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a changed one to the file form", async () => {
+test("chooseManagedCompose always builds the file form", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const path = `${dir}/docker-compose.yml`;
@@ -867,13 +866,6 @@ test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a 
 
     const fresh = await chooseManagedCompose(path, payload);
     assertEquals(fresh.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
-
-    const legacy = normalizeManagedCompose(payload, {
-      legacyRootPasswordEnv: true,
-    });
-    await Deno.writeTextFile(path, legacy.composeYaml);
-    const same = await chooseManagedCompose(path, payload);
-    assertEquals(same.composeYaml, legacy.composeYaml);
 
     const changed = await chooseManagedCompose(path, {
       ...payload,

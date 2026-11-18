@@ -54,16 +54,25 @@ class FakeClock {
   }
 }
 
-/** Scheduler stub recording every cadence change. */
+/**
+ * Scheduler stub recording every cadence change. `intervals` lists the
+ * effective sampling cadence after each change: the stream sampler's interval
+ * while a lease is live, the baseline otherwise.
+ */
 function fakeScheduler(): {
   intervals: number[];
   setIntervalMs: (ms: number) => void;
+  setStreamIntervalMs: (ms: number | null) => void;
 } {
   const intervals: number[] = [];
+  let baseline = METRICS_INTERVAL_MS;
   return {
     intervals,
     setIntervalMs(ms: number) {
-      intervals.push(ms);
+      baseline = ms;
+    },
+    setStreamIntervalMs(ms: number | null) {
+      intervals.push(ms ?? baseline);
     },
   };
 }
@@ -239,14 +248,13 @@ it("full 10s live session against a real scheduler-shaped stub", () => {
   ]);
 });
 
-it("under the wire version 8 a lease keeps the baseline cadence and starts the stream sampler", () => {
+it("a lease keeps the baseline cadence and starts the stream sampler", () => {
   const clock = new FakeClock(1_000);
   const intervals: number[] = [];
   const streams: Array<number | null> = [];
   const manager = new LiveLeaseManager({
     scheduler: {
       setIntervalMs: (ms) => intervals.push(ms),
-      splitsLiveStream: () => true,
       setStreamIntervalMs: (ms) => streams.push(ms),
     },
     now: clock.now,

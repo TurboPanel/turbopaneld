@@ -250,18 +250,9 @@ import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import { DAEMON_VERSION } from "../version.ts";
 import {
-  BACKUP_S3_COPY_FEATURE,
-  DEV_HOST_FEATURE,
-  FABRIC_PEER_REPORT_FEATURE,
-  HOST_CAPACITY_FEATURE,
-  MANAGED_HA_BOOT_HOLD_FEATURE,
-  MANAGED_HA_PROBE_FEATURE,
-  MANAGED_HEALTH_REPORT_FEATURE,
-  REPO_KEY_REPORT_FEATURE,
   resolveDaemonCapabilities,
   SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
-  TLS_CAPTURE_FEATURE,
   TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
 } from "./version-wire.ts";
 import {
@@ -326,22 +317,13 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers unconfirmed command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
   /**
-   * Runs when a session attaches: delivers held command outcomes. `peer`
-   * answers whether the control plane advertised a feature.
+   * A session socket opened (before its attach frame): send unconfirmed
+   * results on it without clearing anything.
    */
-  handleSessionAttach?: (
-    ws: WebSocket,
-    peer: { supports(feature: string): boolean },
-  ) => Promise<void>;
-  /**
-   * A session socket opened (before its attach frame): send held results on
-   * it without clearing anything.
-   */
-  handleSessionOpen?: (
-    ws: WebSocket,
-    peer: { supports(feature: string): boolean; known(): boolean },
-  ) => void;
+  handleSessionOpen?: (ws: WebSocket) => void;
   /** The control plane stored a command's outcome (`command-outcome-ack`). */
   handleCommandOutcomeAck?: (id: string) => Promise<void>;
   /**
@@ -822,9 +804,7 @@ export class InstanceClient {
     this.#updateProgress.setContext({
       progressId,
       upgradeId: options.upgradeId,
-      canSend: () =>
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN,
+      canSend: () => ws.readyState === WebSocket.OPEN,
       send: (message) => {
         if (ws.readyState !== WebSocket.OPEN) return false;
         ws.send(JSON.stringify(message));
@@ -852,21 +832,10 @@ export class InstanceClient {
     this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
   }
 
-  /** What the command outbox may ask about the attached control plane. */
-  #commandPeer(): { supports(feature: string): boolean; known(): boolean } {
-    return {
-      supports: (feature) => this.instanceSupports(feature),
-      known: () => this.#peerFeaturesKnown,
-    };
-  }
-
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
-      this.#runSocketHandler(
-        "session-attach",
-        sessionAttach(ws, this.#commandPeer()),
-      );
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
     }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
@@ -874,9 +843,7 @@ export class InstanceClient {
       ws.send(JSON.stringify({ ...pending, at: new Date().toISOString() }));
     }
     this.#updateProgress.setContext({
-      canSend: () =>
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN,
+      canSend: () => ws.readyState === WebSocket.OPEN,
       send: (message) => {
         if (ws.readyState !== WebSocket.OPEN) return false;
         ws.send(JSON.stringify(message));
@@ -1028,9 +995,6 @@ export class InstanceClient {
     setTopologyGenerationOptional(
       accepted.includes(TOPOLOGY_GENERATION_OPTIONAL_FEATURE),
     );
-    // A change kept for an older control plane goes out once this one lists the feature.
-    void this.#repoKeyReporter?.flush();
-    this.#devHost?.peerFeaturesChanged();
     this.#releaseHeldReports();
   }
 
@@ -2219,7 +2183,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupports: () => this.instanceSupports(DEV_HOST_FEATURE),
     });
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
@@ -2391,7 +2354,7 @@ export class InstanceClient {
           if (this.#ws !== ws) return;
           this.#startSessionWork(ws, attachProof, panelPin);
           this.#applySignedHello(hello);
-          commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+          commandPorts.handleSessionOpen?.(ws);
         },
         onFrame: (json) => this.#dispatchRawMessage(json, ws),
         onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),
@@ -2490,7 +2453,7 @@ export class InstanceClient {
     // never wait on one frame that may be lost with the upgrade. Nothing is
     // cleared until the attach frame says the control plane confirms results
     // (or it confirms one); a repeat send is harmless.
-    if (!signed) commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+    if (!signed) commandPorts.handleSessionOpen?.(ws);
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
@@ -2541,7 +2504,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
     });
   }
 
@@ -2553,10 +2515,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerBootHoldSupport: () =>
-        this.#peerFeaturesKnown
-          ? this.instanceSupports(MANAGED_HA_BOOT_HOLD_FEATURE)
-          : undefined,
     });
   }
 
@@ -2567,8 +2525,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () =>
-        this.instanceSupports(MANAGED_HEALTH_REPORT_FEATURE),
     });
     return this.#managedHealthReporter;
   }
@@ -2580,7 +2536,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () => this.instanceSupports(REPO_KEY_REPORT_FEATURE),
       ledger: () => repoKeyLedgerFor(),
     });
     return this.#repoKeyReporter;
@@ -2593,8 +2548,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () =>
-        this.instanceSupports(FABRIC_PEER_REPORT_FEATURE),
       subscribe: () => commandPorts.subscribeFabricPeers,
     });
     return this.#fabricPeerReporter;
@@ -2631,7 +2584,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
     });
     return this.#backupCopyReporter;
   }
@@ -2673,7 +2625,6 @@ export class InstanceClient {
         return api.reportIssuedCertificate(input);
       },
     });
-    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
     return this.#acmeIssue;
   }
 
@@ -2685,9 +2636,7 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
       },
       capture: createCertificateCapture({
-        supported: () =>
-          this.#apiClient !== undefined &&
-          this.instanceSupports(TLS_CAPTURE_FEATURE),
+        supported: () => this.#apiClient !== undefined,
         report: (input) => {
           const api = this.#apiClient;
           if (api === undefined) {
@@ -2737,10 +2686,8 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
-      hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
       // Running and unconfirmed commands ride on hello / heartbeat.
       commandReport: () => commandPorts.commandReport?.(),
-      peerSupports: (feature) => this.instanceSupports(feature),
     });
   }
 
@@ -2752,10 +2699,6 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
-      schedulerOptions: {
-        durabilityFlag: () => this.instanceSupports("metrics-v8"),
-        sizesFlag: () => this.instanceSupports("metrics-v8-sizes"),
-      },
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;
@@ -3600,10 +3543,7 @@ export class InstanceClient {
   ): void {
     const upgradeId = message.upgradeId?.trim() || undefined;
     const error = "preflight_in_progress: update already in progress";
-    if (
-      this.instanceSupports("update-progress-v1") &&
-      ws.readyState === WebSocket.OPEN
-    ) {
+    if (ws.readyState === WebSocket.OPEN) {
       const progress: DaemonMessage = {
         type: "update-progress",
         id: message.id,
@@ -3801,10 +3741,7 @@ export class InstanceClient {
     const upgradeId = message.upgradeId?.trim() || undefined;
     const error =
       "preflight_in_progress: control-plane update already in progress";
-    if (
-      this.instanceSupports("update-progress-v1") &&
-      ws.readyState === WebSocket.OPEN
-    ) {
+    if (ws.readyState === WebSocket.OPEN) {
       const progress: DaemonMessage = {
         type: "update-progress",
         id: message.id,

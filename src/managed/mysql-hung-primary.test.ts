@@ -23,6 +23,7 @@ const RECORD: ManagedHaMemberRecord = {
   role: "primary",
   containerName: "mariadb-primary-1",
   replicaPeerCount: 1,
+  peerCount: 1,
   updatedAt: "2026-10-23T00:00:00.000Z",
 };
 

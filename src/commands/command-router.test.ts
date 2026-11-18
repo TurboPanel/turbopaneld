@@ -1363,9 +1363,7 @@ test({
     try {
       const mock = new MockWebSocket();
       const ws = mock as unknown as WebSocket;
-      await outbox.flushCommandOutcomes(ws, {
-        supports: (feature) => feature === "command-recovery-v1",
-      });
+      await outbox.flushCommandOutcomes(ws);
       const dispatch = (id: string): CommandDispatchMessage => ({
         type: "command-dispatch",
         id,

@@ -2,8 +2,7 @@
  * The development host on the cell wire (feature `dev-host-v1`).
  *
  * - `dev-host-status` (daemon → control plane, fire-and-forget): sent on
- *   attach, whenever the job changes, and after every 60 s status tick; only
- *   to a control plane that lists `dev-host-v1`.
+ *   attach, whenever the job changes, and after every 60 s status tick.
  * - `dev-host-action` → `dev-host-action-result` (correlated on `id`): start
  *   Update and Restart (`update`) or Restart Only (`restart`). The action enum
  *   is the only input taken from the wire.
@@ -58,16 +57,12 @@ export const DEV_HOST_TICK_MS = 60_000;
 export type DevHostLink = {
   /** Send one frame; false when the socket is not open. */
   send: (message: DaemonMessage) => boolean;
-  /** True while the control plane lists `dev-host-v1`. */
-  peerSupports: () => boolean;
 };
 
 /** What the instance client needs from the development host. */
 export type DevHostPort = {
   attach: (link: DevHostLink) => void;
   detach: () => void;
-  /** The attach frame's feature list arrived or changed. */
-  peerFeaturesChanged: () => void;
   /** The attach frame's `commit` (the control plane's running build). */
   setControlPlaneCommit: (commit: unknown) => void;
   start: (action: DevHostAction) => Promise<StartResult>;
@@ -243,10 +238,6 @@ export class DevHostService implements DevHostPort {
     this.#link = undefined;
   }
 
-  peerFeaturesChanged(): void {
-    this.#send();
-  }
-
   setControlPlaneCommit(commit: unknown): void {
     this.#controlPlaneCommit = typeof commit === "string" ? commit : null;
   }
@@ -282,7 +273,7 @@ export class DevHostService implements DevHostPort {
   #send(): void {
     const link = this.#link;
     const status = this.#status;
-    if (!link || !status || !link.peerSupports()) return;
+    if (!link || !status) return;
     link.send({
       type: "dev-host-status",
       status,

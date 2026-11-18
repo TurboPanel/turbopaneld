@@ -3,11 +3,9 @@
  *
  * The playbook runner remembers each change in the {@link RepoKeyLedger}
  * (`orchestration/repo-key-changes.ts`) as pending. This reporter sends one
- * `repo-key-changed` frame per pending change, only to a control plane
- * advertising `repo-key-report-v1`, and marks it sent only after the frame
- * went out on an open socket. A converge that ran before the socket was up, or
- * against an older control plane, therefore keeps its notice until a report
- * can be delivered. Fire-and-forget: the control plane sends no answer.
+ * `repo-key-changed` frame per pending change and marks it sent only after
+ * the frame went out on an open socket. A converge that ran before the socket
+ * was up therefore keeps its notice until a report can be delivered. Fire-and-forget: the control plane sends no answer.
  */
 
 import type { DaemonMessage } from "../contracts/cell-messages.ts";
@@ -21,8 +19,6 @@ import { logWarn } from "../util/logger.ts";
 export type RepoKeyReporterOptions = {
   /** Send one frame; false when the socket is not open. */
   send: (message: DaemonMessage) => boolean;
-  /** True while the control plane advertises `repo-key-report-v1`. */
-  peerSupportsReport: () => boolean;
   ledger: () => RepoKeyLedger;
   nowMs?: () => number;
 };
@@ -80,7 +76,6 @@ export class RepoKeyReporter {
   }
 
   async #flushOnce(): Promise<void> {
-    if (!this.#options.peerSupportsReport()) return;
     const ledger = this.#options.ledger();
     const nowMs = this.#options.nowMs ?? Date.now;
     let open = true;

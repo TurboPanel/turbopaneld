@@ -46,8 +46,7 @@ export const DEPLOY_PROGRESS_DETAIL_INTERVAL_MS = 2000;
 export const DEPLOY_PROGRESS_WAITING_BEAT_MS = 60_000;
 
 /**
- * While a deploy runs, the whole payload is sent again this often (when the
- * control plane advertises `command-recovery-v1`), so a quiet build is told
+ * While a deploy runs, the whole payload is sent again this often so a quiet build is told
  * apart from a lost link.
  */
 export const DEPLOY_PROGRESS_KEEPALIVE_MS = 30_000;
@@ -134,8 +133,6 @@ export type DeployStepReporterOptions = {
   clearTimer?: (handle: unknown) => void;
   /** Called with every payload that is sent (the journal keeps the latest). */
   onSnapshot?: (progress: CommandProgress) => void;
-  /** True when the running payload should be repeated as a keepalive. */
-  keepalive?: () => boolean;
   keepaliveMs?: number;
 };
 
@@ -243,7 +240,6 @@ class DeployStepReporterImpl implements DeployStepReporter {
   #beatTimer: unknown = undefined;
   #keepaliveTimer: unknown = undefined;
   readonly #onSnapshot: ((progress: CommandProgress) => void) | undefined;
-  readonly #keepalive: (() => boolean) | undefined;
   readonly #keepaliveMs: number;
 
   constructor(options: DeployStepReporterOptions) {
@@ -256,7 +252,6 @@ class DeployStepReporterImpl implements DeployStepReporter {
     this.#clearTimer = options.clearTimer ??
       ((handle) => clearTimeout(handle as number));
     this.#onSnapshot = options.onSnapshot;
-    this.#keepalive = options.keepalive;
     this.#keepaliveMs = options.keepaliveMs ?? DEPLOY_PROGRESS_KEEPALIVE_MS;
   }
 
@@ -379,12 +374,10 @@ class DeployStepReporterImpl implements DeployStepReporter {
   }
 
   #startKeepalive(): void {
-    if (this.#keepalive === undefined || this.#keepaliveTimer !== undefined) {
-      return;
-    }
+    if (this.#keepaliveTimer !== undefined) return;
     this.#keepaliveTimer = this.#setTimer(() => {
       this.#keepaliveTimer = undefined;
-      if (this.#runningSince !== null && this.#keepalive?.()) this.#sendNow();
+      if (this.#runningSince !== null) this.#sendNow();
       this.#startKeepalive();
     }, this.#keepaliveMs);
   }

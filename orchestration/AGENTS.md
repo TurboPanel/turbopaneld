@@ -370,12 +370,7 @@ access groups (`tpsftp`, `tpshell`, `tppasswd`, `tpprincipal`), which are the
 only groups the daemon reconciles on a site owner's Linux user.
 
 The `runtime-access` role (included by `php-fpm`, `openlitespeed` for lsphp,
-`node-app-runtime` and `deno-app-runtime`) sets those ACLs and removes what
-older releases left behind: every group named `tpphp<NN>`, `tpnode<N>` or
-`tpdeno<N>` with a gid in **9900–9979** (name and band must both match), first
-the `dpkg-statoverride` entries that name one (dpkg refuses to run while an
-override names a missing group; the binary is put back to `root:root 0755`),
-then their ACL entries, then the group. Nothing else may take a gid in that
+`node-app-runtime` and `deno-app-runtime`) sets those ACLs. Nothing else may take a gid in that
 band; **9980–9999** is service identities (9994 stays reserved for `tpbuild`,
 the retired shared build account; builds now run as per-build systemd
 `DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
@@ -544,10 +539,9 @@ daemon-converge and the co-located refresh; daemon-reload only). `RestartSteps`
 needs systemd 254; an older systemd ignores it with a warning. A unit that
 fails to restart after a Deno bump is reported, never failing the play.
 
-`playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
-when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or
-stale, so enrolled hosts are edge-ready before the first compose deploy. The
-role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
+`daemon-converge` does not run the hosting-caddy role; the daemon sets the edge
+up on the first compose deploy that needs it. The role grants `tpedge` exactly
+what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on
 `/etc/turbopanel/hosting{,/sites}` (so every Caddyfile and snippet the daemon

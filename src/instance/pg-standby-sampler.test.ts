@@ -24,6 +24,7 @@ function member(
     role,
     containerName: `c-${memberId}`,
     replicaPeerCount: 1,
+    peerCount: 1,
     updatedAt: AT,
   };
 }

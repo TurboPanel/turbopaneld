@@ -133,24 +133,6 @@ export async function recordHostBootPersist(
   }
 }
 
-/**
- * Compare with the previous record, then write this run's record (no clean
- * stamp: it must be earned again by the next clean shutdown).
- *
- * @deprecated Use `classifyHostBootRecord` then `recordHostBootPersist` instead.
- */
-export async function recordHostBoot(
-  layout: LayoutPaths,
-  deps: {
-    readBootId?: () => Promise<string | undefined>;
-    nowIso?: () => string;
-  } = {},
-): Promise<HostBootKind> {
-  const kind = await classifyHostBootRecord(layout, deps);
-  await recordHostBootPersist(layout, deps);
-  return kind;
-}
-
 async function writeBootRecord(
   layout: LayoutPaths,
   record: HostBootRecord,

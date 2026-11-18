@@ -4932,53 +4932,6 @@ it({
 });
 
 it({
-  name: "update-result still carries errorCode when progress feature is closed",
-  permissions: {
-    env: true,
-    read: true,
-    write: true,
-    sys: ["hostname", "networkInterfaces"],
-  },
-  sanitizeOps: false,
-  sanitizeResources: false,
-  fn: async () => {
-    const restoreHooks = installClientTestHooks({
-      getBuildInfo: () => ({
-        commit: "old",
-        buildId: "dev-old",
-        builtAt: "2026-08-01T00:00:00Z",
-        channel: "trunk",
-        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
-      }),
-      resolveUpdate: () =>
-        Promise.reject(new ManifestSignatureError("signature invalid")),
-    });
-    const { socket, restore } = await startConnectedClient();
-    try {
-      socket.receive({
-        type: "update",
-        id: "upd-legacy",
-        upgradeId: "up-legacy",
-        at: new Date().toISOString(),
-      });
-      const result = await waitFor(
-        "legacy signature update-result",
-        () =>
-          framesOfType(socket, "update-result").find((f) =>
-            (f as { id?: string }).id === "upd-legacy"
-          ) as { errorCode?: string; upgradeId?: string } | undefined,
-      );
-      assertEquals(result.errorCode, "preflight_manifest");
-      assertEquals(result.upgradeId, "up-legacy");
-      assertEquals(framesOfType(socket, "update-progress").length, 0);
-    } finally {
-      await restore();
-      restoreHooks();
-    }
-  },
-});
-
-it({
   name: "update targetCommit short-circuit skips reconcile",
   permissions: {
     env: true,

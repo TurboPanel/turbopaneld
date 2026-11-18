@@ -503,6 +503,7 @@ const INTENT_DISPATCHES: Array<{
 test("every intent verb's handler runs with the marker already active", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
+  (await import("../commands/command-outbox.ts")).resetCommandOutboxForTests();
   const covered = new Set(INTENT_DISPATCHES.map((d) => d.commandType));
   for (const type of Object.keys(MANAGED_COMMAND_INTENT_KINDS)) {
     assert(covered.has(type), `${type} lacks a dispatch case in this test`);
@@ -558,6 +559,7 @@ test("every intent verb's handler runs with the marker already active", async ()
 test("apply records the member; promote flips it; destroy removes it", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
+  (await import("../commands/command-outbox.ts")).resetCommandOutboxForTests();
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
     await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
@@ -620,6 +622,7 @@ test("apply records the member; promote flips it; destroy removes it", async () 
 test("a managed.destroy through the router keeps the marker held when the member record cannot be removed", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
+  (await import("../commands/command-outbox.ts")).resetCommandOutboxForTests();
   await withTempLayout(async (fixture) => {
     resetManagedIntentsForTests();
     const layout = resolveLayout(fixture.env);
@@ -659,6 +662,7 @@ test("a managed.destroy through the router keeps the marker held when the member
 test("a managed.destroy through the router clears the marker once the member record is gone", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
+  (await import("../commands/command-outbox.ts")).resetCommandOutboxForTests();
   await withTempLayout(async (fixture) => {
     resetManagedIntentsForTests();
     const layout = resolveLayout(fixture.env);
@@ -674,6 +678,7 @@ test("a managed.destroy through the router clears the marker once the member rec
         role: "primary",
         containerName: "svc-1",
         replicaPeerCount: 0,
+        peerCount: 0,
         updatedAt: new Date().toISOString(),
       });
       setCommandRouterHandlersForTests({
@@ -708,6 +713,7 @@ test("a managed.destroy through the router clears the marker once the member rec
 test("managed.ha.failover recover flips the local target member to primary", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
+  (await import("../commands/command-outbox.ts")).resetCommandOutboxForTests();
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
     await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
@@ -720,6 +726,7 @@ test("managed.ha.failover recover flips the local target member to primary", asy
       role: "replica",
       containerName: "svc-2",
       replicaPeerCount: 1,
+      peerCount: 1,
       updatedAt: new Date().toISOString(),
     });
     setManagedCommandHooksLayoutForTests(layout);
@@ -759,6 +766,7 @@ test("managed.ha.failover recover flips the local target member to primary", asy
 test("managed.ha.failover repoint does not flip the local replica to primary", async () => {
   const { handleCommandDispatch, setCommandRouterHandlersForTests } =
     await import("../commands/command-router.ts");
+  (await import("../commands/command-outbox.ts")).resetCommandOutboxForTests();
   await withTempLayout(async (fixture) => {
     const layout = resolveLayout(fixture.env);
     await Deno.mkdir(`${layout.stateDir}/managed/${MANAGED_ID}`, {
@@ -771,6 +779,7 @@ test("managed.ha.failover repoint does not flip the local replica to primary", a
       role: "replica",
       containerName: "svc-3",
       replicaPeerCount: 2,
+      peerCount: 2,
       updatedAt: new Date().toISOString(),
     });
     setManagedCommandHooksLayoutForTests(layout);
@@ -881,23 +890,6 @@ test("1+1 cluster: the promoted replica is watched at once (old primary counted 
     const promoted = await readManagedHaMember(layout, MANAGED_ID);
     assertEquals(promoted?.role, "primary");
     assertEquals(promoted?.replicaPeerCount, 1);
-
-    // A record written before peerCount existed still counts the old primary.
-    await saveManagedHaMember(layout, {
-      ...record,
-      peerCount: undefined,
-      role: "replica",
-    });
-    await markManagedHaMemberPromoted(
-      layout,
-      MANAGED_ID,
-      MEMBER_ID,
-      new Date().toISOString(),
-    );
-    assertEquals(
-      (await readManagedHaMember(layout, MANAGED_ID))?.replicaPeerCount,
-      1,
-    );
   });
 });
 

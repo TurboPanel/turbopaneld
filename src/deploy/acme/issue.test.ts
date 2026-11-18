@@ -3,7 +3,7 @@ import { join } from "@std/path";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { createFakeCa, FAKE_CA_DIRECTORY } from "../../testing/fake-acme-ca.ts";
 import type { CommandResult } from "../instance-acme-http01.ts";
-import { sweepTenantAcme, tenantAcmeSocketPath } from "../tenant-acme-issue.ts";
+import { tenantAcmeSocketPath } from "../tenant-acme-issue.ts";
 import { acmeAccountPath } from "./account-store.ts";
 import { AcmeError, LocalAcmeError } from "./client.ts";
 import { Http01Answers, withHttp01Answers } from "./http01.ts";
@@ -361,23 +361,6 @@ async function exists(path: string): Promise<boolean> {
     return false;
   }
 }
-
-test("the start-up sweep keeps the account and clears only the request files", async () => {
-  await withRoot(async (root) => {
-    const layout = layoutUnder(root);
-    const path = acmeAccountPath(layout, FAKE_CA_DIRECTORY, "ops@example.com");
-    await Deno.mkdir(join(path, ".."), { recursive: true });
-    await Deno.writeTextFile(path, "{}");
-    const requests = join(root, "state", "tenant-acme", "requests");
-    await Deno.mkdir(requests, { recursive: true });
-    await sweepTenantAcme(layout, {
-      run: okRun,
-      stopUnit: () => Promise.resolve(null),
-    });
-    assertEquals(await exists(path), true);
-    assertEquals(await exists(requests), false);
-  });
-});
 
 test("a peer that sends nothing does not hold up the next check", async () => {
   await withRoot(async (root) => {

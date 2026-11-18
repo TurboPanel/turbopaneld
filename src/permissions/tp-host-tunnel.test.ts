@@ -88,9 +88,9 @@ async function stageToken(host: Host, text: string, id = ID) {
   await Deno.writeTextFile(host.path(`${STAGE_DIR}/${id}.env`), text);
 }
 
-test("the unit the daemon renders is accepted, for an id and for the two legacy names", async () => {
+test("the unit the daemon renders is accepted, for an id and for the instance tunnel", async () => {
   await withHost(async (host) => {
-    for (const id of [ID, "instance", "default"]) {
+    for (const id of [ID, "instance"]) {
       const result = await installUnit(host, unitName(id), unitFor(host, id));
       assertEquals(result.code, 0, result.stderr);
     }
@@ -101,7 +101,7 @@ test("the unit the daemon renders is accepted, for an id and for the two legacy 
 
 test("the second unit of a tunnel (a connector update) is accepted under its own name only", async () => {
   await withHost(async (host) => {
-    for (const id of [ID, "instance", "default"]) {
+    for (const id of [ID, "instance"]) {
       const result = await installUnit(
         host,
         unitName(id, "b"),
@@ -319,9 +319,9 @@ test("tunnel-env-install copies a checked token into a root-only folder", async 
   });
 });
 
-test("tunnel-env-install and tunnel-env-remove accept the legacy names", async () => {
+test("tunnel-env-install and tunnel-env-remove accept the instance tunnel", async () => {
   await withHost(async (host) => {
-    for (const id of ["default", "instance"]) {
+    for (const id of ["instance"]) {
       await stageToken(host, renderTunnelEnvFile(TOKEN), id);
       assertEquals((await host.run(["tunnel-env-install", id])).code, 0);
       const copy = host.path(`${COPY_DIR}/${id}.env`);

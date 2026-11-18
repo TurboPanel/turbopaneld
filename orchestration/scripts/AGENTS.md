@@ -213,8 +213,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     takes the same names and only a fresh group of the user's own name: in the
     band, nobody's primary group yet, no members. Residual risk accepted with
     the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
-    lines that name a group are not scanned. `groupmod` only renames a site
-    owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
+    lines that name a group are not scanned. It takes `chpasswd`
     input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and

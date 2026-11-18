@@ -4,7 +4,7 @@ Each Cloudflare tunnel connector runs as its own systemd service,
 `turbopanel-tunnel-<id>.service`, never as a child of the daemon: systemd stops
 the daemon's process group on every daemon restart, so a child connector would
 drop with every update. `<id>` is the provider's tunnel id (lower-case UUID) or
-one of the two legacy names `instance` and `default`; `isTunnelId` and
+`instance`; `isTunnelId` and
 `tp_tunnel_id_ok` apply the same rule, and every operation refuses anything else.
 
 - `connector-unit.ts` is pure (ids, names, unit text, token line, status map);
@@ -64,10 +64,6 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   token is staged. If the token copy is gone too, the unit cannot start: the
   command fails naming the missing token, and the unit is left stopped and not
   enabled.
-- Hosts that held a tunnel as `<id>.token` in the tunnels folder migrate on
-  daemon start: the file becomes a service and is deleted once the service is
-  enabled and (re)started (not once `/ready` passes; status shows that). If a
-  service already exists for that id the stale file is dropped, never installed. Files not named for a tunnel id are left alone with a warning.
 - Purge needs no tunnel-specific code beyond the port lock's table name: it
   stops and removes every `turbopanel*` unit (the boot unit below included) and
   removes `/etc/turbopanel`, `/var/lib/turbopanel` and `/opt/turbopanel` whole,
@@ -128,8 +124,7 @@ after repeated crashes; `Restart=always` covers a plain crash) is started again
 resend repairs it; a start the host refuses fails the command so the list is
 sent again. `remove` entries call `removeConnector`. Only the ids
 named in the command are touched, and the contract refuses `instance` and
-`default`, so the instance's own tunnel and legacy token files are never
-reached from here. One tunnel failing does not stop the others; the command
+`default`, so the instance's own tunnel is never reached from here. One tunnel failing does not stop the others; the command
 then fails with the tunnel ids and plain reasons (never a token or an
 envelope) and the control plane sends the list again.
 
@@ -152,7 +147,7 @@ transcript redactor here keeps its no-heuristics rule.
 - The daemon pins one connector version (`CLOUDFLARED_VERSION`, with checksums in
   `assets.ts`) and the permission list names that exact file, so a newer
   connector reaches servers only with a daemon release. After a daemon update,
-  `startTunnels` migrates legacy token files and then runs
+  `startTunnels` runs
   `runConnectorUpdates`: every tunnel whose recorded version differs from the pin
   is moved by `updateConnector`, one tunnel at a time.
 - A tunnel has two possible units: slot `a` (`turbopanel-tunnel-<id>.service`,

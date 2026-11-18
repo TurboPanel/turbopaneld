@@ -12,7 +12,7 @@ The `environment.deploy` / `environment.lifecycle` / `environment.stop` command 
 
 **The daemon's own ACME client (`acme/`).** A port of the control plane's client lives in `acme/` with its own guide (`acme/AGENTS.md`): one certificate for several names over the same proof socket and routes, the account under `<state>/tenant-acme/account/`. Server-placed orders use it (`runOrder` calls `issueCertificateOverHttp01`).
 
-Restart safety of an order: the order runs inside the daemon with one 3-minute deadline, below the 15 minutes the local proof routes live. At start-up, before any request is taken, `sweepTenantAcme` still stops every `turbopanel-tenant-acme@*` unit an older release left running (the template unit stays installed by the `hosting-caddy` role and is never started now) and deletes the per-request folders, any certificates that issuer stored and leftover sockets; the accounts (`account/`, and the old issuer's `caddy/acme`) are kept. A re-send of a request the handler is still running is ignored (`AcmeIssueHandler` keeps the open request ids). A `started` event the link could not carry begins nothing. A rate-limit failure is reported in the words "rate limited" because the control plane's one-hour wait keys on them.
+Restart safety of an order: the order runs inside the daemon with one 3-minute deadline, below the 15 minutes the local proof routes live. A re-send of a request the handler is still running is ignored (`AcmeIssueHandler` keeps the open request ids). A `started` event the link could not carry begins nothing. A rate-limit failure is reported in the words "rate limited" because the control plane's one-hour wait keys on them.
 
 **Certificate folder cleanup (`tls-cleanup.ts`).** `materializeTlsCertificates` only ever wrote `<tlsDir>/<tlsId>/`, so a pin that moved or an environment that was torn down left its key on the server. After a site is live (deploy) and after an environment's site is removed and hosting Caddy reloaded, `removeUnreferencedTlsFolders` deletes a folder only when its name is a certificate UUID, no file of any name in `hosting/sites` (environment, reserved, tunnel, quarantined) mentions the id, and nothing in it is newer than ten minutes (a deploy materializes before it writes the site). If the sites folder cannot be read, nothing is removed. Both calls run inside the hosting sites lock. `scripts/purge.sh` needed no change for the issuer and the proof handlers: they sit in trees it removes whole (`/etc/turbopanel/hosting/proof`, `/var/lib/turbopanel/tenant-acme`, `/run/turbopanel/tenant-acme-*.sock`) and its `turbopanel*` unit patterns already stop the issuer instances and remove the template unit (tests added).
 
@@ -83,8 +83,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    then direct GitHub download) when
    `/opt/turbopanel/vendor/caddy/current/caddy` or the `tpedge` account it
    runs as is missing (only the playbook can create the account). On-demand like
-   Docker on deploy; `daemon-converge` backfills tpedge, Caddy, and the ingress
-   guard on enrolled hosts (`hosting-caddy/tasks/backfill-edge-account.yml`).
+   Docker on deploy.
    Required for hostname ingress.
 4. When `principalMaterial[]` is present, ensure Linux users/groups on the host
    (`ensureSystemPrincipals` in `src/deploy/ensure-principal.ts`; a name must
@@ -118,12 +117,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (conflict) instead of silently attaching the principal to that group. An
    existing group `<username>` is adopted only when its gid is in the band and,
    if the account exists, it is the account's primary group; an existing
-   account whose primary group is neither is refused. A host set up while the
-   group was still called `<username>-grp` gets it renamed in place
-   (`tp-host groupmod -n <username> <username>-grp`, only for that exact shape:
-   a principal whose primary group it is, in the band, no group `<username>`
-   yet); files and memberships follow the gid. Units rendered before the rename
-   still say `Group=<username>-grp` until the same deploy rewrites them. Shell comes from `principalMaterial[].shell`
+   account whose primary group is not `<username>` is refused. Shell comes from `principalMaterial[].shell`
    (default `/usr/sbin/nologin`) via `useradd -s` / `usermod -s`. Existing
    accounts are adopted only when the passwd **home** matches the expected
    path — a username collision with a foreign home fails the deploy instead

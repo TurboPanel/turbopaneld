@@ -1956,6 +1956,7 @@ test("only a MySQL or MariaDB primary with a replica is watched for a hang", () 
       engine: "mysql",
       role: "primary",
       replicaPeerCount: 1,
+      peerCount: 1,
     }),
     true,
   );
@@ -1965,6 +1966,7 @@ test("only a MySQL or MariaDB primary with a replica is watched for a hang", () 
       engine: "mariadb",
       role: "primary",
       replicaPeerCount: 0,
+      peerCount: 0,
     }),
     false,
   );
@@ -1974,6 +1976,7 @@ test("only a MySQL or MariaDB primary with a replica is watched for a hang", () 
       engine: "mariadb",
       role: "replica",
       replicaPeerCount: 1,
+      peerCount: 1,
     }),
     false,
   );
@@ -1983,6 +1986,7 @@ test("only a MySQL or MariaDB primary with a replica is watched for a hang", () 
       engine: "postgres",
       role: "primary",
       replicaPeerCount: 1,
+      peerCount: 1,
     }),
     false,
   );
