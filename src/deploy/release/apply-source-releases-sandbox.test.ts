@@ -480,13 +480,13 @@ test("an image build's prepare step runs in the sandbox, in the site owner's sli
       const layout = resolveLayout(fixture.env);
       await applySourceReleases(
         layout,
-        payload({ build: { kind: "railpack" }, subdirectory: "apps/web" }),
+        payload({ build: { kind: "image" }, subdirectory: "apps/web" }),
         lane,
       );
       await applySourceReleases(
         layout,
         payload({
-          build: { kind: "railpack" },
+          build: { kind: "image" },
           principal: undefined,
           releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000002",
         }),
@@ -515,7 +515,7 @@ test("a development checkout prepares image builds as the developer, without the
       let sandboxed: boolean | null = null;
       await applySourceReleases(
         resolveLayout(fixture.env),
-        payload({ build: { kind: "railpack" } }),
+        payload({ build: { kind: "image" } }),
         {
           ...imageLaneDeps(deps, []),
           sandboxedBuilds: false,

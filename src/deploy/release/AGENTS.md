@@ -550,19 +550,10 @@ record written by that same deploy no longer names it.
 
 A source binding may set `x-turbopanel.source.buildKind: image`, which
 deploy-prepare passes straight through as `sourceMaterial[].build.kind`.
-**Both spellings are accepted** while the rename rolls out: `image` is the new
-value and the old one still parses and behaves the same
-(`isImageBuildKind` in `commands-contracts.ts` is the one check). Likewise the
-two version fields are written as `builderFrontendVersion` /
-`builderPlanVersion`; `readReleaseManifest` still reads the old field names from
-manifests sealed earlier and maps them to the new ones, so a rollback to an old
-release keeps working. A daemon older than this change still reads a manifest
-written with the new names (it ignores unknown keys) and only loses the two
-version fields when it reports the release. Both fallbacks stay until wipe day:
-released control planes still send the old build kind value, and live hosts
-still hold manifests sealed with the old field names. On wipe day, when every
-database is wiped and every server reinstalled, the control plane switches to
-sending `image` and both fallbacks are removed in one step. That is
+`image` is the only accepted build kind
+(`isImageBuildKind` in `commands-contracts.ts` is the one check). The two
+version fields are written as `builderFrontendVersion` /
+`builderPlanVersion`. That is
 the **fourth deploy pattern** on this host, alongside compose, site,
 and native app — and the four differ only in what a release *is*:
 

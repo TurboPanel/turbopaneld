@@ -186,7 +186,7 @@ test("sitesWithReleaseRoots and siteBuildRuntimes follow the site sources", () =
   const withOutput = payload({ kind: "native", outputDirectory: "out" });
   assertEquals(sitesWithReleaseRoots(withOutput, [SITE])[0]?.root, ".");
   assertEquals(siteBuildRuntimes(withOutput).length, 1);
-  assertEquals(siteBuildRuntimes(payload({ kind: "railpack" })).length, 0);
+  assertEquals(siteBuildRuntimes(payload({ kind: "image" })).length, 0);
   assertEquals(siteBuildRuntimes(payload({ kind: "image" })).length, 0);
   assertEquals(siteBuildRuntimes(payload({ kind: "native" }, [])).length, 0);
 });
