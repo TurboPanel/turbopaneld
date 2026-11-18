@@ -111,7 +111,10 @@ test("a status answer naming the retired tunnel id default is refused", () => {
   };
   let refused = false;
   try {
-    parseTunnelStatusResult({ pinnedVersion: "2026.5.2", connectors: [connector] });
+    parseTunnelStatusResult({
+      pinnedVersion: "2026.5.2",
+      connectors: [connector],
+    });
   } catch (error) {
     refused = error instanceof TypeError;
   }
