@@ -323,9 +323,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    has forced HTTPS off and so no HTTPS site. It runs under the hosting's own
    TLS mode, so in `acme` mode it gets its own certificate and lands in the
    acme manifest. Names with no www spelling (IP addresses, one-word names like
-   `localhost` or `com` from `www.com`) expand to nothing extra. An older
-   control plane's `wwwRedirect: true` is read as `www-to-root`
-   (`root-to-www` when the first name starts with `www.`).
+   `localhost` or `com` from `www.com`) expand to nothing extra.
    **Where the rules are enforced:** `validateDeployWwwModes` (refuses a mode
    on `tcp`/`udp`, a name with no other spelling, an other spelling already a
    hostname in the deploy, and different www choices on paths of one name) is
