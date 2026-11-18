@@ -113,7 +113,7 @@
 #   registry egress every time a Railpack service builds. Once this role has
 #   run, the build lane touches nothing outside `{{ turbopanel_vendor_dir }}`.
 # - **Reproducibility.** `ghcr.io/railwayapp/railpack-frontend:<tag>` is a
-#   mutable tag. Two releases recorded with the same `railpackFrontendVersion`
+#   mutable tag. Two releases recorded with the same `builderFrontendVersion`
 #   must have been produced by the same frontend bytes, which is only true when
 #   the bytes are the thing kept. The layout's own manifest digest is written to
 #   `digest`, and the daemon's `docker buildx build` names the frontend by it
