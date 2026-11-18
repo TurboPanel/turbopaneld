@@ -284,59 +284,54 @@ test("resolveOverlayGitShortSha defaults error and exit on git failure", async (
   }
 });
 
-test("withReleaseLock runs once, holds the lock meanwhile and frees it after", async () => {
+test("withReleaseLock holds the lock during the run and refuses a second taker", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const path = `${dir}/dist/.release-dev.lock`;
     let nested: boolean | undefined;
     const ran = await withReleaseLock(path, async () => {
-      assertEquals((await Deno.readTextFile(path)).trim(), "100");
       nested = await withReleaseLock(path, () => Promise.resolve(), {
-        pid: 200,
-        pidAlive: () => Promise.resolve(true),
+        waitMs: 20,
       });
-    }, { pid: 100 });
+    });
     assertEquals(ran, true);
     assertEquals(nested, false);
-    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
-
-test("withReleaseLock takes over a dead pid's lock and frees it when the run fails", async () => {
-  const dir = await Deno.makeTempDir();
-  try {
-    const path = `${dir}/.release-dev.lock`;
-    await Deno.writeTextFile(path, "999\n");
+    // Free again once the run is over, also after a failed run.
     await assertRejects(
-      () =>
-        withReleaseLock(path, () => Promise.reject(new Error("boom")), {
-          pid: 100,
-          pidAlive: () => Promise.resolve(false),
-        }),
+      () => withReleaseLock(path, () => Promise.reject(new Error("boom"))),
       Error,
       "boom",
     );
-    await assertRejects(() => Deno.stat(path), Deno.errors.NotFound);
+    assertEquals(await withReleaseLock(path, () => Promise.resolve()), true);
+    // Let the refused taker's pending lock call finish and close its file.
+    await new Promise((resolve) => setTimeout(resolve, 50));
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
 });
 
-test("withReleaseLock refuses while a live pid holds the lock", async () => {
+test("the lock is freed when the process leaves through exit(1)", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const path = `${dir}/.release-dev.lock`;
-    await Deno.writeTextFile(path, "999\n");
-    let ran = false;
-    const ok = await withReleaseLock(path, () => {
-      ran = true;
-      return Promise.resolve();
-    }, { pid: 100, pidAlive: () => Promise.resolve(true) });
-    assertEquals(ok, false);
-    assertEquals(ran, false);
-    assertEquals((await Deno.readTextFile(path)).trim(), "999");
+    const script = `${dir}/child.ts`;
+    const module = new URL("./release-dev-overlay.ts", import.meta.url).href;
+    await Deno.writeTextFile(
+      script,
+      `import { withReleaseLock } from ${JSON.stringify(module)};
+await withReleaseLock(${JSON.stringify(path)}, () => {
+  Deno.exit(1);
+  return Promise.resolve();
+});
+`,
+    );
+    const child = await new Deno.Command(Deno.execPath(), {
+      args: ["run", "-A", script],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    assertEquals(child.code, 1);
+    assertEquals(await withReleaseLock(path, () => Promise.resolve()), true);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

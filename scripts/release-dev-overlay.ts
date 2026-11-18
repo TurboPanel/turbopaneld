@@ -171,66 +171,50 @@ export async function runReleaseDevOverlay(
 }
 
 export type ReleaseLockHooks = {
-  pid?: number;
-  pidAlive?: (pid: number) => Promise<boolean>;
+  /** How long to wait for another build to let go (default 2 seconds). */
+  waitMs?: number;
 };
 
 const RELEASE_LOCK_PATH = join(ROOT, "dist", ".release-dev.lock");
 
-async function procAlive(pid: number): Promise<boolean> {
-  try {
-    await Deno.stat(`/proc/${pid}`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function createReleaseLock(path: string, pid: number): Promise<boolean> {
-  try {
-    const file = await Deno.open(path, {
-      createNew: true,
-      write: true,
-      mode: 0o640,
-    });
-    await file.write(new TextEncoder().encode(`${pid}\n`));
-    file.close();
-    return true;
-  } catch (err) {
-    if (err instanceof Deno.errors.AlreadyExists) return false;
-    throw err;
-  }
-}
-
 /**
- * Hold an exclusive lock file (holding the pid) around `run`, so the console
- * rebuild and the web Build and Push never write `dist/` together. A lock
- * whose pid is gone is taken over. Returns false, without running, when a live
- * build holds it.
+ * Hold a kernel `flock` on `path` around `run`, so the console rebuild and the
+ * web Build and Push never write `dist/` together. The kernel drops the lock
+ * when the process ends for any reason (exit, signal, crash), so nothing can
+ * go stale. Returns false, without running, when another build still holds it
+ * after `waitMs`.
  */
 export async function withReleaseLock(
   path: string,
   run: () => Promise<void>,
   hooks: ReleaseLockHooks = {},
 ): Promise<boolean> {
-  const pid = hooks.pid ?? Deno.pid;
-  const alive = hooks.pidAlive ?? procAlive;
   await Deno.mkdir(dirname(path), { recursive: true });
-  if (!(await createReleaseLock(path, pid))) {
-    const owner = Number.parseInt(
-      (await Deno.readTextFile(path).catch(() => "")).trim(),
-      10,
-    );
-    if (Number.isFinite(owner) && owner !== pid && await alive(owner)) {
-      return false;
-    }
-    await Deno.remove(path).catch(() => undefined);
-    if (!(await createReleaseLock(path, pid))) return false;
+  const file = await Deno.open(path, {
+    create: true,
+    write: true,
+    mode: 0o640,
+  });
+  const locking = file.lock(true).then(() => true, () => false);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), hooks.waitMs ?? 2000);
+  });
+  const got = await Promise.race([locking, timedOut]);
+  clearTimeout(timer);
+  if (!got) {
+    // The pending lock call finishes when the holder lets go; free it then.
+    void locking.then(async (late) => {
+      if (late) await file.unlock().catch(() => undefined);
+      file.close();
+    });
+    return false;
   }
   try {
     await run();
   } finally {
-    await Deno.remove(path).catch(() => undefined);
+    await file.unlock().catch(() => undefined);
+    file.close();
   }
   return true;
 }
@@ -242,7 +226,7 @@ if (import.meta.main) {
   );
   if (!ran) {
     console.error(
-      "release-dev-overlay: another daemon build is running (dist/.release-dev.lock); try again when it finishes",
+      "release-dev-overlay: another release:dev is running (dist/.release-dev.lock); try again when it finishes",
     );
     Deno.exit(1);
   }

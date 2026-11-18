@@ -545,6 +545,21 @@ test("a ?host= value that is not an absolute path is a network host, not a socke
   assert("command" in buildBackupCommand(loop, "/b", "c"));
 });
 
+test("a host list or a hostaddr override is refused", () => {
+  for (
+    const rest of [
+      "/db?host=/run/postgresql,db.example.com",
+      "localhost/db?host=localhost,db.example.com",
+      "/db?host=/run/postgresql&hostaddr=192.0.2.7",
+      "localhost/db?hostaddr=192.0.2.7",
+    ]
+  ) {
+    const url = dbUrl("postgres", "u", "x", rest);
+    assertEquals(parsePostgresUrl(url), null, rest);
+    assert("error" in buildBackupCommand(url, "/b", "c"), rest);
+  }
+});
+
 test("the backup refuses a database that is not on this machine", () => {
   for (const host of ["localhost", "127.0.0.1", "[::1]"]) {
     const plan = buildBackupCommand(
