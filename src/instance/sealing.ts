@@ -96,9 +96,10 @@ export const SEALING_REREGISTER_INTERVAL_MS = 60 * 1000;
  * registered before. Two cases: a control plane upgraded while this socket
  * stayed open (before the upgrade it did not take the connect-time
  * registration), and an administrator who cleared the key (Clear Sealing
- * Key). After a failed attempt the next one waits {@link SEALING_RETRY_INTERVAL_MS}; after
- * one that worked, {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt at a
- * time; a caller that arrives during one waits for it.
+ * Key). After a failed attempt the next one waits
+ * {@link SEALING_RETRY_INTERVAL_MS}; after one that worked,
+ * {@link SEALING_REREGISTER_INTERVAL_MS}. One attempt at a time; a caller
+ * that arrives during one waits for it.
  * `afterPlaintextAnswer` resolves true only when an attempt it started or
  * joined put the key on file.
  */
