@@ -219,7 +219,6 @@ test("LinuxMetricsCollector assembles a full v5 sample across two ticks", async 
   assertEquals(first.sample.host.memory.usedBytes !== null, true);
   assertEquals(first.sample.host.storage.diskReadBytesPerSecond, null);
   assertEquals(first.sample.host.network.tcpRetransmitPercent, null);
-  assertEquals(first.sample.metadata.topologyGeneration, 7);
   assertEquals(first.sample.metadata.bootGeneration, 2);
   assertEquals(first.sample.networks.length, 1);
   assertEquals(first.sample.filesystems.length, 1);
@@ -348,7 +347,7 @@ test("LinuxMetricsCollector smoke test: a normal 1-NIC VM produces a logically c
   if (!result.supported) throw new TypeError("expected a supported sample");
 
   assertEquals(result.sample.type, "metrics");
-  assertEquals(result.sample.metadata.version, 6);
+  assertEquals(result.sample.metadata.version, 8);
   assertEquals(result.sample.networks.length, 1);
   assertEquals(result.sample.filesystems.length, 1);
   assertEquals(result.sample.blockDevices.length, 1);

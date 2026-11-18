@@ -8,7 +8,7 @@ import {
 import type { CollectorDeps } from "./collector/types.ts";
 import {
   buildMetricsSample,
-  METRICS_LEGACY_WIRE_VERSION,
+  METRICS_SCHEMA_VERSION,
 } from "../contracts/metrics-contract.ts";
 import type { TopologySnapshot } from "../contracts/topology-types.ts";
 import {
@@ -285,11 +285,10 @@ function supportedSample(sequence: number): MetricsCollectResult {
     supported: true,
     sample: buildMetricsSample({
       metadata: {
-        version: METRICS_LEGACY_WIRE_VERSION,
+        version: METRICS_SCHEMA_VERSION,
         sampledAt: new Date(0).toISOString(),
         intervalSeconds: 60,
         sequence,
-        topologyGeneration: 1,
         bootGeneration: 0,
       },
       host: {
