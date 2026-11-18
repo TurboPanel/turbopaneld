@@ -95,7 +95,6 @@ export const REST_API_PORT = 6070;
 export const PGSQL_PORT = 15432;
 export const MYSQL_PORT = 13306;
 
-
 /** Which protocol module a cluster (and therefore its listener) belongs to. */
 export type ProxySqlProtocolFamily = "pgsql" | "mysql";
 
