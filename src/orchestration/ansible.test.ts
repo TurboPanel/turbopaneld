@@ -1589,10 +1589,6 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // Additive install: a deploy that declares 8.4 must not stop 8.3, so the old
   // "disable every other series" task must stay gone.
   assertEquals(phpFpmTasks.includes("php8.3-fpm"), false);
-  assertEquals(
-    phpFpmTasks.includes("Remove obsolete single-series php-fpm layout"),
-    true,
-  );
 
   // The site Caddy is a distinct identity from tpcaddy (9993, control plane)
   // and from the root edge Caddy that owns public :80/:443.

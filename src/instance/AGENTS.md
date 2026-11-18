@@ -1079,19 +1079,9 @@ form still works and, on a fresh install, pins nothing and writes no pin file.
   With `statement`, stdin is a passkey-approved key-set envelope (see
   **Key rotation** below); it rewrites `current=`, `keyset=`, `rp_id=`,
   `passkeys=` and `panel_key=` in `lib/update-origin`.
-- A host installed before panel keys (an update origin, no pin file) learns
-  the key on its first managed update with no TOKEN: once the trust files are
-  in place, `tp_learn_panel_identity` fetches the identity document from
-  `HOST_URL` with the host's existing TLS trust (never `--insecure-tls`, and
-  only when `HOST_URL` is the update origin's `host=`), checks its header
-  signature with the key it names, and pins that key with `pinned_by=upgrade`,
-  the document's key set and address list. Every address must be exactly
-  `https://host[:port]` (they become pin and update-origin lines). A missing,
-  forged or keyless document, or a bad address, leaves the host unpinned and
-  the update goes on. TLS is what vouches for the learned key (the design
-  learned it over the daemon session; same trust). A host installed with
-  `--unsafe-no-panel-key` keeps its pin file and never learns; reinstalling it
-  with a fresh command pins it.
+- A managed update with no TOKEN never learns or loosens a pin: a host with
+  an update origin and no pin file stays unpinned until it is reinstalled with
+  a fresh command (`--unsafe-no-panel-key` hosts too).
   A fresh install with the older license value has no update origin and
   still pins nothing.
 - `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
@@ -1283,7 +1273,7 @@ A pinned server never sends its license token in clear to a control plane that c
 
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
-- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged and retried on the next connect. Every plaintext decrypt answer also registers the key again without a reconnect, even when this process registered it before, because the control plane answers in plaintext only when no key is on file: a control plane upgraded under an open socket, or a superadmin's Clear Sealing Key (`createSealingRegistration`: one attempt at a time; after a failed attempt the next waits ten minutes, after one that worked a minute). That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.
+- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; any registration failure is warned and retried, rate-limited (ten minutes after a failure, a minute after a success). Every plaintext decrypt answer also registers the key again without a reconnect, even when this process registered it before, because the control plane answers in plaintext only when no key is on file: a control plane upgraded under an open socket, or a superadmin's Clear Sealing Key (`createSealingRegistration`: one attempt at a time; after a failed attempt the next waits ten minutes, after one that worked a minute). That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.
 - `decryptSecrets` takes `{ sealed }` (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set) or `{ plaintexts }`, never both. After the first sealed answer is opened the daemon writes `<state>/trust-level` = `sealed` and refuses any later plaintext answer (`plaintext secrets refused`). A refused plaintext answer still registers the key again (awaited), and when that worked the decrypt is asked once more; that second answer goes through the same refusal, so a sealed server never takes plaintext and never asks a third time. The daemon never lowers the mark; after a deliberate control plane rollback an operator removes the file by hand.
 - The Hosting Account password hash may arrive as `passwordHashEnvelope`; `openPrincipalPasswordEnvelopes` opens it through `decryptSecrets` before the account is touched. `server.principals.reconcile` opens it the same way (`daemon-sealed-principal-reconcile-v1`; the control plane sends the envelope there only to a daemon that lists it), and an envelope that cannot be opened fails the whole command rather than lock the account.
 - `scripts/scan-secrets.patterns` (`daemon-identity-file`) does not name `sealing-key.json`; it is byte-identical across five repos, so it is a follow-up for all five together.

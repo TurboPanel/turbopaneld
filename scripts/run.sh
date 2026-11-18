@@ -82,11 +82,6 @@ TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 # certificate. Every --cacert that must mean "this file only" also passes
 # --capath at this folder, which does not exist and so adds no roots.
 TP_NO_SYSTEM_CAPATH=/nonexistent
-# Set once trust material came in, or was removed, over the system roots or
-# an unverified connection during this run (see tp_learn_panel_identity).
-TP_TRUST_FROM_OPEN_LEG=false
-# Whether this host had a stored trust file when the run began.
-TP_STORED_TRUST_AT_START=false
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -264,7 +259,7 @@ from pathlib import Path
 PATH = "/api/daemon/v1/instance/identity"
 body_path, header, out, expected = sys.argv[1:5]
 out = Path(out)
-# No tok.sig.txt: a document checked on its own (learning the key on upgrade).
+# No tok.sig.txt: a document checked on its own.
 tok_file = out / "tok.sig.txt"
 tok_sig = tok_file.read_text().strip() if tok_file.exists() else None
 
@@ -517,9 +512,6 @@ tp_check_fetched_trust() {
     fi
     tp_print_error "The ${_ct_what} downloaded from ${HOST_URL} does not match ${_ct_expected} (got $(tp_pem_files_pin "$_ct_src"); expected ${CA_PIN}). Nothing was installed. Someone may be intercepting this connection, or the panel's certificates changed. Copy a fresh command from Add Server and try again."
     return 1
-  fi
-  if [ "$_ct_leg" != stored ]; then
-    TP_TRUST_FROM_OPEN_LEG=true
   fi
   if [ "$_ct_leg" = insecure ] && [ "${TP_TOFU_WARNED:-false}" != true ]; then
     TP_TOFU_WARNED=true
@@ -802,9 +794,6 @@ tp_fetch_uploaded_trust() {
         # host that pins it; it stays, and the daemon still trusts it.
         tp_print_step "~" "The control plane no longer offers a private uploaded issuer over public TLS — keeping the stored one ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) this server pins"
       else
-        if [ "$_trust_leg" != stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
-          TP_TRUST_FROM_OPEN_LEG=true
-        fi
         rm -f "$UPLOADED_TRUST_PATH"
       fi
       ;;
@@ -876,9 +865,6 @@ tp_fetch_instance_ca() {
       then
         tp_print_step "~" "The control plane offers no Platform CA over this connection — keeping the one this server pins ($(tp_ca_fingerprint "$CA_PATH"))"
       else
-        if [ "$_ca_leg" != stored ] && [ -f "$CA_PATH" ]; then
-          TP_TRUST_FROM_OPEN_LEG=true
-        fi
         rm -f "$CA_PATH"
       fi
       ;;
@@ -926,7 +912,6 @@ tp_refetch_instance_ca_unpinned() {
         return 0
       fi
       tp_print_ok "Control plane now presents a publicly trusted certificate — Platform CA no longer needed (was ${_old_fp:-unknown})"
-      TP_TRUST_FROM_OPEN_LEG=true
       rm -f "$CA_PATH" "$_ca_retry"
       return 0
       ;;
@@ -3646,9 +3631,6 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
-if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then
-  TP_STORED_TRUST_AT_START=true
-fi
 # Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
 # tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
 LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
@@ -3771,16 +3753,11 @@ tp_pin_file_field() {
 # Decide what this run does with the panel key pin, before anything is
 # written. The pin file (lib/panel-identity) and the panel_key line in
 # lib/update-origin must agree. Outcomes in PIN_ACTION:
-#   none    a legacy install: nothing to pin (no key given, none stored)
+#   none    nothing to pin (an install from the licence form, no key given, none stored)
 #   write   first pin (fresh install with a TOKEN, or --unsafe-no-panel-key)
 #   refresh the same key again: only urls= and updated= change
 #   keep    a re-run without a TOKEN (managed update): file untouched, and the
 #           stored key stays in update-origin
-#   learn   a re-run without a TOKEN on a host installed before panel keys
-#           (an update origin, no pin): tp_learn_panel_identity fetches the
-#           panel's signed identity document once the trust files are in
-#           place and pins its key with pinned_by=upgrade (or leaves the host
-#           as it was when that fails)
 # A different key is refused: a key change arrives only as a signed rotation
 # from the panel. A TOKEN-less run never loosens a stored pin.
 tp_resolve_panel_pin() {
@@ -3833,71 +3810,8 @@ tp_resolve_panel_pin() {
     PIN_HOSTS="$PANEL_URLS"
   else
     PIN_HOSTS="$_pp_ohosts"
-    # An update origin with no pin is a host installed before panel keys,
-    # updated now; a fresh install with the older license value has none.
-    if [ -z "$TOKEN_PAYLOAD" ] && [ -f "$_pp_origin" ] && [ ! -L "$_pp_origin" ]; then
-      PIN_ACTION=learn
-    fi
   fi
   return 0
-}
-
-# PIN_ACTION=learn: pin the key the control plane signs its identity document
-# with, as far as this host's existing TLS trust vouches for the connection
-# (never over --insecure-tls), and only from the control plane this host is
-# enrolled with (HOST_URL equal to the update origin's host=). Any failure (no
-# document, a bad signature or address, a control plane without a key) leaves
-# the host unpinned and the update goes on as before.
-tp_learn_panel_identity() {
-  [ "$PIN_ACTION" = learn ] || return 0
-  PIN_ACTION=none
-  if [ -z "$HOST_URL" ] || [ "${INSECURE_TLS:-false}" = true ]; then
-    return 0
-  fi
-  _lp_host="$(tp_pin_file_field "$INSTALL_ROOT/lib/update-origin" host)"
-  if [ "${HOST_URL%/}" != "${_lp_host%/}" ]; then
-    tp_print_detail "Not learning a panel key: ${HOST_URL} is not the control plane this server is enrolled with"
-    return 0
-  fi
-  # The key is only learned over trust this host already had: its stored
-  # trust files (curl checks them alone), or the public roots on a host
-  # that has none and pins none. Trust that arrived during this run over the
-  # public roots or an unverified connection does not count, or whoever
-  # served it could also pick the key.
-  _lp_leg="$(tp_bootstrap_leg)"
-  if [ "$TP_TRUST_FROM_OPEN_LEG" = true ] ||
-    { [ "$TP_STORED_TRUST_AT_START" = true ] && [ "$_lp_leg" != stored ]; } ||
-    { [ "$_lp_leg" = system ] && [ -n "${CA_PIN:-}" ]; }
-  then
-    tp_print_detail "Not learning a panel key: this run could not check ${HOST_URL} against trust this server already had; this server stays unpinned for now"
-    return 0
-  fi
-  _lp_dir="$(mktemp -d)"
-  _lp_curl="$(tp_instance_bootstrap_curl)"
-  # shellcheck disable=SC2086
-  if ! $_lp_curl -f --max-time 20 -D "$_lp_dir/headers" -o "$_lp_dir/body" "${HOST_URL%/}/api/daemon/v1/instance/identity" 2>/dev/null; then
-    tp_print_detail "Could not fetch a panel key from ${HOST_URL}; this server stays unpinned for now"
-    rm -rf "$_lp_dir"
-    return 0
-  fi
-  _lp_header="$(tr -d '\r' < "$_lp_dir/headers" | grep -i '^x-turbopanel-signature:' | tail -n 1 | sed 's/^[^:]*:[[:space:]]*//')"
-  if ! python3 -c "$(tp_identity_material_python)" "$_lp_dir/body" "$_lp_header" "$_lp_dir" "" 2>"$_lp_dir/err" \
-    || ! tp_verify_ed25519 "$_lp_dir/pub.pem" "$_lp_dir/doc.msg" "$_lp_dir/doc.sig"; then
-    tp_print_detail "The panel's identity document was refused ($(cat "$_lp_dir/err" 2>/dev/null)); this server stays unpinned"
-    rm -rf "$_lp_dir"
-    return 0
-  fi
-  PANEL_FINGERPRINT="$(cat "$_lp_dir/kid")"
-  PANEL_NEXT_FINGERPRINT=""
-  PANEL_KEYSET="$(cat "$_lp_dir/keyset")"
-  PANEL_RP_ID="$(cat "$_lp_dir/rp_id")"
-  PANEL_PASSKEYS="$(cat "$_lp_dir/passkeys")"
-  _lp_urls="$(cat "$_lp_dir/urls")"
-  PIN_HOSTS="${_lp_urls:-$HOST_URL}"
-  PIN_ACTION=write
-  PIN_LEARNED=true
-  rm -rf "$_lp_dir"
-  tp_print_ok "Pinned the panel key $PANEL_FINGERPRINT (learned on upgrade)"
 }
 
 # The install command's panel key, checked against the panel's own identity
@@ -4018,7 +3932,6 @@ fi
 tp_write_panel_identity_pin() {
   _wp_file="$INSTALL_ROOT/lib/panel-identity"
   _wp_by=install
-  [ "${PIN_LEARNED:-false}" = true ] && _wp_by=upgrade
   # The flag only matters for a token with no key; a checked key is a real pin.
   [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -z "$PANEL_FINGERPRINT" ] && _wp_by=unsafe
   _wp_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -4113,7 +4026,6 @@ tp_write_colocated_update_origin_pin() {
   rm -f "$_pin_tmp"
 }
 if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
-  tp_learn_panel_identity
   tp_write_update_origin_pin
   tp_write_panel_identity_pin
 else

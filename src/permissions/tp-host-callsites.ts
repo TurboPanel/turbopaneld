@@ -134,7 +134,6 @@ const LAYOUT = resolveLayout({}, {
 });
 /** The vendored runtimes root on a managed host. */
 const VENDOR = LAYOUT.runtimesDir;
-const CADDY_BIN = `${P}${VENDOR}/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
 const FABRIC_DIR = `${STATE}/network`;
 const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
@@ -853,12 +852,6 @@ const SITES: CallSite[] = [
     { argv: ["rm", "-f", "--", BACKUP_TIMER] },
     { argv: ["rm", "-f", "--", BACKUP_SERVICE] },
     { argv: ["rm", "-f", "--", BACKUP_TIMER_STAMP] },
-  ),
-
-  // --- hosting Caddy --------------------------------------------------------
-  tpHost(
-    'src/deploy/ensure-hosting-caddy.ts|["-n","chown","root",binPath]',
-    { argv: ["chown", "root", CADDY_BIN], setup: file(CADDY_BIN) },
   ),
 
   // --- principals -----------------------------------------------------------

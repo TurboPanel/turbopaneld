@@ -192,7 +192,6 @@
     - Reload systemd for instance units
     - Restart turbopanel website
 
-# Upgrades run `sudo -u tp git` from the instance (see upgrade-sudoers.yml).
 # The deploy key must stay mode 0600 — SSH rejects group-readable private keys.
 - name: Check turbopanel GitHub deploy key
   ansible.builtin.stat:
