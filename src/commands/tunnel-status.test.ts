@@ -101,3 +101,19 @@ test("the status answer reports what the hop does about client certificates, and
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+test("a status answer naming the retired tunnel id default is refused", () => {
+  const connector = {
+    tunnelId: "default",
+    status: "connected",
+    version: "2026.5.2",
+    slot: "a",
+  };
+  let refused = false;
+  try {
+    parseTunnelStatusResult({ pinnedVersion: "2026.5.2", connectors: [connector] });
+  } catch (error) {
+    refused = error instanceof TypeError;
+  }
+  assertEquals(refused, true);
+});

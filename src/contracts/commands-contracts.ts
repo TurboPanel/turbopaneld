@@ -8202,8 +8202,7 @@ export function parseTunnelStatusPayload(
 function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
   if (
     !isRecord(value) || typeof value.tunnelId !== "string" ||
-    !(value.tunnelId === "instance" || value.tunnelId === "default" ||
-      TUNNEL_UUID_RE.test(value.tunnelId)) ||
+    !(value.tunnelId === "instance" || TUNNEL_UUID_RE.test(value.tunnelId)) ||
     typeof value.status !== "string" ||
     !TUNNEL_STATUS_VALUES.has(value.status) ||
     !isTunnelConnectorVersion(value.version) ||
