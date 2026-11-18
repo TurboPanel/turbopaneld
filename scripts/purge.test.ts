@@ -1617,8 +1617,10 @@ test("container removal merges the pre-purge inventory and removes every name", 
       '    if [ "$2" = "-a" ]; then',
       '      printf "%s\\n" "turbopanel-database|turbopanel.role|database|-|-|-|-"',
       `      printf "%s\\\\n" "${TP_TEST_UUID}-ha|-|managed-ha|-|-|-|-"`,
-      // A container labelled for a system component (column 3) and a service (column 4).
+      // A container labelled for a system component (column 3).
       '      printf "%s\\n" "queuebox|-|queue|-|-|-|-"',
+      // A container with only the old com.turbopanel.* labels reads as unlabelled and is left alone.
+      '      printf "%s\\n" "oldlabelbox|-|-|-|-|-|-"',
       "    fi",
       "    ;;",
       '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
