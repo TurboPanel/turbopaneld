@@ -545,13 +545,18 @@ test("a ?host= value that is not an absolute path is a network host, not a socke
   assert("command" in buildBackupCommand(loop, "/b", "c"));
 });
 
-test("a host list or a hostaddr override is refused", () => {
+test("a host list, a repeated host, or a hostaddr or service override is refused", () => {
   for (
     const rest of [
       "/db?host=/run/postgresql,db.example.com",
       "localhost/db?host=localhost,db.example.com",
       "/db?host=/run/postgresql&hostaddr=192.0.2.7",
       "localhost/db?hostaddr=192.0.2.7",
+      // libpq takes the last `host`, so a repeated one hides the real target.
+      "/db?host=/run/postgresql&host=db.example.com",
+      "localhost/db?host=localhost&host=db.example.com",
+      "/db?host=/run/postgresql&service=other",
+      "localhost/db?service=other",
     ]
   ) {
     const url = dbUrl("postgres", "u", "x", rest);

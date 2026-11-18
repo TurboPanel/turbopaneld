@@ -289,9 +289,13 @@ test("withReleaseLock holds the lock during the run and refuses a second taker",
   try {
     const path = `${dir}/dist/.release-dev.lock`;
     let nested: boolean | undefined;
+    let drain: Promise<void> | undefined;
     const ran = await withReleaseLock(path, async () => {
       nested = await withReleaseLock(path, () => Promise.resolve(), {
         waitMs: 20,
+        onDrain: (d) => {
+          drain = d;
+        },
       });
     });
     assertEquals(ran, true);
@@ -304,7 +308,7 @@ test("withReleaseLock holds the lock during the run and refuses a second taker",
     );
     assertEquals(await withReleaseLock(path, () => Promise.resolve()), true);
     // Let the refused taker's pending lock call finish and close its file.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await drain;
   } finally {
     await Deno.remove(dir, { recursive: true });
   }
@@ -316,21 +320,24 @@ test("the lock is freed when the process leaves through exit(1)", async () => {
     const path = `${dir}/.release-dev.lock`;
     const script = `${dir}/child.ts`;
     const module = new URL("./release-dev-overlay.ts", import.meta.url).href;
+    const repoConfig = new URL("../deno.json", import.meta.url).pathname;
     await Deno.writeTextFile(
       script,
       `import { withReleaseLock } from ${JSON.stringify(module)};
 await withReleaseLock(${JSON.stringify(path)}, () => {
-  Deno.exit(1);
+  Deno.exit(7);
   return Promise.resolve();
 });
 `,
     );
     const child = await new Deno.Command(Deno.execPath(), {
-      args: ["run", "-A", script],
+      // The repo config resolves the bare `@std/...` imports in the module.
+      args: ["run", "-A", `--config=${repoConfig}`, script],
       stdout: "null",
       stderr: "null",
     }).output();
-    assertEquals(child.code, 1);
+    // 7 is the child's own exit code; a failed import would exit 1 instead.
+    assertEquals(child.code, 7);
     assertEquals(await withReleaseLock(path, () => Promise.resolve()), true);
   } finally {
     await Deno.remove(dir, { recursive: true });

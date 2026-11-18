@@ -173,6 +173,8 @@ export async function runReleaseDevOverlay(
 export type ReleaseLockHooks = {
   /** How long to wait for another build to let go (default 2 seconds). */
   waitMs?: number;
+  /** Receives the cleanup of a refused taker, which ends when the holder lets go. */
+  onDrain?: (drain: Promise<void>) => void;
 };
 
 const RELEASE_LOCK_PATH = join(ROOT, "dist", ".release-dev.lock");
@@ -204,10 +206,12 @@ export async function withReleaseLock(
   clearTimeout(timer);
   if (!got) {
     // The pending lock call finishes when the holder lets go; free it then.
-    void locking.then(async (late) => {
+    const drain = locking.then(async (late) => {
       if (late) await file.unlock().catch(() => undefined);
       file.close();
     });
+    if (hooks.onDrain) hooks.onDrain(drain);
+    else void drain;
     return false;
   }
   try {
