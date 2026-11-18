@@ -484,3 +484,40 @@ test("run.sh --instance reads artifact fields from the verified manifest", async
     "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.2/a.tar.zst",
   );
 });
+
+test("run.sh reads the manifest's top-level fields, never a nested key of the same name", async () => {
+  const source = await Deno.readTextFile(runShPath);
+  const fn = extractShellFunction(source, "tp_manifest_top_field");
+  const read = async (json: string, key: string) => {
+    const out = await new Deno.Command("sh", {
+      args: [
+        "-eu",
+        "-c",
+        `${fn}\ntp_manifest_top_field "$1" "$2"`,
+        "sh",
+        json,
+        key,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    }).output();
+    assertEquals(out.success, true);
+    return new TextDecoder().decode(out.stdout).trim();
+  };
+  // A nested "version" comes first in the text; the top-level one is read.
+  const nested = JSON.stringify({
+    jsFallbackArtifact: { version: "9.9.9", url: "https://x/js" },
+    version: "0.1.1",
+    commit: "abc1234",
+  });
+  assertEquals(await read(nested, "version"), "0.1.1");
+  assertEquals(await read(nested, "commit"), "abc1234");
+  // Only nested, not a string, or absent: nothing.
+  assertEquals(
+    await read(JSON.stringify({ a: { version: "9.9.9" } }), "version"),
+    "",
+  );
+  assertEquals(await read(JSON.stringify({ version: 7 }), "version"), "");
+  assertEquals(await read("{}", "version"), "");
+  assertEquals(await read("not json", "version"), "");
+});

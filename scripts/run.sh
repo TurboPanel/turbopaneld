@@ -1062,6 +1062,18 @@ tp_manifest_field() {
   printf '%s' "$_json" | grep -o "\"$_field\":\"[^\"]*\"" | head -1 | sed 's/.*":"//' | tr -d '"'
 }
 
+# A top-level string field of the manifest, read as JSON so a same-named key
+# inside an artifact object can never stand in for it. Nothing when the field
+# is missing or is not a string.
+tp_manifest_top_field() {
+  _top_json="$1"
+  _top_name="$2"
+  printf '%s' "$_top_json" | python3 -c 'import json, sys
+v = json.load(sys.stdin).get(sys.argv[1])
+if isinstance(v, str) and "\n" not in v:
+    print(v)' "$_top_name" 2>/dev/null || true
+}
+
 tp_manifest_artifact_field() {
   _json="$1"
   _artifact_key="$2"
@@ -1228,11 +1240,11 @@ tp_manifest_signature_bypass() {
 tp_resolve_channel_manifest() {
   _manifest_json="$1"
   _compact="$(tp_manifest_compact "$_manifest_json")"
-  _manifest_host="$(tp_manifest_field "$_compact" "defaultControlPlaneUrl")"
-  _manifest_commit="$(tp_manifest_field "$_compact" "commit")"
-  _manifest_build_id="$(tp_manifest_field "$_compact" "buildId")"
-  _manifest_version="$(tp_manifest_field "$_compact" "version")"
-  _manifest_built_at="$(tp_manifest_field "$_compact" "builtAt")"
+  _manifest_host="$(tp_manifest_top_field "$_manifest_json" "defaultControlPlaneUrl")"
+  _manifest_commit="$(tp_manifest_top_field "$_manifest_json" "commit")"
+  _manifest_build_id="$(tp_manifest_top_field "$_manifest_json" "buildId")"
+  _manifest_version="$(tp_manifest_top_field "$_manifest_json" "version")"
+  _manifest_built_at="$(tp_manifest_top_field "$_manifest_json" "builtAt")"
   _linux_arch="$(tp_resolve_linux_arch)" || return 1
   _binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
   _binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "$TP_MANIFEST_SHA_FIELD")"
@@ -1242,6 +1254,11 @@ tp_resolve_channel_manifest() {
   _orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "$TP_MANIFEST_SHA_FIELD")"
   if [ -z "$_manifest_host" ]; then
     _manifest_host="https://turbopanel.app"
+  fi
+  # Every published manifest carries a version: the build floor records it.
+  if [ -z "$_manifest_version" ]; then
+    tp_print_error "signed manifest has no version; refusing to install (the build floor needs it)"
+    return 1
   fi
   if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
     || [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
@@ -1366,7 +1383,7 @@ tp_read_daemon_build_floor() {
   if [ ! -x "$_rdf_bin" ] || [ -L "$_rdf_bin" ]; then
     return 0
   fi
-  _rdf_line="$(timeout 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
+  _rdf_line="$(timeout -k 2 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
   # turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
   printf '%s' "$_rdf_line" | sed -n 's/^turbopaneld v\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}(.*,[[:space:]]*\([^,)[:space:]]\{1,\}\))[[:space:]]*$/\2\t\1\t\3/p' | head -1
 }
@@ -1792,6 +1809,12 @@ tp_emit_update_stage() {
   printf '%s%s\n' "::turbopanel-stage::" "$_stage_name"
 }
 
+# The `--version` line of a binary, or nothing when it hangs (10 s) or fails.
+tp_binary_version_line() {
+  _vl_bin="$1"
+  timeout -k 2 10 "$_vl_bin" --version 2>/dev/null | head -1 || true
+}
+
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
 tp_parse_daemon_commit_from_version() {
@@ -1898,10 +1921,10 @@ tp_arm_update_guard() {
   _armed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   _previous_commit=""
   if [ -x "$_native_prev" ]; then
-    _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_native_prev" --version 2>/dev/null || true)")"
+    _previous_commit="$(tp_parse_daemon_commit_from_version "$(tp_binary_version_line "$_native_prev")")"
   fi
   if [ -z "$_previous_commit" ] && [ -x "$_js_prev" ]; then
-    _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_js_prev" --version 2>/dev/null || true)")"
+    _previous_commit="$(tp_parse_daemon_commit_from_version "$(tp_binary_version_line "$_js_prev")")"
   fi
   # The record the guard acts on is root's: <install>/lib is root-owned and the
   # daemon cannot write it, so the daemon cannot arm a rollback, keep an old
@@ -2004,15 +2027,16 @@ tp_apt_get() {
 
 # One `key=value` field of the daemon's enroll status file (see
 # src/instance/enroll-status.ts), "" when absent. The daemon account can
-# write that file and this runs as root: a link is ignored, only the first
-# 4 KiB are read, and control characters are dropped. Never sourced.
+# write that file and this runs as root: a link is ignored (and not followed
+# even if swapped in after the check), only the first 4 KiB are read, and
+# control characters are dropped. Never sourced.
 tp_enroll_status_field() {
   _esf_file="$1"
   _esf_key="$2"
   if [ ! -f "$_esf_file" ] || [ -L "$_esf_file" ]; then
     return 0
   fi
-  head -c 4096 "$_esf_file" 2>/dev/null | sed -n "s/^${_esf_key}=//p" | head -n 1 | tr -d '\000-\037\177'
+  dd if="$_esf_file" iflag=nofollow,nonblock bs=4096 count=1 status=none 2>/dev/null | sed -n "s/^${_esf_key}=//p" | head -n 1 | tr -d '\000-\037\177'
 }
 
 # True when the daemon release just installed lists feature $1 in the
@@ -2101,6 +2125,10 @@ tp_wait_for_enrollment() {
             tp_print_error "The control plane did not prove it holds the panel key this server pinned (${_we_reason:-no reason given})."
             tp_print_detail "Check that the command was copied from the right control plane, then copy a fresh one from Add Server and run it here."
             return 1
+            ;;
+          awaiting-license)
+            # The daemon can look before the staged license is readable; it
+            # re-checks by itself, so keep waiting for its next answer.
             ;;
           awaiting-seat)
             tp_print_detail "The organization has no free server size for this server yet; once one is bought in the panel, this server joins by itself"
@@ -2194,7 +2222,7 @@ tp_probe_native_daemon() {
   if [ ! -x "$_bin" ]; then
     return 1
   fi
-  if "$_bin" --version >/dev/null 2>&1; then
+  if timeout -k 2 10 "$_bin" --version >/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -3618,14 +3646,6 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
-# A host that already carries an expected CA list keeps it when this run
-# brings none, so re-running an old command cannot downgrade it to trust on
-# first use. A host with stored trust files but no list is held to the files
-# (tp_host_ca_pin).
-if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
-  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"
-  [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
-fi
 if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then
   TP_STORED_TRUST_AT_START=true
 fi
@@ -3730,6 +3750,15 @@ if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
+# A host that already carries an expected CA list keeps it when this run
+# brings none, so re-running an old command cannot downgrade it to trust on
+# first use. A host with stored trust files but no list is held to the files
+# (tp_host_ca_pin). Read after the prerequisites above: fingerprinting the
+# stored files needs openssl, which a fresh host may only just have gotten.
+if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
+  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"
+  [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
+fi
 
 # One `key=value` line from a pin file ("" when the file or the key is absent).
 tp_pin_file_field() {

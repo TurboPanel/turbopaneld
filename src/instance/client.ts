@@ -216,9 +216,11 @@ import {
   writeActiveUpgradeContext,
 } from "./update-active-context.ts";
 import {
+  clearUpdateSkip,
   handleSelfUpdateAttachOutcome,
   readUpdateGuardArmed,
   readUpdateRollback,
+  readUpdateSkip,
 } from "./update-guard.ts";
 import { UpdateProgressReporter } from "./update-progress-reporter.ts";
 import {
@@ -3617,6 +3619,14 @@ export class InstanceClient {
           `signed manifest commit ${verified.commit} does not match targetCommit ${targetCommit}`,
         );
       }
+      const skipped = await readUpdateSkip();
+      if (skipped?.commit.trim() === verified.commit) {
+        throw new UpdatePreflightError(
+          "update_skipped_after_rollback",
+          `build ${verified.commit} was rolled back automatically (${skipped.reason}); the host needs attention before it is tried again`,
+        );
+      }
+      if (skipped) await clearUpdateSkip();
       await this.#wireUpdateProgress(ws, message.id, {
         upgradeId,
         targetCommit: verified.commit,

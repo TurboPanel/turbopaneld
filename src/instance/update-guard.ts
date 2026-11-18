@@ -41,6 +41,56 @@ export function updateRollbackPath(
   return join(currentLayout(layout).stateDir, "update-rollback.json");
 }
 
+/**
+ * The build an automatic rollback just left. The control plane keeps asking
+ * for it, so the daemon refuses it (and says why) until another build is asked
+ * for. Lives beside update-rollback.json, which is cleared once reported.
+ */
+export type UpdateSkipRecord = {
+  commit: string;
+  reason: string;
+  at: string;
+};
+
+export function updateSkipPath(layout?: LayoutPaths): string {
+  return join(currentLayout(layout).stateDir, "update-skip-target.json");
+}
+
+export async function readUpdateSkip(
+  layout?: LayoutPaths,
+): Promise<UpdateSkipRecord | null> {
+  try {
+    const raw = JSON.parse(
+      await Deno.readTextFile(updateSkipPath(layout)),
+    ) as UpdateSkipRecord;
+    if (!raw.commit?.trim()) return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeUpdateSkip(
+  record: UpdateSkipRecord,
+  layout?: LayoutPaths,
+): Promise<void> {
+  const resolved = currentLayout(layout);
+  await ensureDaemonDir(resolved.stateDir);
+  await writeDaemonFile(
+    updateSkipPath(resolved),
+    JSON.stringify(record),
+    0o640,
+  );
+}
+
+export async function clearUpdateSkip(layout?: LayoutPaths): Promise<void> {
+  try {
+    await removeDaemonFile(updateSkipPath(layout));
+  } catch {
+    // Absent is fine.
+  }
+}
+
 export async function readUpdateGuardArmed(
   layout?: LayoutPaths,
 ): Promise<UpdateGuardArmed | null> {
@@ -118,6 +168,13 @@ export async function handleSelfUpdateAttachOutcome(options: {
       detail: rollback.reason,
       errorCode: "update_rollback",
     });
+    if (rollback.fromCommit?.trim()) {
+      await writeUpdateSkip({
+        commit: rollback.fromCommit.trim(),
+        reason: rollback.reason,
+        at: rollback.at,
+      }, layout);
+    }
     await clearUpdateRollback(layout);
     return;
   }

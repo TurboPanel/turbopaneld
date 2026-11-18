@@ -253,7 +253,7 @@ const INSTALLER_STEP_LABELS: Record<
 > = {
   "daemon-install.yml": {
     running: "Running daemon provisioning…",
-    done: "TurboPanel daemon provisioning complete",
+    done: "TurboPanel daemon installed on this host",
   },
   "instance-install.yml": {
     running: "Setting up the control plane on this host…",
