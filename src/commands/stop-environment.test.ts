@@ -1150,6 +1150,7 @@ test({
 async function stopWithFolders(
   siteReleases: Array<Record<string, unknown>> | undefined,
   fail: (path: string) => boolean = () => false,
+  sharedRecords: readonly string[] = [],
 ): Promise<
   { result: Awaited<ReturnType<typeof handleEnvironmentStop>>; root: string }
 > {
@@ -1173,6 +1174,20 @@ async function stopWithFolders(
       "x",
     );
     await Deno.mkdir(join(home, "volumes", "uploads"), { recursive: true });
+    const sharedDir = join(root, "state", "sites", ".php-shared-sites");
+    if (sharedRecords.length > 0) {
+      await Deno.mkdir(sharedDir, { recursive: true });
+    }
+    for (const environmentId of sharedRecords) {
+      await Deno.writeTextFile(
+        join(sharedDir, `${environmentId}.web.json`),
+        JSON.stringify({
+          environmentId,
+          composeServiceName: "web",
+          series: "8.4",
+        }),
+      );
+    }
     const result = await handleEnvironmentStop(
       {
         environmentId: "envfolder1",
@@ -1200,6 +1215,27 @@ async function stopWithFolders(
     }
   }
 }
+
+Deno.test({
+  name:
+    "handleEnvironmentStop drops the stopped environment's shared-pool PHP site records and no other",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const { root } = await stopWithFolders(undefined, () => false, [
+      "envfolder1",
+      "envother",
+    ]);
+    try {
+      const dir = join(root, "state", "sites", ".php-shared-sites");
+      const names = (await Array.fromAsync(Deno.readDir(dir))).map((e) =>
+        e.name
+      );
+      assertEquals(names, ["envother.web.json"]);
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
+});
 
 const SERVICE_FOLDER = {
   serviceId: "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d",

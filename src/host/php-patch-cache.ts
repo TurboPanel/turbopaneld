@@ -18,8 +18,12 @@ export type PhpPatchSite = {
   environmentId: string;
   composeServiceName: string;
   series: string;
+  /** The patch version its runtime (or the shared pool) runs, when known. */
   version?: string;
+  /** A restart is pending: the installed patch is newer than the running one. */
   outdated?: true;
+  /** The site's PHP runs in the shared php-fpm master, not a per-site runtime. */
+  shared?: true;
 };
 
 export type PhpPatchSnapshot = {

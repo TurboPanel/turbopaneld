@@ -663,7 +663,17 @@ root-owned `0550` by design:
   service, probe URL, patch version) are written when a runtime is committed and
   removed with it; the patch versions and the sites' versions go out in the
   presence snapshot's `runtimes.php` (`versions`, `sites`, `restartError`) from
-  a cache the pass fills (`host/php-patch-cache.ts`). `systemctl show` is run
+  a cache the pass fills (`host/php-patch-cache.ts`). A site that keeps the
+  shared php-fpm master has no runtime record; the deploy writes it a
+  shared-pool record (`<state>/sites/.php-shared-sites/<env>.<service>.json`:
+  environment, service, series, patch version; removed when the site leaves the
+  pool or its environment stops). After the shared master restart the pass
+  restarts those sites' stale workers, one site at a time under the
+  environment's lock, with the same is-active check; a worker that does not stay
+  running only warns and leaves its site pending, as for a per-site runtime.
+  Those sites are listed in `runtimes.php.sites` beside the per-site ones with
+  `shared: true`, `version` (what the pool runs) and `outdated: true` (master or
+  a worker still on the old build). `systemctl show` is run
   without sudo; that is unproven on a managed host (tp-host has no `show` verb).
 - **nginx follows no link below a release-backed document root.** It serves
   one with `disable_symlinks on from=$document_root`, so **every** symlink under
