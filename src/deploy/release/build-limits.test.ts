@@ -228,18 +228,23 @@ test("readHostCapacity reports the host memory the reader finds, 0 when it canno
     Promise.resolve("MemTotal:  4194304 kB\n")
   );
   assertEquals(found.memoryBytes, 4 * GIB);
+  // A fresh copy of the module, so the once-per-process flag starts unset
+  // whatever ran before in this process.
+  const fresh = await import(`./build-limits.ts?fresh=${crypto.randomUUID()}`);
   const originalWarn = console.warn;
   const warnings: string[] = [];
   console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
   try {
-    const lost = await readHostCapacity(() => Promise.reject(new Error("x")));
+    const lost = await fresh.readHostCapacity(() =>
+      Promise.reject(new Error("x"))
+    );
     assertEquals(lost.memoryBytes, 0);
-    await readHostCapacity(() => Promise.resolve(undefined));
+    await fresh.readHostCapacity(() => Promise.resolve(undefined));
   } finally {
     console.warn = originalWarn;
   }
   // The failure is said once, not on every build.
-  assertEquals(warnings.length <= 1, true);
+  assertEquals(warnings, ["build limits: host memory unknown (x)"]);
 });
 
 test("host memory is read through cat when Deno blocks the direct /proc read", async () => {
