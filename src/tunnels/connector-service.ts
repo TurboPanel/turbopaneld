@@ -328,6 +328,45 @@ export function oneLineLockReason(raw: string): string {
 const ESC = 0x1b;
 const BEL = 0x07;
 
+function codeAt(text: string, i: number): number {
+  return text.codePointAt(i) ?? -1;
+}
+
+function isControl(code: number): boolean {
+  return code >= 0 && (code < 0x20 || (code >= 0x7f && code <= 0x9f));
+}
+
+/** Index just past a CSI sequence: after its final byte 0x40-0x7e, or the end. */
+function skipCsi(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    const code = codeAt(text, i);
+    i += 1;
+    if (code >= 0x40 && code <= 0x7e) break;
+  }
+  return i;
+}
+
+/** Index just past an OSC string: after BEL or ESC backslash, or the end. */
+function skipOsc(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    const code = codeAt(text, i);
+    if (code === BEL) return i + 1;
+    if (code === ESC) return codeAt(text, i + 1) === 0x5c ? i + 2 : i;
+    i += 1;
+  }
+  return i;
+}
+
+/** Index after the escape sequence that starts at the ESC at `at`. */
+function skipEscape(text: string, at: number): number {
+  const kind = codeAt(text, at + 1);
+  if (kind === 0x5b) return skipCsi(text, at + 2);
+  if (kind === 0x5d) return skipOsc(text, at + 2);
+  return at + 1;
+}
+
 /**
  * Drop ANSI CSI and OSC sequences, drop a stray ESC, and turn every other C0
  * or C1 control character and DEL into a space. An unterminated sequence runs
@@ -338,37 +377,11 @@ function stripTerminalControls(raw: string): string {
   let out = "";
   let i = 0;
   while (i < raw.length) {
-    const code = raw.charCodeAt(i);
-    if (code === ESC) {
-      const next = raw.charCodeAt(i + 1);
-      i += 1;
-      if (next === 0x5b) {
-        // CSI: skip to the final byte 0x40-0x7e.
-        i += 1;
-        while (i < raw.length) {
-          const c = raw.charCodeAt(i);
-          i += 1;
-          if (c >= 0x40 && c <= 0x7e) break;
-        }
-      } else if (next === 0x5d) {
-        // OSC: skip to BEL or ESC backslash.
-        i += 1;
-        while (i < raw.length) {
-          const c = raw.charCodeAt(i);
-          if (c === BEL) {
-            i += 1;
-            break;
-          }
-          if (c === ESC) {
-            if (raw.charCodeAt(i + 1) === 0x5c) i += 2;
-            break;
-          }
-          i += 1;
-        }
-      }
+    if (codeAt(raw, i) === ESC) {
+      i = skipEscape(raw, i);
       continue;
     }
-    out += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : raw[i];
+    out += isControl(codeAt(raw, i)) ? " " : raw[i];
     i += 1;
   }
   return out;
