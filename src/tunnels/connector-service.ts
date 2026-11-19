@@ -288,6 +288,37 @@ async function stageAndInstallEnv(
   }
 }
 
+/** Whether the last metrics port lock load worked; `reason` only when it did not. */
+export type MetricsPortLockState = { locked: boolean; reason?: string };
+
+const MAX_LOCK_REASON = 200;
+
+let metricsPortLock: MetricsPortLockState | null = null;
+
+/** The outcome of the last lock load in this daemon run; null before any. */
+export function metricsPortLockState(): MetricsPortLockState | null {
+  return metricsPortLock;
+}
+
+/** Forget the recorded outcome (tests only). */
+export function resetMetricsPortLockState(): void {
+  metricsPortLock = null;
+}
+
+function recordLockFailure(reason: string): void {
+  const first = reason.trim().split("\n")[0].trim();
+  metricsPortLock = {
+    locked: false,
+    reason: (first || "failed").slice(0, MAX_LOCK_REASON),
+  };
+  logWarn(
+    "tunnels",
+    `connector metrics ports are not locked to the daemon: ${
+      first || "failed"
+    }`,
+  );
+}
+
 /**
  * Reload the nftables table that lets only root and the daemon account reach
  * the connectors' metrics band on loopback (`tp-host tunnel-loopback-sync`,
@@ -298,7 +329,7 @@ async function stageAndInstallEnv(
  * Never fatal: a failure (no `nft`, a `tp-host` from before this verb, a
  * development host) is logged and the connector still starts. A tunnel that
  * visitors use is never taken down over its metrics port. Returns whether the
- * table was loaded.
+ * table was loaded, and records the outcome for the status report.
  */
 export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
   try {
@@ -306,20 +337,13 @@ export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
       "sudo",
       hostSudoArgs(["-n", "tunnel-loopback-sync"]),
     );
-    if (result.success) return true;
-    logWarn(
-      "tunnels",
-      `connector metrics ports are not locked to the daemon: ${
-        result.stderr || "tp-host refused it"
-      }`,
-    );
+    if (result.success) {
+      metricsPortLock = { locked: true };
+      return true;
+    }
+    recordLockFailure(result.stderr || "tp-host refused it");
   } catch (err) {
-    logWarn(
-      "tunnels",
-      `connector metrics ports are not locked to the daemon: ${
-        err instanceof Error ? err.message : "failed"
-      }`,
-    );
+    recordLockFailure(err instanceof Error ? err.message : "failed");
   }
   return false;
 }

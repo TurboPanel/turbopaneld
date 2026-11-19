@@ -8171,6 +8171,10 @@ export type TunnelStatusResult = {
   peerClientAuth?: TunnelPeerClientAuth;
   /** True when `require` was asked for and `verify` is in force because this server's certificate cannot be shown. */
   peerClientAuthDowngraded?: true;
+  /** Whether the nftables lock on the connectors' metrics ports (20300-20899) is loaded; absent = not tried yet (no feature of its own: an older control plane ignores it). */
+  statusPortsLocked?: boolean;
+  /** Why the lock is not loaded, one line of at most 200 characters; only with `statusPortsLocked: false`. */
+  statusPortsLockReason?: string;
 };
 
 const TUNNEL_STATUS_VALUES = new Set([
@@ -8294,6 +8298,21 @@ export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
       );
     }
     result.peerClientAuthDowngraded = true;
+  }
+  if (value.statusPortsLocked !== undefined) {
+    if (typeof value.statusPortsLocked !== "boolean") {
+      throw new TypeError("Invalid server.tunnel.status statusPortsLocked");
+    }
+    result.statusPortsLocked = value.statusPortsLocked;
+  }
+  if (value.statusPortsLockReason !== undefined) {
+    if (
+      typeof value.statusPortsLockReason !== "string" ||
+      value.statusPortsLockReason.length > 200
+    ) {
+      throw new TypeError("Invalid server.tunnel.status statusPortsLockReason");
+    }
+    result.statusPortsLockReason = value.statusPortsLockReason;
   }
   return result;
 }

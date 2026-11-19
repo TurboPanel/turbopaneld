@@ -9,6 +9,7 @@ import { readTunnelState } from "../deploy/tunnel-state.ts";
 import {
   type ConnectorIo,
   defaultConnectorIo,
+  metricsPortLockState,
   reportConnectors,
 } from "../tunnels/connector-service.ts";
 
@@ -21,7 +22,20 @@ export async function handleTunnelStatus(
   deps: TunnelStatusDeps = {},
 ): Promise<TunnelStatusResult> {
   const io = deps.io ?? defaultConnectorIo();
-  const status = await reportConnectors(io);
+  const connectorStatus = await reportConnectors(io);
+  // Whether the loopback lock on the metrics band loaded; left out until this
+  // daemon run has tried, so an older control plane and an unknown state look
+  // the same (it ignores the field).
+  const lock = metricsPortLockState();
+  const status: TunnelStatusResult = {
+    ...connectorStatus,
+    ...(lock
+      ? {
+        statusPortsLocked: lock.locked,
+        ...(lock.reason ? { statusPortsLockReason: lock.reason } : {}),
+      }
+      : {}),
+  };
   // What the hop between servers does about client certificates, from the
   // table in force. Read here, not sent back with the table, so a downgrade
   // never makes the control plane send the table again.

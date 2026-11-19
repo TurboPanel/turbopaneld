@@ -172,3 +172,26 @@ test("the role installs the script and enables the boot unit", async () => {
   );
   assertStringIncludes(tasks, "name: turbopanel-loopback-tunnel.service");
 });
+
+test("the role warns visibly, and still fails open, when the boot unit does not load", async () => {
+  const tasks = await Deno.readTextFile(
+    join(ORCHESTRATION, "roles/turbopanel-user/tasks/root-helpers.yml"),
+  );
+  const start = tasks.indexOf(
+    "- name: Enable and load the tunnel metrics port lock",
+  );
+  const warn = tasks.indexOf(
+    "- name: Warn when the tunnel metrics port lock did not load",
+  );
+  const next = tasks.indexOf("- name: Record the principal home root");
+  assert(start >= 0 && warn > start && next > warn);
+  const load = tasks.slice(start, warn);
+  // Fail open, but register the result so the failure stays visible.
+  assertStringIncludes(load, "register: turbopanel_tunnel_loopback_load");
+  assertStringIncludes(load, "ignore_errors: true");
+  assert(!load.includes("failed_when: false"), load);
+  const warning = tasks.slice(warn, next);
+  assertStringIncludes(warning, "ansible.builtin.debug");
+  assertStringIncludes(warning, "WARNING:");
+  assertStringIncludes(warning, "turbopanel_tunnel_loopback_load is failed");
+});

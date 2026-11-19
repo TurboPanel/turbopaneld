@@ -127,6 +127,30 @@ test("server.tunnel.status carries what the hop does about client certificates",
   );
 });
 
+test("server.tunnel.status carries whether the metrics port lock is loaded, optionally", () => {
+  assertEquals<unknown>(parseTunnelStatusResult(GOOD), GOOD);
+  const locked = { ...GOOD, statusPortsLocked: true };
+  assertEquals<unknown>(parseTunnelStatusResult(locked), locked);
+  const failed = {
+    ...GOOD,
+    statusPortsLocked: false,
+    statusPortsLockReason: "nft is not installed",
+  };
+  assertEquals<unknown>(parseTunnelStatusResult(failed), failed);
+  assertThrows(() =>
+    parseTunnelStatusResult({ ...GOOD, statusPortsLocked: "yes" })
+  );
+  assertThrows(() =>
+    parseTunnelStatusResult({ ...GOOD, statusPortsLockReason: 3 })
+  );
+  assertThrows(() =>
+    parseTunnelStatusResult({
+      ...GOOD,
+      statusPortsLockReason: "x".repeat(201),
+    })
+  );
+});
+
 test("a status answer naming the retired tunnel id default is refused", () => {
   assertThrows(
     () =>
