@@ -187,23 +187,29 @@ test("the cases that were real gaps are refused or flagged", async () => {
 });
 
 /**
- * Newer Go releases print the offending header line quoted and escaped
- * (`malformed MIME header line: "X-A: a\x00b"`), older ones print it raw. The
- * wording is not part of the verdict, so compare the error text with that
- * quoting undone; `ok`, framing and every other field still compare exactly.
+ * Newer Go releases escape control characters in the offending header line of
+ * a `malformed MIME header line` error (and some quote the line), older ones
+ * print it raw. The wording is not part of the verdict, so compare the error
+ * text with that escaping undone; `ok`, framing and every other field still
+ * compare exactly.
  */
 const ESCAPES: Record<string, string> = {
-  r: "\r",
+  a: "\x07",
+  b: "\b",
+  f: "\f",
   n: "\n",
+  r: "\r",
   t: "\t",
+  v: "\v",
   "\\": "\\",
   '"': '"',
 };
 function unquoteMalformed(error: string | undefined): string | undefined {
-  const m = /^(malformed MIME header line: )"(.*)"$/s.exec(error ?? "");
+  const m = /^(malformed MIME header line: )(.*)$/s.exec(error ?? "");
   if (!m) return error;
-  const body = m[2].replace(
-    /\\(x[0-9a-fA-F]{2}|[rnt\\"])/g,
+  const quoted = /^"(.*)"$/s.exec(m[2]);
+  const body = (quoted ? quoted[1] : m[2]).replace(
+    /\\(x[0-9a-fA-F]{2}|[abfnrtv\\"])/g,
     (_all, e: string) =>
       e.startsWith("x")
         ? String.fromCharCode(parseInt(e.slice(1), 16))
