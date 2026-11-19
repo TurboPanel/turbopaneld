@@ -30,7 +30,9 @@ export type Host = {
  * per-user-group default) makes of every directory a test or tp-host creates.
  * Pin 022 for this test process (and the children it spawns), so the suite
  * passes under any umask. Returns a function that puts the previous umask back;
- * call it from the host's cleanup so later tests see the caller's own umask.
+ * call it from the host's cleanup so later tests see the caller's own umask,
+ * and from the setup's error path (see {@link guardHostSetup}) so a setup that
+ * throws does not leave 022 behind.
  */
 export function useSealedUmask(): () => void {
   const previous = Deno.umask(0o022);
@@ -39,111 +41,137 @@ export function useSealedUmask(): () => void {
   };
 }
 
-export async function makeHost(): Promise<Host> {
+/**
+ * Make a temp prefix under the sealed umask and run `build` on it. If `build`
+ * throws, the prefix is removed (when it exists), the previous umask is put
+ * back and the error is rethrown; on success `build` owns both, and the host's
+ * cleanup restores the umask with the function it is given.
+ */
+export async function guardHostSetup<T>(
+  tempPrefix: string,
+  build: (prefix: string, restoreUmask: () => void) => Promise<T>,
+): Promise<T> {
   const restoreUmask = useSealedUmask();
-  const prefix = await Deno.realPath(
-    await Deno.makeTempDir({ prefix: "tp-host-" }),
-  );
-  const path = (rel: string) => join(prefix, rel);
-  for (
-    const dir of [
-      "opt/turbopanel/lib",
-      "opt/turbopanel/share/orchestration",
-      "opt/turbopanel/vendor/caddy/2.11.4",
-      "etc/turbopanel",
-      "var/lib/turbopanel",
-      "var/log/turbopanel",
-      "run/turbopanel",
-      "srv/users/alice/sites",
-      "etc/systemd/system",
-      "etc/ssh/sshd_config.d",
-      "etc/ssh/turbopanel/authorized_keys",
-      "etc/sysctl.d",
-      "outside",
-      "tmp",
-    ]
-  ) {
-    await Deno.mkdir(path(dir), { recursive: true });
+  let prefix: string | undefined;
+  try {
+    prefix = await Deno.realPath(
+      await Deno.makeTempDir({ prefix: tempPrefix }),
+    );
+    return await build(prefix, restoreUmask);
+  } catch (err) {
+    try {
+      if (prefix !== undefined) await removeHostPrefix(prefix);
+    } catch {
+      // The setup error is the one worth seeing.
+    }
+    restoreUmask();
+    throw err;
   }
-  await Deno.copyFile(SCRIPT, path("opt/turbopanel/lib/tp-host"));
-  await Deno.chmod(path("opt/turbopanel/lib/tp-host"), 0o755);
-  await Deno.copyFile(
-    join(repo, "orchestration/scripts/tp-php-loopback"),
-    path("opt/turbopanel/lib/tp-php-loopback"),
-  );
-  await Deno.copyFile(
-    REGISTRY,
-    path("opt/turbopanel/share/orchestration/runtime-registry.json"),
-  );
-  await Deno.writeTextFile(
-    path("etc/passwd"),
-    [
-      "root:x:0:0:root:/root:/bin/bash",
-      "tp:x:9999:9999::/var/lib/turbopanel:/usr/sbin/nologin",
-      "tpnginx:x:9990:9990::/nonexistent:/usr/sbin/nologin",
-      `alice:x:15001:15001::${prefix}/srv/users/alice:/bin/bash`,
-      "",
-    ].join("\n"),
-  );
-  await Deno.writeTextFile(
-    path("etc/group"),
-    [
-      "root:x:0:",
-      "sudo:x:27:",
-      "docker:x:998:tp",
-      "tp:x:9999:",
-      "tpnginx:x:9990:",
-      "tpshell:x:9985:",
-      "tpsftp:x:9986:",
-      "alice:x:15001:",
-      "carol:x:15003:",
-      "",
-    ].join("\n"),
-  );
-  await Deno.writeTextFile(path("outside/secret"), "root-only secret\n");
-  await Deno.writeTextFile(path("tmp/staged"), "staged content\n");
-  const script = path("opt/turbopanel/lib/tp-host");
-  return {
-    prefix,
-    path,
-    run: async (args, stdin, extraEnv, cwd) => {
-      const child = new Deno.Command("sh", {
-        args: [script, ...args],
-        cwd,
-        clearEnv: true,
-        env: {
-          PATH: "/usr/bin:/bin",
-          TP_HOST_TEST_PREFIX: prefix,
-          // The host's core count, so the default build core limit is the
-          // same on every machine running the suite.
-          TP_TEST_CORES: "8",
-          TP_TEST_MEM_KB: "8388608",
-          ...extraEnv,
-        },
-        stdin: stdin === undefined ? "null" : "piped",
-        stdout: "piped",
-        stderr: "piped",
-      }).spawn();
-      if (stdin !== undefined) {
-        const writer = child.stdin.getWriter();
-        await writer.write(new TextEncoder().encode(stdin));
-        await writer.close();
-      }
-      const out = await child.output();
-      return {
-        code: out.code,
-        stdout: new TextDecoder().decode(out.stdout),
-        stderr: new TextDecoder().decode(out.stderr),
-      };
-    },
-    cleanup: async () => {
-      try {
-        await removeHostPrefix(prefix);
-      } finally {
-        restoreUmask();
-      }
-    },
-  };
+}
+
+export function makeHost(): Promise<Host> {
+  return guardHostSetup("tp-host-", async (prefix, restoreUmask) => {
+    const path = (rel: string) => join(prefix, rel);
+    for (
+      const dir of [
+        "opt/turbopanel/lib",
+        "opt/turbopanel/share/orchestration",
+        "opt/turbopanel/vendor/caddy/2.11.4",
+        "etc/turbopanel",
+        "var/lib/turbopanel",
+        "var/log/turbopanel",
+        "run/turbopanel",
+        "srv/users/alice/sites",
+        "etc/systemd/system",
+        "etc/ssh/sshd_config.d",
+        "etc/ssh/turbopanel/authorized_keys",
+        "etc/sysctl.d",
+        "outside",
+        "tmp",
+      ]
+    ) {
+      await Deno.mkdir(path(dir), { recursive: true });
+    }
+    await Deno.copyFile(SCRIPT, path("opt/turbopanel/lib/tp-host"));
+    await Deno.chmod(path("opt/turbopanel/lib/tp-host"), 0o755);
+    await Deno.copyFile(
+      join(repo, "orchestration/scripts/tp-php-loopback"),
+      path("opt/turbopanel/lib/tp-php-loopback"),
+    );
+    await Deno.copyFile(
+      REGISTRY,
+      path("opt/turbopanel/share/orchestration/runtime-registry.json"),
+    );
+    await Deno.writeTextFile(
+      path("etc/passwd"),
+      [
+        "root:x:0:0:root:/root:/bin/bash",
+        "tp:x:9999:9999::/var/lib/turbopanel:/usr/sbin/nologin",
+        "tpnginx:x:9990:9990::/nonexistent:/usr/sbin/nologin",
+        `alice:x:15001:15001::${prefix}/srv/users/alice:/bin/bash`,
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(
+      path("etc/group"),
+      [
+        "root:x:0:",
+        "sudo:x:27:",
+        "docker:x:998:tp",
+        "tp:x:9999:",
+        "tpnginx:x:9990:",
+        "tpshell:x:9985:",
+        "tpsftp:x:9986:",
+        "alice:x:15001:",
+        "carol:x:15003:",
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(path("outside/secret"), "root-only secret\n");
+    await Deno.writeTextFile(path("tmp/staged"), "staged content\n");
+    const script = path("opt/turbopanel/lib/tp-host");
+    return {
+      prefix,
+      path,
+      run: async (args, stdin, extraEnv, cwd) => {
+        const child = new Deno.Command("sh", {
+          args: [script, ...args],
+          cwd,
+          clearEnv: true,
+          env: {
+            PATH: "/usr/bin:/bin",
+            TP_HOST_TEST_PREFIX: prefix,
+            // The host's core count, so the default build core limit is the
+            // same on every machine running the suite.
+            TP_TEST_CORES: "8",
+            TP_TEST_MEM_KB: "8388608",
+            ...extraEnv,
+          },
+          stdin: stdin === undefined ? "null" : "piped",
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
+        if (stdin !== undefined) {
+          const writer = child.stdin.getWriter();
+          await writer.write(new TextEncoder().encode(stdin));
+          await writer.close();
+        }
+        const out = await child.output();
+        return {
+          code: out.code,
+          stdout: new TextDecoder().decode(out.stdout),
+          stderr: new TextDecoder().decode(out.stderr),
+        };
+      },
+      cleanup: async () => {
+        try {
+          await removeHostPrefix(prefix);
+        } finally {
+          restoreUmask();
+        }
+      },
+    };
+  });
 }
 
 /**
