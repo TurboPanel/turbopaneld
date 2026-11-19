@@ -5,6 +5,7 @@ import {
   BACKUP_S3_COPY_FEATURE,
   BUILD_LIMITS_FEATURE,
   COMMAND_RECOVERY_FEATURE,
+  COMMAND_RECOVERY_V2_FEATURE,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
   DAEMON_SEALED_SECRETS_FEATURE,
@@ -241,6 +242,15 @@ test("managed-switchover-final-position-v1 is advertised and raised no floor", (
 
 test("command-recovery-v1 is advertised", () => {
   assertEquals(COMMAND_RECOVERY_FEATURE, "command-recovery-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
+});
+
+test("command-recovery-v2 is advertised next to v1", () => {
+  assertEquals(COMMAND_RECOVERY_V2_FEATURE, "command-recovery-v2");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_V2_FEATURE),
+    true,
+  );
   assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
 });
 
@@ -603,6 +613,9 @@ test("hosting-name-tls-v1 and acme-issue-dns-v1 are advertised, in that order, a
     DAEMON_WIRE_FEATURES.indexOf(HOSTING_NAME_TLS_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(TUNNEL_PEER_MTLS_FEATURE) + 1,
   );
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), ACME_ISSUE_DNS_FEATURE);
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(ACME_ISSUE_DNS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(HOSTING_NAME_TLS_FEATURE) + 1,
+  );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

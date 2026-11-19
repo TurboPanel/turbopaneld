@@ -122,6 +122,7 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-peer-mtls-v1",
   "hosting-name-tls-v1",
   "acme-issue-dns-v1",
+  "command-recovery-v2",
 ] as const;
 
 /**
@@ -131,6 +132,14 @@ export const DAEMON_WIRE_FEATURES = [
  * progress as a keepalive.
  */
 export const COMMAND_RECOVERY_FEATURE = "command-recovery-v1";
+
+/**
+ * `hello.commandState` tells the control plane which commands this process
+ * and its on-disk journal still know (`CommandStateReport`), so it can tell a
+ * command the daemon never received from one it already ran. Wire contract:
+ * `src/commands/AGENTS.md`. Old control planes ignore the field and the name.
+ */
+export const COMMAND_RECOVERY_V2_FEATURE = "command-recovery-v2";
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
 

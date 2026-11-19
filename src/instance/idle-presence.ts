@@ -22,7 +22,10 @@ import {
 import { resolveLayout } from "../paths/layout.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
-import type { CommandRecoveryReport } from "../contracts/cell-messages.ts";
+import type {
+  CommandRecoveryReport,
+  CommandStateReport,
+} from "../contracts/cell-messages.ts";
 import {
   panelPinReport,
   readPanelIdentityPinSync,
@@ -95,6 +98,12 @@ export const PRESENCE_REFRESH_MS = 5 * 60_000;
  */
 export const MAX_CONNECTION_AGE_MS = 2 * 60 * 60 * 1_000;
 
+/**
+ * How long past its age limit a connection may wait for a quiet moment (no
+ * running command, no unconfirmed outcome) before it is recycled anyway.
+ */
+export const MAX_CONNECTION_QUIET_WAIT_MS = 10 * 60 * 1_000;
+
 /** Default forced-recycle age is spread by +-10% so a fleet that connected together does not recycle together. */
 export const MAX_CONNECTION_AGE_JITTER = 0.1;
 
@@ -148,6 +157,16 @@ export type IdlePresenceOptions = {
    * `hello` and `heartbeat` whenever not empty.
    */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** What this process remembers about commands (`command-recovery-v2`); `hello` only. */
+  commandState?: () => CommandStateReport | undefined;
+  /**
+   * True when no command is running and no outcome waits for its ack. A
+   * connection past its age limit waits for this, up to
+   * {@link maxQuietWaitMs}, so a recycle does not cut a command's link.
+   */
+  commandsQuiet?: () => boolean;
+  /** Override for tests; defaults to {@link MAX_CONNECTION_QUIET_WAIT_MS}. */
+  maxQuietWaitMs?: number;
 };
 
 /** The part of host resources a heartbeat re-sends when it moves. */
@@ -370,6 +389,10 @@ export class IdlePresence {
   #maxConnectionAgeMs: number;
   readonly #onMaxAge: (() => void) | undefined;
   readonly #commandReport: IdlePresenceOptions["commandReport"];
+  readonly #commandState: IdlePresenceOptions["commandState"];
+  readonly #commandsQuiet: IdlePresenceOptions["commandsQuiet"];
+  readonly #maxQuietWaitMs: number;
+  #quietWaitLogged = false;
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -405,6 +428,10 @@ export class IdlePresence {
     this.#maxConnectionAgeMs = this.#baseMaxConnectionAgeMs;
     this.#onMaxAge = options.onMaxAge;
     this.#commandReport = options.commandReport;
+    this.#commandState = options.commandState;
+    this.#commandsQuiet = options.commandsQuiet;
+    this.#maxQuietWaitMs = options.maxQuietWaitMs ??
+      MAX_CONNECTION_QUIET_WAIT_MS;
   }
 
   get lastActivityAt(): number {
@@ -444,6 +471,7 @@ export class IdlePresence {
       ? jitteredMaxConnectionAgeMs(this.#baseMaxConnectionAgeMs)
       : this.#baseMaxConnectionAgeMs;
     this.#maxAgeReported = false;
+    this.#quietWaitLogged = false;
     this.#lastPresenceFrameAt = 0;
     this.#sendHello();
     this.#armIdleTimer();
@@ -490,6 +518,21 @@ export class IdlePresence {
     if (this.#ws?.readyState !== WebSocket.OPEN) return false;
     const ageMs = Date.now() - this.#connectedAtMs;
     if (ageMs < this.#maxConnectionAgeMs) return false;
+    if (
+      ageMs < this.#maxConnectionAgeMs + this.#maxQuietWaitMs &&
+      this.#commandsQuiet?.() === false
+    ) {
+      // Commands are running or unconfirmed: recycle at the next quiet
+      // moment, never later than the bounded wait.
+      if (!this.#quietWaitLogged) {
+        this.#quietWaitLogged = true;
+        logInfo(
+          "instance",
+          "connection past its age limit; waiting for running commands to finish",
+        );
+      }
+      return false;
+    }
     this.#maxAgeReported = true;
     logInfo(
       "instance",
@@ -529,6 +572,12 @@ export class IdlePresence {
     return commands ? { commands } : {};
   }
 
+  /** `{ commandState }` on every hello (`command-recovery-v2`). */
+  #commandStateField(): { commandState?: CommandStateReport } {
+    const commandState = this.#commandState?.();
+    return commandState ? { commandState } : {};
+  }
+
   #sendHello(): void {
     const ws = this.#ws;
     if (ws?.readyState !== WebSocket.OPEN) return;
@@ -565,6 +614,7 @@ export class IdlePresence {
           : panelPinField()),
         ...(this.#attachProof ? { attach: this.#attachProof } : {}),
         ...this.#commandsField(),
+        ...this.#commandStateField(),
       }));
       this.#lastActivityAt = Date.now();
       this.#lastPresenceFrameAt = this.#lastActivityAt;

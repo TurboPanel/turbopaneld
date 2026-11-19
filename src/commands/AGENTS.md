@@ -107,6 +107,38 @@ when either list is not empty, and a running deploy repeats its step plan every
 order (retry every 5 s, resync from the `nextSeq` of a `409`; see
 `../logs/sink.ts`).
 
+### Known commands on `hello` (`command-recovery-v2`)
+
+Listed in `hello.features` next to `command-recovery-v1` (which stays). A
+control plane that does not read it ignores the name and the field. Wire
+contract, field `commandState` on **every `hello`** (never on `heartbeat`;
+present even when `known` is empty):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `commandState.processStartId` | string (UUID) | Made once per daemon process; the same on every reconnect of that process, different after a restart |
+| `commandState.known` | string[] (at most 256 ids, each at most 64 characters) | Ids of commands this daemon accepted and still holds state for: running, finished with the outcome not yet confirmed (`command-outcome-ack`), and entries a previous process left in the on-disk journal. Read from disk before the socket opens, so the first hello after a restart is already complete |
+| `commandState.complete` | boolean | `true` when `known` lists every such id and the journal directory was read. `false` when the list was cut or the journal was unreadable; then a missing id proves nothing |
+
+Reading it: with `complete: true`, a `command-dispatch` the control plane sent
+and never saw acked, whose id is not in `known`, was never started by this
+daemon (a frame is journaled the moment it is accepted), so sending it again
+cannot run it twice, whatever its type. An id in `known` is held; its outcome
+arrives on its own, so it is never sent again. Limits the control plane must
+keep: only resend a command that is still non-terminal in its own records
+(an acknowledged outcome removes the id from `known`), only one younger than
+the 7-day unconfirmed retention, and skip a request written after the
+connection attached. With `complete: false`, or without the field, keep the
+v1 rule (safe-to-repeat types only). A restart changes `processStartId`.
+
+The connection recycle (2 h, jittered) waits for a quiet moment: when the age
+limit passes with a command running or an outcome unconfirmed it recycles at
+the next idle tick that is quiet, and in any case no later than 10 minutes
+past the limit (`MAX_CONNECTION_QUIET_WAIT_MS`). The daemon has no command
+queue: commands run concurrently, serialised only by per-resource locks, so
+the control plane's per-server lane is where a reconcile can hold up a newer
+user command.
+
 Outcomes are sized before they are journaled and sent: `error` keeps its
 last 4000 characters (the control plane caps it at 4096), and a successful
 `result` over 64 KB as JSON (`capOutcomeResult`, the control plane's

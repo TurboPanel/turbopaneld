@@ -3,6 +3,8 @@ import {
   acknowledgeCommandOutcome,
   answerRepeatedDispatch,
   commandRecoveryReport,
+  commandsQuiet,
+  commandStateReport,
   deliverCommandOutcome,
   flushCommandOutcomes,
   interruptedFacts,
@@ -10,11 +12,13 @@ import {
   noteCommandProgress,
   noteSessionOpen,
   OUTCOME_BURST_MAX,
+  primeCommandJournal,
   PROGRESS_JOURNAL_INTERVAL_MS,
   RESEND_INTERVAL_MS,
   resetCommandOutboxForTests,
   sendCommandFrame,
   settleCommandJournalWrites,
+  STATE_MAX_IDS,
   UNACKED_MAX_ENTRIES,
   UNACKED_RETENTION_MS,
 } from "./command-outbox.ts";
@@ -681,5 +685,47 @@ test("a result answered after a restart ages from when it was journaled, oldest 
     names = await journalNames();
     assertEquals(names, []);
     assertEquals(after.sent.length, 0);
+  });
+});
+
+test("commandState is incomplete until the journal is read, then lists a killed daemon's ids", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-old");
+    const first = commandStateReport();
+    resetCommandOutboxForTests(); // restart: nothing in memory
+    const before = commandStateReport();
+    assertEquals(before.known, []);
+    assertEquals(before.complete, false);
+    await primeCommandJournal();
+    const after = commandStateReport();
+    assertEquals(after.known, ["cmd-old"]);
+    assertEquals(after.complete, true);
+    assertEquals(typeof after.processStartId, "string");
+    assertEquals(after.processStartId, first.processStartId);
+    // Acknowledging forgets the id.
+    await acknowledgeCommandOutcome("cmd-old");
+    assertEquals(commandStateReport().known, []);
+  });
+});
+
+test("commandState is complete and empty for a fresh state directory", async () => {
+  await withState(async () => {
+    await primeCommandJournal();
+    assertEquals(commandStateReport().known, []);
+    assertEquals(commandStateReport().complete, true);
+    assertEquals(commandsQuiet(), true);
+  });
+});
+
+test("commandState lists running and unconfirmed ids and is incomplete past the cap", async () => {
+  await withState(async () => {
+    await primeCommandJournal();
+    await markCommandInFlight("run-1");
+    assertEquals(commandStateReport().known, ["run-1"]);
+    assertEquals(commandsQuiet(), false);
+    for (let i = 0; i < STATE_MAX_IDS; i++) await markCommandInFlight(`c-${i}`);
+    const report = commandStateReport();
+    assertEquals(report.known.length, STATE_MAX_IDS);
+    assertEquals(report.complete, false);
   });
 });

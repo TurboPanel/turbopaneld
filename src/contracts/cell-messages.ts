@@ -85,6 +85,26 @@ export type CommandRecoveryReport = {
 };
 
 /**
+ * What this daemon process remembers about commands (feature
+ * `command-recovery-v2`), sent on every `hello` (never on `heartbeat`),
+ * including when `known` is empty. `processStartId` is a random id made once
+ * per daemon process: it stays the same across reconnects and changes on a
+ * restart. `known` holds the ids of commands this daemon has accepted and
+ * still holds state for: running, finished with the outcome not yet
+ * confirmed, and entries a previous process left in the on-disk journal. It
+ * is read from disk before the socket opens, so it is complete on the first
+ * hello after a restart. At most 256 ids of 64
+ * characters; `complete` is `false` when the list was cut or the journal could
+ * not be read, and then an id missing from `known` proves nothing. Twin of
+ * the control plane's contract once it reads the field.
+ */
+export type CommandStateReport = {
+  processStartId: string;
+  known: string[];
+  complete: boolean;
+};
+
+/**
  * Control plane → daemon: the final outcome of command `id` is stored, so the
  * daemon may drop its journaled copy. Until it arrives the daemon sends the
  * outcome again on every attach and every 30 seconds. Twin of
@@ -102,6 +122,7 @@ export type DaemonHelloMessage = {
   at: string;
   features?: string[];
   commands?: CommandRecoveryReport;
+  commandState?: CommandStateReport;
 };
 
 /** Control-plane → daemon self-update. Optional pin fields are expand-only. */

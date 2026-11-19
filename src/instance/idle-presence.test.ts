@@ -1365,3 +1365,80 @@ test("IdlePresence heartbeat carries the command report", async () => {
   const heartbeat = await heartbeatAfterBuildChange();
   assertEquals(heartbeat.commands, REPORT);
 });
+
+test({
+  name:
+    "IdlePresence waits for a quiet moment past the age limit, within a bound",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const interval = 20;
+    const socket = openMockSocket();
+    let quiet = false;
+    let recycled = 0;
+    const presence = new IdlePresence({
+      serverId: "srv-quiet",
+      idleCheckIntervalMs: interval,
+      idleThresholdMs: interval,
+      staleConnectionMs: 60_000,
+      maxConnectionAgeMs: 5,
+      maxQuietWaitMs: 150,
+      commandsQuiet: () => quiet,
+      commandState: () => ({
+        processStartId: "p1",
+        known: ["a"],
+        complete: true,
+      }),
+      onMaxAge: () => {
+        recycled += 1;
+      },
+    });
+    try {
+      presence.attach(socket as unknown as WebSocket);
+      const hello = JSON.parse(socket.sentFrames[0] as string);
+      assertEquals(hello.commandState.processStartId, "p1");
+      await sleep(interval * 3);
+      assertEquals(recycled, 0, "busy: no recycle yet");
+      quiet = true;
+      await sleep(interval * 2);
+      assertEquals(recycled, 1, "recycles once quiet");
+    } finally {
+      presence.detach();
+    }
+    // Never quiet: recycled after the bounded wait.
+    const busySocket = openMockSocket();
+    let busyRecycled = 0;
+    const busy = new IdlePresence({
+      serverId: "srv-busy",
+      idleCheckIntervalMs: interval,
+      idleThresholdMs: interval,
+      staleConnectionMs: 60_000,
+      maxConnectionAgeMs: 5,
+      maxQuietWaitMs: 100,
+      commandsQuiet: () => false,
+      onMaxAge: () => {
+        busyRecycled += 1;
+      },
+    });
+    try {
+      busy.attach(busySocket as unknown as WebSocket);
+      await sleep(60);
+      assertEquals(busyRecycled, 0);
+      await sleep(200);
+      assertEquals(busyRecycled, 1, "bound reached");
+    } finally {
+      busy.detach();
+      restore();
+    }
+  },
+});

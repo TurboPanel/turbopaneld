@@ -18,6 +18,7 @@ import { join } from "@std/path";
 import type {
   CommandProgress,
   CommandRecoveryReport,
+  CommandStateReport,
   DaemonMessage,
 } from "../contracts/cell-messages.ts";
 import { resolveLayout } from "../paths/layout.ts";
@@ -53,6 +54,9 @@ export const UNACKED_MAX_ENTRIES = 64;
  * presence, progress and new results always fit beside them.
  */
 export const OUTCOME_BURST_MAX = 20;
+
+/** Most ids in `hello.commandState.known` (`command-recovery-v2`). */
+export const STATE_MAX_IDS = 256;
 
 /** Wire bounds for {@link CommandRecoveryReport}. */
 export const REPORT_MAX_IDS = 64;
@@ -109,6 +113,12 @@ let resendTimer: unknown;
 const sentOnSocket = new Map<string, number>();
 /** Kept outcomes sent in the current window (see {@link OUTCOME_BURST_MAX}). */
 let burstWindow = { start: 0, used: 0 };
+/** Made once per process, so a restart is visible on the wire. */
+const processStartId = crypto.randomUUID();
+/** Journal ids a previous process left on disk, read before the first hello. */
+const diskIds = new Set<string>();
+/** True once the journal directory was read without error. */
+let journalRead = false;
 /** When an outcome answered from a dead daemon's journal was first recorded. */
 const keptSince = new Map<string, number>();
 
@@ -146,6 +156,7 @@ function journalFile(id: string): string | undefined {
 }
 
 async function removeJournal(id: string): Promise<void> {
+  diskIds.delete(id);
   const file = journalFile(id);
   if (!file) return;
   try {
@@ -429,6 +440,32 @@ async function orphanedIds(): Promise<string[]> {
   }
 }
 
+/**
+ * Read the journal directory once, before the socket opens, so the first
+ * `hello` after a restart already names every command a previous process
+ * accepted (`command-recovery-v2`). Never throws; an unreadable directory
+ * leaves the report incomplete.
+ */
+export async function primeCommandJournal(): Promise<void> {
+  if (journalRead) return;
+  try {
+    const names = await Array.fromAsync(
+      Deno.readDir(journalDir()),
+      (e) => e.name,
+    );
+    for (const name of names) {
+      if (name.endsWith(".json")) diskIds.add(name.slice(0, -".json".length));
+    }
+    journalRead = true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      journalRead = true;
+      return;
+    }
+    logWarn("commands", `in-flight journal unreadable: ${err}`);
+  }
+}
+
 /** What a journaled step plan shows about how far the command got. */
 export function interruptedFacts(progress: CommandProgress | undefined): {
   lastStep?: string;
@@ -652,6 +689,29 @@ export function commandRecoveryReport(): CommandRecoveryReport | undefined {
   return { running: runningIds, unacked: unackedIds };
 }
 
+/**
+ * What this process knows about commands, for every `hello`
+ * (`command-recovery-v2`): running, unconfirmed and journaled ids. Never
+ * `undefined`: an empty, complete list is the answer "nothing here".
+ */
+export function commandStateReport(): CommandStateReport {
+  const all = new Set<string>([...running, ...unacked.keys(), ...diskIds]);
+  const usable = [...all].filter((id) =>
+    id.length > 0 && id.length <= REPORT_MAX_ID_CHARS
+  );
+  return {
+    processStartId,
+    known: usable.slice(0, STATE_MAX_IDS),
+    complete: journalRead && usable.length === all.size &&
+      usable.length <= STATE_MAX_IDS,
+  };
+}
+
+/** True when no command is running and no outcome waits for its confirmation. */
+export function commandsQuiet(): boolean {
+  return running.size === 0 && unacked.size === 0;
+}
+
 /** Resolves when every queued journal write has finished. */
 export async function settleCommandJournalWrites(): Promise<void> {
   await Promise.all(writeChains.values());
@@ -670,6 +730,8 @@ export function resetCommandOutboxForTests(
   writeChains.clear();
   sentOnSocket.clear();
   keptSince.clear();
+  diskIds.clear();
+  journalRead = false;
   burstWindow = { start: 0, used: 0 };
   currentSocket = undefined;
   timers = { ...defaultTimers, ...override };
