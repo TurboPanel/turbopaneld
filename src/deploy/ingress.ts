@@ -2282,19 +2282,25 @@ function isBindToken(token: string): boolean {
  */
 export function siteBindAddresses(texts: readonly string[]): BoundAddresses {
   const found = { http: new Set<string>(), https: new Set<string>() };
-  for (const text of texts) {
-    for (const block of text.matchAll(SITE_BLOCK_RE)) {
-      const bind = SITE_BIND_LINE_RE.exec(block[2]);
-      if (bind === null) continue;
-      const scheme = block[1].startsWith("http://") ? "http" : "https";
-      for (const token of bind[1].split(" ")) {
-        if (isBindToken(token)) found[scheme].add(token);
-      }
-    }
-  }
+  for (const text of texts) collectBlockBindings(text, found);
   const sorted = (set: Set<string>) =>
     [...set].sort((a, b) => a.localeCompare(b));
   return { http: sorted(found.http), https: sorted(found.https) };
+}
+
+/** Adds the IP literals the `bind` lines of one site file's blocks name. */
+function collectBlockBindings(
+  text: string,
+  found: { readonly http: Set<string>; readonly https: Set<string> },
+): void {
+  for (const block of text.matchAll(SITE_BLOCK_RE)) {
+    const bind = SITE_BIND_LINE_RE.exec(block[2]);
+    if (bind === null) continue;
+    const scheme = block[1].startsWith("http://") ? "http" : "https";
+    for (const token of bind[1].split(" ")) {
+      if (isBindToken(token)) found[scheme].add(token);
+    }
+  }
 }
 
 /**
