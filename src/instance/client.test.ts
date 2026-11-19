@@ -8287,20 +8287,32 @@ it({
       const collectsBefore = collects.length;
       socket.close(1000, "connection lost");
 
-      const socket2 = await waitFor(
-        "reconnect websocket",
-        () => sockets.at(1),
-        5_000,
-      );
-      socket2.open();
-      await flushMicrotasks();
-      // Fresh lease manager: back to the baseline cadence despite the
-      // unexpired lease-b, so a collect still lands after the reconnect.
-      await waitFor(
-        "first collect after reconnect",
-        () => collects.length > collectsBefore || undefined,
-        5_000,
-      );
+      // Open every socket the reconnect loop dials after the dropped one (a
+      // transient failed attempt dials another) instead of trusting that
+      // exactly one is ever created, and fail with the socket states when no
+      // collect lands rather than a bare timeout.
+      let opened = 1;
+      try {
+        await waitFor(
+          "first collect after reconnect",
+          () => {
+            while (opened < sockets.length) {
+              sockets[opened++].open();
+            }
+            // Fresh lease manager: back to the baseline cadence despite the
+            // unexpired lease-b, so a collect still lands after the reconnect.
+            return collects.length > collectsBefore || undefined;
+          },
+          15_000,
+        );
+      } catch (err) {
+        const states = sockets.map((candidate) => candidate.readyState);
+        throw new Error(
+          `${(err as Error).message} (sockets: ${sockets.length}, states: ${
+            states.join(",")
+          })`,
+        );
+      }
     } finally {
       client.stop();
       restoreClientTime();
