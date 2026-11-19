@@ -81,16 +81,22 @@ export class AcmeIssueHandler {
    */
   async sweepRestartedDnsOrders(): Promise<void> {
     const ids = await listOpenDnsOrders(this.#deps.layout);
-    for (const requestId of ids) {
-      if (this.#open.has(requestId)) continue;
-      const stillOpen = await listOpenDnsOrders(this.#deps.layout);
-      // No await between this check and the event: nothing starts in between.
-      if (!stillOpen.includes(requestId) || this.#open.has(requestId)) continue;
-      if (!this.#event(requestId, "failed", { reason: SERVER_RESTARTED })) {
-        continue;
-      }
-      await forgetOpenDnsOrder(this.#deps.layout, requestId);
+    // Each order has its own marker and its own event, so the orders are
+    // independent and are swept together.
+    await Promise.all(
+      ids.map((requestId) => this.#sweepRestartedOrder(requestId)),
+    );
+  }
+
+  async #sweepRestartedOrder(requestId: string): Promise<void> {
+    if (this.#open.has(requestId)) return;
+    const stillOpen = await listOpenDnsOrders(this.#deps.layout);
+    // No await between this check and the event: nothing starts in between.
+    if (!stillOpen.includes(requestId) || this.#open.has(requestId)) return;
+    if (!this.#event(requestId, "failed", { reason: SERVER_RESTARTED })) {
+      return;
     }
+    await forgetOpenDnsOrder(this.#deps.layout, requestId);
   }
 
   #event(

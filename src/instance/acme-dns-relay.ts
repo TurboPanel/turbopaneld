@@ -30,8 +30,20 @@ const REFUSED = "the control plane could not publish the DNS record";
 
 // deno-lint-ignore no-control-regex
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[@-Z\\-_]/g;
-// deno-lint-ignore no-control-regex
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/** C0 and C1 control characters, DEL, and the Unicode line and paragraph separators. */
+export function isControlCodePoint(code: number): boolean {
+  return code <= 0x1f || (code >= 0x7f && code <= 0x9f) || code === 0x2028 ||
+    code === 0x2029;
+}
+
+function replaceControlCharacters(text: string): string {
+  let out = "";
+  for (const char of text) {
+    out += isControlCodePoint(char.codePointAt(0) ?? 0) ? " " : char;
+  }
+  return out;
+}
 
 /**
  * The panel's sentence as plain words: ANSI codes, control characters and
@@ -39,7 +51,7 @@ const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
  */
 export function plainPanelError(value: unknown): string {
   if (typeof value !== "string") return REFUSED;
-  const text = value.replace(ANSI_RE, " ").replace(CONTROL_RE, " ")
+  const text = replaceControlCharacters(value.replace(ANSI_RE, " "))
     .replace(/\s+/g, " ").trim().slice(0, MAX_ERROR_CHARS).trim();
   return text.length > 0 ? text : REFUSED;
 }

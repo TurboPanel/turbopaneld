@@ -4923,8 +4923,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const www = parseHostingWww(value.www);
   const nameTls = parseHostingNameTls(value.nameTls, hostnames, www);
   if (
-    tunnel &&
-    tunnel.hostnames.some((name) =>
+    tunnel?.hostnames.some((name) =>
       !tunnel.openHostnames?.includes(name) &&
       hostingTlsForName({ hostnames, www, tlsId, tlsMode, nameTls }, name)
           .tlsMode === "acme"

@@ -8,6 +8,7 @@ import type {
 } from "../../contracts/cell-messages.ts";
 import {
   AcmeDnsRelay,
+  isControlCodePoint,
   plainPanelError,
 } from "../../instance/acme-dns-relay.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
@@ -411,6 +412,15 @@ test("the panel's error text is cleaned: no ANSI, control characters or line bre
   assertEquals(/\s{2}/.test(text), false);
   assertEquals(text.length <= 300, true);
   assertEquals(plainPanelError("\u001b[2J\n"), plainPanelError(undefined));
+  // Every rejected character class becomes a space; its neighbours stay.
+  for (const code of [0x00, 0x09, 0x1f, 0x7f, 0x85, 0x9f, 0x2028, 0x2029]) {
+    const char = String.fromCodePoint(code);
+    assertEquals(plainPanelError(`a${char}b`), "a b");
+    assertEquals(isControlCodePoint(code), true);
+  }
+  for (const code of [0x20, 0x21, 0x7e, 0xa0, 0x2027, 0x202a]) {
+    assertEquals(isControlCodePoint(code), false);
+  }
 });
 
 test("a malformed answer for a waiting order fails it as refused instead of waiting out the deadline", async () => {
