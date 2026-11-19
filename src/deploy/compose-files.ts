@@ -386,6 +386,14 @@ function parseManifestServiceIds(value: unknown): Record<string, string> {
   return out;
 }
 
+/** Optional text fields of a release row, kept only when non-empty. */
+const OPTIONAL_RELEASE_TEXT_FIELDS = [
+  "ref",
+  "commitMessage",
+  "commitAuthor",
+  "username",
+] as const;
+
 /**
  * Accept only fully-identified release rows.
  *
@@ -423,23 +431,12 @@ function parseManifestRelease(
     sourceId: record.sourceId as string,
     ...(commitSha === undefined ? {} : { commitSha }),
   };
-  if (typeof record.ref === "string" && record.ref.length > 0) {
-    entry.ref = record.ref;
-  }
-  // Display-only, and absent on every manifest written before it was recorded —
-  // a missing one is not a reason to drop an otherwise-valid release row.
-  if (
-    typeof record.commitMessage === "string" && record.commitMessage.length > 0
-  ) {
-    entry.commitMessage = record.commitMessage;
-  }
-  if (
-    typeof record.commitAuthor === "string" && record.commitAuthor.length > 0
-  ) {
-    entry.commitAuthor = record.commitAuthor;
-  }
-  if (typeof record.username === "string" && record.username.length > 0) {
-    entry.username = record.username;
+  // `commitMessage` and `commitAuthor` are display-only, and absent on every
+  // manifest written before they were recorded — a missing one is not a reason
+  // to drop an otherwise-valid release row.
+  for (const key of OPTIONAL_RELEASE_TEXT_FIELDS) {
+    const text = record[key];
+    if (typeof text === "string" && text.length > 0) entry[key] = text;
   }
   if (record.folder !== undefined) {
     try {

@@ -1460,16 +1460,30 @@ export function siteCronSpec(
   };
 }
 
+type ApplyDeployCronJobsInput = {
+  layout: LayoutPaths;
+  parsedPayload: EnvironmentDeployPayload;
+  sites: readonly EnvironmentDeploySite[];
+  releaseBindings: ReadonlyMap<string, SiteRelease>;
+  managedBindings: ReadonlyMap<string, SiteManagedDirectory>;
+  nativeAppServices: readonly EnvironmentDeployNativeAppService[];
+  nativeAppBindings: NativeAppBindings;
+  onLine: (stream: "stdout" | "stderr", line: string) => void;
+};
+
 async function applyDeployCronJobs(
-  layout: LayoutPaths,
-  parsedPayload: EnvironmentDeployPayload,
-  sites: readonly EnvironmentDeploySite[],
-  releaseBindings: ReadonlyMap<string, SiteRelease>,
-  managedBindings: ReadonlyMap<string, SiteManagedDirectory>,
-  nativeAppServices: readonly EnvironmentDeployNativeAppService[],
-  nativeAppBindings: NativeAppBindings,
-  onLine: (stream: "stdout" | "stderr", line: string) => void,
+  input: ApplyDeployCronJobsInput,
 ): Promise<void> {
+  const {
+    layout,
+    parsedPayload,
+    sites,
+    releaseBindings,
+    managedBindings,
+    nativeAppServices,
+    nativeAppBindings,
+    onLine,
+  } = input;
   const specs: CronApplySpec[] = [];
   for (const site of sites) {
     const spec = siteCronSpec(
@@ -1529,16 +1543,28 @@ async function applyDeployCronJobs(
   }
 }
 
-async function applyDeploySites(
-  layout: LayoutPaths,
-  environmentId: string,
-  sites: EnvironmentDeploySite[],
-  dockerBindAddress: string | null,
-  releaseBindings: ReadonlyMap<string, SiteRelease>,
-  managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
-  hideWebServerNames: boolean,
-  onLine: (stream: "stdout" | "stderr", line: string) => void,
-): Promise<void> {
+type ApplyDeploySitesInput = {
+  layout: LayoutPaths;
+  environmentId: string;
+  sites: EnvironmentDeploySite[];
+  dockerBindAddress: string | null;
+  releaseBindings: ReadonlyMap<string, SiteRelease>;
+  managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>;
+  hideWebServerNames: boolean;
+  onLine: (stream: "stdout" | "stderr", line: string) => void;
+};
+
+async function applyDeploySites(input: ApplyDeploySitesInput): Promise<void> {
+  const {
+    layout,
+    environmentId,
+    sites,
+    dockerBindAddress,
+    releaseBindings,
+    managedDirectoryBindings,
+    hideWebServerNames,
+    onLine,
+  } = input;
   if (sites.length === 0) return;
   onLine(
     "stdout",
@@ -3511,19 +3537,19 @@ async function deployEnvironmentHolding(
   if (sites.length > 0 || nativeAppServicesForHost.length > 0) {
     runtime.progress.start("start");
   }
-  await applyDeploySites(
+  await applyDeploySites({
     layout,
-    parsedPayload.environmentId,
+    environmentId: parsedPayload.environmentId,
     sites,
-    await resolveSiteDockerBindAddress(
+    dockerBindAddress: await resolveSiteDockerBindAddress(
       hasContainers,
       sites,
     ),
-    siteReleaseBindings,
-    siteManagedBindings,
-    parsedPayload.hideWebServerNames === true,
-    siteLifecycleIo.onLine,
-  );
+    releaseBindings: siteReleaseBindings,
+    managedDirectoryBindings: siteManagedBindings,
+    hideWebServerNames: parsedPayload.hideWebServerNames === true,
+    onLine: siteLifecycleIo.onLine,
+  });
   // Commands that run right after the switch: a failure stops the deploy here,
   // so no worker restarts onto the release that just failed.
   await runPostDeployPhase(
@@ -3575,16 +3601,16 @@ async function deployEnvironmentHolding(
   // One call covers both lanes on purpose: `applyCronJobs` retires every timer
   // for this environment that the specs it was handed do not name, so splitting
   // this into two passes would make each one delete the other's units.
-  await applyDeployCronJobs(
+  await applyDeployCronJobs({
     layout,
     parsedPayload,
     sites,
-    siteReleaseBindings,
-    siteManagedBindings,
-    nativeAppServicesForHost,
-    nativeAppBindingsFromPayload(parsedPayload),
-    siteLifecycleIo.onLine,
-  );
+    releaseBindings: siteReleaseBindings,
+    managedBindings: siteManagedBindings,
+    nativeAppServices: nativeAppServicesForHost,
+    nativeAppBindings: nativeAppBindingsFromPayload(parsedPayload),
+    onLine: siteLifecycleIo.onLine,
+  });
   // Workers last of the site pieces: the new release is live and its variables
   // are in place, so each restarts straight onto it.
   const workerWarnings = sites.length > 0 ||

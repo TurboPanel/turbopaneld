@@ -163,18 +163,7 @@ export function lastRunOutput(
   unit?: string,
 ): PostDeployRunOutput {
   const all = journal.split("\n").map((line) => line.replaceAll("\r", ""));
-  const marker = `${POST_DEPLOY_BEGIN_MARKER} ${releaseId}`;
-  let start = -1;
-  for (let i = all.length - 1; i >= 0; i--) {
-    const line = all[i] ?? "";
-    if (
-      LINE_PREFIX_RE.test(line) &&
-      line.replace(LINE_PREFIX_RE, "") === marker
-    ) {
-      start = i;
-      break;
-    }
-  }
+  const start = lastBeginLine(all, `${POST_DEPLOY_BEGIN_MARKER} ${releaseId}`);
   const failure: PostDeployFailure = {};
   if (start < 0) return { lines: [], finished: false, failure };
   const lines: string[] = [];
@@ -186,15 +175,7 @@ export function lastRunOutput(
     if (ident === "systemd") {
       // systemd's own lines are not the commands' output.
       if (SYSTEMD_END_RE.test(line)) finished = true;
-      // A timeout is logged as `code=killed, status=15/TERM` first and then
-      // `Failed with result 'timeout'`; the result is the cause, so it wins.
-      if (TIMEOUT_RESULT_RE.test(line)) failure.status = "timed out";
-      else {
-        const status = failureStatus(line);
-        if (status !== undefined && failure.status !== "timed out") {
-          failure.status ??= status;
-        }
-      }
+      noteSystemdFailure(failure, line);
       continue;
     }
     const text = line.replace(LINE_PREFIX_RE, "");
@@ -215,6 +196,36 @@ export function lastRunOutput(
   const program = step > 0 ? commands[step - 1]?.[0] : undefined;
   if (program !== undefined) failure.command = program;
   return { lines, finished, failure };
+}
+
+/** The index of the last line that is exactly the begin marker, or -1. */
+function lastBeginLine(all: readonly string[], marker: string): number {
+  for (let i = all.length - 1; i >= 0; i--) {
+    const line = all[i] ?? "";
+    if (
+      LINE_PREFIX_RE.test(line) &&
+      line.replace(LINE_PREFIX_RE, "") === marker
+    ) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Record what one of systemd's lines says about the failure. A timeout is
+ * logged as `code=killed, status=15/TERM` first and then
+ * `Failed with result 'timeout'`; the result is the cause, so it wins.
+ */
+function noteSystemdFailure(failure: PostDeployFailure, line: string): void {
+  if (TIMEOUT_RESULT_RE.test(line)) {
+    failure.status = "timed out";
+    return;
+  }
+  const status = failureStatus(line);
+  if (status !== undefined && failure.status === undefined) {
+    failure.status = status;
+  }
 }
 
 function stepMarkerNumber(text: string): number | undefined {
