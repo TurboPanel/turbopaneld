@@ -5792,7 +5792,7 @@ test("siteBindAddresses lists each bound address once per scheme, sorted, across
     "https://b.test {\n  bind 10.0.0.5 127.0.0.1\n}\n",
     "c.test {\n  bind [fd00::1]\n}\n",
     "http://d.test {\n  bind 127.0.0.1\n}\n",
-    "e.test {\n  bind evil 192.0.2.9 999.1.1.1 [zz]\n  respond \"x\"\n}\n",
+    'e.test {\n  bind evil 192.0.2.9 999.1.1.1 [zz]\n  respond "x"\n}\n',
     "f.test {\n    bind 192.0.2.1\n}\n",
   ]);
   assertEquals(addresses, {

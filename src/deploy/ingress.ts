@@ -2232,14 +2232,12 @@ export function hostingFallbackSnippet(
   const hide = headerDeletions({ hideWebServerNames, sendViaHeader }, false);
   const page = hostingDefaultPageResponse(hideWebServerNames);
   const bound = (["http", "https"] as const).map((scheme) =>
-    bindAddresses[scheme].map((address) =>
-      `
+    bindAddresses[scheme].map((address) => `
 # Names nobody hosts, on ${scheme} at ${address}.
 ${scheme}:// {
   bind ${address}
 ${hide}${page}}
-`
-    ).join("")
+`).join("")
   ).join("");
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
