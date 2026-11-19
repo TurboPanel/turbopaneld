@@ -24,7 +24,19 @@ export type Host = {
   cleanup: () => Promise<void>;
 };
 
+/**
+ * The prefix stands in for root's tree: tp-host's seal check refuses a parent
+ * that is group- or world-writable, which is what a 0002 umask (a distro's
+ * per-user-group default) makes of every directory a test or tp-host creates.
+ * Pin 022 for this test process (and the children it spawns), so the suite
+ * passes under any umask.
+ */
+export function useSealedUmask(): void {
+  Deno.umask(0o022);
+}
+
 export async function makeHost(): Promise<Host> {
+  useSealedUmask();
   const prefix = await Deno.realPath(
     await Deno.makeTempDir({ prefix: "tp-host-" }),
   );

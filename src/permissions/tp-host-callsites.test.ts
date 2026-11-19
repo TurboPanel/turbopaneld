@@ -15,7 +15,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import { hostSudoArgs } from "./host-sudo.ts";
-import { removeHostPrefix } from "../testing/tp-host-fixture.ts";
+import {
+  removeHostPrefix,
+  useSealedUmask,
+} from "../testing/tp-host-fixture.ts";
 import {
   CALL_SITES,
   type CallSiteSetup,
@@ -223,6 +226,7 @@ type Host = {
 };
 
 async function makeHost(): Promise<Host> {
+  useSealedUmask();
   const prefix = await Deno.realPath(
     await Deno.makeTempDir({ prefix: "tp-host-callsites-" }),
   );
