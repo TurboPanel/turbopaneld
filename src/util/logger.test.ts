@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import { setActiveInstallPresenter } from "../orchestration/install-presenter-context.ts";
 import { InstallPresenter } from "../orchestration/install-presenter.ts";
 import {
+  errorText,
   logDebug,
   logError,
   logInfo,
@@ -21,6 +22,21 @@ const test = Deno.test.bind(Deno);
 
 test("stripLogInjection replaces control whitespace", () => {
   assertEquals(stripLogInjection("a\nb\rc\td"), "a_b_c_d");
+});
+
+test("errorText renders errors, primitives, objects and the unserializable", () => {
+  assertEquals(errorText(new Error("boom\nline")), "boom\nline");
+  assertEquals(errorText("plain"), "plain");
+  assertEquals(errorText(42), "42");
+  assertEquals(errorText(false), "false");
+  assertEquals(errorText(10n), "10");
+  assertEquals(errorText(null), "null");
+  assertEquals(errorText(undefined), "undefined");
+  assertEquals(errorText({ a: 1 }), String.raw`{"a":1}`);
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  assertEquals(errorText(circular), "[unserializable]");
+  assertEquals(errorText(Symbol("x")), "[unserializable]");
 });
 
 test("sanitizeForLog covers primitives, errors, and objects", () => {
