@@ -392,6 +392,17 @@ test("a row with nameTls plans certificates only for the names that choose acme"
   ]);
 });
 
+test("a redirect name that asks for an automatic certificate is planned", () => {
+  const payload = {
+    hostings: [{
+      hostnames: ["a.example.com"],
+      www: "www-to-root",
+      nameTls: [{ hostname: "www.a.example.com", tlsMode: "acme" }],
+    }],
+  } as unknown as EnvironmentDeployPayload;
+  assertEquals(automaticCertificateHostnames(payload), ["www.a.example.com"]);
+});
+
 test("the plan lists the same names whether or not a row has per-name overrides", () => {
   const row = {
     hostnames: ["a.example.com", "b.example.com"],

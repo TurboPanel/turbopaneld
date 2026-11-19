@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  hostingTlsForName,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -2101,11 +2102,11 @@ test("parseEnvironmentDeployPayload refuses a malformed nameTls", () => {
   refuse(["x"], "hostings[].nameTls entries must be objects");
   refuse(
     [{ hostname: "other.example.test", tlsMode: "internal" }],
-    "must be one of the row's served names",
+    "must be one of the row's served or www redirect names",
   );
   refuse(
-    [{ hostname: "www.shop.example.test", tlsMode: "internal" }],
-    "must be one of the row's served names",
+    [{ hostname: "www.other.example.test", tlsMode: "internal" }],
+    "must be one of the row's served or www redirect names",
   );
   refuse(
     [
@@ -2158,4 +2159,102 @@ test("parseEnvironmentDeployPayload applies the tunnel acme rule per name", () =
       { hostname: "shop.example.test", tlsMode: "internal" },
     ],
   }));
+});
+
+test("parseEnvironmentDeployPayload accepts a nameTls entry on a www redirect name", () => {
+  const parsed = parseEnvironmentDeployPayload(nameTlsDeploy({
+    nameTls: [{ hostname: "www.shop.example.test", tlsId: NAME_TLS_A }],
+  }));
+  assertEquals(parsed.hostings[0]?.nameTls, [
+    { hostname: "www.shop.example.test", tlsId: NAME_TLS_A },
+  ]);
+  const rootToWww = parseEnvironmentDeployPayload(nameTlsDeploy({
+    hostnames: ["shop.example.test"],
+    www: "root-to-www",
+    nameTls: [{ hostname: "shop.example.test", tlsMode: "acme" }],
+  }));
+  assertEquals(
+    rootToWww.hostings[0]?.nameTls?.[0]?.hostname,
+    "shop.example.test",
+  );
+  // Both spellings are served under `both`, and `off` has no redirect name.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(nameTlsDeploy({
+        www: "off",
+        nameTls: [{ hostname: "www.shop.example.test", tlsMode: "internal" }],
+      })),
+    TypeError,
+    "served or www redirect names",
+  );
+});
+
+test("hostingTlsForName resolves own entry, then the redirect target's entry, then the row", () => {
+  const row = {
+    hostnames: ["shop.example.test"],
+    www: "www-to-root" as const,
+    tlsId: "row",
+    tlsMode: "internal" as const,
+  };
+  const www = "www.shop.example.test";
+  const root = "shop.example.test";
+  // No nameTls: the row level, as before.
+  assertEquals(hostingTlsForName(row, www), {
+    tlsId: "row",
+    tlsMode: "internal",
+  });
+  // Only the target has an entry: the redirect name follows it.
+  const targetOnly = { ...row, nameTls: [{ hostname: root, tlsId: "root" }] };
+  assertEquals(hostingTlsForName(targetOnly, www), {
+    tlsId: "root",
+    tlsMode: undefined,
+  });
+  // The redirect name's own entry wins over its target's.
+  const both = {
+    ...row,
+    nameTls: [
+      { hostname: root, tlsId: "root" },
+      { hostname: www, tlsMode: "acme" as const },
+    ],
+  };
+  assertEquals(hostingTlsForName(both, www), { tlsId: null, tlsMode: "acme" });
+  assertEquals(hostingTlsForName(both, root), {
+    tlsId: "root",
+    tlsMode: undefined,
+  });
+  // An entry only on the redirect name leaves the target on the row level.
+  const redirectOnly = {
+    ...row,
+    nameTls: [{ hostname: www, tlsId: "own" }],
+  };
+  assertEquals(hostingTlsForName(redirectOnly, www), {
+    tlsId: "own",
+    tlsMode: undefined,
+  });
+  assertEquals(hostingTlsForName(redirectOnly, root), {
+    tlsId: "row",
+    tlsMode: "internal",
+  });
+  // Under `both` every name is served and keeps its own choice.
+  const bothMode = {
+    ...row,
+    www: "both" as const,
+    nameTls: [{ hostname: www, tlsId: "own" }],
+  };
+  assertEquals(hostingTlsForName(bothMode, www).tlsId, "own");
+  assertEquals(hostingTlsForName(bothMode, root).tlsId, "row");
+});
+
+test("hostingTlsForName gives the redirect name its own certificate under root-to-www", () => {
+  const row = {
+    hostnames: ["shop.example.test"],
+    www: "root-to-www" as const,
+    tlsId: "row",
+    nameTls: [
+      { hostname: "shop.example.test", tlsId: "bare" },
+      { hostname: "www.shop.example.test", tlsId: "www" },
+    ],
+  };
+  assertEquals(hostingTlsForName(row, "shop.example.test").tlsId, "bare");
+  assertEquals(hostingTlsForName(row, "www.shop.example.test").tlsId, "www");
 });

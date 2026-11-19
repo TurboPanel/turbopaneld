@@ -844,7 +844,10 @@ export type EnvironmentDeployHostingWeb = {
 
 /** One name's certificate choice inside a hosting row (`hosting-name-tls-v1`). */
 export type EnvironmentDeployHostingNameTls = {
-  /** One of the row's served names, as `hostingServedNames` lists it. */
+  /**
+   * One of the row's served names (`hostingServedNames`) or a name its `www`
+   * mode only redirects (`hostingWwwRedirects`), which can carry its own choice.
+   */
   hostname: string;
   /** A certificate in the deploy's `tlsMaterial`; absent = none pinned. */
   tlsId?: string;
@@ -868,9 +871,10 @@ export type EnvironmentDeployHosting = {
   tlsMode?: "internal" | "pinned" | "acme";
   /**
    * Per-name certificate choice (feature `hosting-name-tls-v1`). Each entry
-   * replaces the hosting-level `tlsId` / `tlsMode` for that served name and
-   * for the `www` redirect that sends visitors to it; unlisted names keep the
-   * hosting level. Absent = every name uses the hosting level, as before.
+   * replaces the hosting-level `tlsId` / `tlsMode` for that name, served or a
+   * `www` redirect name. A redirect name with no entry of its own follows the
+   * entry of the name it sends visitors to; other names keep the hosting
+   * level. Absent = every name uses the hosting level, as before.
    */
   nameTls?: EnvironmentDeployHostingNameTls[];
   proxy?: EnvironmentDeployHostingProxy;
@@ -3131,10 +3135,11 @@ export function hostingWwwRedirects(
 }
 
 /**
- * The certificate settings one name of a hosting uses: its `nameTls` entry when
- * it has one, else the hosting level. A `www` redirect name follows the served
- * name it sends visitors to. A hosting with no `nameTls` always answers with
- * its own `tlsId` and `tlsMode`, exactly as before the field existed.
+ * The certificate settings one name of a hosting uses: its own `nameTls` entry
+ * when it has one; else, for a `www` redirect name, the entry of the served name
+ * it sends visitors to; else the hosting level. A hosting with no `nameTls`
+ * always answers with its own `tlsId` and `tlsMode`, exactly as before the
+ * field existed.
  */
 export function hostingTlsForName(
   hosting: Pick<
@@ -3150,10 +3155,11 @@ export function hostingTlsForName(
   if (entries !== undefined && entries.length > 0) {
     const target = hostingWwwRedirects(hosting).find((redirect) =>
       redirect.from === hostname
-    )?.to ?? hostname;
-    const entry = entries.find((item) =>
-      item.hostname === target
-    );
+    )?.to;
+    const entry = entries.find((item) => item.hostname === hostname) ??
+      (target === undefined
+        ? undefined
+        : entries.find((item) => item.hostname === target));
     if (entry !== undefined) {
       return { tlsId: entry.tlsId ?? null, tlsMode: entry.tlsMode };
     }
@@ -4735,7 +4741,7 @@ function parseNameTlsEntry(
   const hostname = item.hostname;
   if (typeof hostname !== "string" || !served.has(hostname)) {
     throw new TypeError(
-      "hostings[].nameTls hostname must be one of the row's served names",
+      "hostings[].nameTls hostname must be one of the row's served or www redirect names",
     );
   }
   const tlsId = item.tlsId;
@@ -4772,7 +4778,10 @@ function parseHostingNameTls(
   if (!Array.isArray(value) || value.length > MAX_NAME_TLS_ENTRIES) {
     throw new TypeError("hostings[].nameTls must be an array");
   }
-  const served = new Set(hostingServedNames({ hostnames, www }));
+  const served = new Set([
+    ...hostingServedNames({ hostnames, www }),
+    ...hostingWwwRedirects({ hostnames, www }).map((redirect) => redirect.from),
+  ]);
   const seen = new Set<string>();
   const entries = value.map((item) => {
     const entry = parseNameTlsEntry(item, served);

@@ -4902,6 +4902,37 @@ test("buildCaddyHostnameRoutes gives each name its own certificate mode and its 
   assertEquals(routes.get("www.shop.example.com")!.tlsMode, "acme");
 });
 
+test("buildCaddyHostnameRoutes lets a redirect name choose its own certificate mode", () => {
+  for (const www of ["www-to-root", "root-to-www"] as const) {
+    const [from, to] = www === "www-to-root"
+      ? ["www.example.com", "example.com"]
+      : ["example.com", "www.example.com"];
+    const routes = buildCaddyHostnameRoutes({
+      ...WWW_BASE_PAYLOAD,
+      hostings: [
+        wwwHosting(["example.com"], www, {
+          nameTls: [{ hostname: from, tlsMode: "acme" }],
+        }),
+      ],
+    });
+    assertEquals(routes.get(from)!.redirectTo, to);
+    assertEquals(routes.get(from)!.tlsMode, "acme");
+    assertEquals(routes.get(to)!.tlsMode !== "acme", true);
+  }
+  // Own internal choice on the redirect name beats the target's acme.
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "www-to-root", {
+        tlsMode: "acme",
+        nameTls: [{ hostname: "www.example.com", tlsMode: "internal" }],
+      }),
+    ],
+  });
+  assertEquals(routes.get("example.com")!.tlsMode, "acme");
+  assertEquals(routes.get("www.example.com")!.tlsMode !== "acme", true);
+});
+
 test("buildCaddyHostnameRoutes root-to-www serves www and redirects the bare name", () => {
   const routes = buildCaddyHostnameRoutes({
     ...WWW_BASE_PAYLOAD,

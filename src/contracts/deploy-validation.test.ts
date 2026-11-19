@@ -440,4 +440,22 @@ describe("www mode validation", () => {
       "forceHttps:false is incompatible with ACME TLS on hostname a.example.test",
     );
   });
+
+  it("sees an acme name a www mode serves, whichever spelling the row typed", () => {
+    // root-to-www serves www; the bare name has its own non-acme entry.
+    assertEquals(
+      validateDeployHostnameRouting([
+        hosting({
+          hostnames: ["a.example.test"],
+          www: "root-to-www",
+          proxy: { forceHttps: false },
+          nameTls: [
+            { hostname: "a.example.test", tlsMode: "internal" },
+            { hostname: "www.a.example.test", tlsMode: "acme" },
+          ],
+        }),
+      ]),
+      "forceHttps:false is incompatible with ACME TLS on hostname a.example.test",
+    );
+  });
 });

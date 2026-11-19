@@ -14,6 +14,7 @@ import { join } from "@std/path";
 import {
   type EnvironmentDeployPayload,
   hostingTlsForName,
+  hostingWwwRedirects,
   isImageBuildKind,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -231,9 +232,19 @@ export function automaticCertificateHostnames(
   const names = (payload.hostings ?? []).flatMap((hosting) =>
     hosting.nameTls === undefined
       ? hosting.tlsMode === "acme" ? hosting.hostnames : []
-      : hosting.hostnames.filter((name) =>
-        hostingTlsForName(hosting, name).tlsMode === "acme"
-      )
+      : [
+        ...hosting.hostnames.filter((name) =>
+          hostingTlsForName(hosting, name).tlsMode === "acme"
+        ),
+        // A redirect-only name joins the list only when its own entry asks
+        // for an automatic certificate; one that follows its target adds none.
+        ...hostingWwwRedirects(hosting).map((redirect) => redirect.from).filter(
+          (name) =>
+            hosting.nameTls?.some((entry) =>
+              entry.hostname === name && entry.tlsMode === "acme"
+            ),
+        ),
+      ]
   );
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }

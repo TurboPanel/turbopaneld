@@ -3,6 +3,7 @@
  */
 
 import {
+  hostingServedNames,
   hostingTlsForName,
   isValidHostname,
   wwwSiblingHostname,
@@ -115,7 +116,17 @@ function recordHostnameAcmeHttps(
   hostname: string,
   hosting: EnvironmentDeployHosting,
 ): string | null {
-  if (hostingTlsForName(hosting, hostname).tlsMode === "acme") {
+  // A name a `www` mode expands answers on its served spellings too, and each
+  // may pick its own certificate: any served one on acme needs the HTTPS site.
+  const served = hostingServedNames({
+    hostnames: [hostname],
+    www: hosting.www,
+  });
+  if (
+    [hostname, ...served].some((name) =>
+      hostingTlsForName(hosting, name).tlsMode === "acme"
+    )
+  ) {
     state.hasAcme = true;
   }
   if (hosting.proxy?.forceHttps === false) {

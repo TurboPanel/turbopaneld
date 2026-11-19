@@ -379,9 +379,10 @@ export const ACME_ISSUE_ONE_CERT_FEATURE: DaemonWireFeature =
   "acme-issue-one-cert-v1";
 
 /**
- * `EnvironmentDeployHosting.nameTls`: each served name of a hosting row may
- * carry its own `tlsId` / `tlsMode`, replacing the row's for that name and its
- * `www` redirect. The control plane sends the field only to a daemon that lists
+ * `EnvironmentDeployHosting.nameTls`: each served name of a hosting row, and
+ * each name its `www` mode only redirects, may carry its own `tlsId` /
+ * `tlsMode`, replacing the row's for that name; a redirect name with no entry
+ * follows its target's. The control plane sends the field only to a daemon that lists
  * this feature; an older daemon would ignore it and serve every name with the
  * row's choice. Without the field nothing changes.
  */

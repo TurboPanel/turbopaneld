@@ -75,8 +75,8 @@ export async function materializeTlsCertificates(
 
 /**
  * Map hostname → tlsId from a deploy payload (last write wins if duplicates).
- * A name with a `nameTls` entry takes that entry's choice, and so does the
- * `www` redirect that sends visitors to it (`hosting-name-tls-v1`).
+ * A name with a `nameTls` entry takes that entry's choice; a `www` redirect
+ * name without one follows the name it sends visitors to (`hosting-name-tls-v1`).
  */
 export function hostnameTlsMap(
   payload: EnvironmentDeployPayload,
@@ -84,7 +84,7 @@ export function hostnameTlsMap(
   const map = new Map<string, string>();
   for (const hosting of payload.hostings) {
     // Served names and `www` redirect names sit under the hosting's pinned
-    // pair unless a `nameTls` entry gives the name its own choice.
+    // pair unless a `nameTls` entry (their own, or their target's) says else.
     const names = [
       ...hostingServedNames(hosting),
       ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
