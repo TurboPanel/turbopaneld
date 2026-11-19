@@ -38,7 +38,13 @@ import {
   LocalAcmeError,
 } from "./client.ts";
 import { withHttp01Answers } from "./http01.ts";
-import { type ChallengeSolver, type OrderDeps, runAcmeOrder } from "./order.ts";
+import { createDns01Solver, type DnsRelay } from "./dns01.ts";
+import {
+  ACME_DNS_ORDER_TIMEOUT_MS,
+  type ChallengeSolver,
+  type OrderDeps,
+  runAcmeOrder,
+} from "./order.ts";
 import { renewalCertId } from "./renewal-id.ts";
 
 export type DaemonIssueRequest =
@@ -137,6 +143,8 @@ function sentence(err: AcmeError): string {
       return "this server's Let's Encrypt account was closed; a new one is made on the next try";
     case "foreign_address":
       return "Let's Encrypt named an address outside its own site, so the order was stopped";
+    case "relay":
+      return err.message;
     case "rejected_name":
     case "unsupported":
       // A refusal this server raised is plain already; the authority's never
@@ -228,26 +236,63 @@ async function renewalHints(
   };
 }
 
+/** Gives the order its solver: the HTTP proof socket, or the DNS relay. */
+type WithSolver = <T>(
+  work: (solver: ChallengeSolver) => Promise<T>,
+) => Promise<T>;
+
 /**
  * Order one certificate for every name in the request over the HTTP proof.
  * Never throws.
  */
-export async function issueCertificateOverHttp01(
+export function issueCertificateOverHttp01(
   layout: Pick<LayoutPaths, "stateDir">,
   request: DaemonIssueRequest,
   socketPath: string,
   deps: DaemonIssueDeps = {},
 ): Promise<DaemonIssueOutcome> {
+  const serve = deps.serveAnswers ?? withHttp01Answers;
+  return issueCertificate(
+    layout,
+    request,
+    (work) => serve(socketPath, deps.run ?? defaultCommand, work),
+    deps,
+  );
+}
+
+/**
+ * Order one certificate for every name in the request over DNS, with the
+ * control plane publishing the records through `relay` (wildcard names are
+ * allowed). Never throws; the order gets the longer DNS deadline unless
+ * `deps.timeoutMs` says otherwise.
+ */
+export function issueCertificateOverDns01(
+  layout: Pick<LayoutPaths, "stateDir">,
+  request: DaemonIssueRequest,
+  relay: DnsRelay,
+  deps: DaemonIssueDeps = {},
+): Promise<DaemonIssueOutcome> {
+  return issueCertificate(
+    layout,
+    request,
+    (work) => work(createDns01Solver(request.requestId, relay)),
+    { ...deps, timeoutMs: deps.timeoutMs ?? ACME_DNS_ORDER_TIMEOUT_MS },
+  );
+}
+
+async function issueCertificate(
+  layout: Pick<LayoutPaths, "stateDir">,
+  request: DaemonIssueRequest,
+  withSolver: WithSolver,
+  deps: DaemonIssueDeps,
+): Promise<DaemonIssueOutcome> {
   const directoryUrl = deps.directoryUrl ??
     daemonAcmeDirectoryUrl(request.directory);
-  const serve = deps.serveAnswers ?? withHttp01Answers;
   const fetchOption = deps.fetch ? { fetch: deps.fetch } : {};
   // The account this order used: only that one is forgotten if it turns out closed.
   let accountUrl: string | null = null;
   try {
-    const chain = await serve(
-      socketPath,
-      deps.run ?? defaultCommand,
+    const chain = await withSolver(
       async (solver) => {
         const client = await acmeAccountClient(layout, {
           directoryUrl,

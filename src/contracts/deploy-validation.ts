@@ -2,7 +2,11 @@
  * Deploy payload validators — keep in sync with instance `src/contracts/commands/deploy-validation.ts`.
  */
 
-import { isValidHostname, wwwSiblingHostname } from "./commands-contracts.ts";
+import {
+  hostingTlsForName,
+  isValidHostname,
+  wwwSiblingHostname,
+} from "./commands-contracts.ts";
 import type {
   EnvironmentDeployHosting,
   EnvironmentDeployStorageMaterial,
@@ -111,7 +115,7 @@ function recordHostnameAcmeHttps(
   hostname: string,
   hosting: EnvironmentDeployHosting,
 ): string | null {
-  if (hosting.tlsMode === "acme") {
+  if (hostingTlsForName(hosting, hostname).tlsMode === "acme") {
     state.hasAcme = true;
   }
   if (hosting.proxy?.forceHttps === false) {

@@ -371,6 +371,27 @@ test("probeDeployPresence runs only the probes the plan needs and treats a throw
   assertEquals(noDocker.sharedIngress, false);
 });
 
+test("a row with nameTls plans certificates only for the names that choose acme", () => {
+  const payload = {
+    hostings: [
+      {
+        hostnames: ["a.example.com", "b.example.com"],
+        www: "www-to-root",
+        tlsMode: "acme",
+        nameTls: [{ hostname: "b.example.com", tlsMode: "internal" }],
+      },
+      {
+        hostnames: ["c.example.com"],
+        nameTls: [{ hostname: "c.example.com", tlsMode: "acme" }],
+      },
+    ],
+  } as unknown as EnvironmentDeployPayload;
+  assertEquals(automaticCertificateHostnames(payload), [
+    "a.example.com",
+    "c.example.com",
+  ]);
+});
+
 test("a deploy whose names get an automatic certificate plans the certificates step and says where to watch", () => {
   const payload = {
     hostings: [

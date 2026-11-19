@@ -120,6 +120,8 @@ export const DAEMON_WIRE_FEATURES = [
   "tunnel-lock-add-v1",
   "build-limits-v1",
   "tunnel-peer-mtls-v1",
+  "hosting-name-tls-v1",
+  "acme-issue-dns-v1",
 ] as const;
 
 /**
@@ -375,6 +377,26 @@ export const ACME_ISSUE_FEATURE: DaemonWireFeature = "acme-issue-v1";
  */
 export const ACME_ISSUE_ONE_CERT_FEATURE: DaemonWireFeature =
   "acme-issue-one-cert-v1";
+
+/**
+ * `EnvironmentDeployHosting.nameTls`: each served name of a hosting row may
+ * carry its own `tlsId` / `tlsMode`, replacing the row's for that name and its
+ * `www` redirect. The control plane sends the field only to a daemon that lists
+ * this feature; an older daemon would ignore it and serve every name with the
+ * row's choice. Without the field nothing changes.
+ */
+export const HOSTING_NAME_TLS_FEATURE: DaemonWireFeature =
+  "hosting-name-tls-v1";
+
+/**
+ * `acme-issue-request` may carry `challenge: 'dns-01'`: the order is proved
+ * through DNS, with the control plane publishing the TXT records over
+ * `acme-dns-publish` / `acme-dns-published` / `acme-dns-remove` (this daemon
+ * holds no DNS credential), and wildcard names are allowed. The control plane
+ * sends `dns-01` only to a daemon that lists this feature: an older daemon
+ * drops the field and would run the HTTP proof instead.
+ */
+export const ACME_ISSUE_DNS_FEATURE: DaemonWireFeature = "acme-issue-dns-v1";
 
 /**
  * Planned Postgres switchover: the fence stop reports the old primary's final

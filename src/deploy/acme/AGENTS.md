@@ -9,6 +9,7 @@ Every organization Let's Encrypt certificate is ordered by a daemon on a server 
 | File | Role |
 | --- | --- |
 | `client.ts` | `AcmeClient` (one request per call, `badNonce` retried once), `AcmeError` codes with the authority's `Retry-After`, `fetchRenewalInfo` (never throws) |
+| `dns01.ts` | The DNS-01 solver for `acme-issue-dns-v1`: `createDns01Solver(requestId, relay)` batches the order's records into one `relay.publish` and sends one `relay.remove` (only after a publish was asked for); never writes a record. `issueCertificateOverDns01` in `issue.ts` runs the order with the 10-minute `ACME_DNS_ORDER_TIMEOUT_MS`; wildcard names are allowed |
 | `session.ts` | Process-wide directory and spare-nonce cache keyed by the `fetch` in use; `Retry-After` parsing |
 | `jws.ts`, `csr.ts`, `der.ts` | Signing, key authorization and DNS-01 value, certificate request with every name in one SAN, the small DER reader/writer |
 | `renewal-id.ts` | RFC 9773 identifier: base64url AKI key id, a dot, base64url serial **as the DER content, leading zero kept** (the RFC's own example) |

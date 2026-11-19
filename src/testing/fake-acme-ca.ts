@@ -7,7 +7,11 @@
  * identifier and a serial whose top bit is set. No network.
  */
 import { decodeBase64Url, encodeBase64Url } from "@std/encoding/base64url";
-import { accountThumbprint, type AcmeAccountKey } from "../deploy/acme/jws.ts";
+import {
+  accountThumbprint,
+  type AcmeAccountKey,
+  dnsChallengeValue,
+} from "../deploy/acme/jws.ts";
 import {
   children,
   concat,
@@ -57,6 +61,12 @@ export type FakeCaOptions = {
    * null is a refused connection.
    */
   http01?: (name: string, token: string) => Promise<string | null>;
+  /**
+   * What a lookup of the TXT records at `_acme-challenge.<name>` answers (a
+   * wildcard is looked up at its base name); null is a name with no records.
+   * The test's stand-in for the zone a DNS-01 check reads.
+   */
+  dns01?: (recordName: string, token: string) => Promise<string[] | null>;
   /** Refuse new orders with a rate-limit error and this `Retry-After`. */
   rateLimitOrders?: string;
   /**
@@ -465,6 +475,29 @@ export async function createFakeCa(
     });
   };
 
+  const checkDns = async (a: Authz, jwk: Jwk) => {
+    const recordName = `_acme-challenge.${a.identifier}`;
+    const values = options.dns01
+      ? await options.dns01(recordName, a.token)
+      : null;
+    const expected = await dnsChallengeValue(
+      { publicJwk: jwk } as AcmeAccountKey,
+      a.token,
+    );
+    if (values?.includes(expected)) {
+      a.state = "valid";
+    } else {
+      a.state = "invalid";
+      a.error = {
+        type: "urn:ietf:params:acme:error:unauthorized",
+        detail: values === null || values.length === 0
+          ? `No TXT record found at ${recordName}`
+          : `Incorrect TXT record at ${recordName}`,
+      };
+    }
+    a.holdReads = options.pendingReads ?? 0;
+  };
+
   const check = async (a: Authz, jwk: Jwk) => {
     const thumb = await accountThumbprint(
       { publicJwk: jwk } as AcmeAccountKey,
@@ -497,7 +530,11 @@ export async function createFakeCa(
     headers: ReplyHeaders,
   ): Promise<Response> => {
     answers.push(challengeId);
-    if (a.state === "pending") await check(a, signed.jwk);
+    if (a.state === "pending") {
+      // The challenge ids end in `d` (dns-01) or `h` (http-01).
+      if (challengeId.endsWith("d")) await checkDns(a, signed.jwk);
+      else await check(a, signed.jwk);
+    }
     return json({ status: "processing" }, { headers });
   };
 

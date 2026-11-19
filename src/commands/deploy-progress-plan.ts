@@ -13,6 +13,8 @@
 import { join } from "@std/path";
 import {
   type EnvironmentDeployPayload,
+  hostingServedNames,
+  hostingTlsForName,
   isImageBuildKind,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -227,9 +229,13 @@ export async function probeDeployPresence(
 export function automaticCertificateHostnames(
   payload: Pick<EnvironmentDeployPayload, "hostings">,
 ): string[] {
-  const names = (payload.hostings ?? [])
-    .filter((hosting) => hosting.tlsMode === "acme")
-    .flatMap((hosting) => hosting.hostnames);
+  const names = (payload.hostings ?? []).flatMap((hosting) =>
+    hosting.nameTls === undefined
+      ? hosting.tlsMode === "acme" ? hosting.hostnames : []
+      : hostingServedNames(hosting).filter((name) =>
+        hostingTlsForName(hosting, name).tlsMode === "acme"
+      )
+  );
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 

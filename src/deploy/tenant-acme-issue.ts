@@ -40,8 +40,10 @@ import {
   withInstanceAcmeWindowLock,
   withPreflightServer,
 } from "./instance-acme-http01.ts";
+import type { DnsRelay } from "./acme/dns01.ts";
 import {
   type DaemonIssueDeps,
+  issueCertificateOverDns01,
   issueCertificateOverHttp01,
 } from "./acme/issue.ts";
 
@@ -55,6 +57,15 @@ const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 /** Server-placed order state: `account/` holds this server's ACME accounts (one per contact address). */
 export function tenantAcmeDataDir(layout: LayoutPaths): string {
   return join(layout.stateDir, "tenant-acme");
+}
+
+/**
+ * One empty file per DNS order in flight (`<name>` is the request id). The
+ * control plane keeps such a request open until it hears, so a restart that
+ * loses the order must be able to say so afterwards (`sweepDnsOrders`).
+ */
+export function tenantAcmeDnsOpenDir(layout: LayoutPaths): string {
+  return join(tenantAcmeDataDir(layout), "dns-open");
 }
 
 export function tenantAcmeCertificateRoot(layout: LayoutPaths): string {
@@ -352,6 +363,84 @@ async function reportPair(
       );
     }
   });
+}
+
+export type TenantDnsIssueDeps =
+  & Pick<
+    TenantIssueDeps,
+    "now" | "report" | "acme"
+  >
+  & {
+    /** Carries the records to the control plane and waits for its answer. */
+    relay: DnsRelay;
+    /** Places the order over DNS with this daemon's own client (test seam). */
+    issueDns?: typeof issueCertificateOverDns01;
+  };
+
+/** Request ids of DNS orders a restart cut short (their marker file is left). */
+export async function listOpenDnsOrders(
+  layout: LayoutPaths,
+): Promise<string[]> {
+  const ids: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(tenantAcmeDnsOpenDir(layout))) {
+      if (entry.isFile && SAFE_REQUEST_ID_RE.test(entry.name)) {
+        ids.push(entry.name);
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return ids;
+}
+
+export function forgetOpenDnsOrder(
+  layout: LayoutPaths,
+  requestId: string,
+): Promise<void> {
+  if (!SAFE_REQUEST_ID_RE.test(requestId)) return Promise.resolve();
+  return removeIfPresent(join(tenantAcmeDnsOpenDir(layout), requestId));
+}
+
+/**
+ * Run one DNS-01 order from start to cleanup. No proof routes, no port 80 and
+ * no window lock (nothing here shares a window); the control plane publishes
+ * the TXT records and the pair goes out through the same report as an HTTP
+ * order. Never throws; returns the outcome.
+ */
+export async function issueTenantCertificatesOverDns(
+  layout: LayoutPaths,
+  request: AcmeIssueRequestMessage,
+  deps: TenantDnsIssueDeps,
+): Promise<TenantIssueOutcome> {
+  const now = deps.now ?? Date.now;
+  if (!SAFE_REQUEST_ID_RE.test(request.requestId)) {
+    return { ok: false, reason: "the request id is not usable" };
+  }
+  if (Date.parse(request.startByIso) <= now()) {
+    return { ok: false, reason: "the request was not started in time" };
+  }
+  const marker = join(tenantAcmeDnsOpenDir(layout), request.requestId);
+  try {
+    await Deno.mkdir(tenantAcmeDnsOpenDir(layout), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await Deno.writeTextFile(marker, "", { mode: 0o600 });
+    const issue = deps.issueDns ?? issueCertificateOverDns01;
+    const outcome = await issue(layout, request, deps.relay, deps.acme);
+    if (!outcome.ok) throw new IssueStop(outcome.reason);
+    await reportPair(outcome, request, deps);
+    return { ok: true, notAfterIso: outcome.notAfterIso, skippedHelpers: [] };
+  } catch (err) {
+    return { ok: false, reason: plainReason(err) };
+  } finally {
+    try {
+      await removeIfPresent(marker);
+    } catch (err) {
+      logWarn("deploy", "tenant ACME DNS marker cleanup failed:", err);
+    }
+  }
 }
 
 /** Run one order from start to cleanup. Never throws; returns the outcome. */

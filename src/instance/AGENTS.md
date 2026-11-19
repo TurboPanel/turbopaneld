@@ -85,6 +85,8 @@ the generation itself. The flag is set on attach and cleared on close
 (`setTopologyGenerationOptional`); details in `../metrics/AGENTS.md`. No
 version floor moved: older control planes still get the numbers.
 
+**DNS orders and per-name certificates (`acme-issue-dns-v1`, `hosting-name-tls-v1`).** Both are advertised in `hello.features` (`DAEMON_WIRE_FEATURES`, appended; no wire-version floor moved). `acme-issue-request` may carry `challenge` (`http-01` or `dns-01`; absent means HTTP, any other value is refused). For `dns-01` the daemon asks the control plane for TXT records over three messages and never touches DNS itself: `acme-dns-publish` (daemon to control plane: `requestId`, `records: [{ name, value }]`, `at`), `acme-dns-published` (control plane to daemon: `requestId`, `ok`, plain `error` when not ok, `at`) and `acme-dns-remove` (daemon to control plane: `requestId`, `at`). `AcmeDnsRelay` (`acme-dns-relay.ts`) is the daemon end; `AcmeIssueHandler.handleDnsPublished` feeds it from `#handleCentralCertificateMessage`, and `sweepRestartedDnsOrders` runs at attach. All three validators refuse certificate and key material. The control plane must never send `dns-01` to a daemon without `acme-issue-dns-v1` (an older daemon drops the field and would run HTTP) and must send `hostings[].nameTls` only to one with `hosting-name-tls-v1`. Details: `../deploy/AGENTS.md`.
+
 **Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
 `hello.features`. A control plane that sees it may send `deploy-cancel`
 (`commandId`) and gets `deploy-cancel-result` (`ok`, `outcome`: `cancelling`,

@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import {
+  ACME_ISSUE_DNS_FEATURE,
   ACME_ISSUE_FEATURE,
   BACKUP_S3_COPY_FEATURE,
   BUILD_LIMITS_FEATURE,
@@ -16,6 +17,7 @@ import {
   FABRIC_PEER_REPORT_FEATURE,
   FABRIC_RETAIN_KEYS_FEATURE,
   HOST_CAPACITY_FEATURE,
+  HOSTING_NAME_TLS_FEATURE,
   HOSTING_VIA_HEADER_FEATURE,
   INSTALL_TOKEN_V2_FEATURE,
   INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE,
@@ -585,12 +587,22 @@ test("build-limits-v1 is advertised and raised no floor", () => {
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });
 
-test("tunnel-peer-mtls-v1 is advertised, is the last entry and raised no floor", () => {
+test("tunnel-peer-mtls-v1 is advertised and raised no floor", () => {
   assertEquals(TUNNEL_PEER_MTLS_FEATURE, "tunnel-peer-mtls-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_PEER_MTLS_FEATURE);
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(TUNNEL_PEER_MTLS_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(BUILD_LIMITS_FEATURE) + 1,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("hosting-name-tls-v1 and acme-issue-dns-v1 are advertised, in that order, and raised no floor", () => {
+  assertEquals(HOSTING_NAME_TLS_FEATURE, "hosting-name-tls-v1");
+  assertEquals(ACME_ISSUE_DNS_FEATURE, "acme-issue-dns-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(HOSTING_NAME_TLS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_PEER_MTLS_FEATURE) + 1,
+  );
+  assertEquals(DAEMON_WIRE_FEATURES.at(-1), ACME_ISSUE_DNS_FEATURE);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

@@ -2047,3 +2047,115 @@ test("parseEnvironmentDeployPayload rejects a credential without credentialKind"
     "Invalid sourceMaterial credentialKind",
   );
 });
+
+const NAME_TLS_A = "00000000-0000-4000-8000-0000000000a1";
+const MATERIAL_A = {
+  tlsId: NAME_TLS_A,
+  certificatePem:
+    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+  privateKeyEnvelope: TP_ENVELOPE,
+};
+
+function nameTlsDeploy(
+  overrides: Record<string, unknown>,
+  withMaterial = true,
+): Record<string, unknown> {
+  return {
+    ...DEPLOY_BASE,
+    hostingIngressNetwork: SERVICE_UUID,
+    hostings: [hosting({
+      hostnames: ["example.test", "shop.example.test"],
+      www: "www-to-root",
+      ...overrides,
+    })],
+    ...(withMaterial ? { tlsMaterial: [MATERIAL_A] } : {}),
+  };
+}
+
+test("parseEnvironmentDeployPayload carries nameTls and leaves it off when absent", () => {
+  const parsed = parseEnvironmentDeployPayload(nameTlsDeploy({
+    tlsMode: "acme",
+    nameTls: [
+      { hostname: "shop.example.test", tlsId: NAME_TLS_A },
+      { hostname: "example.test", tlsMode: "internal" },
+    ],
+  }));
+  assertEquals(parsed.hostings[0]?.nameTls, [
+    { hostname: "shop.example.test", tlsId: NAME_TLS_A },
+    { hostname: "example.test", tlsMode: "internal" },
+  ]);
+  const plain = parseEnvironmentDeployPayload(nameTlsDeploy({}));
+  assertEquals("nameTls" in (plain.hostings[0] ?? {}), false);
+  const empty = parseEnvironmentDeployPayload(nameTlsDeploy({ nameTls: [] }));
+  assertEquals("nameTls" in (empty.hostings[0] ?? {}), false);
+});
+
+test("parseEnvironmentDeployPayload refuses a malformed nameTls", () => {
+  const refuse = (nameTls: unknown, message: string, material = true) =>
+    assertThrows(
+      () => parseEnvironmentDeployPayload(nameTlsDeploy({ nameTls }, material)),
+      TypeError,
+      message,
+    );
+  refuse("x", "hostings[].nameTls must be an array");
+  refuse(["x"], "hostings[].nameTls entries must be objects");
+  refuse(
+    [{ hostname: "other.example.test", tlsMode: "internal" }],
+    "must be one of the row's served names",
+  );
+  refuse(
+    [{ hostname: "www.shop.example.test", tlsMode: "internal" }],
+    "must be one of the row's served names",
+  );
+  refuse(
+    [
+      { hostname: "shop.example.test", tlsMode: "internal" },
+      { hostname: "shop.example.test", tlsMode: "acme" },
+    ],
+    "names a hostname twice",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsMode: "pinned" }],
+    "tlsMode must be internal or acme",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsId: "" }],
+    "tlsId must be a non-empty string",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsMode: "acme", tlsId: NAME_TLS_A }],
+    "cannot pin a certificate on an acme name",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsId: NAME_TLS_A }],
+    "tlsId is not in tlsMaterial",
+    false,
+  );
+});
+
+test("parseEnvironmentDeployPayload applies the tunnel acme rule per name", () => {
+  const base = {
+    tunnel: {
+      hostnames: ["example.test", "shop.example.test"],
+      peers: ["192.0.2.10"],
+      generation: 1,
+    },
+  };
+  // Whole row acme on a tunnel name stays refused, as before.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        nameTlsDeploy({ tlsMode: "acme", ...base }),
+      ),
+    TypeError,
+  );
+  // The same row is fine once its tunnel names choose another way.
+  parseEnvironmentDeployPayload(nameTlsDeploy({
+    tlsMode: "acme",
+    ...base,
+    nameTls: [
+      { hostname: "example.test", tlsMode: "internal" },
+      { hostname: "shop.example.test", tlsMode: "internal" },
+    ],
+  }));
+});

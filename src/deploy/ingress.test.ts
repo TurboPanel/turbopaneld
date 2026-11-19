@@ -4880,6 +4880,28 @@ test("buildCaddyHostnameRoutes www-to-root serves the bare name and redirects ww
   assertEquals(routes.get("example.com")!.redirectTo, undefined);
 });
 
+test("buildCaddyHostnameRoutes gives each name its own certificate mode and its redirect follows", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com", "shop.example.com"], "www-to-root", {
+        tlsMode: "acme",
+        proxy: { forceHttps: false },
+        nameTls: [{ hostname: "example.com", tlsMode: "internal" }],
+      }),
+    ],
+  });
+  // example.com keeps the row's HTTPS setting and its www redirect follows it.
+  assertEquals(routes.get("example.com")!.tlsMode !== "acme", true);
+  assertEquals(routes.get("example.com")!.forceHttps, false);
+  assertEquals(routes.get("www.example.com")!.tlsMode !== "acme", true);
+  assertEquals(routes.get("www.example.com")!.forceHttps, false);
+  // shop.example.com is unlisted and stays on the row's acme.
+  assertEquals(routes.get("shop.example.com")!.tlsMode, "acme");
+  assertEquals(routes.get("shop.example.com")!.forceHttps, true);
+  assertEquals(routes.get("www.shop.example.com")!.tlsMode, "acme");
+});
+
 test("buildCaddyHostnameRoutes root-to-www serves www and redirects the bare name", () => {
   const routes = buildCaddyHostnameRoutes({
     ...WWW_BASE_PAYLOAD,
