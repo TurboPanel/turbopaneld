@@ -40,8 +40,8 @@ describe("ansible binary probes", () => {
     const { ANSIBLE_LINT_BIN, ANSIBLE_STATE_DIR } = await import(
       "./assets.ts"
     );
-    const marker = `${ANSIBLE_STATE_DIR}/lint-args`;
-    await Deno.mkdir(ANSIBLE_STATE_DIR, { recursive: true });
+    const markerDir = await Deno.makeTempDir({ prefix: "lint-marker-" });
+    const marker = `${markerDir}/lint-args`;
     await Deno.mkdir(ANSIBLE_LINT_BIN.replace(/\/[^/]+$/, ""), {
       recursive: true,
     });
@@ -64,7 +64,7 @@ describe("ansible binary probes", () => {
       );
     } finally {
       await Deno.remove(ANSIBLE_LINT_BIN);
-      await Deno.remove(marker);
+      await Deno.remove(markerDir, { recursive: true });
     }
   });
 

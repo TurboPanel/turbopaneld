@@ -74,7 +74,7 @@ helper's `cwd = ROOT` *default argument*, guard it with
 off-checkout; CI always has a real checkout.
 
 **Daemon identity files in tests:** a test that writes `server.id`, the server
-key, `server-key-id`, the sealing key, the license files, the CA pin
+key, `server-key-id`, the sealing key, the license files, or the CA pin
 gives the code a temp state dir (`createTempLayout` /
 `withTempLayout`, or a `Deno.makeTempDir` passed as `stateDir`). In a
 `deno test` run `writeDaemonFile`, `removeDaemonFile`, the key-id writer, the

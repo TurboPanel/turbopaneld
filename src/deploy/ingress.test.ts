@@ -606,8 +606,15 @@ test("siteSnippet answers a fixed 503 and times out a silent peer on the peer pa
     respond "This site is not running right now." 503
   }
 `;
-  // The HTTP block redirects, so only the HTTPS block carries the peer hop.
+  // Both blocks carry the page: the HTTPS block forwards to the peer, and the
+  // HTTP redirect block is given the same page by the shared block preamble.
   assertStringIncludes(snippet, error);
+  assertEquals(snippet.split("handle_errors {").length - 1, 2);
+  const httpBlock = snippet.slice(
+    snippet.indexOf("http://app.example.com {"),
+    snippet.indexOf("\napp.example.com {"),
+  );
+  assertStringIncludes(httpBlock, error);
   assertStringIncludes(snippet, "dial_timeout 2s");
   assertStringIncludes(snippet, "response_header_timeout 60s");
   assertStringIncludes(snippet, "keepalive 15s");
