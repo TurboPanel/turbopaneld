@@ -639,6 +639,51 @@ export type AcmeIssueRequestMessage = {
   startByIso: string;
   /** Other servers that pass the proof path on; each is checked before the order. */
   helpers: AcmeProofHelper[];
+  /**
+   * How the names are proved (feature `acme-issue-dns-v1`). Absent or
+   * `http-01`: the HTTP proof, exactly as before. `dns-01`: the control plane
+   * publishes the TXT records through the relay messages below; `helpers` is
+   * ignored, no proof routes are made, and wildcard names are allowed.
+   */
+  challenge?: "http-01" | "dns-01";
+  at: string;
+};
+
+/** One TXT record the control plane is asked to publish. */
+export type AcmeDnsRecord = { name: string; value: string };
+
+/**
+ * Daemon to control plane (feature `acme-issue-dns-v1`, `challenge: 'dns-01'`):
+ * publish these TXT records for the order `requestId`. The daemon never holds
+ * a DNS credential and never writes a record itself.
+ */
+export type AcmeDnsPublishMessage = {
+  type: "acme-dns-publish";
+  requestId: string;
+  records: AcmeDnsRecord[];
+  at: string;
+};
+
+/**
+ * Control plane to daemon: the records of `requestId` read back at every
+ * authoritative name server (`ok`), or could not be published (`error`, one
+ * plain sentence).
+ */
+export type AcmeDnsPublishedMessage = {
+  type: "acme-dns-published";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  at: string;
+};
+
+/**
+ * Daemon to control plane: the order `requestId` is over (validated or
+ * failed), so its records can go.
+ */
+export type AcmeDnsRemoveMessage = {
+  type: "acme-dns-remove";
+  requestId: string;
   at: string;
 };
 
@@ -1069,6 +1114,9 @@ export type DaemonMessage =
   | AcmeProofForwardEndMessage
   | AcmeIssueEventMessage
   | AcmeProofForwardReportMessage
+  | AcmeDnsPublishMessage
+  | AcmeDnsPublishedMessage
+  | AcmeDnsRemoveMessage
   | {
     type: "tunnel-token-result";
     id: string;
@@ -1187,17 +1235,27 @@ function validateAcmeRequestId(value: unknown): string | null {
     : "invalid requestId";
 }
 
-function validateAcmeNames(value: unknown): string | null {
+function validateAcmeNames(value: unknown, wildcards = false): string | null {
   if (
     !Array.isArray(value) || value.length === 0 ||
     value.length > MAX_ACME_ISSUE_NAMES
   ) {
     return "invalid names";
   }
-  const ok = value.every((n) =>
-    typeof n === "string" && n.length <= 253 && ACME_NAME_RE.test(n)
-  );
+  const ok = value.every((n) => {
+    if (typeof n !== "string" || n.length > 253) return false;
+    if (!wildcards || !n.startsWith("*.")) return ACME_NAME_RE.test(n);
+    // A wildcard sits over a name of at least two labels: `*.com` is no name.
+    const base = n.slice(2);
+    return base.includes(".") && ACME_NAME_RE.test(base);
+  });
   return ok ? null : "invalid names";
+}
+
+function validateAcmeChallenge(value: unknown): string | null {
+  return value === undefined || value === "http-01" || value === "dns-01"
+    ? null
+    : "invalid challenge";
 }
 
 function validateAcmeAddress(value: unknown): boolean {
@@ -1238,7 +1296,9 @@ export function validateAcmeIssueRequestFields(
   return firstProblem(
     validateAcmeRequestId(record.requestId),
     isBoundedId(record.tlsId) ? null : "invalid tlsId",
-    validateAcmeNames(record.names),
+    validateAcmeChallenge(record.challenge),
+    // A wildcard is a DNS-only name: the HTTP proof cannot show one.
+    validateAcmeNames(record.names, record.challenge === "dns-01"),
     record.directory === "production" || record.directory === "staging"
       ? null
       : "invalid directory",
@@ -1304,6 +1364,66 @@ export function validateAcmeProofForwardReportFields(
   return firstProblem(
     validateAcmeRequestId(record.requestId),
     validateOptionalError(record.reason),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** The most records one `acme-dns-publish` carries (one per name of the order). */
+export const MAX_ACME_DNS_RECORDS = MAX_ACME_ISSUE_NAMES;
+/** `_acme-challenge.` then a plain name: letters, digits, dots, hyphens, underscore only up front. */
+const ACME_DNS_RECORD_NAME_RE = /^_acme-challenge\.[a-z0-9.-]+$/;
+const ACME_DNS_RECORD_VALUE_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+function validateAcmeDnsRecords(value: unknown): string | null {
+  if (
+    !Array.isArray(value) || value.length === 0 ||
+    value.length > MAX_ACME_DNS_RECORDS
+  ) {
+    return "invalid records";
+  }
+  const ok = value.every((item) => {
+    const record = item as { name?: unknown; value?: unknown } | null;
+    return typeof record === "object" && record !== null &&
+      typeof record.name === "string" && record.name.length <= 253 &&
+      ACME_DNS_RECORD_NAME_RE.test(record.name) &&
+      typeof record.value === "string" &&
+      ACME_DNS_RECORD_VALUE_RE.test(record.value);
+  });
+  return ok ? null : "invalid records";
+}
+
+/** Shape check for `acme-dns-publish`. Never accepts certificate material. */
+export function validateAcmeDnsPublishFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    validateAcmeDnsRecords(record.records),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-dns-published`. Never accepts certificate material. */
+export function validateAcmeDnsPublishedFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    typeof record.ok === "boolean" ? null : "invalid ok",
+    validateOptionalError(record.error),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-dns-remove`. */
+export function validateAcmeDnsRemoveFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
     isIsoTimestamp(record.at) ? null : "invalid at timestamp",
     acmeForbiddenKey(record),
   );

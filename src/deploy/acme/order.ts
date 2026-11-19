@@ -33,6 +33,11 @@ import { buildCertificateRequest, generateCertificateKey } from "./csr.ts";
 
 /** How long a whole order may take before it is given up. */
 export const ACME_ORDER_TIMEOUT_MS = 3 * 60_000;
+/**
+ * A DNS-01 order waits for the control plane to publish the records and for
+ * them to reach every authoritative name server, so it gets longer.
+ */
+export const ACME_DNS_ORDER_TIMEOUT_MS = 10 * 60_000;
 const MIN_POLL_MS = 1_000;
 const MAX_POLL_MS = 10_000;
 /**
@@ -49,6 +54,16 @@ export type ChallengeSolver = {
    * TXT value (DNS-01).
    */
   present(challenge: SolverChallenge): Promise<void>;
+  /**
+   * Optional: put every answer of the order in place in one step, once all of
+   * them are known (DNS-01 asks the control plane for all its records in one
+   * request). When set, the order calls it instead of `present`; `signal` ends
+   * when the order's deadline passes.
+   */
+  presentAll?(
+    challenges: readonly SolverChallenge[],
+    signal: AbortSignal,
+  ): Promise<void>;
   /**
    * Take the answer away again; called once the order is over, whatever its
    * outcome.
@@ -254,6 +269,7 @@ async function presentAll(
   solved: SolverChallenge[],
   clock: Clock,
 ): Promise<void> {
+  const batch: SolverChallenge[] = [];
   await forEachSequential(order.authorizations, async (authzUrl) => {
     clock.check("putting the answers in place");
     const authz = await client.getAuthorization(authzUrl);
@@ -274,9 +290,14 @@ async function presentAll(
       : await client.keyAuthorization(challenge.token);
     const entry = { name, token: challenge.token, value };
     solved.push(entry);
-    await solver.present(entry);
+    if (solver.presentAll === undefined) await solver.present(entry);
+    else batch.push(entry);
     presented.push({ authzUrl, challenge, name });
   });
+  if (solver.presentAll !== undefined && batch.length > 0) {
+    clock.check("putting the answers in place");
+    await solver.presentAll(batch, clock.signal);
+  }
 }
 
 async function validateAll(

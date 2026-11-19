@@ -2189,7 +2189,10 @@ export class InstanceClient {
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
     this.#ensureProofForward();
-    this.#ensureAcmeIssue();
+    this.#runSocketHandler(
+      "acme-dns sweep",
+      this.#ensureAcmeIssue().sweepRestartedDnsOrders(),
+    );
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -2617,6 +2620,11 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
+      sendDns: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
       report: (input) => {
         const api = this.#apiClient;
         if (api === undefined) {
@@ -2977,6 +2985,9 @@ export class InstanceClient {
           "acme-issue-request",
           this.#ensureAcmeIssue().handleRequest(message),
         );
+        return true;
+      case "acme-dns-published":
+        this.#ensureAcmeIssue().handleDnsPublished(message);
         return true;
       case "acme-proof-forward":
         this.#runSocketHandler(

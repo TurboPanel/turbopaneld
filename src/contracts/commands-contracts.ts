@@ -842,6 +842,18 @@ export type EnvironmentDeployHostingWeb = {
   php?: EnvironmentDeployHostingPhp;
 };
 
+/** One name's certificate choice inside a hosting row (`hosting-name-tls-v1`). */
+export type EnvironmentDeployHostingNameTls = {
+  /**
+   * One of the row's served names (`hostingServedNames`) or a name its `www`
+   * mode only redirects (`hostingWwwRedirects`), which can carry its own choice.
+   */
+  hostname: string;
+  /** A certificate in the deploy's `tlsMaterial`; absent = none pinned. */
+  tlsId?: string;
+  tlsMode?: "internal" | "acme";
+};
+
 export type EnvironmentDeployHosting = {
   hostingId: string;
   serviceId: string;
@@ -857,6 +869,14 @@ export type EnvironmentDeployHosting = {
    * the `tls` directive so Caddy's own ACME client issues on :80/:443.
    */
   tlsMode?: "internal" | "pinned" | "acme";
+  /**
+   * Per-name certificate choice (feature `hosting-name-tls-v1`). Each entry
+   * replaces the hosting-level `tlsId` / `tlsMode` for that name, served or a
+   * `www` redirect name. A redirect name with no entry of its own follows the
+   * entry of the name it sends visitors to; other names keep the hosting
+   * level. Absent = every name uses the hosting level, as before.
+   */
+  nameTls?: EnvironmentDeployHostingNameTls[];
   proxy?: EnvironmentDeployHostingProxy;
   /**
    * Resolved Caddy `bind` address for this hosting (public pinned IP, datacenter
@@ -3114,6 +3134,39 @@ export function hostingWwwRedirects(
   });
 }
 
+/**
+ * The certificate settings one name of a hosting uses: its own `nameTls` entry
+ * when it has one; else, for a `www` redirect name, the entry of the served name
+ * it sends visitors to; else the hosting level. A hosting with no `nameTls`
+ * always answers with its own `tlsId` and `tlsMode`, exactly as before the
+ * field existed.
+ */
+export function hostingTlsForName(
+  hosting: Pick<
+    EnvironmentDeployHosting,
+    "hostnames" | "www" | "tlsId" | "tlsMode" | "nameTls"
+  >,
+  hostname: string,
+): {
+  tlsId: string | null | undefined;
+  tlsMode: EnvironmentDeployHosting["tlsMode"];
+} {
+  const entries = hosting.nameTls;
+  if (entries !== undefined && entries.length > 0) {
+    const target = hostingWwwRedirects(hosting).find((redirect) =>
+      redirect.from === hostname
+    )?.to;
+    const entry = entries.find((item) => item.hostname === hostname) ??
+      (target === undefined
+        ? undefined
+        : entries.find((item) => item.hostname === target));
+    if (entry !== undefined) {
+      return { tlsId: entry.tlsId ?? null, tlsMode: entry.tlsMode };
+    }
+  }
+  return { tlsId: hosting.tlsId, tlsMode: hosting.tlsMode };
+}
+
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
 export function assertValidHostname(value: unknown): asserts value is string {
   if (!isValidHostname(value)) {
@@ -4675,6 +4728,72 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
+const NAME_TLS_MODES = new Set(["internal", "acme"]);
+const MAX_NAME_TLS_ENTRIES = 1000;
+
+function parseNameTlsEntry(
+  item: unknown,
+  served: ReadonlySet<string>,
+): EnvironmentDeployHostingNameTls {
+  if (!isRecord(item)) {
+    throw new TypeError("hostings[].nameTls entries must be objects");
+  }
+  const hostname = item.hostname;
+  if (typeof hostname !== "string" || !served.has(hostname)) {
+    throw new TypeError(
+      "hostings[].nameTls hostname must be one of the row's served or www redirect names",
+    );
+  }
+  const tlsId = item.tlsId;
+  if (tlsId !== undefined && (typeof tlsId !== "string" || tlsId === "")) {
+    throw new TypeError("hostings[].nameTls tlsId must be a non-empty string");
+  }
+  const tlsMode = item.tlsMode;
+  if (
+    tlsMode !== undefined &&
+    (typeof tlsMode !== "string" || !NAME_TLS_MODES.has(tlsMode))
+  ) {
+    throw new TypeError("hostings[].nameTls tlsMode must be internal or acme");
+  }
+  if (tlsMode === "acme" && tlsId !== undefined) {
+    throw new TypeError(
+      "hostings[].nameTls cannot pin a certificate on an acme name",
+    );
+  }
+  return {
+    hostname,
+    ...(tlsId === undefined ? {} : { tlsId }),
+    ...(tlsMode === undefined
+      ? {}
+      : { tlsMode: tlsMode as EnvironmentDeployHostingNameTls["tlsMode"] }),
+  };
+}
+
+function parseHostingNameTls(
+  value: unknown,
+  hostnames: string[],
+  www: EnvironmentDeployHosting["www"],
+): EnvironmentDeployHostingNameTls[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_NAME_TLS_ENTRIES) {
+    throw new TypeError("hostings[].nameTls must be an array");
+  }
+  const served = new Set([
+    ...hostingServedNames({ hostnames, www }),
+    ...hostingWwwRedirects({ hostnames, www }).map((redirect) => redirect.from),
+  ]);
+  const seen = new Set<string>();
+  const entries = value.map((item) => {
+    const entry = parseNameTlsEntry(item, served);
+    if (seen.has(entry.hostname)) {
+      throw new TypeError("hostings[].nameTls names a hostname twice");
+    }
+    seen.add(entry.hostname);
+    return entry;
+  });
+  return entries.length > 0 ? entries : undefined;
+}
+
 function parseHostingWww(
   value: unknown,
 ): EnvironmentDeployHosting["www"] {
@@ -4801,9 +4920,14 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const bindAddress = parseHostingBindAddress(value.bindAddress);
   const hostnames = parseHostingHostnames(value.hostnames);
   const tunnel = parseHostingTunnel(value.tunnel, hostnames);
+  const www = parseHostingWww(value.www);
+  const nameTls = parseHostingNameTls(value.nameTls, hostnames, www);
   if (
-    tunnel && tlsMode === "acme" &&
-    tunnel.hostnames.some((name) => !tunnel.openHostnames?.includes(name))
+    tunnel?.hostnames.some((name) =>
+      !tunnel.openHostnames?.includes(name) &&
+      hostingTlsForName({ hostnames, www, tlsId, tlsMode, nameTls }, name)
+          .tlsMode === "acme"
+    )
   ) {
     throw new TypeError(
       "Invalid hostings[].tunnel: tlsMode acme needs every tunnel name open",
@@ -4812,7 +4936,6 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
-  const www = parseHostingWww(value.www);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
@@ -4823,6 +4946,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
     ...(tlsMode === undefined ? {} : { tlsMode }),
+    ...(nameTls === undefined ? {} : { nameTls }),
     ...(proxy === undefined ? {} : { proxy }),
     ...(bindAddress === undefined ? {} : { bindAddress }),
     ...(tunnel === undefined ? {} : { tunnel }),
@@ -4831,6 +4955,23 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(web === undefined ? {} : { web }),
     ...(www === undefined ? {} : { www }),
   };
+}
+
+/** Every certificate a `nameTls` entry pins must ride in the same deploy's `tlsMaterial`. */
+function assertNameTlsPinsInMaterial(
+  hostings: readonly EnvironmentDeployHosting[],
+  material: readonly EnvironmentDeployTlsMaterial[] | undefined,
+): void {
+  const known = new Set((material ?? []).map((entry) => entry.tlsId));
+  for (const hosting of hostings) {
+    for (const entry of hosting.nameTls ?? []) {
+      if (entry.tlsId !== undefined && !known.has(entry.tlsId)) {
+        throw new TypeError(
+          "hostings[].nameTls tlsId is not in tlsMaterial",
+        );
+      }
+    }
+  }
 }
 
 function parseTlsMaterial(value: unknown): EnvironmentDeployTlsMaterial {
@@ -7359,6 +7500,13 @@ export function parseEnvironmentDeployPayload(
     parseDeploySourceEntry,
   );
   assertUniqueSourceReleaseServiceIds(sourceMaterial);
+  const parsedHostings = hostings.map(parseHosting);
+  const tlsMaterial = parseOptionalMaterialArray(
+    value.tlsMaterial,
+    "tlsMaterial",
+    parseTlsMaterial,
+  );
+  assertNameTlsPinsInMaterial(parsedHostings, tlsMaterial);
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -7366,7 +7514,7 @@ export function parseEnvironmentDeployPayload(
     organizationId: parseNonEmptyString(value, "organizationId"),
     projectName: parseNonEmptyString(value, "projectName"),
     composeFiles: parseEnvironmentDeployComposeFiles(value.composeFiles),
-    hostings: hostings.map(parseHosting),
+    hostings: parsedHostings,
     ...definedProps({
       sites: parseOptionalMaterialArray(
         value.sites,
@@ -7422,11 +7570,7 @@ export function parseEnvironmentDeployPayload(
         value.remoteBuildSourcesApproved,
         "remoteBuildSourcesApproved",
       ),
-      tlsMaterial: parseOptionalMaterialArray(
-        value.tlsMaterial,
-        "tlsMaterial",
-        parseTlsMaterial,
-      ),
+      tlsMaterial,
       variableMaterial: parseOptionalMaterialArray(
         value.variableMaterial,
         "variableMaterial",

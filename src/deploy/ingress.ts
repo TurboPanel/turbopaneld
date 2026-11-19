@@ -40,6 +40,7 @@ import {
   type EnvironmentDeployPayload,
   HOSTING_FALLBACK_HOSTNAME,
   hostingServedNames,
+  hostingTlsForName,
   hostingWwwRedirects,
   isValidIpv4Literal,
   isValidIpv6Literal,
@@ -2484,7 +2485,7 @@ function mergeHostingIntoHostnameSite(
 ): void {
   const tunnel = mergeSiteTunnel(site.tunnel, hosting, hostname);
   if (tunnel) site.tunnel = tunnel;
-  if (hosting.tlsMode === "acme") {
+  if (hostingTlsForName(hosting, hostname).tlsMode === "acme") {
     site.tlsMode = "acme";
   }
   // ACME on this hostname always keeps HTTPS — a sibling `forceHttps: false`
@@ -2541,7 +2542,10 @@ function addWwwRedirectSites(
     if ((hosting.protocol ?? "http") !== "http") continue;
     for (const { from, to } of hostingWwwRedirects(hosting)) {
       if (byHostname.has(from)) continue;
-      byHostname.set(from, redirectSiteFor(hosting, to, byHostname.get(to)));
+      byHostname.set(
+        from,
+        redirectSiteFor(hosting, from, to, byHostname.get(to)),
+      );
     }
   }
 }
@@ -2553,10 +2557,11 @@ function addWwwRedirectSites(
  */
 function redirectSiteFor(
   hosting: EnvironmentDeployHosting,
+  from: string,
   to: string,
   target: HostnameSite | undefined,
 ): HostnameSite {
-  const acme = hosting.tlsMode === "acme";
+  const acme = hostingTlsForName(hosting, from).tlsMode === "acme";
   const forceHttps = target
     ? emitHttpsSite(target.forceHttps, target.tlsMode)
     : acme || (hosting.proxy?.forceHttps ?? true);
