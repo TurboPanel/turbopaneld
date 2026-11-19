@@ -20,6 +20,7 @@
       { "name": "branch", "required": true, "type": "string" },
       { "name": "commit", "required": true, "type": "string" },
       { "name": "features", "required": false, "type": "Array<string>" },
+      { "name": "heartbeatSeconds", "required": false, "type": "number" },
       { "name": "instanceVersion", "required": false, "type": "string" },
       { "name": "type", "required": true, "type": "'version'" }
     ]
@@ -210,7 +211,9 @@
         "required": true,
         "type": "'restart' | 'start' | 'stop'"
       },
+      { "name": "captureSwitchoverGtid", "required": false, "type": "boolean" },
       { "name": "demoted", "required": false, "type": "boolean" },
+      { "name": "engine", "required": false, "type": "ManagedEngineCode" },
       { "name": "managedId", "required": true, "type": "string" },
       { "name": "memberId", "required": false, "type": "string" },
       {
@@ -219,12 +222,32 @@
         "type": "number"
       },
       {
+        "name": "reactivateAfterSwitchoverAbort",
+        "required": false,
+        "type": "boolean"
+      },
+      {
         "name": "role",
         "required": false,
         "type": "'primary' | 'replica'"
       },
       {
+        "name": "switchoverAbortPromoteSafe",
+        "required": false,
+        "type": "boolean"
+      },
+      {
         "name": "switchoverRecoveryId",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "name": "switchoverTargetPromoteCompleted",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "name": "switchoverTargetPromoteError",
         "required": false,
         "type": "string"
       }
@@ -234,6 +257,11 @@
     "instance": "src/contracts/commands/schemas.ts",
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
+      {
+        "name": "artifactExtension",
+        "required": false,
+        "type": "ManagedBackupArtifactExtension"
+      },
       { "name": "composeProject", "required": false, "type": "string" },
       { "name": "copyId", "required": false, "type": "string" },
       {
@@ -241,8 +269,15 @@
         "required": false,
         "type": "'docker' | 'path'"
       },
+      {
+        "name": "copyTarget",
+        "required": false,
+        "type": "{ accessKeyId: string; bucket: string; destinationId: string; endpoint: string; name: string; pathStyle: boolean; prefix: string; region: string; secretKeyEnvelope: string; serverSideEncryption: boolean }"
+      },
       { "name": "database", "required": false, "type": "string" },
       { "name": "enabled", "required": true, "type": "boolean" },
+      { "name": "engine", "required": false, "type": "ManagedEngineCode" },
+      { "name": "folder", "required": false, "type": "FolderRefParts" },
       { "name": "hostPath", "required": false, "type": "string" },
       { "name": "managedId", "required": false, "type": "string" },
       { "name": "onCalendar", "required": true, "type": "string" },
@@ -251,7 +286,7 @@
       { "name": "policyId", "required": true, "type": "string" },
       { "name": "retentionKeep", "required": true, "type": "number" },
       { "name": "storageId", "required": false, "type": "string" },
-      { "name": "targetKind", "required": true, "type": "'managed' | 'copy'" },
+      { "name": "targetKind", "required": true, "type": "'copy' | 'managed'" },
       { "name": "volumeName", "required": false, "type": "string" }
     ]
   },
@@ -269,11 +304,11 @@
       { "name": "nextRunAt", "required": false, "type": "string" },
       { "name": "path", "required": false, "type": "string" },
       { "name": "policyId", "required": true, "type": "string" },
-      { "name": "pruned", "required": false, "type": "string[]" },
+      { "name": "pruned", "required": false, "type": "Array<string>" },
       { "name": "runId", "required": true, "type": "string" },
       { "name": "sizeBytes", "required": false, "type": "number" },
       { "name": "startedAt", "required": true, "type": "string" },
-      { "name": "status", "required": true, "type": "'succeeded' | 'failed'" },
+      { "name": "status", "required": true, "type": "'failed' | 'succeeded'" },
       { "name": "type", "required": true, "type": "'backup-run-report'" }
     ]
   },
@@ -293,10 +328,10 @@
     "daemon": "src/contracts/cell-messages.ts",
     "fields": [
       { "name": "at", "required": true, "type": "string" },
-      { "name": "databases", "required": true, "type": "string[]" },
+      { "name": "databases", "required": true, "type": "Array<string>" },
       { "name": "engine", "required": true, "type": "string" },
       { "name": "id", "required": true, "type": "string" },
-      { "name": "logins", "required": true, "type": "string[]" },
+      { "name": "logins", "required": true, "type": "Array<string>" },
       { "name": "managedId", "required": true, "type": "string" },
       {
         "name": "type",

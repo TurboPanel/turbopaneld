@@ -372,6 +372,16 @@ jobs:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
 
+      # The checker above compares the two snapshots with each other; this
+      # test also compares the committed snapshot with both checkouts' live
+      # field types, so a field added without a snapshot update goes red here
+      # instead of waiting for someone to run the suite beside a sibling.
+      - name: Check the snapshot against both checkouts' live field types
+        working-directory: turbopaneld
+        env:
+          TURBOPANEL_REQUIRE_SIBLING: "1"
+        run: deno task test:contract-drift
+
   # The one context the trunk ruleset will require: green only when every
   # PR-time job above succeeded. Every need runs unconditionally, so a
   # `skipped` result is a failure here too.
