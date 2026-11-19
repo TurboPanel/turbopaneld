@@ -111,12 +111,6 @@ import {
   signPinReport,
 } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
-import {
-  setTopologyGenerationOptional,
-  setTopologySizesNegotiated,
-  sizesFeaturesNegotiated,
-  topologyGenerationOptional,
-} from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   createPanelSealKeySource,
@@ -253,15 +247,11 @@ import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
 import {
   SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
-  TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
 } from "./version-wire.ts";
-import {
-  TopologyReporter,
-  topologyReportForWire,
-} from "./topology-reporter.ts";
+import { TopologyReporter } from "./topology-reporter.ts";
 import { answerDevHostAction, type DevHostPort } from "../dev-host/wire.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
 import type {
   CommandRecoveryReport,
   DaemonMessage,
@@ -373,7 +363,7 @@ export interface InstanceClientOptions {
   /** When set, enables host metrics on the daemon WebSocket. */
   metricsCollectorFactory?: () => MetricsCollector;
   /** When set, enables `topology-report` emission on the daemon WebSocket (see `TopologyReporter`). */
-  collectTopologyFn?: () => Promise<TopologySnapshot>;
+  collectTopologyFn?: () => Promise<CollectedTopology>;
   /**
    * Checkout-sync unpack implementation. Production compile never supplies this;
    * source `main.ts` registers it via `enableCheckoutDevSync`.
@@ -707,7 +697,7 @@ export class InstanceClient {
    */
   #liveLeases: LiveLeaseManager | undefined;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
-  readonly #collectTopologyFn?: () => Promise<TopologySnapshot>;
+  readonly #collectTopologyFn?: () => Promise<CollectedTopology>;
   /** Created lazily once `#collectTopologyFn` is set; lives across reconnects (unlike `#liveLeases`). */
   #topologyReporter: TopologyReporter | undefined;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
@@ -981,8 +971,6 @@ export class InstanceClient {
     this.#peerFeaturesKnown = true;
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
-      setTopologySizesNegotiated(false);
-      setTopologyGenerationOptional(false);
       this.#releaseHeldReports();
       return;
     }
@@ -991,10 +979,6 @@ export class InstanceClient {
       if (typeof entry === "string") accepted.push(entry);
     }
     this.#peerFeatures = accepted;
-    setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
-    setTopologyGenerationOptional(
-      accepted.includes(TOPOLOGY_GENERATION_OPTIONAL_FEATURE),
-    );
     this.#releaseHeldReports();
   }
 
@@ -2203,7 +2187,7 @@ export class InstanceClient {
       ws.send(JSON.stringify(
         {
           type: "topology-report",
-          ...topologyReportForWire(report, topologyGenerationOptional()),
+          ...report,
         } satisfies DaemonMessage,
       ));
     });
@@ -2424,8 +2408,6 @@ export class InstanceClient {
       this.#ws = undefined;
       this.#peerFeatures = [];
       this.#peerFeaturesKnown = false;
-      setTopologySizesNegotiated(false);
-      setTopologyGenerationOptional(false);
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
@@ -4171,9 +4153,8 @@ export class InstanceClient {
       ok = true;
 
       // A pushed nicSlot*/hostingFilesystemId override can reassign a slot
-      // without changing any identity set — only the resolved SlotMapping
-      // reflects that (see `../metrics/topology/generation.ts`). Force a
-      // recompute now rather than waiting for the next scheduled tick.
+      // without changing any identity set. Force a recompute now rather
+      // than waiting for the next scheduled tick.
       void this.#topologyReporter?.reportNow();
 
       // A flip from false/unset to true is the only edge that should load

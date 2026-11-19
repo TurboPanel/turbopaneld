@@ -4,9 +4,10 @@ import { NicLinkEventCollector } from "./nic-link.ts";
 import type { EventDetectContext } from "./types.ts";
 import type {
   NetworkDeviceTopology,
-  TopologySnapshot,
 } from "../../../contracts/topology-types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
+
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -23,9 +24,8 @@ const VETH: NetworkDeviceTopology = {
   identity: { virtualKey: "1234" },
 };
 
-function snapshot(networks: NetworkDeviceTopology[]): TopologySnapshot {
+function snapshot(networks: NetworkDeviceTopology[]): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 1,
     networks,
     filesystems: [],

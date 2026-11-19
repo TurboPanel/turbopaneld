@@ -31,14 +31,11 @@ test("METRIC_EVENT_KINDS has no duplicates", () => {
   );
 });
 
-test("isHardwareHealthEventKind splits physical-health kinds from generation/clock kinds", () => {
+test("isHardwareHealthEventKind splits physical-health kinds from boot/clock kinds", () => {
   assertEquals(isHardwareHealthEventKind("gpu_xid"), true);
   assertEquals(isHardwareHealthEventKind("edac_uncorrected"), true);
   assertEquals(isHardwareHealthEventKind("clock_sync_lost"), false);
-  assertEquals(
-    isHardwareHealthEventKind("topology_generation_changed"),
-    false,
-  );
+  assertEquals(isHardwareHealthEventKind("boot_generation_changed"), false);
 });
 
 test("clampPercent clamps 0-100 and passes null", () => {

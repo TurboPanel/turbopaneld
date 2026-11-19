@@ -2,7 +2,7 @@
  * Linux collector orchestrator — v5 assembly.
  *
  * Builds one `MetricsSample` per tick by composing this tick's
- * `TopologySnapshot` (identity + topology generation + boot generation), the
+ * `TopologySnapshot` (identity) and the boot generation, the
  * shared counter-baseline layer (`baseline.ts`), and every v5 parser module.
  * `gpus` is populated via `gpu/index.ts`'s `buildGpuSamples` when
  * `CollectorDeps.gpuAdapters` is wired (production always wires it —
@@ -739,10 +739,9 @@ function buildHostMetrics(parts: {
 /**
  * The network devices this tick actually reports: the resolved
  * `SlotMapping`'s `normalNicSlots` in slot order (so a control plane that
- * has not recorded this topology generation yet still embeds slot 1/2 by
- * position), then every fabric device. Members, VLAN children, tunnels,
+ * has not recorded this topology yet still embeds slot 1/2 by position), then every fabric device. Members, VLAN children, tunnels,
  * container bridges, and loopback are enumerated in the topology (identity,
- * generation, the settings picker) but never sampled — their traffic is
+ * the settings picker) but never sampled — their traffic is
  * either already counted on a monitored uplink or not the host's to bill.
  * A pinned slot id absent from this snapshot simply has no device to
  * sample this tick; it never pulls in a different device by position.
@@ -802,7 +801,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
   /**
    * Any failure propagates: the scheduler logs it (rate limited) and sends
    * nothing for this tick. A placeholder all-null row would be stored as real
-   * data, with generations 0 that the control plane can read as a reboot.
+   * data, with a boot generation 0 that the control plane can read as a reboot.
    */
   collect(options: {
     sequence: number;
@@ -1004,8 +1003,7 @@ export class LinuxMetricsCollector implements MetricsCollector {
       ? await this.#deps.resolveCapabilityPlan()
       : undefined;
     // Truncation numbers slots over the FULL snapshot, exactly what the
-    // topology fingerprint (generation) and the topology sent upstream use, so
-    // a slot never changes meaning without a generation bump. Presence only
+    // topology sent upstream uses, so a slot never changes meaning. Presence only
     // decides what is reported, never which slot an entity occupies.
     // Self-hosted never caps outbound samples — ignore a leftover plan so
     // enroll/reconnect cannot start dropping GPUs, filesystems, or signals.

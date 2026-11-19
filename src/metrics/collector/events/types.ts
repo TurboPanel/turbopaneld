@@ -20,7 +20,7 @@ import type {
   MetricEventSeverity,
 } from "../../../contracts/metrics-contract.ts";
 import { fnv1aHex } from "../../topology/identity.ts";
-import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
+import type { CollectedTopology } from "../../topology/topology.ts";
 import type { CounterBaselineTracker } from "../baseline.ts";
 import type { GpuThermalReadings } from "../gpu/index.ts";
 import type { MountEntry } from "../mounts.ts";
@@ -40,7 +40,7 @@ export type HardwareSignalCandidateMap = ReadonlyMap<string, SensorCandidate>;
  */
 export type EventDetectContext = {
   nowMs: number;
-  snapshot: TopologySnapshot;
+  snapshot: CollectedTopology;
   tracker: CounterBaselineTracker;
   bootGeneration: number;
   seconds: number;

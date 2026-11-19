@@ -5,10 +5,11 @@ import type { GpuHealthSignals } from "./gpu-health.ts";
 import type { EventDetectContext } from "./types.ts";
 import type {
   GpuTopology,
-  TopologySnapshot,
 } from "../../../contracts/topology-types.ts";
 import type { GpuSample } from "../../../contracts/metrics-contract.ts";
 import type { GpuThermalReadings } from "../gpu/index.ts";
+
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -53,9 +54,8 @@ function gpuThermals(
   }]]);
 }
 
-function snapshot(gpus: GpuTopology[]): TopologySnapshot {
+function snapshot(gpus: GpuTopology[]): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 1,
     networks: [],
     filesystems: [],
