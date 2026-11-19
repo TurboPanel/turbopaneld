@@ -41,6 +41,8 @@ import {
   type SiteRelease,
 } from "../site.ts";
 import { siteRunContext } from "./lifecycle-context.ts";
+import { syncPhpSharedSiteRecords } from "./php-patch-restart.ts";
+import { sitePhpRuntimeMode } from "./php-runtime.ts";
 import {
   postDeployBeforeTrafficFailure,
   PostDeployFailedAfterSwitchError,
@@ -342,6 +344,12 @@ export async function applyDeployWorkers(
   io: SiteLifecycleIo,
 ): Promise<string[]> {
   const warnings: string[] = [];
+  // The PHP patch pass restarts these sites' workers after a package update.
+  await syncPhpSharedSiteRecords(
+    deploy.layout,
+    deploy.environmentId,
+    sharedPoolPhpSites(deploy),
+  );
   try {
     await removePostDeployUnits(
       postDeployIo(io),
@@ -363,6 +371,28 @@ export async function applyDeployWorkers(
     io.onLine("stderr", `workers could not be applied: ${message}`);
   }
   return warnings;
+}
+
+/**
+ * The environment's PHP sites that keep the shared php-fpm master (no per-site
+ * runtime), with their series: what the PHP patch pass restarts the workers of.
+ */
+export function sharedPoolPhpSites(
+  deploy: Pick<SiteLifecycleDeploy, "environmentId" | "sites">,
+): Array<{ composeServiceName: string; series: string }> {
+  const found: Array<{ composeServiceName: string; series: string }> = [];
+  for (const site of deploy.sites) {
+    try {
+      const series = resolveSitePhpSeries(site);
+      if (
+        series !== undefined &&
+        sitePhpRuntimeMode(site, deploy.environmentId) === null
+      ) found.push({ composeServiceName: site.composeServiceName, series });
+    } catch {
+      // A site the deploy refused has no pool to track.
+    }
+  }
+  return found;
 }
 
 /** Remove an environment's workers and post-deploy units (stop). */

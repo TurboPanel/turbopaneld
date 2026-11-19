@@ -23,11 +23,14 @@ import {
   type PhpRuntimeRecord,
   readPhpPackageVersions,
   readPhpRuntimeRecords,
+  readPhpSharedSiteRecords,
   removePhpRuntimeRecords,
   requestPhpPatchPassAfterDeploy,
   resetPhpPatchState,
   runPhpPatchPass,
+  syncPhpSharedSiteRecords,
   writePhpRuntimeRecord,
+  writePhpSharedSiteRecord,
 } from "./php-patch-restart.ts";
 import { phpSeriesChangeTime, workerIoOf } from "./php-patch-restart.ts";
 import { holdPruneKeys } from "./prune-holds.ts";
@@ -612,6 +615,212 @@ test("a deploy asks for a pass only once the daemon has armed the restarts, and 
     assertEquals(f.events, []);
   } finally {
     disarmPhpPatchRestarts();
+    await f.cleanup();
+  }
+});
+
+/** Install workers for an environment's sites (one apply, so none is swept). */
+async function installWorkers(
+  f: Fixture,
+  environmentId: string,
+  workers: ReadonlyArray<[service: string, name: string]>,
+): Promise<void> {
+  await applySiteWorkers(
+    {
+      run: f.host.run,
+      onLine: () => undefined,
+      sleep: () => Promise.resolve(),
+      systemdUnitDir: f.host.unitDir,
+    },
+    environmentId,
+    workers.map(([composeServiceName, name]) => ({
+      layout: f.host.layout,
+      composeServiceName,
+      username: "alice",
+      workingDirectory: `/srv/users/alice/sites/${composeServiceName}/current`,
+      environmentFile:
+        `/etc/turbopanel/site-env/alice/${composeServiceName}.env`,
+      phpSeries: "8.4",
+      siteWritableDirs: [],
+      workers: [{ name, command: ["/bin/true"] }],
+    })),
+  );
+}
+
+test("shared-pool site records are written, kept across deploys, moved and removed", async () => {
+  const host = await makeSystemdHost();
+  try {
+    const layout = { stateDir: host.layout.stateDir };
+    await syncPhpSharedSiteRecords(layout, "env1", [
+      { composeServiceName: "web", series: "8.4" },
+      { composeServiceName: "api", series: "8.3" },
+    ]);
+    await syncPhpSharedSiteRecords(layout, "env2", [
+      { composeServiceName: "other", series: "8.4" },
+    ]);
+    await writePhpSharedSiteRecord(layout, {
+      environmentId: "env1",
+      composeServiceName: "web",
+      series: "8.4",
+      version: "8.4.26",
+    });
+    // A later deploy keeps the version of a site that did not move series and
+    // drops the one of a site that did; a site that is gone loses its record.
+    await syncPhpSharedSiteRecords(layout, "env1", [
+      { composeServiceName: "web", series: "8.4" },
+    ]);
+    assertEquals(
+      (await readPhpSharedSiteRecords(layout)).map((r) => [
+        r.environmentId,
+        r.composeServiceName,
+        r.series,
+        r.version,
+      ]),
+      [["env1", "web", "8.4", "8.4.26"], ["env2", "other", "8.4", undefined]],
+    );
+    await syncPhpSharedSiteRecords(layout, "env1", [
+      { composeServiceName: "web", series: "8.5" },
+    ]);
+    assertEquals(
+      (await readPhpSharedSiteRecords(layout))[0]?.version,
+      undefined,
+    );
+    await syncPhpSharedSiteRecords(layout, "env1", []);
+    assertEquals(
+      (await readPhpSharedSiteRecords(layout)).map((r) => r.composeServiceName),
+      ["other"],
+    );
+    await Deno.writeTextFile(
+      join(host.layout.stateDir, "sites", ".php-shared-sites", "junk.json"),
+      JSON.stringify({ environmentId: "../x", composeServiceName: "a" }),
+    );
+    assertEquals((await readPhpSharedSiteRecords(layout)).length, 1);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("shared-pool site workers restart after the shared master, one site at a time, and the sites are reported", async () => {
+  resetPhpPatchState();
+  const f = await fixture([A]);
+  try {
+    oldRuntimes(f, A);
+    f.started.set("turbopanel-php-fpm@8.4.service", OLD_START_S);
+    await installWorkers(f, "env1", [["web", "queue"]]);
+    await installWorkers(f, "env2", [["shop", "queue"], ["idle", "mail"]]);
+    const layout = f.io.layout;
+    await syncPhpSharedSiteRecords(layout, "env1", [
+      { composeServiceName: "web", series: "8.4" },
+    ]);
+    await syncPhpSharedSiteRecords(layout, "env2", [
+      { composeServiceName: "shop", series: "8.4" },
+      { composeServiceName: "idle", series: "8.4" },
+      { composeServiceName: "bare", series: "8.4" },
+    ]);
+    f.started.set("turbopanel-worker-env1-web-queue@1.service", OLD_START_S);
+    f.started.set("turbopanel-worker-env2-shop-queue@1.service", OLD_START_S);
+    // idle's worker already runs the new build.
+    f.started.set("turbopanel-worker-env2-idle-mail@1.service", NEW_START_S);
+    f.events.length = 0;
+    const result = await runPhpPatchPass(f.io);
+    assertEquals(result?.restarted, [A.id]);
+    assertEquals(
+      f.events.filter((e) => e.startsWith("restart ")),
+      [
+        `restart turbopanel-php-${A.id}.service`,
+        "restart turbopanel-php-fpm@8.4.service",
+        "restart turbopanel-worker-env1-web-queue@1.service",
+        "restart turbopanel-worker-env2-shop-queue@1.service",
+      ],
+    );
+    const sites = phpPatchSnapshot().sites;
+    assertEquals(
+      sites.map((s) => [
+        s.composeServiceName,
+        s.version,
+        s.outdated,
+        s.shared,
+      ]),
+      [
+        ["alpha", "8.4.27", undefined, undefined],
+        ["web", "8.4.27", undefined, true],
+        ["bare", "8.4.27", undefined, true],
+        ["idle", "8.4.27", undefined, true],
+        ["shop", "8.4.27", undefined, true],
+      ],
+    );
+    // The version is kept for the next pass.
+    assertEquals(
+      (await readPhpSharedSiteRecords(layout)).every((r) =>
+        r.version === "8.4.27"
+      ),
+      true,
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a failed runtime restart stops the pass before any shared-pool worker and the shared sites stay pending", async () => {
+  resetPhpPatchState();
+  const f = await fixture([A]);
+  try {
+    oldRuntimes(f, A);
+    f.started.set("turbopanel-php-fpm@8.4.service", OLD_START_S);
+    await installWorkers(f, "env2", [["shop", "queue"]]);
+    await syncPhpSharedSiteRecords(f.io.layout, "env2", [
+      { composeServiceName: "shop", series: "8.4" },
+      { composeServiceName: "bare", series: "8.4" },
+    ]);
+    f.started.set("turbopanel-worker-env2-shop-queue@1.service", OLD_START_S);
+    f.failsAfterRestart.add("alpha");
+    f.events.length = 0;
+    const result = await runPhpPatchPass(f.io);
+    assertEquals(result?.stoppedAt, A.id);
+    assert(!f.events.some((e) => e.includes("worker")));
+    assert(!f.events.includes("restart turbopanel-php-fpm@8.4.service"));
+    const shared = phpPatchSnapshot().sites.filter((s) => s.shared);
+    assertEquals(shared.map((s) => [s.composeServiceName, s.outdated]), [
+      ["bare", true],
+      ["shop", true],
+    ]);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("a shared-pool worker that does not stay running leaves its site pending and the other sites go on", async () => {
+  resetPhpPatchState();
+  const f = await fixture([]);
+  try {
+    f.started.set("turbopanel-php-fpm@8.4.service", OLD_START_S);
+    await installWorkers(f, "env1", [["web", "queue"]]);
+    await installWorkers(f, "env2", [["shop", "queue"]]);
+    await syncPhpSharedSiteRecords(f.io.layout, "env1", [
+      { composeServiceName: "web", series: "8.4" },
+    ]);
+    await syncPhpSharedSiteRecords(f.io.layout, "env2", [
+      { composeServiceName: "shop", series: "8.4" },
+    ]);
+    f.started.set("turbopanel-worker-env1-web-queue@1.service", OLD_START_S);
+    f.started.set("turbopanel-worker-env2-shop-queue@1.service", OLD_START_S);
+    // `is-active` answers "failed" for web's worker, "active" otherwise.
+    const inner = f.io.run;
+    f.io.run = (command, args) =>
+      args.includes("is-active") &&
+        args.some((a) => a.startsWith("turbopanel-worker-env1-web"))
+        ? Promise.resolve(hostFail("failed"))
+        : inner(command, args);
+    f.events.length = 0;
+    await runPhpPatchPass(f.io);
+    assert(
+      f.events.includes("restart turbopanel-worker-env2-shop-queue@1.service"),
+    );
+    assertEquals(
+      phpPatchSnapshot().sites.map((s) => [s.composeServiceName, s.outdated]),
+      [["web", true], ["shop", undefined]],
+    );
+  } finally {
     await f.cleanup();
   }
 });
