@@ -127,28 +127,38 @@ test("server.tunnel.status carries what the hop does about client certificates",
   );
 });
 
-test("server.tunnel.status carries whether the metrics port lock is loaded, optionally", () => {
+test("server.tunnel.status carries the last metrics port lock load, optionally", () => {
   assertEquals<unknown>(parseTunnelStatusResult(GOOD), GOOD);
-  const locked = { ...GOOD, statusPortsLocked: true };
+  const at = "2026-11-19T10:00:00.000Z";
+  const locked = {
+    ...GOOD,
+    statusPortsLocked: true,
+    statusPortsLockCheckedAt: at,
+  };
   assertEquals<unknown>(parseTunnelStatusResult(locked), locked);
+  const bare = { ...GOOD, statusPortsLocked: true };
+  assertEquals<unknown>(parseTunnelStatusResult(bare), bare);
   const failed = {
     ...GOOD,
     statusPortsLocked: false,
     statusPortsLockReason: "nft is not installed",
+    statusPortsLockCheckedAt: at,
   };
   assertEquals<unknown>(parseTunnelStatusResult(failed), failed);
-  assertThrows(() =>
-    parseTunnelStatusResult({ ...GOOD, statusPortsLocked: "yes" })
-  );
-  assertThrows(() =>
-    parseTunnelStatusResult({ ...GOOD, statusPortsLockReason: 3 })
-  );
-  assertThrows(() =>
-    parseTunnelStatusResult({
-      ...GOOD,
-      statusPortsLockReason: "x".repeat(201),
-    })
-  );
+  const bad = (extra: Record<string, unknown>) =>
+    assertThrows(() => parseTunnelStatusResult({ ...GOOD, ...extra }));
+  bad({ statusPortsLocked: "yes" });
+  bad({ statusPortsLockReason: "x" }); // a reason without a fact
+  bad({ statusPortsLockCheckedAt: at }); // a time without a fact
+  bad({ statusPortsLocked: true, statusPortsLockReason: "x" }); // reason only when false
+  bad({ statusPortsLocked: false, statusPortsLockReason: 3 });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\nb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\rb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\tb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\u001b[31mb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "x".repeat(201) });
+  bad({ statusPortsLocked: true, statusPortsLockCheckedAt: "yesterday" });
 });
 
 test("a status answer naming the retired tunnel id default is refused", () => {

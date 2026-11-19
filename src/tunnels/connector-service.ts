@@ -288,8 +288,18 @@ async function stageAndInstallEnv(
   }
 }
 
-/** Whether the last metrics port lock load worked; `reason` only when it did not. */
-export type MetricsPortLockState = { locked: boolean; reason?: string };
+/**
+ * The outcome of the last lock load in this daemon run, and when it ran. It is
+ * not a live check of the rule set: nothing unprivileged can list nftables, so
+ * a ruleset flushed after the load still reads as locked until the next load.
+ */
+export type MetricsPortLockState = {
+  locked: boolean;
+  /** One plain line, at most 200 characters; only when `locked` is false. */
+  reason?: string;
+  /** ISO time of the load. */
+  checkedAt: string;
+};
 
 const MAX_LOCK_REASON = 200;
 
@@ -305,16 +315,35 @@ export function resetMetricsPortLockState(): void {
   metricsPortLock = null;
 }
 
-function recordLockFailure(reason: string): void {
-  const first = reason.trim().split("\n")[0].trim();
+/**
+ * A host message as one plain line for the report: ANSI escapes dropped, every
+ * control character (tabs, carriage returns, newlines) turned into a space,
+ * blanks collapsed, cut to 200 characters.
+ */
+export function oneLineLockReason(raw: string): string {
+  const text = raw
+    // deno-lint-ignore no-control-regex -- intentional terminal-escape scrub
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    // deno-lint-ignore no-control-regex -- intentional terminal-escape scrub
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
+    // deno-lint-ignore no-control-regex -- intentional control-char scrub
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return (text || "failed").slice(0, MAX_LOCK_REASON);
+}
+
+function recordLockFailure(raw: string): void {
   metricsPortLock = {
     locked: false,
-    reason: (first || "failed").slice(0, MAX_LOCK_REASON),
+    reason: oneLineLockReason(raw),
+    checkedAt: new Date().toISOString(),
   };
+  // The log keeps everything the host said; only the reported field is cut.
   logWarn(
     "tunnels",
     `connector metrics ports are not locked to the daemon: ${
-      first || "failed"
+      raw.trim() || "failed"
     }`,
   );
 }
@@ -338,7 +367,10 @@ export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
       hostSudoArgs(["-n", "tunnel-loopback-sync"]),
     );
     if (result.success) {
-      metricsPortLock = { locked: true };
+      metricsPortLock = {
+        locked: true,
+        checkedAt: new Date().toISOString(),
+      };
       return true;
     }
     recordLockFailure(result.stderr || "tp-host refused it");

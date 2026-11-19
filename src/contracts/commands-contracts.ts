@@ -8171,10 +8171,12 @@ export type TunnelStatusResult = {
   peerClientAuth?: TunnelPeerClientAuth;
   /** True when `require` was asked for and `verify` is in force because this server's certificate cannot be shown. */
   peerClientAuthDowngraded?: true;
-  /** Whether the nftables lock on the connectors' metrics ports (20300-20899) is loaded; absent = not tried yet (no feature of its own: an older control plane ignores it). */
+  /** True when the last load of the nftables lock on the connectors' metrics ports (20300-20899) in this agent run succeeded. A load is not a live check: a ruleset flushed afterwards still reads true until the next load (at connector install, and hourly while a tunnel exists). Absent = no load tried yet in this run (older agents never send it). */
   statusPortsLocked?: boolean;
-  /** Why the lock is not loaded, one line of at most 200 characters; only with `statusPortsLocked: false`. */
+  /** Why the last load failed: one plain line of at most 200 characters, only with `statusPortsLocked: false`. */
   statusPortsLockReason?: string;
+  /** ISO time of that load, so a panel can show how old the fact is; only with `statusPortsLocked`. */
+  statusPortsLockCheckedAt?: string;
 };
 
 const TUNNEL_STATUS_VALUES = new Set([
@@ -8273,6 +8275,55 @@ function withTunnelStatusFacts(
   return connector;
 }
 
+type TunnelStatusLockFact = Pick<
+  TunnelStatusResult,
+  "statusPortsLocked" | "statusPortsLockReason" | "statusPortsLockCheckedAt"
+>;
+
+const MAX_TUNNEL_STATUS_LOCK_REASON = 200;
+// deno-lint-ignore no-control-regex -- one plain line: no control characters at all
+const TUNNEL_STATUS_LOCK_REASON_RE = /^[^\u0000-\u001f\u007f-\u009f]+$/;
+
+/** The optional lock fact: a reason only with `false`, one plain line; a time only with a fact. */
+function parseTunnelStatusLockFact(
+  value: Record<string, unknown>,
+): TunnelStatusLockFact | null {
+  const locked = value.statusPortsLocked;
+  const reason = value.statusPortsLockReason;
+  const at = value.statusPortsLockCheckedAt;
+  if (locked === undefined) {
+    if (reason !== undefined || at !== undefined) {
+      throw new TypeError("Invalid server.tunnel.status lock fact");
+    }
+    return null;
+  }
+  if (typeof locked !== "boolean") {
+    throw new TypeError("Invalid server.tunnel.status statusPortsLocked");
+  }
+  const fact: TunnelStatusLockFact = {
+    statusPortsLocked: locked,
+  };
+  if (reason !== undefined) {
+    if (
+      locked || typeof reason !== "string" ||
+      reason.length > MAX_TUNNEL_STATUS_LOCK_REASON ||
+      !TUNNEL_STATUS_LOCK_REASON_RE.test(reason)
+    ) {
+      throw new TypeError("Invalid server.tunnel.status statusPortsLockReason");
+    }
+    fact.statusPortsLockReason = reason;
+  }
+  if (at !== undefined) {
+    if (typeof at !== "string" || !TUNNEL_ISO_TIMESTAMP_RE.test(at)) {
+      throw new TypeError(
+        "Invalid server.tunnel.status statusPortsLockCheckedAt",
+      );
+    }
+    fact.statusPortsLockCheckedAt = at;
+  }
+  return fact;
+}
+
 export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
   if (
     !isRecord(value) || !isTunnelConnectorVersion(value.pinnedVersion) ||
@@ -8299,21 +8350,8 @@ export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
     }
     result.peerClientAuthDowngraded = true;
   }
-  if (value.statusPortsLocked !== undefined) {
-    if (typeof value.statusPortsLocked !== "boolean") {
-      throw new TypeError("Invalid server.tunnel.status statusPortsLocked");
-    }
-    result.statusPortsLocked = value.statusPortsLocked;
-  }
-  if (value.statusPortsLockReason !== undefined) {
-    if (
-      typeof value.statusPortsLockReason !== "string" ||
-      value.statusPortsLockReason.length > 200
-    ) {
-      throw new TypeError("Invalid server.tunnel.status statusPortsLockReason");
-    }
-    result.statusPortsLockReason = value.statusPortsLockReason;
-  }
+  const lockFact = parseTunnelStatusLockFact(value);
+  if (lockFact) Object.assign(result, lockFact);
   return result;
 }
 

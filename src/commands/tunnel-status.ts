@@ -23,15 +23,16 @@ export async function handleTunnelStatus(
 ): Promise<TunnelStatusResult> {
   const io = deps.io ?? defaultConnectorIo();
   const connectorStatus = await reportConnectors(io);
-  // Whether the loopback lock on the metrics band loaded; left out until this
-  // daemon run has tried, so an older control plane and an unknown state look
-  // the same (it ignores the field).
+  // Whether the last loopback lock load of this daemon run worked, and when
+  // (not a live check of the rules); left out until a load was tried, so an
+  // older control plane and an unknown state look the same.
   const lock = metricsPortLockState();
   const status: TunnelStatusResult = {
     ...connectorStatus,
     ...(lock
       ? {
         statusPortsLocked: lock.locked,
+        statusPortsLockCheckedAt: lock.checkedAt,
         ...(lock.reason ? { statusPortsLockReason: lock.reason } : {}),
       }
       : {}),

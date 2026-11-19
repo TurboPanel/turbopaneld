@@ -188,10 +188,13 @@ test("the role warns visibly, and still fails open, when the boot unit does not 
   const load = tasks.slice(start, warn);
   // Fail open, but register the result so the failure stays visible.
   assertStringIncludes(load, "register: turbopanel_tunnel_loopback_load");
-  assertStringIncludes(load, "ignore_errors: true");
-  assert(!load.includes("failed_when: false"), load);
+  assertStringIncludes(load, "failed_when: false");
+  assert(!load.includes("ignore_errors"), load);
   const warning = tasks.slice(warn, next);
   assertStringIncludes(warning, "ansible.builtin.debug");
   assertStringIncludes(warning, "WARNING:");
-  assertStringIncludes(warning, "turbopanel_tunnel_loopback_load is failed");
+  assertStringIncludes(
+    warning,
+    "turbopanel_tunnel_loopback_load.msg is defined",
+  );
 });

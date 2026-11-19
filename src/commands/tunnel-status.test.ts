@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import type { RunResult } from "../deploy/ensure-principal.ts";
 import {
@@ -118,7 +118,7 @@ function lockIo(dir: string, run: ConnectorIo["run"]): ConnectorIo {
   };
 }
 
-test("the status answer says whether the metrics port lock loaded: unknown, locked, failed", async () => {
+test("the status answer says how the last metrics port lock load went: unknown, locked, failed", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tunnel-status-" });
   try {
     const ok = lockIo(
@@ -129,11 +129,15 @@ test("the status answer says whether the metrics port lock loaded: unknown, lock
     const unknown = await handleTunnelStatus("", { io: ok });
     assertEquals("statusPortsLocked" in unknown, false);
     assertEquals("statusPortsLockReason" in unknown, false);
+    assertEquals("statusPortsLockCheckedAt" in unknown, false);
 
+    const before = Date.now();
     await lockMetricsPorts(ok);
     const locked = await handleTunnelStatus("", { io: ok });
     assertEquals(locked.statusPortsLocked, true);
     assertEquals("statusPortsLockReason" in locked, false);
+    const lockedAt = Date.parse(locked.statusPortsLockCheckedAt ?? "");
+    assert(lockedAt >= before && lockedAt <= Date.now());
     assertEquals(parseTunnelStatusResult(locked), locked);
 
     const bad = lockIo(
@@ -148,7 +152,11 @@ test("the status answer says whether the metrics port lock loaded: unknown, lock
     await lockMetricsPorts(bad);
     const failed = await handleTunnelStatus("", { io: bad });
     assertEquals(failed.statusPortsLocked, false);
-    assertEquals(failed.statusPortsLockReason, "nft: command not found");
+    assertEquals(
+      failed.statusPortsLockReason,
+      "nft: command not found second line",
+    );
+    assert(failed.statusPortsLockCheckedAt);
     assertEquals(parseTunnelStatusResult(failed), failed);
 
     // A reload that works again clears the reason.
@@ -162,37 +170,39 @@ test("the status answer says whether the metrics port lock loaded: unknown, lock
   }
 });
 
-test("a lock reason is one line, cut to 200 characters, and a thrown error is reported", async () => {
+test("a lock reason is one clean line of at most 200 characters, and a thrown error is reported", async () => {
   const dir = await Deno.makeTempDir({ prefix: "tunnel-status-" });
+  resetMetricsPortLockState();
+  const report = async (
+    run: ConnectorIo["run"],
+  ): Promise<string | undefined> => {
+    await lockMetricsPorts(lockIo(dir, run));
+    const answer = await handleTunnelStatus("", {
+      io: lockIo(
+        dir,
+        () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
+      ),
+    });
+    assertEquals(parseTunnelStatusResult(answer), answer);
+    return answer.statusPortsLockReason;
+  };
+  const refuse = (stderr: string): ConnectorIo["run"] => () =>
+    Promise.resolve({ success: false, stdout: "", stderr });
   try {
-    await lockMetricsPorts(
-      lockIo(
-        dir,
-        () =>
-          Promise.resolve({
-            success: false,
-            stdout: "",
-            stderr: "x".repeat(500),
-          }),
-      ),
+    const long = await report(refuse("x".repeat(500)));
+    assertEquals(long?.length, 200);
+    const messy = await report(
+      refuse("\u001b[31mnft\u001b[0m:\tbad\r\nrule\u0007 \u0000set\n\n"),
     );
-    const long = await handleTunnelStatus("", {
-      io: lockIo(
-        dir,
-        () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
-      ),
-    });
-    assertEquals(long.statusPortsLockReason?.length, 200);
-    await lockMetricsPorts(
-      lockIo(dir, () => Promise.reject(new Error("no sudo"))),
+    assertEquals(messy, "nft: bad rule set");
+    assertEquals(await report(refuse(" \n\t ")), "failed");
+    assertEquals(
+      await report(() => Promise.reject(new Error("no sudo"))),
+      "no sudo",
     );
-    const thrown = await handleTunnelStatus("", {
-      io: lockIo(
-        dir,
-        () => Promise.resolve({ success: true, stdout: "", stderr: "" }),
-      ),
-    });
-    assertEquals(thrown.statusPortsLockReason, "no sudo");
+    for (const reason of [long, messy]) {
+      assert([...(reason ?? "")].every((ch) => ch.charCodeAt(0) >= 0x20));
+    }
   } finally {
     resetMetricsPortLockState();
     await Deno.remove(dir, { recursive: true });
