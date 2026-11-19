@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   tpOrchestratePlaybookAllowlist,
@@ -676,6 +681,7 @@ test("tp-orchestrate update uses the pinned overlay host with the pinned Platfor
     "/etc/turbopanel/instance-ca.pem",
     "/etc/turbopanel/test-absent-ca.pem",
   );
+  assertNotEquals(absentCaPin, OVERLAY_PIN);
   const result = await runUpdateVerb(
     [
       "--license-stdin",

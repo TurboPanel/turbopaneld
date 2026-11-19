@@ -226,7 +226,7 @@ type Host = {
 };
 
 async function makeHost(): Promise<Host> {
-  useSealedUmask();
+  const restoreUmask = useSealedUmask();
   const prefix = await Deno.realPath(
     await Deno.makeTempDir({ prefix: "tp-host-callsites-" }),
   );
@@ -317,7 +317,13 @@ async function makeHost(): Promise<Host> {
         stderr: new TextDecoder().decode(out.stderr),
       };
     },
-    cleanup: () => removeHostPrefix(prefix),
+    cleanup: async () => {
+      try {
+        await removeHostPrefix(prefix);
+      } finally {
+        restoreUmask();
+      }
+    },
   };
 }
 

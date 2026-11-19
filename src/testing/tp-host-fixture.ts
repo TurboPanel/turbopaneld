@@ -29,14 +29,18 @@ export type Host = {
  * that is group- or world-writable, which is what a 0002 umask (a distro's
  * per-user-group default) makes of every directory a test or tp-host creates.
  * Pin 022 for this test process (and the children it spawns), so the suite
- * passes under any umask.
+ * passes under any umask. Returns a function that puts the previous umask back;
+ * call it from the host's cleanup so later tests see the caller's own umask.
  */
-export function useSealedUmask(): void {
-  Deno.umask(0o022);
+export function useSealedUmask(): () => void {
+  const previous = Deno.umask(0o022);
+  return () => {
+    Deno.umask(previous);
+  };
 }
 
 export async function makeHost(): Promise<Host> {
-  useSealedUmask();
+  const restoreUmask = useSealedUmask();
   const prefix = await Deno.realPath(
     await Deno.makeTempDir({ prefix: "tp-host-" }),
   );
@@ -132,7 +136,13 @@ export async function makeHost(): Promise<Host> {
         stderr: new TextDecoder().decode(out.stderr),
       };
     },
-    cleanup: () => removeHostPrefix(prefix),
+    cleanup: async () => {
+      try {
+        await removeHostPrefix(prefix);
+      } finally {
+        restoreUmask();
+      }
+    },
   };
 }
 
