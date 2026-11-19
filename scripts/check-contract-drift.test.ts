@@ -67,6 +67,21 @@ test("extractFieldSpecs keeps fields after a brace inside a comment", () => {
   );
 });
 
+test("an alias keeps its name for a runtime-derived type and later aliases survive a regex literal", () => {
+  const source = `
+export const CODES = ["a", "b"] as const;
+export type Code = (typeof CODES)[number];
+export const SHELL_RE = /[;|&$\`()<>\\"'!*?{}]/;
+export type Inner = { id: string };
+export type Holder = { code?: Code; list: Code[]; inner: Inner };
+`;
+  assertEquals(extractFieldSpecs(source, "Holder"), [
+    { name: "code", required: false, type: "Code" },
+    { name: "inner", required: true, type: "{ id: string }" },
+    { name: "list", required: true, type: "Array<Code>" },
+  ]);
+});
+
 test("a narrowed union, literal, array, or member fails the drift check", () => {
   const live = extractFieldSpecs(NARROWED, "Sample");
   assertStringIncludes(
@@ -375,6 +390,19 @@ test("snapshot: this daemon may pin more types and optional fields, never fewer 
   assertStringIncludes(
     snapshotSubsetDrift(pin([a]), pin([{ ...a, type: "number" }])) ?? "",
     "$.T.fields.a.type differs",
+  );
+  // The same type spelled another way (an older pin) is not drift.
+  const list = { name: "l", required: true, type: "string[]" };
+  const kind = { name: "k", required: true, type: "'a' | 'b'" };
+  assertEquals(
+    snapshotSubsetDrift(
+      pin([list, kind]),
+      pin([
+        { ...list, type: "Array<string>" },
+        { ...kind, type: "'b' | 'a'" },
+      ]),
+    ),
+    null,
   );
 });
 
