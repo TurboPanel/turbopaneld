@@ -232,12 +232,16 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    listens everywhere, which the catch-all above belongs to: a name no site
    holds that arrives on a bound address (a tunnel connector dials loopback,
    which a tunnel name's `bind` holds) would get Caddy's empty 200. So the file
-   also holds one `http://` and one `https://` block per distinct bound
-   address of the written sites, with the same page (`siteBindAddresses`,
-   `plannedFallbackForSites`). It is one block per address, never per `bind`
-   set: Caddy refuses a repeated site address per listen address, so
-   overlapping sets would make it refuse every deploy. A deploy, a tunnel table
-   apply that relocks sites, a site removal (validated first) and the
+   also holds one `http://` or `https://` block per scheme and address that a
+   written site block binds (`siteBindAddresses`, `plannedFallbackForSites`),
+   with the same page. A block with no site behind it on that scheme would
+   open a listener of its own and take that traffic (plain HTTP, HTTPS for
+   unbound names, proof paths) from the server that listens everywhere, so an
+   HTTP-only site gets no HTTPS block and a locked tunnel site no HTTP block.
+   It is one block per address, never per `bind` set: Caddy refuses a repeated
+   site address per listen address, so overlapping sets would make it refuse
+   every deploy. A deploy, a tunnel table apply that relocks sites, a site
+   removal (validated first, one reload) and the
    start-time check keep the addresses current. HTTPS shows one fixed internal
    certificate for the reserved
    name `unconfigured.invalid`, given to every other name by the Caddyfile's
