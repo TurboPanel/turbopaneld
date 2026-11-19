@@ -135,12 +135,16 @@ export type PostDeployRunOutput = {
 };
 
 function failureStatus(line: string): string | undefined {
-  const code = /code=(exited|killed|dumped), status=(\w+)(?:\/\w+)?/.exec(line);
+  const code = /code=(exited|killed|dumped), status=(\w+)(?:\/(\w+))?/.exec(
+    line,
+  );
   if (code?.[1] === "exited") return `exit status ${code[2]}`;
-  if (code?.[1] !== undefined) return `signal ${code[2]}`;
-  if (/result 'timeout'/i.test(line)) return "timed out";
+  // `status=11/SEGV`: the signal is named when systemd names it.
+  if (code?.[1] !== undefined) return `signal ${code[3] ?? code[2]}`;
   return undefined;
 }
+
+const TIMEOUT_RESULT_RE = /result 'timeout'/i;
 
 /**
  * The commands' output from the last run of the unit: the lines after the last
@@ -178,13 +182,22 @@ export function lastRunOutput(
     if (ident === "systemd") {
       // systemd's own lines are not the commands' output.
       if (SYSTEMD_END_RE.test(line)) finished = true;
-      const status = failureStatus(line);
-      if (status !== undefined) failure.status ??= status;
+      // A timeout is logged as `code=killed, status=15/TERM` first and then
+      // `Failed with result 'timeout'`; the result is the cause, so it wins.
+      if (TIMEOUT_RESULT_RE.test(line)) failure.status = "timed out";
+      else {
+        const status = failureStatus(line);
+        if (status !== undefined && failure.status !== "timed out") {
+          failure.status ??= status;
+        }
+      }
       continue;
     }
     const text = line.replace(LINE_PREFIX_RE, "");
-    const stepNumber = stepMarkerNumber(text);
-    if (stepNumber !== undefined) {
+    // Only the unit's own `echo` lines, in increasing order, name the running
+    // command: a command's output cannot move the marker.
+    const stepNumber = ident === "echo" ? stepMarkerNumber(text) : undefined;
+    if (stepNumber !== undefined && stepNumber > step) {
       step = stepNumber;
       continue;
     }
@@ -203,8 +216,14 @@ function stepMarkerNumber(text: string): number | undefined {
 }
 
 /** The tail of a failing run's output: bounded in lines and in line length. */
-export function boundedOutputTail(lines: readonly string[]): string[] {
-  const kept = lines.slice(-POST_DEPLOY_OUTPUT_MAX_LINES).map((line) =>
+export function boundedOutputTail(
+  lines: readonly string[],
+  redact: (text: string) => string = (text) => text,
+): string[] {
+  // Redact first, then cut: a secret split by the cut would leak its first part.
+  const kept = lines.slice(-POST_DEPLOY_OUTPUT_MAX_LINES).map(redact).map((
+    line,
+  ) =>
     line.length > POST_DEPLOY_OUTPUT_MAX_LINE_CHARS
       ? `${line.slice(0, POST_DEPLOY_OUTPUT_MAX_LINE_CHARS)}...`
       : line
@@ -239,6 +258,8 @@ export type PostDeployIo = {
   run: RunFn;
   /** Where each output line goes (the deploy transcript). */
   onLine: (stream: "stdout" | "stderr", line: string) => void;
+  /** The log sink's own redaction, applied before a long line is cut. */
+  redact?: (text: string) => string;
   sleep?: (ms: number) => Promise<void>;
   systemdUnitDir?: string;
 };
@@ -304,7 +325,7 @@ export async function runPostDeployUnit(
     for (const line of read.lines) io.onLine("stdout", line);
     return { ok: true };
   }
-  const tail = boundedOutputTail(read.lines);
+  const tail = boundedOutputTail(read.lines, io.redact);
   for (const line of tail) io.onLine("stderr", line);
   if (tail.length === 0) {
     io.onLine("stderr", "no output was captured from the failed command");

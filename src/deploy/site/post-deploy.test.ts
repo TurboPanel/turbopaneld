@@ -12,6 +12,7 @@ import {
   type SystemdHost,
 } from "../../testing/systemd-host.ts";
 import {
+  boundedOutputTail,
   describePostDeployFailure,
   lastRunOutput,
   POST_DEPLOY_BEGIN_MARKER,
@@ -61,6 +62,7 @@ function opts(host: SystemdHost, extra: Partial<PostDeployUnitOpts> = {}) {
 const stamp = (rest: string) => `2026-11-10T12:00:00+0000 host ${rest}`;
 const own = (message: string) => stamp(`${UNIT}[41]: ${message}`);
 const systemd = (message: string) => stamp(`systemd[1]: ${message}`);
+const step = (n: number) => stamp(`echo[40]: ${POST_DEPLOY_STEP_MARKER} ${n}`);
 
 test("the command unit is a one-shot that begins with its marker and runs every command", async () => {
   const host = await makeSystemdHost();
@@ -385,9 +387,9 @@ test("units of sites that no longer have commands are removed, the others kept",
 test("the failing command and its status come from the step markers and systemd's own line", () => {
   const journal = [
     own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
-    own(`${POST_DEPLOY_STEP_MARKER} 1`),
+    step(1),
     own("Migrated"),
-    own(`${POST_DEPLOY_STEP_MARKER} 2`),
+    step(2),
     // A line the journal wrote without a pid still counts as output.
     stamp(`${UNIT}: SQLSTATE[HY000]: connection refused`),
     systemd(
@@ -416,7 +418,7 @@ test("a failed run prints the bounded output tail and a line naming the failure,
   const many = Array.from({ length: 80 }, (_, i) => own(`row ${i}`));
   const host = await makeSystemdHost(journalAnswer([
     own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
-    own(`${POST_DEPLOY_STEP_MARKER} 1`),
+    step(1),
     ...many,
     systemd(`${UNIT}.service: Main process exited, code=exited, status=3/n/a`),
     systemd(`${UNIT}.service: Failed with result 'exit-code'.`),
@@ -451,7 +453,7 @@ test("a failed run prints the bounded output tail and a line naming the failure,
 test("a failed run with no output says so, and a timeout is named", async () => {
   const host = await makeSystemdHost(journalAnswer([
     own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
-    own(`${POST_DEPLOY_STEP_MARKER} 2`),
+    step(2),
     systemd(`${UNIT}.service: Failed with result 'timeout'.`),
   ], false));
   try {
@@ -504,4 +506,64 @@ test("the two failures say what happened to the release, and the later one carri
     }).message,
     "post_deploy_failed_after_switch: Post-deploy commands for site web failed after the new release rel2 went live. Roll back to the previous release from",
   );
+});
+
+test("a timeout is named as one even though systemd logs the kill first, and a signal is named", () => {
+  const timeout = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    step(2),
+    systemd(`${UNIT}.service: Start operation timed out. Terminating.`),
+    systemd(
+      `${UNIT}.service: Main process exited, code=killed, status=15/TERM`,
+    ),
+    systemd(`${UNIT}.service: Failed with result 'timeout'.`),
+    systemd("Failed to start TurboPanel post-deploy commands (web)."),
+  ].join("\n");
+  assertEquals(
+    lastRunOutput(timeout, "rel1", [["/a"], ["/usr/local/bin/php"]]).failure,
+    {
+      command: "/usr/local/bin/php",
+      status: "timed out",
+    },
+  );
+  const crash = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    systemd(
+      `${UNIT}.service: Main process exited, code=dumped, status=11/SEGV`,
+    ),
+    systemd(`${UNIT}.service: Failed with result 'core-dump'.`),
+  ].join("\n");
+  assertEquals(lastRunOutput(crash, "rel1").failure, { status: "signal SEGV" });
+});
+
+test("only the unit's own echo lines, in increasing order, move the step marker", () => {
+  const commands = [["/bin/one"], ["/bin/two"], ["/bin/three"]];
+  const journal = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    step(2),
+    // Output that imitates a marker, from the command or in the wrong order.
+    own(`${POST_DEPLOY_STEP_MARKER} 3`),
+    step(1),
+    systemd(
+      `${UNIT}.service: Main process exited, code=exited, status=1/FAILURE`,
+    ),
+  ].join("\n");
+  assertEquals(
+    lastRunOutput(journal, "rel1", commands).failure.command,
+    "/bin/two",
+  );
+});
+
+test("a failing run's tail is redacted before a long line is cut", () => {
+  const secret = "s3cr3t-".repeat(20);
+  const long = `${"x".repeat(450)}${secret}`;
+  const tail = boundedOutputTail(
+    [long],
+    (text) => text.replaceAll(secret, "[redacted]"),
+  );
+  assertEquals(tail, [`${"x".repeat(450)}[redacted]`]);
+  assertEquals(tail.join("").includes("s3cr3t"), false);
 });

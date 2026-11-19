@@ -969,7 +969,7 @@ function serviceIdsForManifest(
  * engine skipped (no owning principal) and for the marker-only write path, which
  * publishes the manifest without running the engine at all.
  */
-function releasesForManifest(
+export function releasesForManifest(
   payload: EnvironmentDeployPayload,
   applied: readonly AppliedRelease[] = [],
 ): DeploymentManifestRelease[] {
@@ -3493,6 +3493,7 @@ async function deployEnvironmentHolding(
   const siteLifecycleIo: SiteLifecycleIo = {
     run: runtime.runPrivileged,
     onLine: (stream, line) => runtime.logSink.onLine(stream, line),
+    redact: (text) => runtime.logSink.redactSummary(text),
   };
   // Commands that must pass before the new release takes traffic: every
   // site's run first, then the held sites switch; one failure switches none.

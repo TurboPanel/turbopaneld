@@ -216,6 +216,41 @@ describe("compose-files", () => {
     }
   });
 
+  it("manifest releases[] drops a commitSha that is not a commit id and reads a row that has none", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deploymentDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      const row = {
+        composeServiceName: "web",
+        serviceId: "svc-1",
+        releaseId: "rel-1",
+        sourceId: "src-1",
+      };
+      await writeDeploymentManifest(deploymentDir, {
+        version: 2 as const,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "srv-1",
+        generation: 4,
+        projectName: "demo",
+        composeSha256: "e".repeat(64),
+        services: {},
+        releases: [
+          { ...row, commitSha: "main" },
+          { ...row, composeServiceName: "api", serviceId: "svc-2" },
+        ],
+      });
+      assertEquals((await readDeploymentManifest(deploymentDir))?.releases, [
+        row,
+        { ...row, composeServiceName: "api", serviceId: "svc-2" },
+      ]);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
   it("manifest releases[] round-trip carries the owning principal", async () => {
     const tmp = await Deno.makeTempDir({ prefix: "tp-" });
     try {

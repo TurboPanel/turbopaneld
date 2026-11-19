@@ -61,6 +61,8 @@ import {
 export type SiteLifecycleIo = {
   run: RunFn;
   onLine: (stream: "stdout" | "stderr", line: string) => void;
+  /** The log sink's redaction, so a failing run's tail is redacted before it is cut. */
+  redact?: (text: string) => string;
   sleep?: (ms: number) => Promise<void>;
   systemdUnitDir?: string;
 };
@@ -209,6 +211,7 @@ function postDeployIo(io: SiteLifecycleIo): PostDeployIo {
   return {
     run: io.run,
     onLine: io.onLine,
+    ...(io.redact === undefined ? {} : { redact: io.redact }),
     ...(io.sleep === undefined ? {} : { sleep: io.sleep }),
     ...(io.systemdUnitDir === undefined
       ? {}
