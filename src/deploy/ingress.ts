@@ -2271,7 +2271,7 @@ export function siteBindAddresses(texts: readonly string[]): string[] {
       }
     }
   }
-  return [...addresses].sort();
+  return [...addresses].sort((a, b) => a.localeCompare(b));
 }
 
 /**

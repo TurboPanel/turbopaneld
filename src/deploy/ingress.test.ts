@@ -5792,7 +5792,12 @@ test("siteBindAddresses lists each bound address once, sorted, across overlappin
     'e.test {\n  bind evil 192.0.2.9\n  respond "x"\n}\n',
     "f.test {\n    bind 192.0.2.1\n}\n",
   ]);
-  assertEquals(addresses, ["10.0.0.5", "127.0.0.1", "192.0.2.9", "[fd00::1]"]);
+  assertEquals(addresses, [
+    "[fd00::1]",
+    "10.0.0.5",
+    "127.0.0.1",
+    "192.0.2.9",
+  ]);
   assertEquals(siteBindAddresses(["a.test {\n  respond ok\n}\n"]), []);
 });
 
