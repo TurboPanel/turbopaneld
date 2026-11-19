@@ -209,10 +209,10 @@ function unquoteMalformed(error: string | undefined): string | undefined {
   if (!m) return error;
   const quoted = /^"(.*)"$/s.exec(m[2]);
   const body = (quoted ? quoted[1] : m[2]).replace(
-    /\\(x[0-9a-fA-F]{2}|[abfnrtv\\"])/g,
+    /\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[abfnrtv\\"])/g,
     (_all, e: string) =>
-      e.startsWith("x")
-        ? String.fromCharCode(parseInt(e.slice(1), 16))
+      /^[xuU]/.test(e)
+        ? String.fromCodePoint(parseInt(e.slice(1), 16))
         : ESCAPES[e],
   );
   return m[1] + body;

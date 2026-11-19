@@ -8499,8 +8499,12 @@ it({
         return Promise.resolve();
       },
     });
+    let decryptCalls = 0;
     const { socket, restore } = await startConnectedClient({
-      decrypt: openSealedFixtures,
+      decrypt: (ciphertexts) => {
+        decryptCalls += 1;
+        return openSealedFixtures(ciphertexts);
+      },
     });
     try {
       socket.receive({
@@ -8529,6 +8533,7 @@ it({
         ),
         true,
       );
+      assertEquals(decryptCalls, 0);
       assertEquals(applyCalls, 0);
     } finally {
       await restore();
@@ -8597,7 +8602,7 @@ it({
 
 it({
   name:
-    "tunnel-token opens a sealed token, refuses a plaintext one and an empty message",
+    "tunnel-token opens a sealed token, refuses a plaintext one and an empty message, and treats an empty plain token as teardown",
   permissions: {
     env: true,
     read: true,

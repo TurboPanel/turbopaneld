@@ -6,12 +6,15 @@
 # reboot. It is deliberately NOT part of the opt-in TP-FWD / TP-INPUT firewall:
 # that one is off by default and would not reach every host.
 #
-# One chain, TP-EGRESS, hung off two hooks for traffic that ENTERS on a
-# container-side interface (docker0, br-+ = every user-defined Docker bridge):
-#   - DOCKER-USER  forwarded traffic: a site owner's container or build reaching
-#                  a cloud metadata service or anything else on a link-local
-#                  address through the host.
-#   - INPUT        the same destinations when they are the host's own addresses.
+# One chain, TP-EGRESS, hung off two hooks:
+#   - DOCKER-USER  forwarded traffic from any ingress interface (a network with
+#                  a custom bridge name is neither docker0 nor br-*, and nothing
+#                  legitimate forwards to these addresses): a site owner's
+#                  container or build reaching a cloud metadata service or
+#                  anything else on a link-local address through the host.
+#   - INPUT        the same destinations when they are the host's own addresses,
+#                  matched only on container-side interfaces (docker0, br-+ =
+#                  every user-defined Docker bridge).
 # Nothing else is matched, so ingress/Caddy, ProxySQL, the daemon, traffic
 # between containers on a project network, published ports and replies to all of
 # them pass exactly as before. What is dropped:
