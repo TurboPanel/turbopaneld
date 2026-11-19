@@ -600,11 +600,11 @@ root-owned `0550` by design:
   starts with the code and a colon, the one place a failed command outcome can
   carry it (like `rolled_back: `), then names the site, the new release, the
   failed program (path only, never an argument or a variable) and its exit
-  status; the unit prints `turbopanel-post-deploy-step <token> <n>` before each command
-  (the token is random per run, and the line carries the unit's own journal
-  identifier) so the failing one is known; only the next number with the run's
-  token counts, and such lines are left out of the transcript (a command could
-  still guess and print one, which only misnames the failing step), and the status is read from systemd's own journal
+  status; the unit prints `turbopanel-post-deploy-step <n>` before each command
+  (the line carries the unit's own journal identifier) so the failing one is
+  known; only the next number counts, and such lines are left out of the
+  transcript (a command could still print one, which only misnames the failing
+  step). The status is read from systemd's own journal
   lines. The failing run's output goes to the transcript as its last 60 lines
   (500 characters each), then a line naming the failure, or a line saying no
   output was captured. Neither timing runs for a rollback

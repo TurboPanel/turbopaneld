@@ -39,8 +39,7 @@ export const POST_DEPLOY_UNIT_PREFIX = "turbopanel-deploycmd-";
 export const POST_DEPLOY_BEGIN_MARKER = "turbopanel-post-deploy-begin";
 
 /**
- * Printed before each command (`<marker> <token> <n>`, counting from 1; the
- * token is random per run), so a failure names the command that was running
+ * Printed before each command (`<marker> <n>`, counting from 1), so a failure names the command that was running
  * without reading any command's arguments.
  */
 export const POST_DEPLOY_STEP_MARKER = "turbopanel-post-deploy-step";
@@ -82,19 +81,7 @@ export type PostDeployUnitOpts = SiteLifecycleUnitBase & {
   /** The release the commands run in. */
   releaseId: string;
   postDeploy: EnvironmentDeploySitePostDeploy;
-  /**
-   * Random per run, written into the step markers and checked when the journal
-   * is read. `runPostDeployUnit` makes one when none is given.
-   */
-  runToken?: string;
 };
-
-/** The text of the marker printed before command `n`. */
-function stepMarkerPrefix(runToken: string | undefined): string {
-  return runToken === undefined
-    ? `${POST_DEPLOY_STEP_MARKER} `
-    : `${POST_DEPLOY_STEP_MARKER} ${runToken} `;
-}
 
 export function postDeployUnitContent(opts: PostDeployUnitOpts): string {
   const unit = postDeployUnitName(opts.environmentId, opts.composeServiceName);
@@ -117,7 +104,7 @@ export function postDeployUnitContent(opts: PostDeployUnitOpts): string {
       `ExecStart=${
         [
           "/bin/echo",
-          `${stepMarkerPrefix(opts.runToken)}${index + 1}`,
+          `${POST_DEPLOY_STEP_MARKER} ${index + 1}`,
         ].map(quoteExecArg).join(" ")
       }`,
       `ExecStart=${command.map(quoteExecArg).join(" ")}`,
@@ -172,8 +159,8 @@ export function lastRunOutput(
   journal: string,
   releaseId: string,
   commands: readonly (readonly string[])[] = [],
-  /** The unit's name (the journal identifier of its own lines) and run token. */
-  markers?: { unit: string; runToken?: string },
+  /** The unit's name: the journal identifier of its own lines. */
+  unit?: string,
 ): PostDeployRunOutput {
   const all = journal.split("\n").map((line) => line.replaceAll("\r", ""));
   const marker = `${POST_DEPLOY_BEGIN_MARKER} ${releaseId}`;
@@ -213,12 +200,12 @@ export function lastRunOutput(
     const text = line.replace(LINE_PREFIX_RE, "");
     // The unit gives every ExecStart its own name as the journal identifier,
     // so the marker lines carry it. A marker counts only with that identifier,
-    // the run's token and exactly the next number; it is then left out of the
-    // output. A command can still print a line like that (the unit's identifier
-    // is shared) but would have to guess the token and the next number.
+    // exactly the next number; it is then left out of the output. A command
+    // can still print such a line (the identifier is shared), which would only
+    // misname the failing step.
     if (
-      markers !== undefined && ident === markers.unit &&
-      stepMarkerNumber(text, markers.runToken) === step + 1
+      unit !== undefined && ident === unit &&
+      stepMarkerNumber(text) === step + 1
     ) {
       step += 1;
       continue;
@@ -230,11 +217,8 @@ export function lastRunOutput(
   return { lines, finished, failure };
 }
 
-function stepMarkerNumber(
-  text: string,
-  runToken: string | undefined,
-): number | undefined {
-  const prefix = stepMarkerPrefix(runToken);
+function stepMarkerNumber(text: string): number | undefined {
+  const prefix = `${POST_DEPLOY_STEP_MARKER} `;
   if (!text.startsWith(prefix)) return undefined;
   const n = Number(text.slice(prefix.length));
   return Number.isInteger(n) && n > 0 ? n : undefined;
@@ -299,10 +283,12 @@ async function readRunOutput(
   attempt = 1,
 ): Promise<PostDeployRunOutput> {
   const text = await readUnitJournal(io.run, `${unit}.service`, 2000);
-  const read = lastRunOutput(text, opts.releaseId, opts.postDeploy.commands, {
+  const read = lastRunOutput(
+    text,
+    opts.releaseId,
+    opts.postDeploy.commands,
     unit,
-    ...(opts.runToken === undefined ? {} : { runToken: opts.runToken }),
-  });
+  );
   if (read.finished || attempt >= POST_DEPLOY_JOURNAL_ATTEMPTS) return read;
   await (io.sleep ?? defaultSleep)(POST_DEPLOY_JOURNAL_WAIT_MS);
   return await readRunOutput(io, unit, opts, attempt + 1);
@@ -321,12 +307,8 @@ export type PostDeployRunResult =
  */
 export async function runPostDeployUnit(
   io: PostDeployIo,
-  given: PostDeployUnitOpts,
+  opts: PostDeployUnitOpts,
 ): Promise<PostDeployRunResult> {
-  const opts: PostDeployUnitOpts = {
-    ...given,
-    runToken: given.runToken ?? crypto.randomUUID(),
-  };
   const unit = postDeployUnitName(opts.environmentId, opts.composeServiceName);
   const unitDir = io.systemdUnitDir ?? SYSTEMD_UNIT_DIR;
   const changed = await installUnit(
