@@ -67,11 +67,30 @@ test({
     const text = await role();
     const dir = await Deno.makeTempDir();
     const bin = join(dir, "app");
-    await Deno.copyFile("/bin/sleep", bin);
+    await Deno.copyFile("/bin/sh", bin);
     await Deno.chmod(bin, 0o755);
-    const child = new Deno.Command(bin, { args: ["30"] }).spawn();
+    // A copy of a multi-call coreutils binary (the default on newer runner
+    // images) exits at once because it no longer knows its own name, so the
+    // long-lived process is a copy of the shell instead, blocked reading its
+    // open stdin. The trailing `:` keeps it from exec-ing the `read` builtin
+    // away, and no helper process is left behind when it is killed.
+    const child = new Deno.Command(bin, {
+      args: ["-c", "read line; :"],
+      stdin: "piped",
+    }).spawn();
+    let exited = false;
+    void child.status.then(() => {
+      exited = true;
+    });
     try {
       await new Promise((resolve) => setTimeout(resolve, 1100));
+      // A child that already died would make every check below vacuous.
+      assertEquals(exited, false, "the test process must still be running");
+      assertEquals(
+        await Deno.readLink(`/proc/${child.pid}/exe`),
+        bin,
+        "the running executable must be the copy under test",
+      );
       // Current: binary older than the process.
       assertEquals(await run(snippet(text, child.pid, bin)), "");
       // Touched after the process started.
@@ -83,7 +102,7 @@ test({
       // Not running at all.
       assertEquals(await run(snippet(text, 2147483, bin)), "");
     } finally {
-      child.kill();
+      if (!exited) child.kill();
       await child.status;
       await Deno.remove(dir, { recursive: true });
     }
