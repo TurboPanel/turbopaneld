@@ -321,16 +321,57 @@ export function resetMetricsPortLockState(): void {
  * blanks collapsed, cut to 200 characters.
  */
 export function oneLineLockReason(raw: string): string {
-  const text = raw
-    // deno-lint-ignore no-control-regex -- intentional terminal-escape scrub
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    // deno-lint-ignore no-control-regex -- intentional terminal-escape scrub
-    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
-    // deno-lint-ignore no-control-regex -- intentional control-char scrub
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+  const text = stripTerminalControls(raw).replace(/\s+/g, " ").trim();
   return (text || "failed").slice(0, MAX_LOCK_REASON);
+}
+
+const ESC = 0x1b;
+const BEL = 0x07;
+
+/**
+ * Drop ANSI CSI and OSC sequences, drop a stray ESC, and turn every other C0
+ * or C1 control character and DEL into a space. An unterminated sequence runs
+ * to the end of the text. Written as a char-code loop so no pattern holds a
+ * control character.
+ */
+function stripTerminalControls(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    const code = raw.charCodeAt(i);
+    if (code === ESC) {
+      const next = raw.charCodeAt(i + 1);
+      i += 1;
+      if (next === 0x5b) {
+        // CSI: skip to the final byte 0x40-0x7e.
+        i += 1;
+        while (i < raw.length) {
+          const c = raw.charCodeAt(i);
+          i += 1;
+          if (c >= 0x40 && c <= 0x7e) break;
+        }
+      } else if (next === 0x5d) {
+        // OSC: skip to BEL or ESC backslash.
+        i += 1;
+        while (i < raw.length) {
+          const c = raw.charCodeAt(i);
+          if (c === BEL) {
+            i += 1;
+            break;
+          }
+          if (c === ESC) {
+            if (raw.charCodeAt(i + 1) === 0x5c) i += 2;
+            break;
+          }
+          i += 1;
+        }
+      }
+      continue;
+    }
+    out += code < 0x20 || (code >= 0x7f && code <= 0x9f) ? " " : raw[i];
+    i += 1;
+  }
+  return out;
 }
 
 function recordLockFailure(raw: string): void {

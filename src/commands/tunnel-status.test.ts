@@ -196,6 +196,14 @@ test("a lock reason is one clean line of at most 200 characters, and a thrown er
     );
     assertEquals(messy, "nft: bad rule set");
     assertEquals(await report(refuse(" \n\t ")), "failed");
+    assertEquals(await report(refuse("ok\u001b[31")), "ok");
+    assertEquals(await report(refuse("ok\u001b]0;title")), "ok");
+    assertEquals(await report(refuse("a\u001bb\u001b]x\u001bc")), "abc");
+    assertEquals(await report(refuse("a\u0085b\u009fc\u007fd")), "a b c d");
+    assertEquals(
+      await report(refuse("\u001b[0m\u001b]0;x\u0007\u001b]y\u001b\\\u001b")),
+      "failed",
+    );
     assertEquals(
       await report(() => Promise.reject(new Error("no sudo"))),
       "no sudo",
