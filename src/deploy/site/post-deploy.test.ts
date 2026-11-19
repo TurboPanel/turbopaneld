@@ -12,9 +12,13 @@ import {
   type SystemdHost,
 } from "../../testing/systemd-host.ts";
 import {
+  boundedOutputTail,
+  describePostDeployFailure,
   lastRunOutput,
   POST_DEPLOY_BEGIN_MARKER,
   POST_DEPLOY_FAILED_AFTER_SWITCH,
+  POST_DEPLOY_OUTPUT_MAX_LINES,
+  POST_DEPLOY_STEP_MARKER,
   postDeployBeforeTrafficFailure,
   PostDeployFailedAfterSwitchError,
   postDeployUnitContent,
@@ -58,6 +62,9 @@ function opts(host: SystemdHost, extra: Partial<PostDeployUnitOpts> = {}) {
 const stamp = (rest: string) => `2026-11-10T12:00:00+0000 host ${rest}`;
 const own = (message: string) => stamp(`${UNIT}[41]: ${message}`);
 const systemd = (message: string) => stamp(`systemd[1]: ${message}`);
+const marker = (n: number) => `${POST_DEPLOY_STEP_MARKER} ${n}`;
+const step = (n: number) => own(marker(n));
+const MARKERS = UNIT;
 
 test("the command unit is a one-shot that begins with its marker and runs every command", async () => {
   const host = await makeSystemdHost();
@@ -69,7 +76,9 @@ test("the command unit is a one-shot that begins with its marker and runs every 
       lines.filter((line) => line.startsWith("ExecStart=")),
       [
         `ExecStart="/bin/echo" "${POST_DEPLOY_BEGIN_MARKER}" "rel1"`,
+        `ExecStart="/bin/echo" "${marker(1)}"`,
         'ExecStart="/usr/local/bin/php" "artisan" "migrate" "--force"',
+        `ExecStart="/bin/echo" "${marker(2)}"`,
         'ExecStart="/usr/local/bin/php" "artisan" "optimize"',
       ],
     );
@@ -159,6 +168,7 @@ test("only the lines after the last begin marker are the run's output", () => {
   assertEquals(lastRunOutput(journal, "rel1"), {
     lines: ["Migrating: create_jobs", "  Migrated"],
     finished: true,
+    failure: {},
   });
 });
 
@@ -170,9 +180,11 @@ test("a run whose closing line has not arrived yet is not finished, and a missin
   assertEquals(lastRunOutput(running, "rel1"), {
     lines: ["working"],
     finished: false,
+    failure: {},
   });
-  assertEquals(lastRunOutput(running, "rel2"), { lines: [], finished: false });
-  assertEquals(lastRunOutput("", "rel1"), { lines: [], finished: false });
+  const none = { lines: [], finished: false, failure: {} };
+  assertEquals(lastRunOutput(running, "rel2"), none);
+  assertEquals(lastRunOutput("", "rel1"), none);
 });
 
 test("a command that prints a fake closing line does not end the wait early, and a systemd failure line does", () => {
@@ -212,10 +224,11 @@ test("a run that succeeds installs the unit, starts it and prints its output", a
     const ok = await runPostDeployUnit({
       run: host.run,
       onLine: (_stream, line) => printed.push(line),
+      redact: (text) => text,
       systemdUnitDir: host.unitDir,
       sleep: () => Promise.resolve(),
     }, opts(host));
-    assertEquals(ok, true);
+    assertEquals(ok, { ok: true });
     assertEquals(printed, ["Nothing to migrate."]);
     assertEquals(host.systemctl(), [
       ["daemon-reload"],
@@ -229,6 +242,7 @@ test("a run that succeeds installs the unit, starts it and prints its output", a
     await runPostDeployUnit({
       run: host.run,
       onLine: () => undefined,
+      redact: (text) => text,
       systemdUnitDir: host.unitDir,
       sleep: () => Promise.resolve(),
     }, opts(host));
@@ -253,11 +267,14 @@ test("success is what systemd says about the unit, never what the journal prints
     const ok = await runPostDeployUnit({
       run: host.run,
       onLine: (_stream, line) => printed.push(line),
+      redact: (text) => text,
       systemdUnitDir: host.unitDir,
       sleep: () => Promise.resolve(),
     }, opts(host));
-    assertEquals(ok, false);
-    assertEquals(printed, ["Finished TurboPanel post-deploy commands (web)."]);
+    assertEquals(ok.ok, false);
+    assertEquals(printed.slice(0, 1), [
+      "Finished TurboPanel post-deploy commands (web).",
+    ]);
   } finally {
     await host.cleanup();
   }
@@ -286,6 +303,7 @@ test("the journal is read again, a bounded number of times, until systemd's clos
     await runPostDeployUnit({
       run: host.run,
       onLine: (_stream, line) => printed.push(line),
+      redact: (text) => text,
       systemdUnitDir: host.unitDir,
       sleep: (ms) => {
         waits.push(ms);
@@ -311,6 +329,7 @@ test("a journal that never closes is read ten times and the run still ends", asy
     await runPostDeployUnit({
       run: host.run,
       onLine: () => undefined,
+      redact: (text) => text,
       systemdUnitDir: host.unitDir,
       sleep: () => Promise.resolve(),
     }, opts(host));
@@ -332,6 +351,7 @@ test("a reload that fails stops the run before anything starts", async () => {
         runPostDeployUnit({
           run: host.run,
           onLine: () => undefined,
+          redact: (text) => text,
           systemdUnitDir: host.unitDir,
         }, opts(host)),
       Error,
@@ -372,24 +392,223 @@ test("units of sites that no longer have commands are removed, the others kept",
   }
 });
 
-test("the two failures say what happened to the release, and the later one carries both release ids", () => {
+test("the failing command and its status come from the step markers and systemd's own line", () => {
+  const journal = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    own("Migrated"),
+    step(2),
+    // A line the journal wrote without a pid still counts as output.
+    stamp(`${UNIT}: SQLSTATE[HY000]: connection refused`),
+    systemd(
+      `${UNIT}.service: Main process exited, code=exited, status=1/FAILURE`,
+    ),
+    systemd(`${UNIT}.service: Failed with result 'exit-code'.`),
+  ].join("\n");
+  const read = lastRunOutput(journal, "rel1", [[
+    "/usr/local/bin/php",
+    "artisan",
+    "migrate",
+  ], ["/usr/local/bin/php", "artisan", "optimize"]], MARKERS);
+  assertEquals(read.lines, ["Migrated", "SQLSTATE[HY000]: connection refused"]);
+  assertEquals(read.finished, true);
+  assertEquals(read.failure, {
+    command: "/usr/local/bin/php",
+    status: "exit status 1",
+  });
   assertEquals(
-    postDeployBeforeTrafficFailure("web").message,
-    "Post-deploy commands for site web failed, so the new release was not switched in. The release that was serving keeps serving.",
+    describePostDeployFailure(read.failure),
+    "/usr/local/bin/php exited with exit status 1",
+  );
+});
+
+test("a failed run prints the bounded output tail and a line naming the failure, never an argument", async () => {
+  const many = Array.from({ length: 80 }, (_, i) => own(`row ${i}`));
+  const host = await makeSystemdHost(journalAnswer([
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    ...many,
+    systemd(`${UNIT}.service: Main process exited, code=exited, status=3/n/a`),
+    systemd(`${UNIT}.service: Failed with result 'exit-code'.`),
+  ], false));
+  try {
+    const printed: Array<[string, string]> = [];
+    const result = await runPostDeployUnit({
+      run: host.run,
+      onLine: (stream, line) => printed.push([stream, line]),
+      redact: (text) => text,
+      systemdUnitDir: host.unitDir,
+      sleep: () => Promise.resolve(),
+    }, opts(host));
+    assertEquals(result, {
+      ok: false,
+      failure: { command: "/usr/local/bin/php", status: "exit status 3" },
+    });
+    const lines = printed.map(([, line]) => line);
+    assertEquals(lines[0], "... 20 earlier output lines omitted ...");
+    assertEquals(lines.length, POST_DEPLOY_OUTPUT_MAX_LINES + 2);
+    assertEquals(lines.at(-2), "row 79");
+    assertEquals(
+      lines.at(-1),
+      "post-deploy failed: /usr/local/bin/php exited with exit status 3",
+    );
+    assert(printed.every(([stream]) => stream === "stderr"));
+    assert(!lines.some((line) => line.includes("migrate")));
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failed run with no output says so, and a timeout is named", async () => {
+  const host = await makeSystemdHost(journalAnswer([
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    step(2),
+    systemd(`${UNIT}.service: Failed with result 'timeout'.`),
+  ], false));
+  try {
+    const printed: string[] = [];
+    const result = await runPostDeployUnit({
+      run: host.run,
+      onLine: (_stream, line) => printed.push(line),
+      redact: (text) => text,
+      systemdUnitDir: host.unitDir,
+      sleep: () => Promise.resolve(),
+    }, opts(host));
+    assertEquals(result.ok, false);
+    assertEquals(printed, [
+      "no output was captured from the failed command",
+      "post-deploy failed: /usr/local/bin/php timed out",
+    ]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("the two failures say what happened to the release, and the later one carries the code, both release ids and the failure", () => {
+  const failure = { command: "/usr/local/bin/php", status: "exit status 1" };
+  assertEquals(
+    postDeployBeforeTrafficFailure("web", failure).message,
+    "Post-deploy commands for site web failed, so the new release was not switched in. /usr/local/bin/php exited with exit status 1. The release that was serving keeps serving.",
   );
   const late = new PostDeployFailedAfterSwitchError({
     composeServiceName: "web",
     failedReleaseId: "rel2",
     previousReleaseId: "rel1",
+    failure,
   });
   assertEquals(
     late.message,
-    "Post-deploy commands for site web failed after the new release went live. Roll back to the previous release from the deploy page if the site is not working.",
+    "post_deploy_failed_after_switch: Post-deploy commands for site web failed after the new release rel2 went live. /usr/local/bin/php exited with exit status 1. Roll back to the previous release rel1 from the deploy page if the site is not working.",
   );
   assertEquals(late.code, POST_DEPLOY_FAILED_AFTER_SWITCH);
   assertEquals(late.details, {
     composeServiceName: "web",
     failedReleaseId: "rel2",
     previousReleaseId: "rel1",
+    failure,
   });
+  // With nothing known about the failure the sentence still starts with the code.
+  assertStringIncludes(
+    new PostDeployFailedAfterSwitchError({
+      composeServiceName: "web",
+      failedReleaseId: "rel2",
+      previousReleaseId: null,
+    }).message,
+    "post_deploy_failed_after_switch: Post-deploy commands for site web failed after the new release rel2 went live. Roll back to the previous release from",
+  );
+});
+
+test("a timeout is named as one even though systemd logs the kill first, and a signal is named", () => {
+  const timeout = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    step(2),
+    systemd(`${UNIT}.service: Start operation timed out. Terminating.`),
+    systemd(
+      `${UNIT}.service: Main process exited, code=killed, status=15/TERM`,
+    ),
+    systemd(`${UNIT}.service: Failed with result 'timeout'.`),
+    systemd("Failed to start TurboPanel post-deploy commands (web)."),
+  ].join("\n");
+  assertEquals(
+    lastRunOutput(timeout, "rel1", [["/a"], ["/usr/local/bin/php"]], MARKERS)
+      .failure,
+    {
+      command: "/usr/local/bin/php",
+      status: "timed out",
+    },
+  );
+  const crash = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    systemd(
+      `${UNIT}.service: Main process exited, code=dumped, status=11/SEGV`,
+    ),
+    systemd(`${UNIT}.service: Failed with result 'core-dump'.`),
+  ].join("\n");
+  assertEquals(lastRunOutput(crash, "rel1", [], MARKERS).failure, {
+    status: "signal SEGV",
+  });
+});
+
+test("only the unit's own lines and the next number move the step marker", () => {
+  const commands = [["/bin/one"], ["/bin/two"], ["/bin/three"]];
+  const journal = [
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    step(2),
+    // Output that imitates a marker: a skipped number, a repeat, a line from
+    // another program.
+    own(marker(4)),
+    step(2),
+    stamp(`echo[40]: ${marker(3)}`),
+    systemd(
+      `${UNIT}.service: Main process exited, code=exited, status=1/FAILURE`,
+    ),
+  ].join("\n");
+  const read = lastRunOutput(journal, "rel1", commands, MARKERS);
+  assertEquals(read.failure.command, "/bin/two");
+  // Accepted markers are not output; the imitations are.
+  assertEquals(read.lines, [
+    marker(4),
+    marker(2),
+    marker(3),
+  ]);
+});
+
+test("accepted step markers never reach the transcript", async () => {
+  const host = await makeSystemdHost(journalAnswer([
+    own(`${POST_DEPLOY_BEGIN_MARKER} rel1`),
+    step(1),
+    own("Migrated"),
+    step(2),
+    own("Optimized"),
+    systemd("Finished TurboPanel post-deploy commands (web)."),
+  ]));
+  try {
+    const printed: string[] = [];
+    const ok = await runPostDeployUnit({
+      run: host.run,
+      onLine: (_stream, line) => printed.push(line),
+      redact: (text) => text,
+      systemdUnitDir: host.unitDir,
+      sleep: () => Promise.resolve(),
+    }, opts(host));
+    assertEquals(ok, { ok: true });
+    assertEquals(printed, ["Migrated", "Optimized"]);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("a failing run's tail is redacted before a long line is cut", () => {
+  const secret = "s3cr3t-".repeat(20);
+  const long = `${"x".repeat(450)}${secret}`;
+  const tail = boundedOutputTail(
+    [long],
+    (text) => text.replaceAll(secret, "[redacted]"),
+  );
+  assertEquals(tail, [`${"x".repeat(450)}[redacted]`]);
+  assertEquals(tail.join("").includes("s3cr3t"), false);
 });

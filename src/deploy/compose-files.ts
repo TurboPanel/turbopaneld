@@ -5,6 +5,7 @@
  * `<stateDir>/deployments/<projectId>/<environmentId>/`.
  */
 
+import { isResolvedCommitSha } from "./commit-sha.ts";
 import { basename, join } from "@std/path";
 import {
   type FolderRefParts,
@@ -168,8 +169,10 @@ export type DeploymentManifestRelease = {
    * is the commit read back out of the promoted release's own manifest, not the
    * placeholder the payload carried. The host's durable record therefore names
    * the code that is running, which is the whole point of keeping it here.
+   * Only ever a resolved commit id (40 or 64 hex characters), and absent when
+   * none is known: a branch name or a placeholder is never recorded here.
    */
-  commitSha: string;
+  commitSha?: string;
   /** Commit subject / author, when the source provider resolved them. */
   commitMessage?: string;
   commitAuthor?: string;
@@ -383,6 +386,14 @@ function parseManifestServiceIds(value: unknown): Record<string, string> {
   return out;
 }
 
+/** Optional text fields of a release row, kept only when non-empty. */
+const OPTIONAL_RELEASE_TEXT_FIELDS = [
+  "ref",
+  "commitMessage",
+  "commitAuthor",
+  "username",
+] as const;
+
 /**
  * Accept only fully-identified release rows.
  *
@@ -403,36 +414,29 @@ function parseManifestRelease(
       "serviceId",
       "releaseId",
       "sourceId",
-      "commitSha",
     ]
   ) {
     const field = record[key];
     if (typeof field !== "string" || field.length === 0) return null;
   }
+  // Absent when no commit was resolved; a value that is not a commit id (a
+  // branch name an older daemon recorded) is dropped, not kept.
+  const commitSha = isResolvedCommitSha(record.commitSha)
+    ? record.commitSha
+    : undefined;
   const entry: DeploymentManifestRelease = {
     composeServiceName: record.composeServiceName as string,
     serviceId: record.serviceId as string,
     releaseId: record.releaseId as string,
     sourceId: record.sourceId as string,
-    commitSha: record.commitSha as string,
+    ...(commitSha === undefined ? {} : { commitSha }),
   };
-  if (typeof record.ref === "string" && record.ref.length > 0) {
-    entry.ref = record.ref;
-  }
-  // Display-only, and absent on every manifest written before it was recorded —
-  // a missing one is not a reason to drop an otherwise-valid release row.
-  if (
-    typeof record.commitMessage === "string" && record.commitMessage.length > 0
-  ) {
-    entry.commitMessage = record.commitMessage;
-  }
-  if (
-    typeof record.commitAuthor === "string" && record.commitAuthor.length > 0
-  ) {
-    entry.commitAuthor = record.commitAuthor;
-  }
-  if (typeof record.username === "string" && record.username.length > 0) {
-    entry.username = record.username;
+  // `commitMessage` and `commitAuthor` are display-only, and absent on every
+  // manifest written before they were recorded — a missing one is not a reason
+  // to drop an otherwise-valid release row.
+  for (const key of OPTIONAL_RELEASE_TEXT_FIELDS) {
+    const text = record[key];
+    if (typeof text === "string" && text.length > 0) entry[key] = text;
   }
   if (record.folder !== undefined) {
     try {

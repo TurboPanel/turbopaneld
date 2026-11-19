@@ -432,6 +432,13 @@ export async function applySiteWorkers(
   const watched: Array<{ unit: string; label: string }> = [];
   await forEachSequential(desired, async (entry) => {
     const running = workerInstanceUnits(entry.base, entry.processes);
+    const label = `${entry.spec.composeServiceName}/${entry.worker.name}`;
+    io.onLine(
+      "stdout",
+      `enabling worker ${label} (${running.length} process${
+        running.length === 1 ? "" : "es"
+      })`,
+    );
     const enable = await systemctl(io.run, ["enable", ...running]);
     if (!enable.success) {
       throw new Error(
@@ -452,6 +459,7 @@ export async function applySiteWorkers(
     }
     // One call: systemd stops them in parallel with SIGTERM, waits up to
     // `TimeoutStopSec`, and starts them on the new `current`.
+    io.onLine("stdout", `restarting worker ${label} on the new release`);
     const restart = await systemctl(io.run, [
       "restart",
       "--no-block",
@@ -469,7 +477,21 @@ export async function applySiteWorkers(
       });
     }
   });
+  io.onLine(
+    "stdout",
+    `checking that ${watched.length} worker process${
+      watched.length === 1 ? "" : "es"
+    } stay running`,
+  );
   const failed = await watchWorkerInstances(io, watched);
+  io.onLine(
+    "stdout",
+    failed.length === 0
+      ? "worker check done: every worker process is running or finishing its job"
+      : `worker check done: ${
+        new Set(failed).size
+      } worker(s) did not stay running`,
+  );
   return [...new Set(failed)].map((label) => {
     const [service, name] = label.split("/");
     return `Site ${service}: worker ${name} did not stay running.`;

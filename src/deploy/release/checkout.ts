@@ -31,6 +31,7 @@
  * with `GIT_ALLOW_PROTOCOL`.
  */
 
+import { isResolvedCommitSha } from "../commit-sha.ts";
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
@@ -520,10 +521,13 @@ export async function checkoutRelease(
       );
     }
     const pinned = await git(["rev-parse", "HEAD"], workingDir, env);
-    return {
-      workingDir,
-      commitSha: pinned.success ? pinned.stdout : params.commitSha,
-    };
+    const resolved = pinned.success ? pinned.stdout.trim() : params.commitSha;
+    // The commit is only ever a resolved id; a placeholder (a branch name)
+    // would end up in the release record and the deploy result.
+    if (!isResolvedCommitSha(resolved)) {
+      throw new Error("git could not resolve the checked-out commit");
+    }
+    return { workingDir, commitSha: resolved };
   } finally {
     await removeCheckoutCredentialFiles(credentialFiles);
   }

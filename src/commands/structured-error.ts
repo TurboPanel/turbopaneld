@@ -1,8 +1,9 @@
 /**
  * An error that carries a stable code and a small details record beside its
  * sentence. Raised in process; a command outcome carries only the sentence
- * today, so nothing here reaches the control plane until the outcome grows a
- * place for details.
+ * today, so the details never reach the control plane. A code that must reach
+ * it goes at the start of the sentence (`<code>: <sentence>`, as `rolled_back: `
+ * does), which an older control plane shows as plain text.
  */
 export class StructuredCommandError extends Error {
   readonly code: string;
