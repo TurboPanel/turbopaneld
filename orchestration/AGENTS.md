@@ -922,8 +922,8 @@ download cache is disposable scratch — first-party roles live under FHS
 `run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
 accidental `/root/.ansible` after install. `ansible-lint` ignores both: it
 keeps its own `.ansible/` in the project directory it finds from the cwd (`/`
-from the installer), so `ansibleLintWorks()` passes `--project-dir` pointing at
-the state leaf. `scripts/purge.sh` also removes a stale `/.ansible`. Runtime
+from the installer), so `ansibleLintWorks()` passes `--project-dir` pointing at a private
+temp folder it removes (never the tp-owned state leaf). `scripts/purge.sh` also removes a stale `/.ansible`. Runtime
 orchestration runs as `tp` (dev: the current dev user).
 
 **Galaxy content ships in the package, nothing is downloaded:** the exact

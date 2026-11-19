@@ -36,7 +36,7 @@ describe("ansible binary probes", () => {
     assertEquals(await ansible.ansibleLintWorks(), false);
   });
 
-  it("ansibleLintWorks pins the project to the state leaf, not the cwd", async () => {
+  it("ansibleLintWorks probes from a private scratch dir and removes it", async () => {
     const { ANSIBLE_LINT_BIN, ANSIBLE_STATE_DIR } = await import(
       "./assets.ts"
     );
@@ -47,16 +47,20 @@ describe("ansible binary probes", () => {
     });
     await Deno.writeTextFile(
       ANSIBLE_LINT_BIN,
-      `#!/bin/sh\necho "$@" > "${marker}"\npwd >> "${marker}"\nexit 0\n`,
+      `#!/bin/sh\necho "$@" > "${marker}"\nexit 0\n`,
     );
     await Deno.chmod(ANSIBLE_LINT_BIN, 0o755);
     try {
       assertEquals(await ansible.ansibleLintWorks(), true);
-      const [args, cwd] = (await Deno.readTextFile(marker)).trim().split("\n");
-      assertEquals(args, `--project-dir ${ANSIBLE_STATE_DIR} --version`);
-      assertEquals(
-        await Deno.realPath(cwd),
-        await Deno.realPath(ANSIBLE_STATE_DIR),
+      const [args] = (await Deno.readTextFile(marker)).trim().split("\n");
+      const scratch = args.replace(/^--project-dir (\S+) --version$/, "$1");
+      assertEquals(args, `--project-dir ${scratch} --version`);
+      assertEquals(scratch.includes("turbopanel-lint-probe-"), true);
+      assertEquals(scratch === ANSIBLE_STATE_DIR, false);
+      await assertRejects(() => Deno.stat(scratch), Deno.errors.NotFound);
+      await assertRejects(
+        () => Deno.stat(`${ANSIBLE_STATE_DIR}/.ansible`),
+        Deno.errors.NotFound,
       );
     } finally {
       await Deno.remove(ANSIBLE_LINT_BIN);

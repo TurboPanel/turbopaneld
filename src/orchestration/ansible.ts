@@ -44,7 +44,6 @@ import {
   ANSIBLE_LINT_BIN,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
-  ANSIBLE_STATE_DIR,
   ansibleEnv,
   ansibleHome,
   ansibleProbeEnv,
@@ -85,15 +84,6 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
-async function isDirectory(path: string): Promise<boolean> {
-  try {
-    return (await Deno.stat(path)).isDirectory;
-  } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return false;
-    throw err;
-  }
-}
-
 export async function ansiblePlaybookWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false;
   // The daemon's bare env points HOME at the sealed state root; ansible then
@@ -112,23 +102,23 @@ export async function ansibleLintWorks(): Promise<boolean> {
   // `collections/`, `roles/`) in its project directory, which it finds from
   // the working directory (the filesystem root when nothing marks a project),
   // whatever HOME and ANSIBLE_HOME say. The installer starts from `/`, which
-  // left `/.ansible` on a fresh host. Pin the project to the state leaf, or to
-  // a private throwaway folder when the leaf does not exist yet.
-  let scratch: string | undefined;
-  let projectDir = ANSIBLE_STATE_DIR;
-  if (!(await isDirectory(projectDir))) {
-    scratch = await Deno.makeTempDir({ prefix: "turbopanel-lint-probe-" });
-    projectDir = scratch;
-  }
+  // left `/.ansible` on a fresh host. Always use a private throwaway folder
+  // (0700, removed afterwards): this also runs as root, and a root-owned
+  // cache inside the tp-owned state leaf would break the daemon's own probe.
+  const scratch = await Deno.makeTempDir({ prefix: "turbopanel-lint-probe-" });
   try {
     const result = await run(
       ANSIBLE_LINT_BIN,
-      ["--project-dir", projectDir, "--version"],
-      { stream: false, cwd: projectDir, env: ansibleProbeEnv() },
+      ["--project-dir", scratch, "--version"],
+      { stream: false, cwd: scratch, env: ansibleProbeEnv() },
     );
     return result.success;
   } finally {
-    if (scratch) await Deno.remove(scratch, { recursive: true });
+    try {
+      await Deno.remove(scratch, { recursive: true });
+    } catch {
+      // Best effort: never let cleanup mask the probe result.
+    }
   }
 }
 
