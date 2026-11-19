@@ -228,7 +228,15 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    left out when hide-names is on), and the same hide-names header block as
    hosted sites when the setting is on. The file is shared by every
    environment on the server, so the hide-names choice is that of whichever
-   deployed last. HTTPS shows one fixed internal certificate for the reserved
+   deployed last. A site that sets `bind` is a Caddy server of its own (one per
+   set of listen addresses), which the catch-all above does not belong to: a
+   name no site holds that arrives on a bound address (a tunnel connector dials
+   loopback, which a tunnel name's `bind` holds) would get Caddy's empty 200.
+   So the file also holds one `http://` and one `https://` block per distinct
+   `bind` set of the written sites, with the same page (`siteBindSets`,
+   `plannedFallbackForSites`); a set appears once, since Caddy refuses a
+   repeated address. A deploy, a tunnel table apply that relocks sites, a site
+   removal and the start-time check keep the sets current. HTTPS shows one fixed internal certificate for the reserved
    name `unconfigured.invalid`, given to every other name by the Caddyfile's
    `default_sni` / `fallback_sni`; no per-name certificates are made, and
    deploys refuse that name as a hosting hostname). The daemon also writes

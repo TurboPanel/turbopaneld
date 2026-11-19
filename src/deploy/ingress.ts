@@ -2209,10 +2209,20 @@ ${html}    HTML 404
  * This one file is shared by every environment on the server: each hosting
  * deploy rewrites it, so the hide-names and Via choices in force are those of
  * whichever environment deployed last.
+ *
+ * A site that sets `bind` listens on its own addresses, and Caddy makes one
+ * server per set of listen addresses. The blocks above belong to the server
+ * that listens everywhere, so a request that arrives on a bound address for a
+ * name that server does not hold (a tunnel connector dials loopback, which a
+ * tunnel name's `bind` includes) matches no route and gets an empty 200. Each
+ * distinct set in `bindSets` therefore gets its own `http://` and `https://`
+ * block with the same answer; a set may appear only once or Caddy refuses the
+ * file as ambiguous.
  */
 export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
   sendViaHeader?: boolean,
+  bindSets: readonly (readonly string[])[] = [],
 ): string {
   // No handle_errors here: the http:// and https:// blocks match every host,
   // so their error routes would become the fallback for every other site's
@@ -2220,6 +2230,17 @@ export function hostingFallbackSnippet(
   // `respond` never raises an error, so nothing is lost.
   const hide = headerDeletions({ hideWebServerNames, sendViaHeader }, false);
   const page = hostingDefaultPageResponse(hideWebServerNames);
+  const bound = bindSets.map((set) => {
+    const bind = `  bind ${set.join(" ")}\n`;
+    return `
+# Names nobody hosts, on the addresses of ${set.join(" ")}.
+http:// {
+${bind}${hide}${page}}
+
+https:// {
+${bind}${hide}${page}}
+`;
+  }).join("");
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
 ${hide}${page}}
@@ -2230,7 +2251,70 @@ ${hide}${page}}
 ${HOSTING_FALLBACK_HOSTNAME} {
   tls internal
 ${hide}${page}}
-`;
+${bound}`;
+}
+
+const SITE_BIND_LINE_RE = /^ {2}bind (\S+(?: \S+)*)$/gm;
+const BIND_TOKEN_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\])$/;
+
+/**
+ * The distinct `bind` address sets of written site files, each sorted (Caddy
+ * keys a server by the set, not the order) and listed once, in a stable order.
+ * A line that holds anything but an IP literal is ignored, so a hand-edited
+ * file cannot put other text into the catch-all.
+ */
+export function siteBindSets(texts: readonly string[]): string[][] {
+  const sets = new Map<string, string[]>();
+  for (const text of texts) {
+    for (const match of text.matchAll(SITE_BIND_LINE_RE)) {
+      const tokens = [...new Set(match[1].split(" "))].sort();
+      if (!tokens.every((token) => BIND_TOKEN_RE.test(token))) continue;
+      sets.set(tokens.join(" "), tokens);
+    }
+  }
+  return [...sets.keys()].sort().map((key) => sets.get(key)!);
+}
+
+/**
+ * The bind sets of every site file on disk but the catch-all, with `pending`
+ * replacing (or adding) files that are about to be written.
+ */
+async function liveBindSets(
+  sitesDir: string,
+  pending: ReadonlyMap<string, string> = new Map(),
+): Promise<string[][]> {
+  const names = await liveSnippetNames(sitesDir).catch((err) => {
+    if (err instanceof Deno.errors.NotFound) return [] as string[];
+    throw err;
+  });
+  const texts = await Promise.all(
+    names.filter((name) => name !== HOSTING_FALLBACK_SITE && !pending.has(name))
+      .map((name) =>
+        readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
+      ),
+  );
+  return siteBindSets([
+    ...texts.filter((text) => text !== undefined),
+    ...pending.values(),
+  ]);
+}
+
+/**
+ * The catch-all file as it should be once `pending` site files are written,
+ * with the header choices it has on disk; `undefined` when none is on disk (a
+ * server that never deployed has none to keep current).
+ */
+export async function plannedFallbackForSites(
+  sitesDir: string,
+  pending: ReadonlyMap<string, string>,
+): Promise<string | undefined> {
+  const live = await readTextIfPresent(join(sitesDir, HOSTING_FALLBACK_SITE));
+  if (live === undefined) return undefined;
+  return hostingFallbackSnippet(
+    deletesHeader(live, "Server"),
+    !deletesHeader(live, "Via"),
+    await liveBindSets(sitesDir, pending),
+  );
 }
 
 /** The bind line plus, when asked, the header removal that follows it. */
@@ -3448,6 +3532,7 @@ async function ensureHostingFallbackLocked(
   const fallback = hostingFallbackSnippet(
     choices.hideWebServerNames,
     choices.sendViaHeader,
+    await liveBindSets(sitesDir),
   );
   if (liveFallback === fallback && liveCaddyfile === wantCaddyfile) {
     return false;
@@ -3733,6 +3818,7 @@ async function rewriteHostingCaddySitesLocked(
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
     payload.sendViaHeader,
+    await liveBindSets(sitesDir, new Map([[siteFile, siteContent]])),
   );
   // Tunnel names that run on other servers have forward blocks in a reserved
   // file. Which names run here just changed, so that file is re-rendered with
@@ -3854,6 +3940,7 @@ async function removeHostingCaddySiteLocked(
   }
 
   await refreshTunnelFileAfterRemoval(layout);
+  await refreshFallbackAfterRemoval(join(layout.configDir, "hosting", "sites"));
 
   const reload = await run(
     "sudo",
@@ -3871,6 +3958,24 @@ async function removeHostingCaddySiteLocked(
   // The environment's certificates went with its site: only after Caddy let go
   // of the files does the cleanup remove them.
   await removeUnreferencedTlsFolders(layout);
+}
+
+/**
+ * The catch-all lists the address sets of the written sites, so a removed
+ * site's set must leave it: a set no site uses any more could name an address
+ * this host no longer has, and Caddy would refuse to load it. Best effort,
+ * like the tunnel file; the next deploy rewrites it anyway.
+ */
+async function refreshFallbackAfterRemoval(sitesDir: string): Promise<void> {
+  try {
+    const planned = await plannedFallbackForSites(sitesDir, new Map());
+    if (planned === undefined) return;
+    const path = join(sitesDir, HOSTING_FALLBACK_SITE);
+    if (planned === await readTextIfPresent(path)) return;
+    await writeFileAtomic(path, planned);
+  } catch (err) {
+    logWarn("deploy", `unhosted-name answer left as it was: ${errorText(err)}`);
+  }
 }
 
 /**
