@@ -45,6 +45,7 @@ import {
   postDeployBeforeTrafficFailure,
   PostDeployFailedAfterSwitchError,
   type PostDeployIo,
+  type PostDeployRunResult,
   type PostDeployUnitOpts,
   removePostDeployUnits,
   runPostDeployUnit,
@@ -216,7 +217,10 @@ function postDeployIo(io: SiteLifecycleIo): PostDeployIo {
 }
 
 /** Say what runs, run it, and report whether it passed. */
-function runJob(io: SiteLifecycleIo, job: PostDeployJob): Promise<boolean> {
+function runJob(
+  io: SiteLifecycleIo,
+  job: PostDeployJob,
+): Promise<PostDeployRunResult> {
   io.onLine(
     "stdout",
     `running post-deploy commands for ${job.site.composeServiceName} in release ${job.release.releaseId}`,
@@ -246,22 +250,25 @@ export async function runBeforeTrafficPostDeploy(
 ): Promise<void> {
   const jobs = postDeployJobs(deploy, "before-traffic");
   await forEachSequential(jobs, async (job) => {
-    const ok = await runJob(io, job);
-    if (!ok) {
-      throw postDeployBeforeTrafficFailure(job.site.composeServiceName);
+    const result = await runJob(io, job);
+    if (!result.ok) {
+      throw postDeployBeforeTrafficFailure(
+        job.site.composeServiceName,
+        result.failure,
+      );
     }
   });
-  await forEachSequential(
-    jobs.filter((job) => job.release.heldCurrent === true),
-    async (job) => {
-      await swap(job);
-      io.onLine(
-        "stdout",
-        `switched ${job.site.composeServiceName} to release ${job.release.releaseId}`,
-      );
-    },
-  );
+  // Every site says it: a held site switches here, one that was published at
+  // once (a first deploy) already serves the release.
+  await forEachSequential(jobs, async (job) => {
+    if (job.release.heldCurrent === true) await swap(job);
+    io.onLine("stdout", switchedLine(job));
+  });
   await forEachSequential(jobs, (job) => markPassed(deploy, job));
+}
+
+function switchedLine(job: PostDeployJob): string {
+  return `switched ${job.site.composeServiceName} to release ${job.release.releaseId}`;
 }
 
 /** Remember that a job's commands passed, so a re-send of that release does not skip or repeat them wrongly. */
@@ -284,12 +291,15 @@ export async function runAfterSwitchPostDeploy(
   await forEachSequential(
     postDeployJobs(deploy, "after-switch"),
     async (job) => {
-      const ok = await runJob(io, job);
-      if (!ok) {
+      // The site apply that switched traffic has run by now.
+      io.onLine("stdout", switchedLine(job));
+      const result = await runJob(io, job);
+      if (!result.ok) {
         throw new PostDeployFailedAfterSwitchError({
           composeServiceName: job.site.composeServiceName,
           failedReleaseId: job.release.releaseId,
           previousReleaseId: job.release.previousReleaseId,
+          failure: result.failure,
         });
       }
       await markPassed(deploy, job);

@@ -401,12 +401,17 @@ test("a site that goes before traffic never moves current when its release was n
   const host = await makeSystemdHost(answers());
   try {
     const swapped: string[] = [];
+    const lines: string[] = [];
     const plan = deploy(host, [site({ postDeploy: COMMANDS })], [release()]);
-    await runBeforeTrafficPostDeploy(plan, lifecycleIo(host), (job) => {
+    await runBeforeTrafficPostDeploy(plan, lifecycleIo(host, lines), (job) => {
       swapped.push(job.release.releaseId);
       return Promise.resolve();
     });
     assertEquals(swapped, []);
+    assert(
+      lines.some((line) => line.startsWith("switched web to release")),
+      lines.join("\n"),
+    );
   } finally {
     await host.cleanup();
   }
@@ -426,11 +431,14 @@ test("an after-switch run that fails carries both release ids, and the deploy st
     );
     const failure = error as PostDeployFailedAfterSwitchError;
     assertEquals(failure.code, POST_DEPLOY_FAILED_AFTER_SWITCH);
-    assertEquals(failure.details, {
-      composeServiceName: "web",
-      failedReleaseId: "rel2",
-      previousReleaseId: "rel1",
-    });
+    assertEquals(failure.details.composeServiceName, "web");
+    assertEquals(failure.details.failedReleaseId, "rel2");
+    assertEquals(failure.details.previousReleaseId, "rel1");
+    assert(
+      failure.message.startsWith("post_deploy_failed_after_switch: "),
+      failure.message,
+    );
+    assert(failure.message.includes("rel2"), failure.message);
   } finally {
     await host.cleanup();
   }

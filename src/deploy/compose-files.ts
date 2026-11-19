@@ -5,6 +5,7 @@
  * `<stateDir>/deployments/<projectId>/<environmentId>/`.
  */
 
+import { isResolvedCommitSha } from "./commit-sha.ts";
 import { basename, join } from "@std/path";
 import {
   type FolderRefParts,
@@ -168,8 +169,10 @@ export type DeploymentManifestRelease = {
    * is the commit read back out of the promoted release's own manifest, not the
    * placeholder the payload carried. The host's durable record therefore names
    * the code that is running, which is the whole point of keeping it here.
+   * Only ever a resolved commit id (40 or 64 hex characters), and absent when
+   * none is known: a branch name or a placeholder is never recorded here.
    */
-  commitSha: string;
+  commitSha?: string;
   /** Commit subject / author, when the source provider resolved them. */
   commitMessage?: string;
   commitAuthor?: string;
@@ -403,18 +406,22 @@ function parseManifestRelease(
       "serviceId",
       "releaseId",
       "sourceId",
-      "commitSha",
     ]
   ) {
     const field = record[key];
     if (typeof field !== "string" || field.length === 0) return null;
   }
+  // Absent when no commit was resolved; a value that is not a commit id (a
+  // branch name an older daemon recorded) is dropped, not kept.
+  const commitSha = isResolvedCommitSha(record.commitSha)
+    ? record.commitSha
+    : undefined;
   const entry: DeploymentManifestRelease = {
     composeServiceName: record.composeServiceName as string,
     serviceId: record.serviceId as string,
     releaseId: record.releaseId as string,
     sourceId: record.sourceId as string,
-    commitSha: record.commitSha as string,
+    ...(commitSha === undefined ? {} : { commitSha }),
   };
   if (typeof record.ref === "string" && record.ref.length > 0) {
     entry.ref = record.ref;

@@ -2,6 +2,7 @@ import {
   buildStorageVolumesFragment,
   declaredVolumeUsers,
 } from "../deploy/apply-storage-volumes.ts";
+import { isResolvedCommitSha } from "../deploy/commit-sha.ts";
 import { openPrincipalPasswordEnvelopes } from "../deploy/principal-password-envelope.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import {
@@ -978,7 +979,11 @@ function releasesForManifest(
   const out: DeploymentManifestRelease[] = [];
   for (const entry of payload.sourceMaterial ?? []) {
     const result = appliedByService.get(entry.composeServiceName);
-    const commitSha = result?.commitSha ?? entry.commitSha;
+    // Only a resolved commit id is recorded: the payload's value can be a
+    // placeholder (a branch name) for a release that never got built.
+    const commitSha = [result?.commitSha, entry.commitSha].find(
+      isResolvedCommitSha,
+    );
     const commitMessage = result?.commitMessage ?? entry.commitMessage;
     const commitAuthor = result?.commitAuthor ?? entry.commitAuthor;
     const serviceId = result?.serviceId ??
@@ -994,7 +999,7 @@ function releasesForManifest(
       releaseId: result?.releaseId ?? entry.rollbackToReleaseId ??
         entry.releaseId,
       sourceId: entry.sourceId,
-      commitSha,
+      ...(commitSha === undefined ? {} : { commitSha }),
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitAuthor === undefined ? {} : { commitAuthor }),
       ...(entry.ref.length > 0 ? { ref: entry.ref } : {}),
@@ -1463,6 +1468,7 @@ async function applyDeployCronJobs(
   managedBindings: ReadonlyMap<string, SiteManagedDirectory>,
   nativeAppServices: readonly EnvironmentDeployNativeAppService[],
   nativeAppBindings: NativeAppBindings,
+  onLine: (stream: "stdout" | "stderr", line: string) => void,
 ): Promise<void> {
   const specs: CronApplySpec[] = [];
   for (const site of sites) {
@@ -1499,8 +1505,18 @@ async function applyDeployCronJobs(
     });
   }
   try {
+    if (specs.length > 0) {
+      onLine("stdout", `applying cron jobs for ${specs.length} service(s)`);
+    }
     await applyCronJobs(layout, parsedPayload.environmentId, specs);
+    if (specs.length > 0) onLine("stdout", "cron jobs applied");
   } catch (err) {
+    onLine(
+      "stderr",
+      `cron could not be applied: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
     // Warn, do not fail. A broken timer is a real problem and a bad reason to
     // refuse to publish an application that is otherwise ready — and the
     // transcript is where the operator sees it.
@@ -1521,14 +1537,22 @@ async function applyDeploySites(
   releaseBindings: ReadonlyMap<string, SiteRelease>,
   managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
   hideWebServerNames: boolean,
+  onLine: (stream: "stdout" | "stderr", line: string) => void,
 ): Promise<void> {
   if (sites.length === 0) return;
+  onLine(
+    "stdout",
+    `applying ${sites.length} site(s): ${
+      sites.map((site) => site.composeServiceName).join(", ")
+    }`,
+  );
   await applySites(layout, environmentId, sites, {
     hideWebServerNames,
     dockerBindAddress,
     releaseBindings,
     managedDirectoryBindings,
   });
+  onLine("stdout", "sites applied");
 }
 
 /**
@@ -3497,6 +3521,7 @@ async function deployEnvironmentHolding(
     siteReleaseBindings,
     siteManagedBindings,
     parsedPayload.hideWebServerNames === true,
+    siteLifecycleIo.onLine,
   );
   // Commands that run right after the switch: a failure stops the deploy here,
   // so no worker restarts onto the release that just failed.
@@ -3557,6 +3582,7 @@ async function deployEnvironmentHolding(
     siteManagedBindings,
     nativeAppServicesForHost,
     nativeAppBindingsFromPayload(parsedPayload),
+    siteLifecycleIo.onLine,
   );
   // Workers last of the site pieces: the new release is live and its variables
   // are in place, so each restarts straight onto it.
