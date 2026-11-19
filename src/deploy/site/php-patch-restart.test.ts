@@ -761,6 +761,57 @@ test("shared-pool site workers restart after the shared master, one site at a ti
   }
 });
 
+test("a record deleted while the pass runs is not brought back by the snapshot refresh", async () => {
+  resetPhpPatchState();
+  const f = await fixture([A]);
+  try {
+    oldRuntimes(f, A);
+    f.started.set("turbopanel-php-fpm@8.4.service", OLD_START_S);
+    await installWorkers(f, "env1", [["web", "queue"]]);
+    const layout = f.io.layout;
+    await syncPhpSharedSiteRecords(layout, "env1", [
+      { composeServiceName: "web", series: "8.4" },
+    ]);
+    f.started.set("turbopanel-worker-env1-web-queue@1.service", OLD_START_S);
+    // A stop (or a move to its own runtime) removes both records after the
+    // pass has read them, as the shared worker restarts.
+    const run = f.io.run;
+    f.io.run = async (command, args, ...rest) => {
+      if (args.includes("turbopanel-worker-env1-web-queue@1.service")) {
+        await removePhpRuntimeRecords(layout, [A.id]);
+        await syncPhpSharedSiteRecords(layout, "env1", []);
+      }
+      return run(command, args, ...rest);
+    };
+    await runPhpPatchPass(f.io);
+    assertEquals(await readPhpSharedSiteRecords(layout), []);
+    assertEquals(await readPhpRuntimeRecords(layout), []);
+    assertEquals(phpPatchSnapshot().sites, []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("shared-pool record files of names that differ only by dashes do not collide", async () => {
+  const host = await makeSystemdHost(() => undefined);
+  try {
+    const layout = { stateDir: host.layout.stateDir };
+    await writePhpSharedSiteRecord(layout, {
+      environmentId: "a--b",
+      composeServiceName: "c",
+      series: "8.4",
+    });
+    await writePhpSharedSiteRecord(layout, {
+      environmentId: "a",
+      composeServiceName: "b--c",
+      series: "8.4",
+    });
+    assertEquals((await readPhpSharedSiteRecords(layout)).length, 2);
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("a failed runtime restart stops the pass before any shared-pool worker and the shared sites stay pending", async () => {
   resetPhpPatchState();
   const f = await fixture([A]);

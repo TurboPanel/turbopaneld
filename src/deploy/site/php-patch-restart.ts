@@ -95,7 +95,32 @@ function sharedKey(record: PhpSharedSiteRecord): string {
 }
 
 function sharedRecordFile(record: PhpSharedSiteRecord): string {
-  return `${record.environmentId}--${record.composeServiceName}.json`;
+  // An environment id has no dot and a service name may, so the first dot
+  // always splits the two (a dash could not: both names may contain one).
+  return `${record.environmentId}.${record.composeServiceName}.json`;
+}
+
+function sharedRecordPath(
+  layout: Pick<LayoutPaths, "stateDir">,
+  record: PhpSharedSiteRecord,
+): string {
+  return join(phpSharedSiteRecordsDir(layout), sharedRecordFile(record));
+}
+
+function phpRuntimeRecordPath(
+  layout: Pick<LayoutPaths, "stateDir">,
+  id: string,
+): string {
+  return join(phpRuntimeRecordsDir(layout), `${id}.json`);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isSharedRecord(value: unknown): value is PhpSharedSiteRecord {
@@ -701,6 +726,10 @@ async function refreshSnapshot(
     }
   }
   // A runtime that is not behind a package change runs the installed version.
+  // A stop or a deploy can delete a record while the pass runs; the rewrite
+  // happens under the environment's lock and only for a record still there,
+  // and a record that is gone leaves the snapshot too.
+  const gone = new Set<string>();
   await forEachSequential(records, async (record) => {
     const current = versions[record.series];
     if (
@@ -708,7 +737,16 @@ async function refreshSnapshot(
       record.version !== current
     ) {
       record.version = current;
-      await writePhpRuntimeRecord(io.layout, record).catch((err) =>
+      await withKeyedLock(
+        environmentLockKey(record.environmentId),
+        async () => {
+          if (!await fileExists(phpRuntimeRecordPath(io.layout, record.id))) {
+            gone.add(`r:${record.id}`);
+            return;
+          }
+          await writePhpRuntimeRecord(io.layout, record);
+        },
+      ).catch((err) =>
         logWarn("deploy", `PHP runtime record not updated: ${describe(err)}`)
       );
     }
@@ -721,7 +759,16 @@ async function refreshSnapshot(
       record.version !== current
     ) {
       record.version = current;
-      await writePhpSharedSiteRecord(io.layout, record).catch((err) =>
+      await withKeyedLock(
+        environmentLockKey(record.environmentId),
+        async () => {
+          if (!await fileExists(sharedRecordPath(io.layout, record))) {
+            gone.add(`s:${sharedKey(record)}`);
+            return;
+          }
+          await writePhpSharedSiteRecord(io.layout, record);
+        },
+      ).catch((err) =>
         logWarn(
           "deploy",
           `PHP shared-pool site record not updated: ${describe(err)}`,
@@ -729,14 +776,18 @@ async function refreshSnapshot(
       );
     }
   });
-  const dedicated: PhpPatchSite[] = records.map((record) => ({
+  const dedicated: PhpPatchSite[] = records.filter((r) =>
+    !gone.has(`r:${r.id}`)
+  ).map((record) => ({
     environmentId: record.environmentId,
     composeServiceName: record.composeServiceName,
     series: record.series,
     ...(record.version === undefined ? {} : { version: record.version }),
     ...(outdated.has(record.id) ? { outdated: true as const } : {}),
   }));
-  const shared: PhpPatchSite[] = sharedRecords.map((record) => ({
+  const shared: PhpPatchSite[] = sharedRecords.filter((r) =>
+    !gone.has(`s:${sharedKey(r)}`)
+  ).map((record) => ({
     environmentId: record.environmentId,
     composeServiceName: record.composeServiceName,
     series: record.series,
