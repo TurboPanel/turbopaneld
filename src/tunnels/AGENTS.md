@@ -98,7 +98,23 @@ decision 2026-10-28: keep the port, but only the daemon and root may reach it.
 - Independent of `inet turbopanel_php`: an accept ends only its own table's
   chain and a reject in either table is final, so neither table opens anything
   the other closes. A process running as root (a host-network container as
-  uid 0 too) passes the owner match by design.
+  uid 0 too) passes the owner match by design, and so does any account the
+  design allows (`tp`, `root`): the lock keeps site users out, it is not a
+  boundary against those two.
+- The outcome of the last load is remembered for this daemon run
+  (`metricsPortLockState`) and `server.tunnel.status` reports it as the
+  optional `statusPortsLocked` (boolean: the last lock load in this agent run
+  succeeded), `statusPortsLockCheckedAt` (ISO time of that load) and, when
+  false, `statusPortsLockReason` (one clean line, control characters and ANSI
+  codes removed, at most 200 characters; the daemon log keeps the full
+  message). It is not a live check: nothing unprivileged can list nftables and
+  there is no read-only `tp-host` verb for it (and none to add), so a ruleset
+  flushed after the load still reads locked until the next load (connector
+  install, the hourly update round while a tunnel exists). All three are left
+  out until a load was tried, so an older control plane ignores them and an
+  unknown state is not shown as locked. The Ansible task that loads the boot
+  unit still fails open, but a failed load is reported in a `WARNING:` debug
+  task that the daemon's ansible event log writes at warn level.
 - Tests: `src/orchestration/tunnel-loopback.test.ts` (rendered rules, band and
   account pinned to the code, boot unit and role tasks), the tp-host verb in
   `src/permissions/tp-host.test.ts`, the daemon calls in the two tunnel suites.

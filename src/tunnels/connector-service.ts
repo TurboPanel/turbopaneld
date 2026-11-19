@@ -289,6 +289,120 @@ async function stageAndInstallEnv(
 }
 
 /**
+ * The outcome of the last lock load in this daemon run, and when it ran. It is
+ * not a live check of the rule set: nothing unprivileged can list nftables, so
+ * a ruleset flushed after the load still reads as locked until the next load.
+ */
+export type MetricsPortLockState = {
+  locked: boolean;
+  /** One plain line, at most 200 characters; only when `locked` is false. */
+  reason?: string;
+  /** ISO time of the load. */
+  checkedAt: string;
+};
+
+const MAX_LOCK_REASON = 200;
+
+let metricsPortLock: MetricsPortLockState | null = null;
+
+/** The outcome of the last lock load in this daemon run; null before any. */
+export function metricsPortLockState(): MetricsPortLockState | null {
+  return metricsPortLock;
+}
+
+/** Forget the recorded outcome (tests only). */
+export function resetMetricsPortLockState(): void {
+  metricsPortLock = null;
+}
+
+/**
+ * A host message as one plain line for the report: ANSI escapes dropped, every
+ * control character (tabs, carriage returns, newlines) turned into a space,
+ * blanks collapsed, cut to 200 characters.
+ */
+export function oneLineLockReason(raw: string): string {
+  const text = stripTerminalControls(raw).replace(/\s+/g, " ").trim();
+  return (text || "failed").slice(0, MAX_LOCK_REASON);
+}
+
+const ESC = 0x1b;
+const BEL = 0x07;
+
+function codeAt(text: string, i: number): number {
+  return text.codePointAt(i) ?? -1;
+}
+
+function isControl(code: number): boolean {
+  return code >= 0 && (code < 0x20 || (code >= 0x7f && code <= 0x9f));
+}
+
+/** Index just past a CSI sequence: after its final byte 0x40-0x7e, or the end. */
+function skipCsi(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    const code = codeAt(text, i);
+    i += 1;
+    if (code >= 0x40 && code <= 0x7e) break;
+  }
+  return i;
+}
+
+/** Index just past an OSC string: after BEL or ESC backslash, or the end. */
+function skipOsc(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    const code = codeAt(text, i);
+    if (code === BEL) return i + 1;
+    if (code === ESC) return codeAt(text, i + 1) === 0x5c ? i + 2 : i;
+    i += 1;
+  }
+  return i;
+}
+
+/** Index after the escape sequence that starts at the ESC at `at`. */
+function skipEscape(text: string, at: number): number {
+  const kind = codeAt(text, at + 1);
+  if (kind === 0x5b) return skipCsi(text, at + 2);
+  if (kind === 0x5d) return skipOsc(text, at + 2);
+  return at + 1;
+}
+
+/**
+ * Drop ANSI CSI and OSC sequences, drop a stray ESC, and turn every other C0
+ * or C1 control character and DEL into a space. An unterminated sequence runs
+ * to the end of the text. Written as a char-code loop so no pattern holds a
+ * control character.
+ */
+function stripTerminalControls(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (codeAt(raw, i) === ESC) {
+      i = skipEscape(raw, i);
+      continue;
+    }
+    out += isControl(codeAt(raw, i)) ? " " : raw[i];
+    i += 1;
+  }
+  return out;
+}
+
+function recordLockFailure(raw: string): void {
+  metricsPortLock = {
+    locked: false,
+    reason: oneLineLockReason(raw),
+    checkedAt: new Date().toISOString(),
+  };
+  // The log keeps everything the host said; only the reported field is cut.
+  logWarn(
+    "tunnels",
+    `connector metrics ports are not locked to the daemon: ${
+      raw.trim() || "failed"
+    }`,
+  );
+}
+
+/**
  * Reload the nftables table that lets only root and the daemon account reach
  * the connectors' metrics band on loopback (`tp-host tunnel-loopback-sync`,
  * `orchestration/scripts/tp-tunnel-loopback`). The connector program can only
@@ -298,7 +412,7 @@ async function stageAndInstallEnv(
  * Never fatal: a failure (no `nft`, a `tp-host` from before this verb, a
  * development host) is logged and the connector still starts. A tunnel that
  * visitors use is never taken down over its metrics port. Returns whether the
- * table was loaded.
+ * table was loaded, and records the outcome for the status report.
  */
 export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
   try {
@@ -306,20 +420,16 @@ export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
       "sudo",
       hostSudoArgs(["-n", "tunnel-loopback-sync"]),
     );
-    if (result.success) return true;
-    logWarn(
-      "tunnels",
-      `connector metrics ports are not locked to the daemon: ${
-        result.stderr || "tp-host refused it"
-      }`,
-    );
+    if (result.success) {
+      metricsPortLock = {
+        locked: true,
+        checkedAt: new Date().toISOString(),
+      };
+      return true;
+    }
+    recordLockFailure(result.stderr || "tp-host refused it");
   } catch (err) {
-    logWarn(
-      "tunnels",
-      `connector metrics ports are not locked to the daemon: ${
-        err instanceof Error ? err.message : "failed"
-      }`,
-    );
+    recordLockFailure(err instanceof Error ? err.message : "failed");
   }
   return false;
 }
