@@ -28,8 +28,45 @@ const LINK_DOWN =
 const NOT_IN_TIME = "the control plane did not confirm the DNS record in time";
 const REFUSED = "the control plane could not publish the DNS record";
 
-// deno-lint-ignore no-control-regex
-const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[@-Z\\-_]/g;
+const ESC = 0x1b;
+
+function inRange(code: number, low: number, high: number): boolean {
+  return code >= low && code <= high;
+}
+
+/** Where an escape sequence that starts at `start` (an ESC) ends, or -1 when it is not one. */
+function ansiSequenceEnd(text: string, start: number): number {
+  const first = text.charCodeAt(start + 1);
+  // A two-character sequence: ESC and one of @-Z or \-_ (the "[" is excluded).
+  if (inRange(first, 0x40, 0x5a) || inRange(first, 0x5c, 0x5f)) {
+    return start + 2;
+  }
+  if (first !== 0x5b) return -1;
+  // A control sequence: ESC [, parameters, intermediates, one final character.
+  let at = start + 2;
+  while (
+    inRange(text.charCodeAt(at), 0x30, 0x39) || text[at] === ";" ||
+    text[at] === "?"
+  ) at += 1;
+  while (inRange(text.charCodeAt(at), 0x20, 0x2f)) at += 1;
+  return inRange(text.charCodeAt(at), 0x40, 0x7e) ? at + 1 : -1;
+}
+
+function replaceAnsiSequences(text: string): string {
+  let out = "";
+  let at = 0;
+  while (at < text.length) {
+    const end = text.charCodeAt(at) === ESC ? ansiSequenceEnd(text, at) : -1;
+    if (end === -1) {
+      out += text[at];
+      at += 1;
+    } else {
+      out += " ";
+      at = end;
+    }
+  }
+  return out;
+}
 
 /** C0 and C1 control characters, DEL, and the Unicode line and paragraph separators. */
 export function isControlCodePoint(code: number): boolean {
@@ -51,7 +88,7 @@ function replaceControlCharacters(text: string): string {
  */
 export function plainPanelError(value: unknown): string {
   if (typeof value !== "string") return REFUSED;
-  const text = replaceControlCharacters(value.replace(ANSI_RE, " "))
+  const text = replaceControlCharacters(replaceAnsiSequences(value))
     .replace(/\s+/g, " ").trim().slice(0, MAX_ERROR_CHARS).trim();
   return text.length > 0 ? text : REFUSED;
 }

@@ -412,6 +412,12 @@ test("the panel's error text is cleaned: no ANSI, control characters or line bre
   assertEquals(/\s{2}/.test(text), false);
   assertEquals(text.length <= 300, true);
   assertEquals(plainPanelError("\u001b[2J\n"), plainPanelError(undefined));
+  // Escape sequences go whole; a lone or malformed one is just a control character.
+  assertEquals(plainPanelError("a\u001b[1;31mred\u001b[0m b"), "a red b");
+  assertEquals(plainPanelError("a\u001b[?25 hb"), "a b");
+  assertEquals(plainPanelError("a\u001bMb"), "a b");
+  assertEquals(plainPanelError("a\u001b[1"), "a [1");
+  assertEquals(plainPanelError("a\u001b"), "a");
   // Every rejected character class becomes a space; its neighbours stay.
   for (const code of [0x00, 0x09, 0x1f, 0x7f, 0x85, 0x9f, 0x2028, 0x2029]) {
     const char = String.fromCodePoint(code);
