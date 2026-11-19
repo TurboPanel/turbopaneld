@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   tpOrchestratePlaybookAllowlist,
@@ -670,6 +675,13 @@ test("tp-orchestrate update pins a signed release only off an overlay, which wou
 });
 
 test("tp-orchestrate update uses the pinned overlay host with the pinned Platform CA, never -k", async () => {
+  // A path no host has, so a machine with the real Platform CA installed
+  // (such as the dev VM) still sees the file as missing.
+  const absentCaPin = OVERLAY_PIN.replace(
+    "/etc/turbopanel/instance-ca.pem",
+    "/etc/turbopanel/test-absent-ca.pem",
+  );
+  assertNotEquals(absentCaPin, OVERLAY_PIN);
   const result = await runUpdateVerb(
     [
       "--license-stdin",
@@ -679,7 +691,7 @@ test("tp-orchestrate update uses the pinned overlay host with the pinned Platfor
       "https://server-a.example.lan:8443/downloads",
       "--no-start",
     ],
-    OVERLAY_PIN,
+    absentCaPin,
   );
   // The pinned CA file does not exist on this test host: fail closed.
   assertEquals(result.status, 1);

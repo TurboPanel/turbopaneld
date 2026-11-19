@@ -15,7 +15,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import { hostSudoArgs } from "./host-sudo.ts";
-import { removeHostPrefix } from "../testing/tp-host-fixture.ts";
+import {
+  guardHostSetup,
+  removeHostPrefix,
+} from "../testing/tp-host-fixture.ts";
 import {
   CALL_SITES,
   type CallSiteSetup,
@@ -222,99 +225,104 @@ type Host = {
   cleanup: () => Promise<void>;
 };
 
-async function makeHost(): Promise<Host> {
-  const prefix = await Deno.realPath(
-    await Deno.makeTempDir({ prefix: "tp-host-callsites-" }),
-  );
-  const path = (rel: string) => join(prefix, rel);
-  for (
-    const d of [
-      "opt/turbopanel/lib",
-      "opt/turbopanel/share/orchestration",
-      "etc/turbopanel",
-      "var/lib/turbopanel",
-      "var/log/turbopanel",
-      "run/turbopanel",
-      "srv/users/alice/sites",
-      "etc/systemd/system",
-      "etc/ssh/sshd_config.d",
-      "etc/ssh/turbopanel/authorized_keys",
-      "etc/sysctl.d",
-      "etc/wireguard",
-      "tmp",
-    ]
-  ) {
-    await Deno.mkdir(path(d), { recursive: true });
-  }
-  await Deno.copyFile(SCRIPT, path("opt/turbopanel/lib/tp-host"));
-  await Deno.chmod(path("opt/turbopanel/lib/tp-host"), 0o755);
-  await Deno.copyFile(
-    REGISTRY,
-    path("opt/turbopanel/share/orchestration/runtime-registry.json"),
-  );
-  // The accounts a managed host with web engines has (turbopanel-user,
-  // principal-access and the engine roles create them), plus one
-  // principal and the group a new principal's useradd follows.
-  await Deno.writeTextFile(
-    path("etc/passwd"),
-    [
-      "root:x:0:0:root:/root:/bin/bash",
-      "tp:x:9999:9999::/var/lib/turbopanel:/usr/sbin/nologin",
-      "tpnginx:x:9990:9990::/nonexistent:/usr/sbin/nologin",
-      "tpapache:x:9991:9991::/nonexistent:/usr/sbin/nologin",
-      "tpols:x:9992:9992::/nonexistent:/usr/sbin/nologin",
-      "tpcaddysite:x:9993:9993::/nonexistent:/usr/sbin/nologin",
-      "tpcaddy:x:9995:9995::/nonexistent:/usr/sbin/nologin",
-      // The passwd home is home/ inside the root-owned principal home.
-      `alice:x:15001:15001::${prefix}/srv/users/alice/home:/bin/bash`,
-      "",
-    ].join("\n"),
-  );
-  await Deno.writeTextFile(
-    path("etc/group"),
-    [
-      "root:x:0:",
-      "sudo:x:27:",
-      "docker:x:998:tp",
-      "tp:x:9999:",
-      "tpnginx:x:9990:",
-      "tpapache:x:9991:",
-      "tpols:x:9992:",
-      "tpcaddysite:x:9993:",
-      "tpcaddy:x:9995:",
-      "tpshell:x:9985:",
-      "tpsftp:x:9986:alice",
-      "alice:x:15001:",
-      "",
-    ].join("\n"),
-  );
-  await Deno.writeTextFile(path("tmp/staged"), STAGED_CONTENT);
-  const script = path("opt/turbopanel/lib/tp-host");
-  return {
-    prefix,
-    run: async (args, stdin) => {
-      const child = new Deno.Command("sh", {
-        args: [script, ...args],
-        clearEnv: true,
-        env: { PATH: "/usr/bin:/bin", TP_HOST_TEST_PREFIX: prefix },
-        stdin: stdin === undefined ? "null" : "piped",
-        stdout: "piped",
-        stderr: "piped",
-      }).spawn();
-      if (stdin !== undefined) {
-        const writer = child.stdin.getWriter();
-        await writer.write(new TextEncoder().encode(stdin));
-        await writer.close();
-      }
-      const out = await child.output();
-      return {
-        code: out.code,
-        stdout: new TextDecoder().decode(out.stdout),
-        stderr: new TextDecoder().decode(out.stderr),
-      };
-    },
-    cleanup: () => removeHostPrefix(prefix),
-  };
+function makeHost(): Promise<Host> {
+  return guardHostSetup("tp-host-callsites-", async (prefix, restoreUmask) => {
+    const path = (rel: string) => join(prefix, rel);
+    for (
+      const d of [
+        "opt/turbopanel/lib",
+        "opt/turbopanel/share/orchestration",
+        "etc/turbopanel",
+        "var/lib/turbopanel",
+        "var/log/turbopanel",
+        "run/turbopanel",
+        "srv/users/alice/sites",
+        "etc/systemd/system",
+        "etc/ssh/sshd_config.d",
+        "etc/ssh/turbopanel/authorized_keys",
+        "etc/sysctl.d",
+        "etc/wireguard",
+        "tmp",
+      ]
+    ) {
+      await Deno.mkdir(path(d), { recursive: true });
+    }
+    await Deno.copyFile(SCRIPT, path("opt/turbopanel/lib/tp-host"));
+    await Deno.chmod(path("opt/turbopanel/lib/tp-host"), 0o755);
+    await Deno.copyFile(
+      REGISTRY,
+      path("opt/turbopanel/share/orchestration/runtime-registry.json"),
+    );
+    // The accounts a managed host with web engines has (turbopanel-user,
+    // principal-access and the engine roles create them), plus one
+    // principal and the group a new principal's useradd follows.
+    await Deno.writeTextFile(
+      path("etc/passwd"),
+      [
+        "root:x:0:0:root:/root:/bin/bash",
+        "tp:x:9999:9999::/var/lib/turbopanel:/usr/sbin/nologin",
+        "tpnginx:x:9990:9990::/nonexistent:/usr/sbin/nologin",
+        "tpapache:x:9991:9991::/nonexistent:/usr/sbin/nologin",
+        "tpols:x:9992:9992::/nonexistent:/usr/sbin/nologin",
+        "tpcaddysite:x:9993:9993::/nonexistent:/usr/sbin/nologin",
+        "tpcaddy:x:9995:9995::/nonexistent:/usr/sbin/nologin",
+        // The passwd home is home/ inside the root-owned principal home.
+        `alice:x:15001:15001::${prefix}/srv/users/alice/home:/bin/bash`,
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(
+      path("etc/group"),
+      [
+        "root:x:0:",
+        "sudo:x:27:",
+        "docker:x:998:tp",
+        "tp:x:9999:",
+        "tpnginx:x:9990:",
+        "tpapache:x:9991:",
+        "tpols:x:9992:",
+        "tpcaddysite:x:9993:",
+        "tpcaddy:x:9995:",
+        "tpshell:x:9985:",
+        "tpsftp:x:9986:alice",
+        "alice:x:15001:",
+        "",
+      ].join("\n"),
+    );
+    await Deno.writeTextFile(path("tmp/staged"), STAGED_CONTENT);
+    const script = path("opt/turbopanel/lib/tp-host");
+    return {
+      prefix,
+      run: async (args, stdin) => {
+        const child = new Deno.Command("sh", {
+          args: [script, ...args],
+          clearEnv: true,
+          env: { PATH: "/usr/bin:/bin", TP_HOST_TEST_PREFIX: prefix },
+          stdin: stdin === undefined ? "null" : "piped",
+          stdout: "piped",
+          stderr: "piped",
+        }).spawn();
+        if (stdin !== undefined) {
+          const writer = child.stdin.getWriter();
+          await writer.write(new TextEncoder().encode(stdin));
+          await writer.close();
+        }
+        const out = await child.output();
+        return {
+          code: out.code,
+          stdout: new TextDecoder().decode(out.stdout),
+          stderr: new TextDecoder().decode(out.stderr),
+        };
+      },
+      cleanup: async () => {
+        try {
+          await removeHostPrefix(prefix);
+        } finally {
+          restoreUmask();
+        }
+      },
+    };
+  });
 }
 
 const at = (prefix: string, value: string) => value.replaceAll("{P}", prefix);
