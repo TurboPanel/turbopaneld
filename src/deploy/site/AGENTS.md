@@ -654,7 +654,7 @@ root-owned `0550` by design:
   presence snapshot's `runtimes.php` (`versions`, `sites`, `restartError`) from
   a cache the pass fills (`host/php-patch-cache.ts`). A site that keeps the
   shared php-fpm master has no runtime record; the deploy writes it a
-  shared-pool record (`<state>/sites/.php-shared-sites/<env>--<service>.json`:
+  shared-pool record (`<state>/sites/.php-shared-sites/<env>.<service>.json`:
   environment, service, series, patch version; removed when the site leaves the
   pool or its environment stops). After the shared master restart the pass
   restarts those sites' stale workers, one site at a time under the

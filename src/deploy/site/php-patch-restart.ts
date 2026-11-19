@@ -731,6 +731,10 @@ async function refreshSnapshot(
   // and a record that is gone leaves the snapshot too.
   const gone = new Set<string>();
   await forEachSequential(records, async (record) => {
+    if (!await fileExists(phpRuntimeRecordPath(io.layout, record.id))) {
+      gone.add(`r:${record.id}`);
+      return;
+    }
     const current = versions[record.series];
     if (
       current !== undefined && !outdated.has(record.id) &&
@@ -753,6 +757,10 @@ async function refreshSnapshot(
   });
   // Same for a shared-pool site: not behind means it runs the installed build.
   await forEachSequential(sharedRecords, async (record) => {
+    if (!await fileExists(sharedRecordPath(io.layout, record))) {
+      gone.add(`s:${sharedKey(record)}`);
+      return;
+    }
     const current = versions[record.series];
     if (
       current !== undefined && !sharedOutdated.has(sharedKey(record)) &&

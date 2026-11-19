@@ -792,6 +792,30 @@ test("a record deleted while the pass runs is not brought back by the snapshot r
   }
 });
 
+test("a record whose version is already current but whose file is gone is not listed", async () => {
+  resetPhpPatchState();
+  const f = await fixture([]);
+  try {
+    const layout = f.io.layout;
+    await writePhpSharedSiteRecord(layout, {
+      environmentId: "env1",
+      composeServiceName: "web",
+      series: "8.4",
+      version: "8.4.27",
+    });
+    // Deleted after the pass has read it (the change-time lookup runs later).
+    const changeTime = f.io.changeTime;
+    f.io.changeTime = async (series) => {
+      await syncPhpSharedSiteRecords(layout, "env1", []);
+      return changeTime(series);
+    };
+    await runPhpPatchPass(f.io);
+    assertEquals(phpPatchSnapshot().sites, []);
+  } finally {
+    await f.cleanup();
+  }
+});
+
 test("shared-pool record files of names that differ only by dashes do not collide", async () => {
   const host = await makeSystemdHost(() => undefined);
   try {
