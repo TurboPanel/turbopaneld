@@ -19,9 +19,7 @@ import {
   EMPTY_TOPOLOGY_OVERRIDES,
   type TopologySnapshot,
 } from "../../contracts/topology-types.ts";
-import type {
-  PhysicalSignalTopology,
-} from "../../contracts/topology-types.ts";
+import type { PhysicalSignalTopology } from "../../contracts/topology-types.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
 
 /**

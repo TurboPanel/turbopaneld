@@ -3,9 +3,7 @@ import { CounterBaselineTracker } from "../baseline.ts";
 import { FilesystemStateEventCollector } from "./filesystem-state.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { MountEntry } from "../mounts.ts";
-import type {
-  FilesystemTopology,
-} from "../../../contracts/topology-types.ts";
+import type { FilesystemTopology } from "../../../contracts/topology-types.ts";
 
 import type { CollectedTopology } from "../../topology/topology.ts";
 

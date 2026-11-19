@@ -3,9 +3,7 @@ import { CounterBaselineTracker } from "../baseline.ts";
 import { GpuHealthEventCollector } from "./gpu-health.ts";
 import type { GpuHealthSignals } from "./gpu-health.ts";
 import type { EventDetectContext } from "./types.ts";
-import type {
-  GpuTopology,
-} from "../../../contracts/topology-types.ts";
+import type { GpuTopology } from "../../../contracts/topology-types.ts";
 import type { GpuSample } from "../../../contracts/metrics-contract.ts";
 import type { GpuThermalReadings } from "../gpu/index.ts";
 

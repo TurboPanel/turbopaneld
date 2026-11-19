@@ -6,9 +6,7 @@ import {
   SmartEventCollector,
 } from "./smart.ts";
 import type { EventDetectContext } from "./types.ts";
-import type {
-  BlockDeviceTopology,
-} from "../../../contracts/topology-types.ts";
+import type { BlockDeviceTopology } from "../../../contracts/topology-types.ts";
 
 import type { CollectedTopology } from "../../topology/topology.ts";
 
