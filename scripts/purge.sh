@@ -1702,6 +1702,8 @@ tp_inventory_folders() {
       tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_root" ""
     done
     tp_add_existing "$TP_TMP/inv.folders_remove" /root/.ansible ""
+    # An ansible-lint probe run from / (older installs) left its project cache here.
+    tp_add_existing "$TP_TMP/inv.folders_remove" /.ansible ""
   fi
 }
 
@@ -2833,6 +2835,7 @@ tp_remove_folders_and_shell() {
   tp_safe_rm_tree /run/turbopanel-gate
   tp_safe_rm_tree /var/cache/turbopanel
   tp_safe_rm_tree /root/.ansible
+  tp_safe_rm_tree /.ansible
   tp_strip_shell_rcs
 }
 
@@ -4269,7 +4272,7 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # folder configured elsewhere in daemon.env; those are listed as kept.
 # Root's update records (lib/installed-build, lib/update-guard-armed) go with
 # /opt/turbopanel.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
 # Where systemd keeps the stamp files of persistent timers (outside the owned
 # trees; only stamp-turbopanel-*.timer is ever removed from it).
 TP_TIMER_STAMP_DIR=/var/lib/systemd/timers

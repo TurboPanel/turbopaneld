@@ -44,6 +44,7 @@ import {
   ANSIBLE_LINT_BIN,
   ANSIBLE_PLAYBOOK_BIN,
   ANSIBLE_PLAYBOOK_CWD,
+  ANSIBLE_STATE_DIR,
   ansibleEnv,
   ansibleHome,
   ansibleProbeEnv,
@@ -84,6 +85,15 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(path)).isDirectory;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
 export async function ansiblePlaybookWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_PLAYBOOK_BIN))) return false;
   // The daemon's bare env points HOME at the sealed state root; ansible then
@@ -98,11 +108,28 @@ export async function ansiblePlaybookWorks(): Promise<boolean> {
 
 export async function ansibleLintWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_LINT_BIN))) return false;
-  const result = await run(ANSIBLE_LINT_BIN, ["--version"], {
-    stream: false,
-    env: ansibleProbeEnv(),
-  });
-  return result.success;
+  // ansible-lint keeps a project cache (`.ansible/` with `.lock`,
+  // `collections/`, `roles/`) in its project directory, which it finds from
+  // the working directory (the filesystem root when nothing marks a project),
+  // whatever HOME and ANSIBLE_HOME say. The installer starts from `/`, which
+  // left `/.ansible` on a fresh host. Pin the project to the state leaf, or to
+  // a private throwaway folder when the leaf does not exist yet.
+  let scratch: string | undefined;
+  let projectDir = ANSIBLE_STATE_DIR;
+  if (!(await isDirectory(projectDir))) {
+    scratch = await Deno.makeTempDir({ prefix: "turbopanel-lint-probe-" });
+    projectDir = scratch;
+  }
+  try {
+    const result = await run(
+      ANSIBLE_LINT_BIN,
+      ["--project-dir", projectDir, "--version"],
+      { stream: false, cwd: projectDir, env: ansibleProbeEnv() },
+    );
+    return result.success;
+  } finally {
+    if (scratch) await Deno.remove(scratch, { recursive: true });
+  }
 }
 
 /** Point the stable `current` symlink at the active ansible venv directory. */

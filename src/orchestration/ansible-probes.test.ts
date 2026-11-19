@@ -36,6 +36,34 @@ describe("ansible binary probes", () => {
     assertEquals(await ansible.ansibleLintWorks(), false);
   });
 
+  it("ansibleLintWorks pins the project to the state leaf, not the cwd", async () => {
+    const { ANSIBLE_LINT_BIN, ANSIBLE_STATE_DIR } = await import(
+      "./assets.ts"
+    );
+    const marker = `${ANSIBLE_STATE_DIR}/lint-args`;
+    await Deno.mkdir(ANSIBLE_STATE_DIR, { recursive: true });
+    await Deno.mkdir(ANSIBLE_LINT_BIN.replace(/\/[^/]+$/, ""), {
+      recursive: true,
+    });
+    await Deno.writeTextFile(
+      ANSIBLE_LINT_BIN,
+      `#!/bin/sh\necho "$@" > "${marker}"\npwd >> "${marker}"\nexit 0\n`,
+    );
+    await Deno.chmod(ANSIBLE_LINT_BIN, 0o755);
+    try {
+      assertEquals(await ansible.ansibleLintWorks(), true);
+      const [args, cwd] = (await Deno.readTextFile(marker)).trim().split("\n");
+      assertEquals(args, `--project-dir ${ANSIBLE_STATE_DIR} --version`);
+      assertEquals(
+        await Deno.realPath(cwd),
+        await Deno.realPath(ANSIBLE_STATE_DIR),
+      );
+    } finally {
+      await Deno.remove(ANSIBLE_LINT_BIN);
+      await Deno.remove(marker);
+    }
+  });
+
   it("ansiblePlaybookWorks rethrows non-NotFound stat errors", async () => {
     const { ANSIBLE_PLAYBOOK_BIN } = await import("./assets.ts");
     const originalStat = Deno.stat;
