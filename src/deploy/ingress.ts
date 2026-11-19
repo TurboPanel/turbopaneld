@@ -2210,19 +2210,20 @@ ${html}    HTML 404
  * deploy rewrites it, so the hide-names and Via choices in force are those of
  * whichever environment deployed last.
  *
- * A site that sets `bind` listens on its own addresses, and Caddy makes one
- * server per set of listen addresses. The blocks above belong to the server
- * that listens everywhere, so a request that arrives on a bound address for a
+ * A site that sets `bind` listens on its own addresses, and Caddy makes a
+ * server for them apart from the one that listens everywhere. The blocks above
+ * belong to the latter, so a request that arrives on a bound address for a
  * name that server does not hold (a tunnel connector dials loopback, which a
  * tunnel name's `bind` includes) matches no route and gets an empty 200. Each
- * distinct set in `bindSets` therefore gets its own `http://` and `https://`
- * block with the same answer; a set may appear only once or Caddy refuses the
- * file as ambiguous.
+ * address in `bindAddresses` therefore gets its own `http://` and `https://`
+ * block with the same answer. Caddy refuses a repeated site address per
+ * listen address, not per `bind` set, so the list holds every address once
+ * even where sets overlap, never one block per set.
  */
 export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
   sendViaHeader?: boolean,
-  bindSets: readonly (readonly string[])[] = [],
+  bindAddresses: readonly string[] = [],
 ): string {
   // No handle_errors here: the http:// and https:// blocks match every host,
   // so their error routes would become the fallback for every other site's
@@ -2230,17 +2231,16 @@ export function hostingFallbackSnippet(
   // `respond` never raises an error, so nothing is lost.
   const hide = headerDeletions({ hideWebServerNames, sendViaHeader }, false);
   const page = hostingDefaultPageResponse(hideWebServerNames);
-  const bound = bindSets.map((set) => {
-    const bind = `  bind ${set.join(" ")}\n`;
-    return `
-# Names nobody hosts, on the addresses of ${set.join(" ")}.
+  const bound = bindAddresses.map((address) => `
+# Names nobody hosts, on ${address}.
 http:// {
-${bind}${hide}${page}}
+  bind ${address}
+${hide}${page}}
 
 https:// {
-${bind}${hide}${page}}
-`;
-  }).join("");
+  bind ${address}
+${hide}${page}}
+`).join("");
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
 ${hide}${page}}
@@ -2258,31 +2258,30 @@ const SITE_BIND_LINE_RE = /^ {2}bind (\S+(?: \S+)*)$/gm;
 const BIND_TOKEN_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|\[[0-9A-Fa-f:.]+\])$/;
 
 /**
- * The distinct `bind` address sets of written site files, each sorted (Caddy
- * keys a server by the set, not the order) and listed once, in a stable order.
- * A line that holds anything but an IP literal is ignored, so a hand-edited
+ * The distinct addresses of the `bind` lines of written site files, sorted and
+ * listed once. A token that is not an IP literal is ignored, so a hand-edited
  * file cannot put other text into the catch-all.
  */
-export function siteBindSets(texts: readonly string[]): string[][] {
-  const sets = new Map<string, string[]>();
+export function siteBindAddresses(texts: readonly string[]): string[] {
+  const addresses = new Set<string>();
   for (const text of texts) {
     for (const match of text.matchAll(SITE_BIND_LINE_RE)) {
-      const tokens = [...new Set(match[1].split(" "))].sort();
-      if (!tokens.every((token) => BIND_TOKEN_RE.test(token))) continue;
-      sets.set(tokens.join(" "), tokens);
+      for (const token of match[1].split(" ")) {
+        if (BIND_TOKEN_RE.test(token)) addresses.add(token);
+      }
     }
   }
-  return [...sets.keys()].sort().map((key) => sets.get(key)!);
+  return [...addresses].sort();
 }
 
 /**
- * The bind sets of every site file on disk but the catch-all, with `pending`
+ * The bind addresses of every site file on disk but the catch-all, with `pending`
  * replacing (or adding) files that are about to be written.
  */
-async function liveBindSets(
+async function liveBindAddresses(
   sitesDir: string,
   pending: ReadonlyMap<string, string> = new Map(),
-): Promise<string[][]> {
+): Promise<string[]> {
   const names = await liveSnippetNames(sitesDir).catch((err) => {
     if (err instanceof Deno.errors.NotFound) return [] as string[];
     throw err;
@@ -2293,7 +2292,7 @@ async function liveBindSets(
         readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
       ),
   );
-  return siteBindSets([
+  return siteBindAddresses([
     ...texts.filter((text) => text !== undefined),
     ...pending.values(),
   ]);
@@ -2313,7 +2312,7 @@ export async function plannedFallbackForSites(
   return hostingFallbackSnippet(
     deletesHeader(live, "Server"),
     !deletesHeader(live, "Via"),
-    await liveBindSets(sitesDir, pending),
+    await liveBindAddresses(sitesDir, pending),
   );
 }
 
@@ -3532,7 +3531,7 @@ async function ensureHostingFallbackLocked(
   const fallback = hostingFallbackSnippet(
     choices.hideWebServerNames,
     choices.sendViaHeader,
-    await liveBindSets(sitesDir),
+    await liveBindAddresses(sitesDir),
   );
   if (liveFallback === fallback && liveCaddyfile === wantCaddyfile) {
     return false;
@@ -3818,7 +3817,7 @@ async function rewriteHostingCaddySitesLocked(
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
     payload.sendViaHeader,
-    await liveBindSets(sitesDir, new Map([[siteFile, siteContent]])),
+    await liveBindAddresses(sitesDir, new Map([[siteFile, siteContent]])),
   );
   // Tunnel names that run on other servers have forward blocks in a reserved
   // file. Which names run here just changed, so that file is re-rendered with
@@ -3940,7 +3939,7 @@ async function removeHostingCaddySiteLocked(
   }
 
   await refreshTunnelFileAfterRemoval(layout);
-  await refreshFallbackAfterRemoval(join(layout.configDir, "hosting", "sites"));
+  await refreshFallbackAfterRemoval(layout);
 
   const reload = await run(
     "sudo",
@@ -3961,18 +3960,28 @@ async function removeHostingCaddySiteLocked(
 }
 
 /**
- * The catch-all lists the address sets of the written sites, so a removed
- * site's set must leave it: a set no site uses any more could name an address
- * this host no longer has, and Caddy would refuse to load it. Best effort,
- * like the tunnel file; the next deploy rewrites it anyway.
+ * The catch-all lists the bind addresses of the written sites, so a removed
+ * site's address must leave it: an address no site uses any more could be one
+ * this host no longer has. Judged by the pinned validator before it goes live,
+ * like the tunnel file. Best effort; the next deploy rewrites it anyway.
  */
-async function refreshFallbackAfterRemoval(sitesDir: string): Promise<void> {
+async function refreshFallbackAfterRemoval(layout: LayoutPaths): Promise<void> {
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
   try {
     const planned = await plannedFallbackForSites(sitesDir, new Map());
     if (planned === undefined) return;
     const path = join(sitesDir, HOSTING_FALLBACK_SITE);
     if (planned === await readTextIfPresent(path)) return;
-    await writeFileAtomic(path, planned);
+    await validateHostingCaddyCandidate(
+      layout,
+      hostingDir,
+      sitesDir,
+      HOSTING_FALLBACK_SITE,
+      planned,
+      grantHostingCaddyRead,
+    );
+    await activateHostingSites([{ live: path, contents: planned }]);
   } catch (err) {
     logWarn("deploy", `unhosted-name answer left as it was: ${errorText(err)}`);
   }

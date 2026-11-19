@@ -60,7 +60,7 @@ import {
   setEnsureHostingCaddyRuntimeForTest,
   setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
-  siteBindSets,
+  siteBindAddresses,
   siteSnippet,
   snippetSiteAddresses,
   sortCaddySiteRoutes,
@@ -851,7 +851,7 @@ for (const sendViaHeader of [true, false, undefined]) {
       // The deployed site binds to its own address, so its set is answered too.
       assertEquals(
         fallback,
-        hostingFallbackSnippet(true, sendViaHeader, siteBindSets([site])),
+        hostingFallbackSnippet(true, sendViaHeader, siteBindAddresses([site])),
       );
       assertStringIncludes(fallback, "bind 203.0.113.10");
       for (const text of [site, fallback]) {
@@ -886,7 +886,7 @@ for (const hide of [true, false]) {
       );
       assertEquals(
         fallback,
-        hostingFallbackSnippet(hide, undefined, [["203.0.113.10"]]),
+        hostingFallbackSnippet(hide, undefined, ["203.0.113.10"]),
       );
       assertEquals(fallback.includes("-Server"), hide);
     } finally {
@@ -5783,49 +5783,44 @@ test("ensureHostingFallback leaves live files untouched when Caddy refuses, and 
   }
 });
 
-test("siteBindSets lists each address set once, sorted, and ignores anything but IP literals", () => {
-  const sets = siteBindSets([
+test("siteBindAddresses lists each bound address once, sorted, across overlapping sets, and ignores anything but IP literals", () => {
+  const addresses = siteBindAddresses([
     "a.test {\n  bind 127.0.0.1 10.0.0.5\n  respond ok\n}\n",
     "b.test {\n  bind 10.0.0.5 127.0.0.1\n}\n",
     "c.test {\n  bind [fd00::1]\n}\n",
     "d.test {\n  bind 127.0.0.1\n}\n",
-    'e.test {\n  bind evil\n  respond "x"\n}\n',
+    'e.test {\n  bind evil 192.0.2.9\n  respond "x"\n}\n',
     "f.test {\n    bind 192.0.2.1\n}\n",
   ]);
-  assertEquals(sets, [
-    ["10.0.0.5", "127.0.0.1"],
-    ["127.0.0.1"],
-    ["[fd00::1]"],
-  ]);
-  assertEquals(siteBindSets(["a.test {\n  respond ok\n}\n"]), []);
+  assertEquals(addresses, ["10.0.0.5", "127.0.0.1", "192.0.2.9", "[fd00::1]"]);
+  assertEquals(siteBindAddresses(["a.test {\n  respond ok\n}\n"]), []);
 });
 
-test("hostingFallbackSnippet answers unhosted names on each bound address set once", () => {
+test("hostingFallbackSnippet answers unhosted names on each bound address once", () => {
   assertEquals(
     hostingFallbackSnippet(false, false, []),
     hostingFallbackSnippet(false, false),
   );
-  const bound = hostingFallbackSnippet(false, false, [["127.0.0.1"], [
+  const bound = hostingFallbackSnippet(false, false, [
     "10.0.0.5",
     "127.0.0.1",
-  ]]);
+  ]);
   assertStringIncludes(bound, "http:// {\n  bind 127.0.0.1\n");
-  assertStringIncludes(bound, "https:// {\n  bind 10.0.0.5 127.0.0.1\n");
-  // The unbound catch-all, its fixed-name block and two blocks per set.
+  assertStringIncludes(bound, "https:// {\n  bind 10.0.0.5\n");
+  // The unbound catch-all, its fixed-name block and two blocks per address.
   assertEquals(bound.split("respond <<HTML").length - 1, 7);
+  assertEquals(bound.split("bind 127.0.0.1\n").length - 1, 2);
   // Same page everywhere: no request data, every CSS brace escaped.
   assertEquals(bound.includes("{host}"), false);
   assertEquals(bound.includes(":root{"), false);
   assertEquals(bound.includes("Hosted with"), true);
   assertEquals(
-    hostingFallbackSnippet(true, false, [["127.0.0.1"]]).includes(
-      "Hosted with",
-    ),
+    hostingFallbackSnippet(true, false, ["127.0.0.1"]).includes("Hosted with"),
     false,
   );
 });
 
-test("plannedFallbackForSites follows the bind sets of the files on disk and the pending ones", async () => {
+test("plannedFallbackForSites follows the bind addresses of the files on disk and the pending ones", async () => {
   const { layout, cleanup } = await makeTestLayout();
   try {
     const sitesDir = await sitesDirOf(layout);
@@ -5838,11 +5833,16 @@ test("plannedFallbackForSites follows the bind sets of the files on disk and the
       join(sitesDir, "env-a.caddy"),
       "a.test {\n  bind 127.0.0.1\n}\n",
     );
+    // A quarantined file is not loaded, so its address is not answered.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-q.caddy.quarantined"),
+      "q.test {\n  bind 192.0.2.99\n}\n",
+    );
     assertEquals(
       await plannedFallbackForSites(sitesDir, new Map()),
-      hostingFallbackSnippet(false, true, [["127.0.0.1"]]),
+      hostingFallbackSnippet(false, true, ["127.0.0.1"]),
     );
-    // A pending file replaces the one on disk; an unwritten one adds its set.
+    // A pending file replaces the one on disk; an unwritten one adds its own.
     assertEquals(
       await plannedFallbackForSites(
         sitesDir,
@@ -5852,8 +5852,9 @@ test("plannedFallbackForSites follows the bind sets of the files on disk and the
         ]),
       ),
       hostingFallbackSnippet(false, true, [
-        ["10.0.0.5", "127.0.0.1"],
-        ["192.0.2.7"],
+        "10.0.0.5",
+        "127.0.0.1",
+        "192.0.2.7",
       ]),
     );
   } finally {
@@ -5861,7 +5862,7 @@ test("plannedFallbackForSites follows the bind sets of the files on disk and the
   }
 });
 
-test("ensureHostingFallback adds a catch-all for the address set of a bound site", async () => {
+test("ensureHostingFallback adds a catch-all for the address of a bound site", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest(fakeHostRun(layout));
   try {
@@ -5873,7 +5874,7 @@ test("ensureHostingFallback adds a catch-all for the address set of a bound site
     assertEquals(await ensureHostingFallback(layout, noGrant), true);
     assertEquals(
       await Deno.readTextFile(join(hostingDir, "sites", "00-fallback.caddy")),
-      hostingFallbackSnippet(false, true, [["127.0.0.1"]]),
+      hostingFallbackSnippet(false, true, ["127.0.0.1"]),
     );
   } finally {
     restore();

@@ -250,9 +250,9 @@ async function judgeTunnelSet(
 }
 
 /**
- * The catch-all file when the relocked sites change an address set (a bound
- * site gains this server's addresses), so no site's address set is left
- * without one; `undefined` when it stays as it is.
+ * The catch-all file when the relocked sites change an address (a bound
+ * site gains this server's addresses), so no bound address is left without
+ * one; `undefined` when it stays as it is.
  */
 async function relockedFallback(
   sitesDir: string,
