@@ -13,7 +13,6 @@
 import { join } from "@std/path";
 import {
   type EnvironmentDeployPayload,
-  hostingServedNames,
   hostingTlsForName,
   isImageBuildKind,
 } from "../contracts/commands-contracts.ts";
@@ -232,7 +231,7 @@ export function automaticCertificateHostnames(
   const names = (payload.hostings ?? []).flatMap((hosting) =>
     hosting.nameTls === undefined
       ? hosting.tlsMode === "acme" ? hosting.hostnames : []
-      : hostingServedNames(hosting).filter((name) =>
+      : hosting.hostnames.filter((name) =>
         hostingTlsForName(hosting, name).tlsMode === "acme"
       )
   );

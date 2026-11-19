@@ -6,7 +6,10 @@ import type {
   AcmeDnsRecord,
   AcmeDnsRemoveMessage,
 } from "../../contracts/cell-messages.ts";
-import { AcmeDnsRelay } from "../../instance/acme-dns-relay.ts";
+import {
+  AcmeDnsRelay,
+  plainPanelError,
+} from "../../instance/acme-dns-relay.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { createFakeCa, FAKE_CA_DIRECTORY } from "../../testing/fake-acme-ca.ts";
 import { createDns01Solver, dnsChallengeRecordName } from "./dns01.ts";
@@ -321,7 +324,7 @@ test("the solver removes once however many names the order had", async () => {
   assertEquals(sent, ["acme-dns-publish", "acme-dns-remove"]);
 });
 
-test("a late or unknown answer is ignored and a malformed one never settles an order", async () => {
+test("a late or unknown answer is ignored and a malformed one never settles an order as issued", async () => {
   const relay = new AcmeDnsRelay(() => true);
   // Nobody waits: nothing happens.
   relay.handlePublished({
@@ -335,7 +338,7 @@ test("a late or unknown answer is ignored and a malformed one never settles an o
     [{ name: "_acme-challenge.example.com", value: "v" }],
     AbortSignal.timeout(50),
   );
-  // Key material in the answer: refused, so the order still waits.
+  // Key material in the answer: refused, and the waiting order fails at once.
   relay.handlePublished(
     {
       type: "acme-dns-published",
@@ -345,14 +348,14 @@ test("a late or unknown answer is ignored and a malformed one never settles an o
       privateKeyPem: "x",
     } as unknown as AcmeDnsPublishedMessage,
   );
-  assertEquals(relay.isWaiting("req_y"), true);
+  assertEquals(relay.isWaiting("req_y"), false);
   let reason = "";
   try {
     await asked;
   } catch (err) {
     reason = plainDaemonAcmeFailure(err).reason;
   }
-  assertStringIncludes(reason, "did not confirm");
+  assertStringIncludes(reason, "could not publish");
 });
 
 test("a second publish for an open order is refused", async () => {
@@ -381,4 +384,51 @@ test("the TXT record of a wildcard is at its base name", () => {
     dnsChallengeRecordName("www.example.com"),
     "_acme-challenge.www.example.com",
   );
+});
+
+test("the panel's error text is cleaned: no ANSI, control characters or line breaks, whitespace collapsed, capped", async () => {
+  const dirty =
+    "\u001b[31mzone\u001b[0m  refused\r\n\tthe\u0000 record\u0007\u2028now " +
+    "x".repeat(400);
+  const relay = new AcmeDnsRelay(() => true);
+  const waiting = relay.publish(
+    "req_dirty",
+    [{ name: "_acme-challenge.example.com", value: "v" }],
+    new AbortController().signal,
+  );
+  relay.handlePublished({
+    type: "acme-dns-published",
+    requestId: "req_dirty",
+    ok: false,
+    error: dirty,
+    at: AT,
+  });
+  const error = await waiting.then(() => null, (e: Error) => e);
+  const text = error?.message ?? "";
+  assertEquals(text.startsWith("zone refused the record now x"), true);
+  // deno-lint-ignore no-control-regex
+  assertEquals(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text), false);
+  assertEquals(/\s{2}/.test(text), false);
+  assertEquals(text.length <= 300, true);
+  assertEquals(plainPanelError("\u001b[2J\n"), plainPanelError(undefined));
+});
+
+test("a malformed answer for a waiting order fails it as refused instead of waiting out the deadline", async () => {
+  const relay = new AcmeDnsRelay(() => true);
+  const waiting = relay.publish(
+    "req_bad",
+    [{ name: "_acme-challenge.example.com", value: "v" }],
+    new AbortController().signal,
+  );
+  relay.handlePublished({
+    type: "acme-dns-published",
+    requestId: "req_bad",
+    ok: "yes",
+  } as never);
+  const error = await waiting.then(() => null, (e: Error) => e);
+  assertEquals(
+    error?.message,
+    "the control plane could not publish the DNS record",
+  );
+  assertEquals(relay.isWaiting("req_bad"), false);
 });

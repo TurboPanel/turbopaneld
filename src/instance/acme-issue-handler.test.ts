@@ -301,7 +301,7 @@ test("the panel's DNS answer reaches the waiting order", async () => {
   assertEquals(sentDns.map((m) => m.type), ["acme-dns-publish"]);
 });
 
-test("the start-up sweep fails open DNS orders a restart cut short and asks for their records to go", async () => {
+test("the start-up sweep fails open DNS orders a restart cut short and sends no removal", async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-acme-sweep-" });
   try {
     const layout = {
@@ -331,9 +331,8 @@ test("the start-up sweep fails open DNS orders a restart cut short and asks for 
     assertEquals(sent.map((m) => [m.requestId, m.stage, m.reason]), [
       ["req_old", "failed", "the server restarted"],
     ]);
-    assertEquals(dnsSent.map((m) => [m.type, m.requestId]), [
-      ["acme-dns-remove", "req_old"],
-    ]);
+    // The control plane removes a failed request's records by id.
+    assertEquals(dnsSent, []);
     assertEquals(await listOpenDnsOrders(layout), []);
     // Nothing left: a second sweep is silent.
     await handler.sweepRestartedDnsOrders();
@@ -382,6 +381,37 @@ test("the sweep leaves an order this process is running alone", async () => {
     release();
     await running;
     assertEquals(sent.map((m) => m.stage), ["started", "issued"]);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("the sweep does not fail an order that finished between the listing and the event", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-acme-sweep-" });
+  try {
+    const layout = {
+      configDir: join(root, "config"),
+      stateDir: join(root, "state"),
+      logDir: join(root, "log"),
+      runDir: join(root, "run"),
+    } as LayoutPaths;
+    const open = tenantAcmeDnsOpenDir(layout);
+    await Deno.mkdir(open, { recursive: true });
+    await Deno.writeTextFile(join(open, "req_done"), "");
+    const sent: AcmeIssueEventMessage[] = [];
+    const dnsSent: unknown[] = [];
+    const handler = new AcmeIssueHandler({
+      layout,
+      send: (m) => (sent.push(m), true),
+      sendDns: (m) => (dnsSent.push(m), true),
+      report: () => Promise.resolve(),
+    });
+    // The order ends (its marker goes) while the sweep is still reading.
+    const sweeping = handler.sweepRestartedDnsOrders();
+    Deno.removeSync(join(open, "req_done"));
+    await sweeping;
+    assertEquals(sent, []);
+    assertEquals(dnsSent, []);
   } finally {
     await Deno.remove(root, { recursive: true });
   }

@@ -28,6 +28,22 @@ const LINK_DOWN =
 const NOT_IN_TIME = "the control plane did not confirm the DNS record in time";
 const REFUSED = "the control plane could not publish the DNS record";
 
+// deno-lint-ignore no-control-regex
+const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b[@-Z\\-_]/g;
+// deno-lint-ignore no-control-regex
+const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g;
+
+/**
+ * The panel's sentence as plain words: ANSI codes, control characters and
+ * line breaks gone, runs of whitespace collapsed, then capped.
+ */
+export function plainPanelError(value: unknown): string {
+  if (typeof value !== "string") return REFUSED;
+  const text = value.replace(ANSI_RE, " ").replace(CONTROL_RE, " ")
+    .replace(/\s+/g, " ").trim().slice(0, MAX_ERROR_CHARS).trim();
+  return text.length > 0 ? text : REFUSED;
+}
+
 type Waiter = {
   resolve: () => void;
   reject: (err: Error) => void;
@@ -99,25 +115,29 @@ export class AcmeDnsRelay implements DnsRelay {
     }
   }
 
-  /** The control plane's answer; an answer nobody waits for is ignored. */
+  /**
+   * The control plane's answer; an answer nobody waits for is ignored. A
+   * malformed answer for an order that waits fails that order as refused
+   * rather than leaving it to wait out the deadline.
+   */
   handlePublished(message: AcmeDnsPublishedMessage): void {
+    const requestId = (message as { requestId?: unknown }).requestId;
+    if (typeof requestId !== "string") return;
+    const waiter = this.#waiting.get(requestId);
+    if (waiter === undefined) return;
     if (
       validateAcmeDnsPublishedFields(
         message as unknown as Record<string, unknown>,
       ) !== null
     ) {
+      waiter.reject(new LocalAcmeError("relay", REFUSED));
       return;
     }
-    const waiter = this.#waiting.get(message.requestId);
-    if (waiter === undefined) return;
     if (message.ok) {
       waiter.resolve();
       return;
     }
-    const text = typeof message.error === "string" && message.error.length > 0
-      ? message.error.slice(0, MAX_ERROR_CHARS)
-      : REFUSED;
-    waiter.reject(new LocalAcmeError("relay", text));
+    waiter.reject(new LocalAcmeError("relay", plainPanelError(message.error)));
   }
 
   /** True while a publish for this order waits for its answer. */

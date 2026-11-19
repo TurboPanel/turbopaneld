@@ -72,19 +72,23 @@ export class AcmeIssueHandler {
 
   /**
    * DNS orders a restart cut short: the control plane still holds the request
-   * open, so each gets a `failed` event ("the server restarted") and its
-   * records are asked to go. Orders this process is running are left alone. A
-   * marker stays until the link carried the event, so a later attach tries
+   * open, so each gets a `failed` event ("the server restarted"); it removes
+   * the records it made for a failed request by id. Orders this process is
+   * running are left alone, and the marker is checked again right before the
+   * event, so an order that finished meanwhile is not failed after `issued`.
+   * A marker stays until the link carried the event, so a later attach tries
    * again.
    */
   async sweepRestartedDnsOrders(): Promise<void> {
     const ids = await listOpenDnsOrders(this.#deps.layout);
     for (const requestId of ids) {
       if (this.#open.has(requestId)) continue;
+      const stillOpen = await listOpenDnsOrders(this.#deps.layout);
+      // No await between this check and the event: nothing starts in between.
+      if (!stillOpen.includes(requestId) || this.#open.has(requestId)) continue;
       if (!this.#event(requestId, "failed", { reason: SERVER_RESTARTED })) {
         continue;
       }
-      this.#relay?.remove(requestId);
       await forgetOpenDnsOrder(this.#deps.layout, requestId);
     }
   }

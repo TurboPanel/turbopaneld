@@ -1242,10 +1242,13 @@ function validateAcmeNames(value: unknown, wildcards = false): string | null {
   ) {
     return "invalid names";
   }
-  const ok = value.every((n) =>
-    typeof n === "string" && n.length <= 253 &&
-    ACME_NAME_RE.test(wildcards && n.startsWith("*.") ? n.slice(2) : n)
-  );
+  const ok = value.every((n) => {
+    if (typeof n !== "string" || n.length > 253) return false;
+    if (!wildcards || !n.startsWith("*.")) return ACME_NAME_RE.test(n);
+    // A wildcard sits over a name of at least two labels: `*.com` is no name.
+    const base = n.slice(2);
+    return base.includes(".") && ACME_NAME_RE.test(base);
+  });
   return ok ? null : "invalid names";
 }
 

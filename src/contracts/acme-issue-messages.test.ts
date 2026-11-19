@@ -156,7 +156,16 @@ test("a wildcard name is accepted only with dns-01", () => {
     );
   }
   // Only a leading wildcard label counts.
-  for (const bad of ["a.*.example.com", "*.*.example.com", "*example.com"]) {
+  // A wildcard needs a base of at least two labels: `*.com` is no name.
+  for (
+    const bad of [
+      "a.*.example.com",
+      "*.*.example.com",
+      "*example.com",
+      "*.com",
+      "*.localhost",
+    ]
+  ) {
     assertEquals(
       validateAcmeIssueRequestFields({
         ...request,
