@@ -186,6 +186,34 @@ test("the cases that were real gaps are refused or flagged", async () => {
   assert(tar && !carriesFormBody(tar.head, tar.framing));
 });
 
+/**
+ * Newer Go releases print the offending header line quoted and escaped
+ * (`malformed MIME header line: "X-A: a\x00b"`), older ones print it raw. The
+ * wording is not part of the verdict, so compare the error text with that
+ * quoting undone; `ok`, framing and every other field still compare exactly.
+ */
+const ESCAPES: Record<string, string> = {
+  r: "\r",
+  n: "\n",
+  t: "\t",
+  "\\": "\\",
+  '"': '"',
+};
+function unquoteMalformed(error: string | undefined): string | undefined {
+  const m = /^(malformed MIME header line: )"(.*)"$/s.exec(error ?? "");
+  if (!m) return error;
+  const body = m[2].replace(
+    /\\(x[0-9a-fA-F]{2}|[rnt\\"])/g,
+    (_all, e: string) =>
+      e.startsWith("x")
+        ? String.fromCharCode(parseInt(e.slice(1), 16))
+        : ESCAPES[e],
+  );
+  return m[1] + body;
+}
+const comparable = (results: GoResult[]) =>
+  results.map((r) => ({ ...r, error: unquoteMalformed(r.error) }));
+
 async function runHarness(): Promise<GoOutput | undefined> {
   const dir = new URL("../testing/docker-gate-diff/", import.meta.url)
     .pathname;
@@ -230,6 +258,6 @@ test({
   fn: async () => {
     const live = await runHarness();
     assert(live, "neither go nor docker could run the harness");
-    assertEquals(live.results, recorded.results);
+    assertEquals(comparable(live.results), comparable(recorded.results));
   },
 });
