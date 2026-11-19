@@ -62,7 +62,7 @@ export type SiteLifecycleIo = {
   run: RunFn;
   onLine: (stream: "stdout" | "stderr", line: string) => void;
   /** The log sink's redaction, so a failing run's tail is redacted before it is cut. */
-  redact?: (text: string) => string;
+  redact: (text: string) => string;
   sleep?: (ms: number) => Promise<void>;
   systemdUnitDir?: string;
 };
@@ -211,7 +211,7 @@ function postDeployIo(io: SiteLifecycleIo): PostDeployIo {
   return {
     run: io.run,
     onLine: io.onLine,
-    ...(io.redact === undefined ? {} : { redact: io.redact }),
+    redact: io.redact,
     ...(io.sleep === undefined ? {} : { sleep: io.sleep }),
     ...(io.systemdUnitDir === undefined
       ? {}
@@ -383,6 +383,8 @@ export async function removeEnvironmentSiteLifecycle(
   io: Pick<SiteLifecycleIo, "run" | "systemdUnitDir" | "onLine">,
   environmentId: string,
 ): Promise<void> {
-  await removeEnvironmentWorkers(workerIo(io), environmentId);
-  await removePostDeployUnits(postDeployIo(io), environmentId, []);
+  // Removing prints no command output, so nothing here needs redacting.
+  const full = { ...io, redact: (text: string) => text };
+  await removeEnvironmentWorkers(workerIo(full), environmentId);
+  await removePostDeployUnits(postDeployIo(full), environmentId, []);
 }

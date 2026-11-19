@@ -121,6 +121,7 @@ function lifecycleIo(host: SystemdHost, lines: string[] = []): SiteLifecycleIo {
   return {
     run: host.run,
     onLine: (_stream, line) => lines.push(line),
+    redact: (text) => text,
     sleep: () => Promise.resolve(),
     systemdUnitDir: host.unitDir,
   };
