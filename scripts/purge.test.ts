@@ -348,6 +348,7 @@ const OWNED_PATHS = [
   "/srv/users/bob",
   "/tmp/turbopanel-ansible",
   "/root/.ansible",
+  "/.ansible",
   "/var/lib/docker",
   "/etc/docker",
   "/etc/systemd/system/turbopaneld.service.d",
