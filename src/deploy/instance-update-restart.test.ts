@@ -72,8 +72,10 @@ test({
     // A copy of a multi-call coreutils binary (the default on newer runner
     // images) exits at once because it no longer knows its own name, so the
     // long-lived process is a copy of the shell instead, blocked reading its
-    // open stdin. The trailing `:` keeps it from exec-ing the `read` builtin
-    // away, and no helper process is left behind when it is killed.
+    // open stdin. The trailing `:` keeps the shell from exec-ing its last
+    // command in place of itself, which would swap the executable under test;
+    // `read` is a builtin, so no helper process is left behind when it is
+    // killed.
     const child = new Deno.Command(bin, {
       args: ["-c", "read line; :"],
       stdin: "piped",
@@ -102,7 +104,12 @@ test({
       // Not running at all.
       assertEquals(await run(snippet(text, 2147483, bin)), "");
     } finally {
-      if (!exited) child.kill();
+      try {
+        child.kill();
+      } catch {
+        // The child already exited on its own.
+      }
+      await child.stdin.close().catch(() => {});
       await child.status;
       await Deno.remove(dir, { recursive: true });
     }
