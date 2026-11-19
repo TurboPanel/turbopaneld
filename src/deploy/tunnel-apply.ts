@@ -294,9 +294,10 @@ async function swapTunnelFile(
       live: join(paths.sitesDir, site.file),
       contents: site.contents,
     })),
-    ...(fallback === undefined
-      ? []
-      : [{ live: join(paths.sitesDir, HOSTING_FALLBACK_SITE), contents: fallback }]),
+    ...(fallback === undefined ? [] : [{
+      live: join(paths.sitesDir, HOSTING_FALLBACK_SITE),
+      contents: fallback,
+    }]),
   ]);
   // Caddy no longer loads anything from it (the empty file loaded).
   if (!tunnelSame && contents === "") {

@@ -26,8 +26,6 @@ import {
   dockerProxyComposePath,
   ensureHostingCaddyRuntime,
   ensureHostingFallback,
-  plannedFallbackForSites,
-  siteBindSets,
   ensureHostingIngress,
   ensureServiceIngress,
   formatCaddyPathMatcher,
@@ -45,6 +43,7 @@ import {
   inspectHostingIngressContainer,
   listPersistedTcpUdpServiceIds,
   parseIngressNetworkGateways,
+  plannedFallbackForSites,
   readAcmeModeHostnames,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
@@ -61,6 +60,7 @@ import {
   setEnsureHostingCaddyRuntimeForTest,
   setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
+  siteBindSets,
   siteSnippet,
   snippetSiteAddresses,
   sortCaddySiteRoutes,
@@ -5789,7 +5789,7 @@ test("siteBindSets lists each address set once, sorted, and ignores anything but
     "b.test {\n  bind 10.0.0.5 127.0.0.1\n}\n",
     "c.test {\n  bind [fd00::1]\n}\n",
     "d.test {\n  bind 127.0.0.1\n}\n",
-    "e.test {\n  bind evil\n  respond \"x\"\n}\n",
+    'e.test {\n  bind evil\n  respond "x"\n}\n',
     "f.test {\n    bind 192.0.2.1\n}\n",
   ]);
   assertEquals(sets, [
@@ -5818,7 +5818,9 @@ test("hostingFallbackSnippet answers unhosted names on each bound address set on
   assertEquals(bound.includes(":root{"), false);
   assertEquals(bound.includes("Hosted with"), true);
   assertEquals(
-    hostingFallbackSnippet(true, false, [["127.0.0.1"]]).includes("Hosted with"),
+    hostingFallbackSnippet(true, false, [["127.0.0.1"]]).includes(
+      "Hosted with",
+    ),
     false,
   );
 });
