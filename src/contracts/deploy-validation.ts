@@ -5,6 +5,7 @@
 import {
   hostingServedNames,
   hostingTlsForName,
+  hostingWwwRedirects,
   isValidHostname,
   wwwSiblingHostname,
 } from "./commands-contracts.ts";
@@ -117,15 +118,15 @@ function recordHostnameAcmeHttps(
   hosting: EnvironmentDeployHosting,
 ): string | null {
   // A name a `www` mode expands answers on its served spellings too, and each
-  // may pick its own certificate: any served one on acme needs the HTTPS site.
-  const served = hostingServedNames({
-    hostnames: [hostname],
-    www: hosting.www,
-  });
+  // may pick its own certificate: any one on acme needs the HTTPS site (a redirect name on acme sends visitors to https).
+  const own = { hostnames: [hostname], www: hosting.www };
+  const names = [
+    hostname,
+    ...hostingServedNames(own),
+    ...hostingWwwRedirects(own).map((redirect) => redirect.from),
+  ];
   if (
-    [hostname, ...served].some((name) =>
-      hostingTlsForName(hosting, name).tlsMode === "acme"
-    )
+    names.some((name) => hostingTlsForName(hosting, name).tlsMode === "acme")
   ) {
     state.hasAcme = true;
   }

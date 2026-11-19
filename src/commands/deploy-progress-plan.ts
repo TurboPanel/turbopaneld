@@ -13,6 +13,7 @@
 import { join } from "@std/path";
 import {
   type EnvironmentDeployPayload,
+  hostingServedNames,
   hostingTlsForName,
   hostingWwwRedirects,
   isImageBuildKind,
@@ -233,11 +234,12 @@ export function automaticCertificateHostnames(
     hosting.nameTls === undefined
       ? hosting.tlsMode === "acme" ? hosting.hostnames : []
       : [
-        ...hosting.hostnames.filter((name) =>
+        ...hostingServedNames(hosting).filter((name) =>
           hostingTlsForName(hosting, name).tlsMode === "acme"
         ),
         // A redirect-only name joins the list only when its own entry asks
-        // for an automatic certificate; one that follows its target adds none.
+        // for an automatic certificate. Redirects that merely inherit acme are
+        // left out on purpose, to match a row without nameTls.
         ...hostingWwwRedirects(hosting).map((redirect) => redirect.from).filter(
           (name) =>
             hosting.nameTls?.some((entry) =>

@@ -403,6 +403,28 @@ test("a redirect name that asks for an automatic certificate is planned", () => 
   assertEquals(automaticCertificateHostnames(payload), ["www.a.example.com"]);
 });
 
+test("root-to-www plans the served www name with an acme entry, not the redirect", () => {
+  const payload = {
+    hostings: [{
+      hostnames: ["a.example.com"],
+      www: "root-to-www",
+      nameTls: [{ hostname: "www.a.example.com", tlsMode: "acme" }],
+    }],
+  } as unknown as EnvironmentDeployPayload;
+  assertEquals(automaticCertificateHostnames(payload), ["www.a.example.com"]);
+});
+
+test("both mode plans a www name that alone chooses acme", () => {
+  const payload = {
+    hostings: [{
+      hostnames: ["a.example.com"],
+      www: "both",
+      nameTls: [{ hostname: "www.a.example.com", tlsMode: "acme" }],
+    }],
+  } as unknown as EnvironmentDeployPayload;
+  assertEquals(automaticCertificateHostnames(payload), ["www.a.example.com"]);
+});
+
 test("the plan lists the same names whether or not a row has per-name overrides", () => {
   const row = {
     hostnames: ["a.example.com", "b.example.com"],

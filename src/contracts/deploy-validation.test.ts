@@ -458,4 +458,18 @@ describe("www mode validation", () => {
       "forceHttps:false is incompatible with ACME TLS on hostname a.example.test",
     );
   });
+
+  it("refuses an acme redirect name when forceHttps is off", () => {
+    assertEquals(
+      validateDeployHostnameRouting([
+        hosting({
+          hostnames: ["x.example.test"],
+          www: "www-to-root",
+          proxy: { forceHttps: false },
+          nameTls: [{ hostname: "www.x.example.test", tlsMode: "acme" }],
+        }),
+      ]),
+      "forceHttps:false is incompatible with ACME TLS on hostname x.example.test",
+    );
+  });
 });
