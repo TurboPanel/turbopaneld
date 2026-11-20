@@ -67,10 +67,8 @@ function stagedContexts(
     if (!entry.build || !isServiceBuildContext(entry.what)) continue;
     const rel = relative(stageDir, entry.path);
     if (escapesDir(rel)) continue;
-    out.push({
-      label: `${entry.what} ${rel === "" ? "." : `./${rel}`}`,
-      rel,
-    });
+    const shown = rel === "" ? "." : `./${rel}`;
+    out.push({ label: `${entry.what} ${shown}`, rel });
   }
   return out;
 }
