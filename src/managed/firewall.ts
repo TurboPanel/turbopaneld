@@ -337,7 +337,13 @@ async function reconcileLocked(
   if (!isValidIpv4Literal(listener.address)) return;
 
   const sources = resolveManagedPublicAllowedSources(payload);
-  if (sources.length === 0) return;
+  if (sources.length === 0) {
+    // No known peers: no rules (the documented behaviour). A chain a boot or an
+    // earlier apply left for this cluster would block the port for good, so
+    // once compose ran it is removed and the state converges to the apply.
+    if (phase === "after") await removeUnlocked(payload.managedId);
+    return;
+  }
 
   // Stage 6 fold: once the confirmed managed rule set (TP-FWD) already narrows
   // this listener to the same peers, the legacy chain is redundant. Drop this
@@ -525,29 +531,43 @@ async function scopeClosedLocked(
 
 /**
  * Daemon start (and Docker coming back): give every published public listener
- * a chain that accepts the peers the last apply allowed (none: drops everyone), unless its chain already scopes it. The rules
- * are gone after a host reboot while Docker republishes the port at once, so
- * the port must not wait for the next managed apply. The peers come from the
- * record the apply left (exactly what was installed before the reboot). One failure
- * never stops the others. Returns how many listeners are now scoped.
+ * a chain that accepts the peers the last apply allowed (none: drops everyone),
+ * unless its chain already scopes it. The rules are gone after a host reboot
+ * while Docker republishes the port at once, so the port must not wait for the
+ * next managed apply. The listeners are loaded INSIDE the firewall lock, so a
+ * concurrent apply's `after` phase can never be followed by a stale record
+ * recreating the chain it just removed. One failure never stops the others.
+ * Returns how many listeners are now scoped.
  */
-export async function scopePublicListenersClosedAtBoot(
+export function scopePublicListenersClosedAtBootLocked(
+  load: () => Promise<BootPublicListener[]>,
+): Promise<number> {
+  return withFirewallLock(async () => {
+    const listeners = await load();
+    const results = await mapSequential(listeners, async (listener) => {
+      try {
+        if (!isValidIpv4Literal(listener.address)) return false;
+        await scopeClosedLocked(listener);
+        return true;
+      } catch (err) {
+        logWarn(
+          "managed",
+          `boot firewall could not scope managed=${
+            sanitizeForLog(listener.managedId)
+          }: ${sanitizeForLog(err)}`,
+        );
+        return false;
+      }
+    });
+    return results.filter(Boolean).length;
+  });
+}
+
+/** {@link scopePublicListenersClosedAtBootLocked} for a list already in hand. */
+export function scopePublicListenersClosedAtBoot(
   listeners: BootPublicListener[],
 ): Promise<number> {
-  const results = await mapSequential(listeners, async (listener) => {
-    try {
-      if (!isValidIpv4Literal(listener.address)) return false;
-      await withFirewallLock(() => scopeClosedLocked(listener));
-      return true;
-    } catch (err) {
-      logWarn(
-        "managed",
-        `boot firewall could not scope managed=${
-          sanitizeForLog(listener.managedId)
-        }: ${sanitizeForLog(err)}`,
-      );
-      return false;
-    }
-  });
-  return results.filter(Boolean).length;
+  return scopePublicListenersClosedAtBootLocked(() =>
+    Promise.resolve(listeners)
+  );
 }

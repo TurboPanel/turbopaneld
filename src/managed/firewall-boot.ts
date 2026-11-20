@@ -28,7 +28,7 @@ import {
   type BootPublicListener,
   reconcileManagedPublicFirewall,
   resolveManagedPublicAllowedSources,
-  scopePublicListenersClosedAtBoot,
+  scopePublicListenersClosedAtBootLocked,
 } from "./firewall.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
 import { mapSequential } from "../util/sequential.ts";
@@ -44,6 +44,8 @@ type ListenerScopeRecord = {
   port: number;
   /** Sources the installed chain accepts, as the last apply left it. */
   peers: string[];
+  /** Read side only: the apply knew no peers and installed no rules. */
+  noRules?: boolean;
 };
 
 function scopePath(layout: LayoutPaths, managedId: string): string {
@@ -97,19 +99,27 @@ async function writeScope(
   }
 }
 
-function parseScope(
-  text: string,
-  managedId: string,
-): ListenerScopeRecord | null {
+/** What `listener-scope.json` held: nothing, a usable record, or garbage. */
+type ScopeRead =
+  | { kind: "none" }
+  | { kind: "invalid" }
+  | { kind: "record"; record: ListenerScopeRecord };
+
+function isValidPort(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 &&
+    value <= 65535;
+}
+
+function parseScope(text: string, managedId: string): ScopeRead {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
     if (
       typeof value.public !== "boolean" || typeof value.address !== "string" ||
-      typeof value.port !== "number"
+      !isValidPort(value.port)
     ) {
-      return null;
+      return { kind: "invalid" };
     }
-    let peers: string[] = [];
+    let peers: string[] | null = [];
     if (value.peers !== undefined) {
       if (
         Array.isArray(value.peers) && value.peers.length <= MAX_RECORD_PEERS &&
@@ -118,6 +128,7 @@ function parseScope(
         peers = value.peers;
       } else {
         // Closed, not open: the listener is still scoped, with no ACCEPTs.
+        peers = null;
         logWarn(
           "managed",
           `listener scope peers malformed managedId=${
@@ -127,29 +138,38 @@ function parseScope(
       }
     }
     return {
-      public: value.public,
-      address: value.address,
-      port: value.port,
-      peers,
+      kind: "record",
+      record: {
+        public: value.public,
+        address: value.address,
+        port: value.port,
+        peers: peers ?? [],
+        // A list that is present and valid but empty means "no rules": the
+        // apply installed nothing. Anything else is DROP only.
+        noRules: peers !== null && value.peers !== undefined &&
+          peers.length === 0,
+      },
     };
   } catch {
-    return null;
+    return { kind: "invalid" };
   }
 }
 
 async function readScope(
   layout: LayoutPaths,
   managedId: string,
-): Promise<ListenerScopeRecord | null> {
+): Promise<ScopeRead> {
+  let text: string;
   try {
-    return parseScope(
-      await Deno.readTextFile(scopePath(layout, managedId)),
-      managedId,
-    );
-  } catch {
-    // Applied by an older daemon (or unreadable): fall back to compose.
-    return null;
+    text = await Deno.readTextFile(scopePath(layout, managedId));
+  } catch (err) {
+    // Applied by an older daemon: fall back to compose. Any other failure
+    // means the file is there but unreadable.
+    return err instanceof Deno.errors.NotFound
+      ? { kind: "none" }
+      : { kind: "invalid" };
   }
+  return parseScope(text, managedId);
 }
 
 /**
@@ -169,11 +189,10 @@ export async function reconcileManagedFirewallBefore(
 ): Promise<void> {
   const next = scopeRecordFor(payload);
   if (next.public) {
-    const previous = await readScope(layout, payload.managedId);
-    const same = previous?.public === true &&
-      previous.address === next.address &&
-      previous.port === next.port;
-    const kept = same
+    const read = await readScope(layout, payload.managedId);
+    const previous = read.kind === "record" ? read.record : null;
+    const kept = previous?.public === true &&
+        previous.address === next.address && previous.port === next.port
       ? next.peers.filter((peer) => previous.peers.includes(peer))
       : [];
     if (
@@ -256,21 +275,29 @@ async function publicListenerOf(
   layout: LayoutPaths,
   managedId: string,
 ): Promise<BootPublicListener | null> {
-  const record = await readScope(layout, managedId);
-  if (record !== null) {
-    return record.public
-      ? {
-        managedId,
-        address: record.address,
-        port: record.port,
-        peers: record.peers,
-      }
-      : null;
+  const read = await readScope(layout, managedId);
+  if (read.kind === "record") {
+    const { record } = read;
+    // No known peers: apply installed no rules, so none are installed here
+    // either (a DROP-only chain would block the port for good).
+    if (!record.public || record.noRules) return null;
+    return {
+      managedId,
+      address: record.address,
+      port: record.port,
+      peers: record.peers,
+    };
   }
+  // No record (older daemon) or one that cannot be read: what compose
+  // publishes, DROP only; the next apply converges it. A record that is
+  // there but unreadable was meant as one, so any IPv4 bind counts then (its
+  // transport is unknown), otherwise only a publicly routable one.
   const published = await composePublish(layout, managedId);
-  return published !== null && isPubliclyRoutableIpv4(published.address)
-    ? { managedId, ...published, peers: [] }
-    : null;
+  if (published === null) return null;
+  const counts = read.kind === "invalid"
+    ? isValidIpv4Literal(published.address) && published.address !== "127.0.0.1"
+    : isPubliclyRoutableIpv4(published.address);
+  return counts ? { managedId, ...published, peers: [] } : null;
 }
 
 /** Every managed listener on disk that publishes a port publicly. */
@@ -285,20 +312,26 @@ export async function listBootPublicListeners(
 }
 
 /**
- * Close every public managed listener found on disk. No managed apps means no
- * firewall call at all. Never throws.
+ * Close every public managed listener found on disk. The records are read
+ * inside the firewall lock (see the firewall function). No managed apps means
+ * no firewall call at all. Never throws.
  */
 export async function scopeManagedPublicListenersAtBoot(
   layout: LayoutPaths,
-  scope: typeof scopePublicListenersClosedAtBoot =
-    scopePublicListenersClosedAtBoot,
+  scope: typeof scopePublicListenersClosedAtBootLocked =
+    scopePublicListenersClosedAtBootLocked,
 ): Promise<number> {
-  const listeners = await listBootPublicListeners(layout);
-  if (listeners.length === 0) return 0;
-  const scoped = await scope(listeners);
-  logInfo(
-    "managed",
-    `boot firewall scoped ${scoped} of ${listeners.length} public managed listener(s)`,
-  );
+  let found = 0;
+  const scoped = await scope(async () => {
+    const listeners = await listBootPublicListeners(layout);
+    found = listeners.length;
+    return listeners;
+  });
+  if (found > 0) {
+    logInfo(
+      "managed",
+      `boot firewall scoped ${scoped} of ${found} public managed listener(s)`,
+    );
+  }
   return scoped;
 }

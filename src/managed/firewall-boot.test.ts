@@ -35,13 +35,16 @@ async function putFile(dir: string, id: string, name: string, text: string) {
 
 test("a host with no managed apps scopes nothing and makes no firewall call", async () => {
   await withState(async (layout) => {
-    let calls = 0;
-    const scoped = await scopeManagedPublicListenersAtBoot(layout, () => {
-      calls += 1;
-      return Promise.resolve(0);
-    });
+    let loaded = -1;
+    const scoped = await scopeManagedPublicListenersAtBoot(
+      layout,
+      async (load) => {
+        loaded = (await load()).length;
+        return 0;
+      },
+    );
     assertEquals(scoped, 0);
-    assertEquals(calls, 0);
+    assertEquals(loaded, 0);
   });
 });
 
@@ -95,10 +98,14 @@ test("a boot with public listeners hands each to the firewall once", async () =>
       JSON.stringify({ public: true, address: "203.0.113.50", port: 45001 }),
     );
     const seen: string[][] = [];
-    const scoped = await scopeManagedPublicListenersAtBoot(layout, (l) => {
-      seen.push(l.map((entry) => `${entry.address}:${entry.port}`));
-      return Promise.resolve(l.length);
-    });
+    const scoped = await scopeManagedPublicListenersAtBoot(
+      layout,
+      async (load) => {
+        const l = await load();
+        seen.push(l.map((entry) => `${entry.address}:${entry.port}`));
+        return l.length;
+      },
+    );
     assertEquals(scoped, 1);
     assertEquals(seen, [["203.0.113.50:45001"]]);
   });
@@ -185,6 +192,49 @@ test("a malformed peers field falls back to DROP-only and still scopes the liste
       ]);
     });
   }
+});
+
+test("a record with an empty peers list gets no boot chain", async () => {
+  await withState(async (layout, dir) => {
+    await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
+    await reconcileManagedFirewallBefore(layout, publicPayload([]), noFirewall);
+    assertEquals((await scopeFile(dir)).peers, []);
+    assertEquals(await listBootPublicListeners(layout), []);
+  });
+});
+
+test("an invalid port makes the record unusable: compose, DROP only, any IPv4 bind", async () => {
+  for (const port of [0, 65536, 4500.5, "45001", null]) {
+    await withState(async (layout, dir) => {
+      await putFile(
+        dir,
+        ID_A,
+        "listener-scope.json",
+        JSON.stringify({
+          public: true,
+          address: "203.0.113.50",
+          port,
+          peers: ["198.51.100.7"],
+        }),
+      );
+      await putFile(
+        dir,
+        ID_A,
+        "docker-compose.yml",
+        'services:\n  db:\n    ports:\n      - "10.0.0.5:45001:5432"\n',
+      );
+      assertEquals(await listBootPublicListeners(layout), [
+        { managedId: ID_A, address: "10.0.0.5", port: 45001, peers: [] },
+      ]);
+    });
+  }
+});
+
+test("an unparseable record is not trusted and never widens: nothing in compose means nothing to close", async () => {
+  await withState(async (layout, dir) => {
+    await putFile(dir, ID_A, "listener-scope.json", "{not json");
+    assertEquals(await listBootPublicListeners(layout), []);
+  });
 });
 
 test("a crash between phases never leaves the record wider than the kernel", async () => {

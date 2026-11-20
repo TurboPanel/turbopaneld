@@ -12,6 +12,7 @@ import {
   removeManagedPublicFirewallBestEffort,
   resolveManagedPublicAllowedSources,
   scopePublicListenersClosedAtBoot,
+  scopePublicListenersClosedAtBootLocked,
   setManagedFirewallRunForTests,
 } from "./firewall.ts";
 
@@ -267,11 +268,17 @@ test("reconcile is a no-op without an IPv4 bind or known peer", async () => {
         transport: "public",
       },
     }));
-    // No peer address is known → never install an overly-broad fallback.
+    assertEquals(invocations, []);
+    // No peer address is known → never install an overly-broad fallback; a
+    // chain left from before is removed once compose ran (the `after` phase).
     await reconcileManagedPublicFirewall(publicPayload({
       replication: { role: "primary", username: "tp_repl" },
     }));
-    assertEquals(invocations, []);
+    assertEquals(invocations, [
+      `-D ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`,
+      `-F ${CHAIN}`,
+      `-X ${CHAIN}`,
+    ]);
   });
 });
 
@@ -728,6 +735,62 @@ test("boot scoping restores the saved peer ACCEPTs ahead of the DROP in one rest
     ).length,
     1,
   );
+});
+
+test("an apply with no known peers removes a stale chain after compose", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    // A boot (or an earlier apply) left a DROP-only chain for the listener.
+    await scopePublicListenersClosedAtBoot([BOOT_LISTENER]);
+    assertEquals(kernel.state.rules.length, 1);
+    const noPeers = publicPayload({
+      replication: undefined,
+      peers: [],
+      ingressSourceAddresses: [],
+    });
+    kernel.state.invocations.length = 0;
+    // The old container may still publish until compose: nothing touched.
+    await reconcileManagedPublicFirewall(noPeers, "before");
+    assertEquals(kernel.state.invocations, []);
+    await reconcileManagedPublicFirewall(noPeers, "after");
+    assertEquals(kernel.state.rules, []);
+    assertEquals(
+      kernel.state.invocations.includes(`iptables -X ${CHAIN}`),
+      true,
+    );
+    assertEquals(
+      kernel.state.invocations.some((line) => line.includes("-A " + CHAIN)),
+      false,
+    );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+});
+
+test("boot scoping loads its listeners only once it holds the firewall lock", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  const order: string[] = [];
+  try {
+    let release = () => {};
+    const held = withFirewallLock(async () => {
+      order.push("lock held");
+      await new Promise<void>((resolve) => release = resolve);
+    });
+    const scoping = scopePublicListenersClosedAtBootLocked(() => {
+      order.push("loaded");
+      return Promise.resolve([BOOT_LISTENER]);
+    });
+    await Promise.resolve();
+    assertEquals(order, ["lock held"]);
+    release();
+    await held;
+    assertEquals(await scoping, 1);
+    assertEquals(order, ["lock held", "loaded"]);
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
 });
 
 test("boot DROP chain is widened to the peer ACCEPTs by the next apply", async () => {
