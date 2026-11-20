@@ -371,15 +371,22 @@ repository) runs in this same sandbox (`image-prepare-sandbox.ts`: the daemon
 copies the vendored tool into `work/<id>/tools/`, the spec runs it, and the
 plan comes back as one regular file checked on its open handle); with no site
 owner the build runs in `turbopanel-tpbuild.slice`. The image build itself
-(`docker buildx`, Compose `build:`) stays on the Docker lane: the Engine's
-BuildKit, driven by `tp`, with no per-build core or memory limit. Not
-verified, only reasoned: `docker buildx build` has no CPU option for the build
-steps except `--cgroup-parent` (a Dockerfile front end setting; whether the
-pinned image builder front end passes it on was not tested), and `docker
-compose build` has only `--memory`, none for CPU. A parent cgroup with a quota
-would also need a new root helper verb. The image lane's transcript always
-says the limits cover the prepare step only; a Compose build says so when
-limits are set.
+(`docker buildx`) stays on the Docker lane (the Engine's BuildKit, driven by
+`tp`), but its CPU is capped: `ensureImageBuildSlice` (`build-sandbox.ts`) runs
+`sudo tp-host image-build-slice [cores]` first, which makes the transient
+`turbopanel-imagebuild.slice` (under `turbopanel.slice`) with a CPU quota from
+the same build-core limit (default half the host's cores), and prints its
+cgroup path; `imageBuildBuildxArgs` passes it as `--cgroup-parent`. Checked on
+Docker 29 / buildx 0.39 with systemd 257: the Engine's BuildKit honours a
+cgroup path with a leading slash (the build step's processes land in
+`.../turbopanel-imagebuild.slice/buildkit/<id>`); a systemd-style `x.slice:..`
+name is not honoured. A build never starts when the slice cannot be set up.
+The slice is shared by every image build on the server, so overlapping builds
+share one quota and the last build to start sets it. Memory is not limited for
+the build steps (the memory limit covers the prepare step only), and Compose
+`build:` is not limited at all (Compose offers no cgroup parent or CPU option
+for builds, only `--memory`); both say so in the transcript.
+`scripts/image-build-cgroup-proof.sh` proves placement and quota on a host.
 
 **Build limits (`build-limits-v1`).** The control plane sends the smallest
 core limit and the smallest memory limit set among the organization (per

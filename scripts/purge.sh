@@ -2308,7 +2308,7 @@ tp_finalize_turbopanel_units() {
     tp_record_skip "systemctl not installed"
     return 0
   fi
-  for _ftu_slice in turbopanel.slice turbopanel-containers.slice turbopaneld.slice; do
+  for _ftu_slice in turbopanel-imagebuild.slice turbopanel.slice turbopanel-containers.slice turbopaneld.slice; do
     tp_stop_disable_unit "$_ftu_slice"
   done
   tp_collect_unit_names

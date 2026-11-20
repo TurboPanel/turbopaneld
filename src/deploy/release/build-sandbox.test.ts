@@ -13,6 +13,8 @@ import {
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
+  ensureImageBuildSlice,
+  IMAGE_BUILD_CGROUP,
   observeBuildSlot,
   removeBuildTree,
   removeBuildWork,
@@ -931,4 +933,58 @@ test("the helper probe tells an old helper from a current one by its answer, and
     managed("build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"),
   );
   resetBuildHelperProbe();
+});
+
+test("the image-build slice is asked for with the build's core limit, or `-` when none is set", async () => {
+  const calls: string[][] = [];
+  const runFn: RunFn = (_command, args) => {
+    calls.push(args);
+    return Promise.resolve({
+      success: true,
+      stdout: `${IMAGE_BUILD_CGROUP}\n`,
+      stderr: "",
+    });
+  };
+  assertEquals(
+    await ensureImageBuildSlice(undefined, runFn),
+    IMAGE_BUILD_CGROUP,
+  );
+  assertEquals(
+    await ensureImageBuildSlice(
+      { cores: { cores: 1.5, source: "server" } },
+      runFn,
+    ),
+    IMAGE_BUILD_CGROUP,
+  );
+  assertEquals(calls, [
+    managed("image-build-slice", "-"),
+    managed("image-build-slice", "1.5"),
+  ]);
+});
+
+test("an image build never starts when the slice could not be set up or names another cgroup", async () => {
+  await assertRejects(
+    () =>
+      ensureImageBuildSlice(
+        undefined,
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "tp-host: image-build-slice: cannot start\n",
+          }),
+      ),
+    Error,
+    "could not set up the image build's CPU limit: tp-host: image-build-slice: cannot start",
+  );
+  await assertRejects(
+    () =>
+      ensureImageBuildSlice(
+        undefined,
+        () =>
+          Promise.resolve({ success: true, stdout: "/other\n", stderr: "" }),
+      ),
+    Error,
+    "could not set up the image build's CPU limit",
+  );
 });

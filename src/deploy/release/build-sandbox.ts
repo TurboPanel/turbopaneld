@@ -45,6 +45,7 @@ import {
   readHostCapacity,
   resolveBuildLimits,
 } from "./build-limits.ts";
+import { roundCores } from "../../contracts/build-limits.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -418,6 +419,44 @@ export async function removeBuildWork(
       `could not remove the build tree ${work.workDir}: ${message}`,
     );
   }
+}
+
+/**
+ * The cgroup every container image build runs under (`tp-host
+ * image-build-slice` prints it; its quota is the build-core budget). Passed as
+ * `buildx build --cgroup-parent`: the Engine's BuildKit puts each build step's
+ * container below it, so the slice's CPU quota caps all image builds together.
+ */
+export const IMAGE_BUILD_CGROUP =
+  "/turbopanel.slice/turbopanel-imagebuild.slice";
+
+/**
+ * `tp-host image-build-slice [cores]`: create the image-build slice if needed
+ * and set its CPU quota from the build's core limit (the same number
+ * `build-run` takes; none set means half the host's cores, decided by
+ * `tp-host`). Idempotent. Returns the cgroup path for `--cgroup-parent`; throws
+ * when the slice could not be made, so an image build never starts without it.
+ */
+export async function ensureImageBuildSlice(
+  limits: BuildLimits | undefined,
+  runFn: RunFn = runPrivileged,
+): Promise<string> {
+  const cores = limits?.cores === undefined
+    ? "-"
+    : String(roundCores(limits.cores.cores));
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "image-build-slice", cores], MANAGED),
+  );
+  const printed = result.stdout.trim().split("\n").at(-1) ?? "";
+  if (!result.success || printed !== IMAGE_BUILD_CGROUP) {
+    throw new Error(
+      `could not set up the image build's CPU limit: ${
+        result.stderr.trim() || "image-build-slice failed"
+      }`,
+    );
+  }
+  return printed;
 }
 
 /** `tp-host build-return <id>`: the tree back to the daemon, unit gone. */

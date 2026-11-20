@@ -232,6 +232,14 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `$P/tp-test/ip-route-kernel`; for `tp0` routes, `tp0`'s own subnet is
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
+  - sets up the image-build CPU slice only through `image-build-slice
+    [cores|-]` (cores is the same number `build-run` takes, validated the same
+    way; nothing else in argv): `systemctl set-property --runtime
+    turbopanel-imagebuild.slice CPUAccounting=yes CPUQuota=<N>%` (N from
+    `tp_build_cpu_quota`, default half the host's cores) then `systemctl start`,
+    idempotent, outside test mode it checks the slice's `cpu.max` and fails
+    closed, and it prints the cgroup path `/turbopanel.slice/turbopanel-imagebuild.slice`
+    the daemon passes to `docker buildx build --cgroup-parent`;
   - starts tenant builds only through
     `build-run <build-id> <project-id> <owner> [cores [memory-bytes [swap]]]` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid

@@ -4468,6 +4468,12 @@ BUILD_CACHE_MAX_KB=6291456
 BUILD_TREE_MAX_INODES=2000000
 BUILD_CACHE_MAX_AGE_DAYS=30
 BUILD_WATCH_SEC=10
+# The cgroup parent of every container image build (the Docker lane: `buildx
+# build --cgroup-parent`, run by the daemon). One shared slice under
+# turbopanel.slice carrying a CPU quota worked out like a native build's
+# (tp_build_cpu_quota); image-build-slice sets it, purge.sh removes it.
+IMAGE_BUILD_SLICE="turbopanel-imagebuild.slice"
+IMAGE_BUILD_CGROUP="/turbopanel.slice/$IMAGE_BUILD_SLICE"
 if [ -n "$TP_TEST" ]; then
   BUILD_WORK_MAX_KB="${TP_TEST_WORK_MAX_KB:-$BUILD_WORK_MAX_KB}"
   BUILD_TREE_MAX_INODES="${TP_TEST_TREE_MAX_INODES:-$BUILD_TREE_MAX_INODES}"
@@ -4822,6 +4828,40 @@ tp_build_cpu_quota() {
     if (n < 1) n = 1
     printf "%d%%\n", int(n * 100 + 0.5)
   }'
+}
+
+# Ensure the image-build slice exists with the CPU quota for [CORES] (the same
+# 1..999 rule and the same clamp as build-run's fourth argument; `-` or none
+# means half the host's cores) and print its cgroup path, the value the daemon
+# passes as `buildx build --cgroup-parent`. Idempotent: the property is set
+# with --runtime (it lives in /run, so it never outlives a reboot), setting
+# the same quota again changes nothing, and the slice is started so its
+# cpu.max exists. Fails closed: when the kernel's cpu.max does not show the
+# quota afterwards, the build must not start unlimited.
+tp_verb_image_build_slice() {
+  [ $# -le 1 ] || tp_die "image-build-slice: only image-build-slice [CORES]"
+  _ib_cores=""
+  if [ $# -eq 1 ] && [ "$1" != "-" ]; then
+    tp_build_cores_ok "$1" || tp_die "image-build-slice: refusing core limit $1"
+    _ib_cores="$1"
+  fi
+  _ib_quota="$(tp_build_cpu_quota "$_ib_cores")"
+  case "$_ib_quota" in
+    [1-9]*%) ;;
+    *) tp_die "image-build-slice: cannot work out the CPU limit" ;;
+  esac
+  tp_run systemctl set-property --runtime "$IMAGE_BUILD_SLICE" \
+    CPUAccounting=yes CPUQuota="$_ib_quota" ||
+    tp_die "image-build-slice: cannot set the CPU limit on $IMAGE_BUILD_SLICE"
+  tp_run systemctl start "$IMAGE_BUILD_SLICE" ||
+    tp_die "image-build-slice: cannot start $IMAGE_BUILD_SLICE"
+  if [ -z "$TP_TEST" ]; then
+    _ib_want="$(printf '%s\n' "${_ib_quota%\%}" | awk '{ printf "%d 100000\n", $1 * 1000 }')"
+    _ib_got="$(cat "/sys/fs/cgroup$IMAGE_BUILD_CGROUP/cpu.max" 2>/dev/null || true)"
+    [ "$_ib_got" = "$_ib_want" ] ||
+      tp_die "image-build-slice: $IMAGE_BUILD_SLICE has cpu.max '$_ib_got', expected '$_ib_want' (is cgroup v2 mounted with the cpu controller?)"
+  fi
+  printf '%s\n' "$IMAGE_BUILD_CGROUP"
 }
 
 tp_verb_build_run() {
@@ -7080,6 +7120,7 @@ case "$_verb" in
   principal-remove) tp_verb_principal_remove "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
   build-run) tp_verb_build_run "$@" ;;
+  image-build-slice) tp_verb_image_build_slice "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
   build-watch) tp_verb_build_watch "$@" ;;
   build-handover) tp_verb_build_handover "$@" ;;

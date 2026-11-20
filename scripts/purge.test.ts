@@ -1212,6 +1212,15 @@ test("the build slice is stopped and its unit file removed although it is not tu
   assertEquals(await exists(join(units, "tpother.slice")), true);
 });
 
+test("the image-build slice is stopped first, before its parent slice, in the final unit step", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const finalize = extractFunction(source, "tp_finalize_turbopanel_units") ??
+    "";
+  const imagebuild = finalize.indexOf("turbopanel-imagebuild.slice");
+  assert(imagebuild >= 0, finalize);
+  assert(imagebuild < finalize.indexOf(" turbopanel.slice"), finalize);
+});
+
 const TUNNEL_UNITS = [
   "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.service",
   "turbopanel-tunnel-1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e.service",

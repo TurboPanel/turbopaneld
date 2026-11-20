@@ -1359,3 +1359,59 @@ test("removing a site owner removes their build caches, and nobody else's", asyn
     assertEquals(await exists(other), true);
   });
 });
+
+test("image-build-slice sets the slice's CPU quota from the build cores, like build-run, and prints its cgroup", async () => {
+  await withHost(async (host) => {
+    const cases: Array<[string[], Record<string, string>, string]> = [
+      // Nothing requested: half of the fixture's 8 cores.
+      [[], {}, "400%"],
+      [["-"], {}, "400%"],
+      [["-"], { TP_TEST_CORES: "5" }, "200%"],
+      [["2"], {}, "200%"],
+      [["1.5"], {}, "150%"],
+      // Above the host's cores: the host's cores.
+      [["64"], {}, "800%"],
+      [["999.99"], { TP_TEST_CORES: "3" }, "300%"],
+    ];
+    await forEachSequential(cases, async ([args, env, quota]) => {
+      const result = await host.run(["image-build-slice", ...args], "", env);
+      assertEquals(result.code, 0, result.stderr);
+      assertStringIncludes(
+        result.stdout,
+        `EXEC [systemctl] [set-property] [--runtime] [turbopanel-imagebuild.slice] [CPUAccounting=yes] [CPUQuota=${quota}]\n`,
+      );
+      assertStringIncludes(
+        result.stdout,
+        "EXEC [systemctl] [start] [turbopanel-imagebuild.slice]\n",
+      );
+      assertEquals(
+        result.stdout.trim().split("\n").at(-1),
+        "/turbopanel.slice/turbopanel-imagebuild.slice",
+      );
+    });
+  });
+});
+
+test("image-build-slice is idempotent: the same call prints the same commands", async () => {
+  await withHost(async (host) => {
+    const first = await host.run(["image-build-slice", "2"]);
+    const second = await host.run(["image-build-slice", "2"]);
+    assertEquals(first.code, 0, first.stderr);
+    assertEquals(second.stdout, first.stdout);
+  });
+});
+
+test("image-build-slice refuses a core limit build-run would refuse, and extra arguments", async () => {
+  await withHost(async (host) => {
+    await forEachSequential([
+      ["0"],
+      ["0.5"],
+      ["1000"],
+      ["1.234"],
+      ["01"],
+      ["2;reboot"],
+      ["-1"],
+      ["2", "3"],
+    ], (args) => refused(host, ["image-build-slice", ...args]));
+  });
+});

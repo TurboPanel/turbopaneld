@@ -1,5 +1,5 @@
 import { dirname, join } from "@std/path";
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -18,6 +18,7 @@ import {
   imageBuildFrontendLayoutDir,
   imageBuildFrontendRef,
   imageBuildImageTag,
+  imageBuildLimitsNotice,
   runImageBuildBuild,
 } from "./image-build.ts";
 
@@ -194,10 +195,41 @@ test("imageBuildBuildxArgs targets the Engine builder with the pinned frontend",
     "--load",
     "/w/checkout",
   ]);
+  // With a cgroup parent, only that option is added.
+  const limited = imageBuildBuildxArgs(
+    {
+      workingDir: "/w/checkout",
+      cacheKey: "proj-1",
+      imageTag: "turbopanel-app/web:rel-1",
+      tools: SEAM_TOOLS,
+    },
+    "/w/scratch/railpack-plan.json",
+    "/turbopanel.slice/x.slice",
+  );
+  assertEquals(limited.filter((arg) => !args.includes(arg)), [
+    "--cgroup-parent",
+    "/turbopanel.slice/x.slice",
+  ]);
+  assertEquals(limited.indexOf("--cgroup-parent"), 5);
   // Never a host network or an insecure entitlement: the gate's strict profile
   // refuses host-network builds.
   assertEquals(args.some((arg) => arg.startsWith("--network")), false);
   assertEquals(args.some((arg) => arg.startsWith("--allow")), false);
+});
+
+test("the image build transcript names the core limit that holds for the build steps", () => {
+  assertEquals(
+    imageBuildLimitsNotice({ cores: { cores: 2, source: "server" } }),
+    "Image build steps limited to 2 cores (server limit), shared by all image builds on this server; the memory limit applies to the prepare step only",
+  );
+  assertStringIncludes(
+    imageBuildLimitsNotice({ cores: { cores: 1, source: "service" } }),
+    "1 core (service limit)",
+  );
+  assertStringIncludes(
+    imageBuildLimitsNotice(),
+    "half the server's cores (default)",
+  );
 });
 
 test("imageBuildFrontendRef names the frontend by digest only", () => {

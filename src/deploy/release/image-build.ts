@@ -74,7 +74,8 @@ import { assertFileSha256 } from "../../orchestration/download-verify.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import { isReservedBuildEnvKey, sandboxBuildEnvironment } from "./build.ts";
-import { isSpecEnvName } from "./build-sandbox.ts";
+import { ensureImageBuildSlice, isSpecEnvName } from "./build-sandbox.ts";
+import type { BuildLimits } from "./build-limits.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import {
   type ImagePrepareSandbox,
@@ -776,6 +777,8 @@ export type RunImageBuildBuildDeps = {
   ) => Promise<void>;
   /** Every `docker` call; defaults to the shared CLI path ({@link runDockerStreamed}). */
   runDocker?: RunDockerStreamedFn;
+  /** The image-build slice setup; defaults to `tp-host image-build-slice`. */
+  ensureImageBuildSlice?: typeof ensureImageBuildSlice;
   /** Non-docker helper commands (`tar`); defaults to a plain spawn. */
   runCommand?: EnsureBuildkitImageBuildDeps["runCommand"];
   inspectImage?: (imageTag: string) => Promise<string | undefined>;
@@ -904,16 +907,24 @@ async function ensureFrontendImage(
 }
 
 /**
- * The build limits hold for the prepare step (it runs in the build sandbox).
- * The image's own build steps run in the Docker Engine's builder (cgroup driver
- * systemd), driven by `docker buildx build`, which takes no CPU or memory
- * option for them apart from `--cgroup-parent`. That option is a Dockerfile
- * front end setting; whether the pinned image builder front end passes it on
- * is not verified, and a parent cgroup with a quota would need a new root
- * helper verb, so no limit is set there. The transcript says so.
+ * The core limit holds for the image's own build steps as well as the prepare
+ * step: `tp-host image-build-slice` makes a cgroup whose CPU quota is the
+ * build's core limit, and `docker buildx build --cgroup-parent` puts the
+ * Engine's BuildKit step containers below it (checked on Docker 29 with the
+ * systemd cgroup driver: a cgroup path is honoured; a systemd-style slice name
+ * only makes a literal directory under system.slice, outside the quota). The slice is shared by every image build on the server, so
+ * overlapping builds share one quota. Memory is not limited there: the memory
+ * limit still covers the prepare step only.
  */
-export const DOCKER_BUILDER_LIMITS_NOTICE =
-  "Build limits apply to the prepare step; the image build steps run in Docker's builder, which this server does not limit per build";
+export function imageBuildLimitsNotice(limits?: BuildLimits): string {
+  const cores = limits?.cores;
+  const coresText = cores === undefined
+    ? "half the server's cores (default)"
+    : `${cores.cores} ${
+      cores.cores === 1 ? "core" : "cores"
+    } (${cores.source} limit)`;
+  return `Image build steps limited to ${coresText}, shared by all image builds on this server; the memory limit applies to the prepare step only`;
+}
 
 /** `docker buildx build` argv for one image build (Engine builder, `--load`). */
 export function imageBuildBuildxArgs(
@@ -922,6 +933,7 @@ export function imageBuildBuildxArgs(
     "workingDir" | "cacheKey" | "imageTag" | "tools"
   >,
   planPath: string,
+  cgroupParent?: string,
 ): string[] {
   return [
     "buildx",
@@ -931,6 +943,8 @@ export function imageBuildBuildxArgs(
     "--builder",
     "default",
     "--progress=plain",
+    // The cgroup the build steps run under (the image-build slice's CPU quota).
+    ...(cgroupParent === undefined ? [] : ["--cgroup-parent", cgroupParent]),
     // A single-platform image in the store, without attestation manifests.
     "--provenance=false",
     "--sbom=false",
@@ -1101,7 +1115,15 @@ export async function runImageBuildBuild(
     );
   }
 
-  if (params.sandbox) params.onOutput?.("stdout", DOCKER_BUILDER_LIMITS_NOTICE);
+  let cgroupParent: string | undefined;
+  if (params.sandbox) {
+    const limits = params.sandbox.work.buildLimits;
+    cgroupParent = await (deps?.ensureImageBuildSlice ?? ensureImageBuildSlice)(
+      limits,
+      params.sandbox.runFn,
+    );
+    params.onOutput?.("stdout", imageBuildLimitsNotice(limits));
+  }
 
   await ensureFrontendImage(
     params,
@@ -1109,7 +1131,7 @@ export async function runImageBuildBuild(
     deps?.runCommand ?? runDefault,
   );
 
-  const args = imageBuildBuildxArgs(params, planPath);
+  const args = imageBuildBuildxArgs(params, planPath, cgroupParent);
   params.onOutput?.(
     "stdout",
     `$ docker buildx build (${

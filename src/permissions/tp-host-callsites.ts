@@ -1690,6 +1690,11 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice",cores],MANAGED',
+    { argv: ["image-build-slice", "-"] },
+    { argv: ["image-build-slice", "1.5"] },
+  ),
+  tpHost(
     'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',
     { argv: ["build-return", BUILD_ID], setup: BUILD_TREE },
   ),

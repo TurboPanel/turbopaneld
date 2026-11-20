@@ -372,3 +372,10 @@ in CI, and checked when it is present. A path that is not a repo file (a
 command run elsewhere, an installed path) goes in `ALLOWLIST` in the script
 with a reason. It is part of `deno task verify:static` and the `verify.yml`
 job.
+
+`scripts/image-build-cgroup-proof.sh` is a root-only canary check, run by hand on
+a managed host with Docker: it runs `tp-host image-build-slice`, builds a
+CPU-burning throwaway image with the same `--cgroup-parent` the daemon passes,
+and proves the build step lands in `turbopanel-imagebuild.slice` and its CPU time
+stays within the quota. `purge.sh` stops that slice with the other TurboPanel
+slices; it is a runtime-only unit, so there is no file to remove.

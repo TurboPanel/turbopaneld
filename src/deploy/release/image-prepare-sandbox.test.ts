@@ -13,7 +13,11 @@ import {
 } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import type { DockerCliResult } from "../docker-cli.ts";
-import type { BuildWork, SandboxedBuildParams } from "./build-sandbox.ts";
+import {
+  type BuildWork,
+  IMAGE_BUILD_CGROUP,
+  type SandboxedBuildParams,
+} from "./build-sandbox.ts";
 import {
   IMAGE_PLAN_MAX_BYTES,
   imagePrepareCommand,
@@ -228,6 +232,7 @@ test("an image build on a managed host prepares in the sandbox with the build's 
         );
       },
       inspectImage: () => Promise.resolve("sha256:image"),
+      ensureImageBuildSlice: () => Promise.resolve(IMAGE_BUILD_CGROUP),
     });
     assertEquals(daemonRan, 0);
     assertEquals(seen.length, 1);
@@ -249,6 +254,11 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     assert(plan.startsWith(scratchDir), plan);
     assertEquals((await Deno.readTextFile(plan)).trim(), PLAN);
     assertEquals(build.at(-1), work.checkoutDir);
+    // The build steps run under the image-build slice's CPU quota.
+    assertEquals(
+      build[build.indexOf("--cgroup-parent") + 1],
+      IMAGE_BUILD_CGROUP,
+    );
   });
 });
 
