@@ -4,6 +4,7 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { safeUrlPath } from "../contracts/config-values.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import { logInfo } from "../util/logger.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
   LABEL_ENVIRONMENT,
@@ -41,7 +42,9 @@ function addLabel(
  * namespace. Compose refuses `networks` on it, so the platform never adds a
  * network, alias or attachment to such a service.
  */
-function sharesNetworkNamespace(service: Record<string, unknown>): boolean {
+export function sharesNetworkNamespace(
+  service: Record<string, unknown>,
+): boolean {
   const mode = service.network_mode;
   return typeof mode === "string" && mode.trim().length > 0;
 }
@@ -375,6 +378,7 @@ export function buildHostingLabelsFragment(input: {
   // The overlay merges after the tenant's compose files, so these win.
   stampIdentityLabels(services, resolved, payload);
 
+  let ingressAttached = false;
   for (const hosting of hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");
     const resolvedService = requireResolvedService(
@@ -384,7 +388,13 @@ export function buildHostingLabelsFragment(input: {
     // A service in another namespace cannot be reached through the ingress
     // network: it gets no route labels and no network. The container that
     // owns the namespace carries the hosting instead.
-    if (sharesNetworkNamespace(resolvedService)) continue;
+    if (sharesNetworkNamespace(resolvedService)) {
+      logInfo(
+        "deploy",
+        `hosting ${hosting.hostingId} skipped: ${hosting.composeServiceName} sets network_mode and cannot join the ingress network`,
+      );
+      continue;
+    }
     const name = hosting.composeServiceName;
     if (!services[name]) {
       services[name] = {
@@ -418,11 +428,12 @@ export function buildHostingLabelsFragment(input: {
         ingressNetwork,
       ),
     };
+    ingressAttached = true;
   }
 
   // Only declare the external ingress network when something actually routes
   // through it — bare container deploys must not require Traefik/network.
-  if (hostings.length > 0) {
+  if (ingressAttached) {
     networks[ingressNetwork] = { external: true };
   }
 

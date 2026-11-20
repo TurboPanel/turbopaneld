@@ -7,6 +7,7 @@
  */
 
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import { sharesNetworkNamespace } from "./compose-labels.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 
 // Docker's default docker0 bridge gateway when `ip addr` lookup fails.
@@ -99,8 +100,12 @@ export function buildSiteReachabilityFragment(
 
   const services: Record<string, Record<string, unknown>> = {};
   for (const name of resolved.serviceNames) {
+    // A service in another namespace shares that container's hosts file
+    // (Docker refuses extra_hosts on it); the namespace owner carries the
+    // mapping for both.
+    const shared = sharesNetworkNamespace(resolved.services[name] ?? {});
     services[name] = {
-      extra_hosts: [HOST_DOCKER_INTERNAL],
+      ...(shared ? {} : { extra_hosts: [HOST_DOCKER_INTERNAL] }),
       environment: { ...envEntries },
     };
   }

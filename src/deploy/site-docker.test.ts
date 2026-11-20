@@ -200,3 +200,31 @@ test("apacheSiteConfig adds docker VirtualHost address when bind provided", () =
   assertStringIncludes(conf, "Listen 172.17.0.1:18081");
   assertStringIncludes(conf, "<VirtualHost 127.0.0.1:18081 172.17.0.1:18081>");
 });
+
+test("buildSiteReachabilityFragment leaves extra_hosts off services in another network namespace", () => {
+  const services = {
+    vpn: { image: "vpn:latest" },
+    app: { image: "app:latest", network_mode: "service:vpn" },
+    other: { image: "app:latest", network_mode: "container:x" },
+    host: { image: "app:latest", network_mode: "host" },
+  };
+  const fragment = buildSiteReachabilityFragment(
+    [{ composeServiceName: "vpn", listenPort: 8080 }],
+    {
+      services,
+      serviceNames: Object.keys(services),
+    },
+  );
+  assertEquals(fragment.services?.vpn?.extra_hosts, [
+    "host.docker.internal:host-gateway",
+  ]);
+  for (const name of ["app", "other", "host"]) {
+    assertEquals("extra_hosts" in (fragment.services?.[name] ?? {}), false);
+    assertEquals(
+      typeof (fragment.services?.[name]?.environment as Record<string, string>)[
+        SITE_ENDPOINTS_ENV
+      ],
+      "string",
+    );
+  }
+});

@@ -678,10 +678,10 @@ for (const mode of sharedNamespaceModes) {
     assertEquals(labels["traefik.enable"], undefined);
     // The service that owns the namespace still joins the managed network.
     assertEquals(fragment.services?.vpn?.networks, [MANAGED_NETWORK]);
-    assertEquals(
-      Object.keys(fragment.networks as Record<string, unknown>).sort(),
-      [HOSTING_INGRESS_NETWORK, MANAGED_NETWORK].sort(),
-    );
+    // The only hosting was skipped, so the ingress network is not declared.
+    assertEquals(Object.keys(fragment.networks as Record<string, unknown>), [
+      MANAGED_NETWORK,
+    ]);
   });
 }
 
