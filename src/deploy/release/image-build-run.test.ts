@@ -1,5 +1,5 @@
 import { dirname, join } from "@std/path";
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -18,6 +18,7 @@ import {
   imageBuildFrontendLayoutDir,
   imageBuildFrontendRef,
   imageBuildImageTag,
+  imageBuildLimitsNotice,
   runImageBuildBuild,
 } from "./image-build.ts";
 
@@ -194,10 +195,35 @@ test("imageBuildBuildxArgs targets the Engine builder with the pinned frontend",
     "--load",
     "/w/checkout",
   ]);
+  // With a cgroup parent, only that option is added.
+  const limited = imageBuildBuildxArgs(
+    {
+      workingDir: "/w/checkout",
+      cacheKey: "proj-1",
+      imageTag: "turbopanel-app/web:rel-1",
+      tools: SEAM_TOOLS,
+    },
+    "/w/scratch/railpack-plan.json",
+    "/turbopanel.slice/x.slice",
+  );
+  assertEquals(limited.filter((arg) => !args.includes(arg)), [
+    "--cgroup-parent",
+    "/turbopanel.slice/x.slice",
+  ]);
+  assertEquals(limited.indexOf("--cgroup-parent"), 5);
   // Never a host network or an insecure entitlement: the gate's strict profile
   // refuses host-network builds.
   assertEquals(args.some((arg) => arg.startsWith("--network")), false);
   assertEquals(args.some((arg) => arg.startsWith("--allow")), false);
+});
+
+test("the image build transcript says the steps are not CPU limited yet, and names the slice's cores", () => {
+  assertEquals(
+    imageBuildLimitsNotice(2),
+    "Image build steps are not CPU limited yet; only the prepare step is. This build's slice is set to 2 cores for when they are",
+  );
+  assertStringIncludes(imageBuildLimitsNotice(1), "set to 1 core for");
+  assertStringIncludes(imageBuildLimitsNotice(1.5), "set to 1.5 cores for");
 });
 
 test("imageBuildFrontendRef names the frontend by digest only", () => {

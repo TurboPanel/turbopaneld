@@ -13,9 +13,12 @@ import {
   buildSpecCwd,
   type BuildWork,
   createBuildWorkDir,
+  ensureImageBuildSlice,
+  imageBuildCgroup,
   observeBuildSlot,
   removeBuildTree,
   removeBuildWork,
+  removeImageBuildSlice,
   renderBuildSpec,
   resetBuildHelperProbe,
   resolveBuildWork,
@@ -931,4 +934,91 @@ test("the helper probe tells an old helper from a current one by its answer, and
     managed("build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"),
   );
   resetBuildHelperProbe();
+});
+
+test("an image build's slice is asked for by build id with the core limit, or `-` when none is set", async () => {
+  const calls: string[][] = [];
+  const cgroup = imageBuildCgroup("svc1-20260927-120000");
+  const runFn: RunFn = (_command, args) => {
+    calls.push(args);
+    return Promise.resolve({
+      success: true,
+      stdout: `${cgroup}\n${args.at(-1) === "-" ? "4" : "1.5"}\n`,
+      stderr: "",
+    });
+  };
+  assertEquals(
+    cgroup,
+    "/turbopanel.slice/turbopanel-imagebuild.slice/turbopanel-imagebuild-svc1_20260927_120000.slice",
+  );
+  assertEquals(
+    await ensureImageBuildSlice("svc1-20260927-120000", undefined, runFn),
+    { cgroup, cores: 4 },
+  );
+  assertEquals(
+    await ensureImageBuildSlice(
+      "svc1-20260927-120000",
+      { cores: { cores: 1.5, source: "server" } },
+      runFn,
+    ),
+    { cgroup, cores: 1.5 },
+  );
+  assertEquals(calls, [
+    managed("image-build-slice", "svc1-20260927-120000", "-"),
+    managed("image-build-slice", "svc1-20260927-120000", "1.5"),
+  ]);
+});
+
+test("an image build never starts when its slice could not be set up or is not the one asked for", async () => {
+  const id = "svc1-20260927-120000";
+  await assertRejects(
+    () =>
+      ensureImageBuildSlice(
+        id,
+        undefined,
+        () =>
+          Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "tp-host: image-build-slice: cannot start\n",
+          }),
+      ),
+    Error,
+    "could not set up the image build's CPU slice: tp-host: image-build-slice: cannot start",
+  );
+  const answer = (stdout: string) => () =>
+    Promise.resolve({ success: true, stdout, stderr: "" });
+  await assertRejects(
+    () => ensureImageBuildSlice(id, undefined, answer("/other\n4\n")),
+    Error,
+    "could not set up the image build's CPU slice",
+  );
+  // An older tp-host that does not know the verb prints no core count.
+  await assertRejects(
+    () =>
+      ensureImageBuildSlice(
+        id,
+        undefined,
+        answer(`${imageBuildCgroup(id)}\n`),
+      ),
+    Error,
+    "could not set up the image build's CPU slice",
+  );
+});
+
+test("a build's slice is removed by id, every one with no id, and a failing removal is left for the next sweep", async () => {
+  const { runFn, calls } = recordingRunFn();
+  await removeImageBuildSlice("svc1-20260927-120000", runFn);
+  await removeImageBuildSlice(undefined, runFn);
+  assertEquals(calls, [
+    managed("image-build-slice-remove", "svc1-20260927-120000"),
+    managed("image-build-slice-remove"),
+  ]);
+  await removeImageBuildSlice("x", () => Promise.reject(new Error("no sudo")));
+  // A verb that exits non-zero is logged and left for the sweep, never thrown.
+  await removeImageBuildSlice(
+    "x",
+    () =>
+      Promise.resolve({ success: false, code: 1, stdout: "", stderr: "boom" }),
+  );
 });

@@ -2302,12 +2302,28 @@ tp_remove_docker_containers() {
   return 0
 }
 
+# Container image builds run in one slice per build below
+# turbopanel-imagebuild.slice (tp-host image-build-slice). They only exist as
+# runtime properties: stop them, then remove the drop-ins `systemctl
+# set-property --runtime` left in the control directory.
+TP_SYSTEMD_CONTROL_DIR="${TP_SYSTEMD_CONTROL_DIR:-/run/systemd/system.control}"
+tp_remove_image_build_slices() {
+  tp_run "stop the image build slices" systemctl stop \
+    'turbopanel-imagebuild-*.slice' turbopanel-imagebuild.slice || true
+  for _rib_dir in "$TP_SYSTEMD_CONTROL_DIR"/turbopanel-imagebuild*.slice.d; do
+    [ -d "$_rib_dir" ] || continue
+    tp_run "remove $_rib_dir" rm -rf "$_rib_dir" || true
+  done
+  return 0
+}
+
 tp_finalize_turbopanel_units() {
   tp_print_step "▸" "Units (after Docker)"
   if ! tp_has_tool systemctl; then
     tp_record_skip "systemctl not installed"
     return 0
   fi
+  tp_remove_image_build_slices
   for _ftu_slice in turbopanel.slice turbopanel-containers.slice turbopaneld.slice; do
     tp_stop_disable_unit "$_ftu_slice"
   done

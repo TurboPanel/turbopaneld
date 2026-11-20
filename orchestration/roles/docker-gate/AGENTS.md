@@ -82,6 +82,11 @@ engine would clean (`..`, `//`); an API version prefix other than one
 refuses (`body-unparseable` with `empty`, `invalid-utf8`, `invalid-json`,
 `too-deep`, `duplicate-key` or `non-ascii-key`).
 
+The legacy `/build` refuses a cgroup parent (rule `build-cgroup-parent`), but
+`docker buildx build` sends `cgroupparent` over `/grpc`, which the gate cannot
+see. The daemon passes each image build's slice that way, so the gate does not
+check it.
+
 ## Bind sources: allowed places, and the start-time re-check
 
 **Allowed places under the site owners' homes.** A bind source that resolves

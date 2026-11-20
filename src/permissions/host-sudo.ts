@@ -69,6 +69,8 @@ export const TP_HOST_ONLY_VERBS: ReadonlySet<string> = new Set([
   "principal-remove",
   "build-run",
   "build-return",
+  "image-build-slice",
+  "image-build-slice-remove",
   "php-test",
   "cert-dates",
   "cert-export",
