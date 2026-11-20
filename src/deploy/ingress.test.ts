@@ -43,6 +43,7 @@ import {
   inspectHostingIngressContainer,
   listPersistedTcpUdpServiceIds,
   parseIngressNetworkGateways,
+  plannedFallbackForSites,
   readAcmeModeHostnames,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
@@ -59,6 +60,7 @@ import {
   setEnsureHostingCaddyRuntimeForTest,
   setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
+  siteBindAddresses,
   siteSnippet,
   snippetSiteAddresses,
   sortCaddySiteRoutes,
@@ -846,7 +848,12 @@ for (const sendViaHeader of [true, false, undefined]) {
       const fallback = await Deno.readTextFile(
         join(sitesDir, "00-fallback.caddy"),
       );
-      assertEquals(fallback, hostingFallbackSnippet(true, sendViaHeader));
+      // The deployed site binds to its own address, so its set is answered too.
+      assertEquals(
+        fallback,
+        hostingFallbackSnippet(true, sendViaHeader, siteBindAddresses([site])),
+      );
+      assertStringIncludes(fallback, "bind 203.0.113.10");
       for (const text of [site, fallback]) {
         assertEquals(/^\s*-Via$/m.test(text), sendViaHeader !== true);
         assertEquals(/^\s*-Server$/m.test(text), true);
@@ -877,7 +884,13 @@ for (const hide of [true, false]) {
       const fallback = await Deno.readTextFile(
         join(layout.configDir, "hosting", "sites", "00-fallback.caddy"),
       );
-      assertEquals(fallback, hostingFallbackSnippet(hide));
+      assertEquals(
+        fallback,
+        hostingFallbackSnippet(hide, undefined, {
+          http: ["203.0.113.10"],
+          https: ["203.0.113.10"],
+        }),
+      );
       assertEquals(fallback.includes("-Server"), hide);
     } finally {
       restore();
@@ -5767,6 +5780,146 @@ test("ensureHostingFallback leaves live files untouched when Caddy refuses, and 
       0,
     );
     refuse = false;
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("siteBindAddresses lists each bound address once per scheme, sorted, across overlapping sets, and ignores anything but IP literals", () => {
+  const addresses = siteBindAddresses([
+    "http://a.test {\n  bind 127.0.0.1 10.0.0.5\n  respond ok\n}\n\na.test {\n  bind 127.0.0.1 10.0.0.5\n  tls internal\n}\n",
+    "https://b.test {\n  bind 10.0.0.5 127.0.0.1\n}\n",
+    "c.test {\n  bind [fd00::1]\n}\n",
+    "http://d.test {\n  bind 127.0.0.1\n}\n",
+    'e.test {\n  bind evil 192.0.2.9 999.1.1.1 [zz]\n  respond "x"\n}\n',
+    "f.test {\n    bind 192.0.2.1\n}\n",
+  ]);
+  assertEquals(addresses, {
+    http: ["10.0.0.5", "127.0.0.1"],
+    https: ["[fd00::1]", "10.0.0.5", "127.0.0.1", "192.0.2.9"],
+  });
+  assertEquals(siteBindAddresses(["a.test {\n  respond ok\n}\n"]), {
+    http: [],
+    https: [],
+  });
+});
+
+test("siteBindAddresses follows the schemes the site blocks really serve", () => {
+  const common = {
+    tlsDir: "/tls",
+    upstream: { kind: "http", host: "127.0.0.1", port: 9000 } as const,
+  };
+  // Plain HTTP only: no HTTPS listener, so none on :443.
+  assertEquals(
+    siteBindAddresses([
+      siteSnippet({
+        ...common,
+        hostname: "h.test",
+        forceHttps: false,
+        bindAddress: "192.0.2.5",
+      }),
+    ]),
+    { http: ["192.0.2.5"], https: [] },
+  );
+  // A locked tunnel name has an HTTPS site on its addresses and no HTTP site.
+  assertEquals(
+    siteBindAddresses([
+      siteSnippet({
+        ...common,
+        hostname: "t.test",
+        bindAddress: "192.0.2.5",
+        tunnel: { lock: true, peers: [], extraBind: [] },
+      }),
+    ]),
+    { http: [], https: ["127.0.0.1", "192.0.2.5"] },
+  );
+});
+
+test("hostingFallbackSnippet answers unhosted names on each bound scheme and address once", () => {
+  assertEquals(
+    hostingFallbackSnippet(false, false, { http: [], https: [] }),
+    hostingFallbackSnippet(false, false),
+  );
+  const bound = hostingFallbackSnippet(false, false, {
+    http: ["127.0.0.1"],
+    https: ["10.0.0.5", "127.0.0.1"],
+  });
+  assertStringIncludes(bound, "http:// {\n  bind 127.0.0.1\n");
+  assertStringIncludes(bound, "https:// {\n  bind 10.0.0.5\n");
+  assertEquals(bound.includes("http:// {\n  bind 10.0.0.5\n"), false);
+  // The unbound catch-all, its fixed-name block and one block per scheme and address.
+  assertEquals(bound.split("respond <<HTML").length - 1, 6);
+  assertEquals(bound.split("bind 127.0.0.1\n").length - 1, 2);
+  // Same page everywhere: no request data, every CSS brace escaped.
+  assertEquals(bound.includes("{host}"), false);
+  assertEquals(bound.includes(":root{"), false);
+  assertEquals(bound.includes("Hosted with"), true);
+  assertEquals(
+    hostingFallbackSnippet(true, false, { http: ["127.0.0.1"], https: [] })
+      .includes("Hosted with"),
+    false,
+  );
+});
+
+test("plannedFallbackForSites follows the bind addresses of the files on disk and the pending ones", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    assertEquals(await plannedFallbackForSites(sitesDir, new Map()), undefined);
+    await Deno.writeTextFile(
+      join(sitesDir, "00-fallback.caddy"),
+      hostingFallbackSnippet(false, true),
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "http://a.test {\n  bind 127.0.0.1\n}\n",
+    );
+    // A quarantined file is not loaded, so its address is not answered.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-q.caddy.quarantined"),
+      "q.test {\n  bind 192.0.2.99\n}\n",
+    );
+    assertEquals(
+      await plannedFallbackForSites(sitesDir, new Map()),
+      hostingFallbackSnippet(false, true, {
+        http: ["127.0.0.1"],
+        https: [],
+      }),
+    );
+    // A pending file replaces the one on disk; an unwritten one adds its own.
+    assertEquals(
+      await plannedFallbackForSites(
+        sitesDir,
+        new Map([
+          ["env-a.caddy", "a.test {\n  bind 127.0.0.1 10.0.0.5\n}\n"],
+          ["env-b.caddy", "http://b.test {\n  bind 192.0.2.7\n}\n"],
+        ]),
+      ),
+      hostingFallbackSnippet(false, true, {
+        http: ["192.0.2.7"],
+        https: ["10.0.0.5", "127.0.0.1"],
+      }),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ensureHostingFallback adds a catch-all for the scheme and address of a bound site", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const hostingDir = await startedHostingHost(layout);
+    await Deno.writeTextFile(
+      join(hostingDir, "sites", "env-a.caddy"),
+      "a.test {\n  bind 127.0.0.1\n}\n",
+    );
+    assertEquals(await ensureHostingFallback(layout, noGrant), true);
+    assertEquals(
+      await Deno.readTextFile(join(hostingDir, "sites", "00-fallback.caddy")),
+      hostingFallbackSnippet(false, true, { http: [], https: ["127.0.0.1"] }),
+    );
   } finally {
     restore();
     await cleanup();
