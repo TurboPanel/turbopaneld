@@ -23,7 +23,10 @@ import {
   composeServices,
   deployAlwaysBuilds,
 } from "../deploy/compose-build-contexts.ts";
-import { readComposeCheckoutDirs } from "../deploy/compose-checkout-marker.ts";
+import {
+  type ComposeCheckoutDirs,
+  readComposeCheckoutDirs,
+} from "../deploy/compose-checkout-marker.ts";
 import {
   applyComposeCheckout,
   type ApplyComposeCheckoutDeps,
@@ -2317,6 +2320,18 @@ export async function applyDeployComposeCheckout(
 }
 
 /**
+ * The option fragments the build and host-path checks take for a checkout:
+ * both empty when this deploy has no repository checkout.
+ */
+function composeCheckoutOptions(dirs: ComposeCheckoutDirs | null): {
+  root: { checkoutRoot?: string };
+  dirs: { checkout?: ComposeCheckoutDirs };
+} {
+  if (!dirs) return { root: {}, dirs: {} };
+  return { root: { checkoutRoot: dirs.root }, dirs: { checkout: dirs } };
+}
+
+/**
  * Writes one compiled `compose.yaml` (daemon overlay merged in), validates
  * Docker config, publishes `compose.yaml` + `deployment.json` + `.env`, then
  * runs deploy hooks / external networks / compose up. Secret files under
@@ -2350,7 +2365,9 @@ async function deployContainerServices(
   // The repository checkout of a Git Compose project, when this deploy has one
   // (`deploy/compose-checkout-marker.ts`): Compose resolves relative paths
   // against it, and the checks below treat it as inside the deployment.
-  const checkoutDirs = await readComposeCheckoutDirs(deploymentDir);
+  const checkout = composeCheckoutOptions(
+    await readComposeCheckoutDirs(deploymentDir),
+  );
   // Read before publish replaces the live files.
   const previousProjects = await readPreviousProjects(deploymentDir);
   let retiredEarlier: string[] = [];
@@ -2419,7 +2436,7 @@ async function deployContainerServices(
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
-      ...(checkoutDirs ? { checkoutRoot: checkoutDirs.root } : {}),
+      ...checkout.root,
       exemptSecretNames: daemonSecretNames,
       remoteBuildSourcesApproved:
         parsedPayload.remoteBuildSourcesApproved === true,
@@ -2438,7 +2455,7 @@ async function deployContainerServices(
       {
         deploymentDir,
         stageDir,
-        ...(checkoutDirs ? { checkout: checkoutDirs } : {}),
+        ...checkout.dirs,
         hostLevelApproved: parsedPayload.hostLevelApproved === true,
         ownerTree: {
           homeRoot: layout.principalHomeRoot,
@@ -2460,7 +2477,7 @@ async function deployContainerServices(
     await assertBuildContextsPresent([resolvedHostPaths], {
       stageDir,
       deploymentDir,
-      ...(checkoutDirs ? { checkoutRoot: checkoutDirs.root } : {}),
+      ...checkout.root,
       services: composeServices(resolved.document),
       alwaysBuilds: deployAlwaysBuilds(parsedPayload),
     });
