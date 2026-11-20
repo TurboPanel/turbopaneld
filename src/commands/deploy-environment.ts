@@ -18,6 +18,7 @@ import {
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
+import { assertBuildContextsPresent } from "../deploy/compose-build-contexts.ts";
 import {
   DeployCancelledError,
   type DeployCancelToken,
@@ -2370,15 +2371,13 @@ async function deployContainerServices(
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
     // excuses a symlink escape, a nested writable bind, or the staging dir.
+    const resolvedHostPaths = collectResolvedHostPaths(
+      resolved.document ?? {},
+      daemonSecretNames,
+      daemonConfigFiles,
+    );
     await assertComposeHostPathsConfined(
-      [
-        collectResolvedHostPaths(
-          resolved.document ?? {},
-          daemonSecretNames,
-          daemonConfigFiles,
-        ),
-        collectAuthoredHostPaths(yaml),
-      ],
+      [resolvedHostPaths, collectAuthoredHostPaths(yaml)],
       {
         deploymentDir,
         stageDir,
@@ -2394,6 +2393,13 @@ async function deployContainerServices(
         ),
       },
     );
+
+    // The deploy copies no repository files to the host: say so up front when
+    // a local build context has nothing behind it.
+    await assertBuildContextsPresent([resolvedHostPaths], {
+      stageDir,
+      deploymentDir,
+    });
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],

@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   COMPOSE_ENV_FILENAME,
@@ -2396,4 +2396,94 @@ test("siteCronWritableDirs: a service folder adds logs/, and the uploaded folder
     `${root}/shared`,
     `${root}/logs`,
   ]);
+});
+
+/** A fake `docker compose config` that resolves `web` to a `./vpn` context. */
+function buildContextRunDocker(
+  seen: string[][],
+): (args: string[]) => Promise<DockerCliResult> {
+  return (args) => {
+    seen.push(args);
+    if (args.includes("config") && args.includes("--format")) {
+      const staged = args[args.indexOf("-f") + 1];
+      return Promise.resolve({
+        success: true,
+        stdout: fakeConfigJson({
+          web: { build: { context: join(dirname(staged), "vpn") } },
+        }),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+  };
+}
+
+const buildContextPayload = {
+  environmentId: "env-buildctx1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "tp-demo-buildctx",
+  composeFiles: [{
+    filename: RUNTIME_COMPOSE_FILENAME,
+    role: "runtime" as const,
+    content: "services:\n  web:\n    build: ./vpn\n",
+  }],
+  hostings: [],
+};
+
+test({
+  name:
+    "handleEnvironmentDeploy names a local build context that is not on the host",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const seen: string[][] = [];
+      const error = await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            buildContextPayload,
+            new Date().toISOString(),
+            {
+              runDocker: buildContextRunDocker(seen),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "build context not found in the deployment directory: service web build context ./vpn",
+      );
+      assertEquals(error.message.includes("remote context"), true);
+      // Refused before anything is built or started.
+      assertEquals(
+        seen.some((args) => args.includes("up") || args.includes("build")),
+        false,
+      );
+    });
+  },
+});
+
+test({
+  name: "handleEnvironmentDeploy builds a local context that is on the host",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir }) => {
+      await Deno.mkdir(
+        join(
+          stateDir,
+          "deployments",
+          buildContextPayload.projectId,
+          buildContextPayload.environmentId,
+          "vpn",
+        ),
+        { recursive: true, mode: 0o750 },
+      );
+      const seen: string[][] = [];
+      await handleEnvironmentDeploy(
+        buildContextPayload,
+        new Date().toISOString(),
+        { runDocker: buildContextRunDocker(seen), ...hermeticDeployDeps },
+      );
+      assertEquals(seen.some((args) => args.includes("up")), true);
+    });
+  },
 });
