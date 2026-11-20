@@ -739,9 +739,10 @@ function buildHostMetrics(parts: {
 /**
  * The network devices this tick actually reports: the resolved
  * `SlotMapping`'s `normalNicSlots` in slot order (so a control plane that
- * has not recorded this topology yet still embeds slot 1/2 by position), then every fabric device. Members, VLAN children, tunnels,
- * container bridges, and loopback are enumerated in the topology (identity,
- * the settings picker) but never sampled — their traffic is
+ * has not recorded this topology yet still embeds slot 1/2 by position),
+ * then every fabric device. Members, VLAN children, tunnels, container
+ * bridges, and loopback are enumerated in the topology (identity, the
+ * settings picker) but never sampled — their traffic is
  * either already counted on a monitored uplink or not the host's to bill.
  * A pinned slot id absent from this snapshot simply has no device to
  * sample this tick; it never pulls in a different device by position.

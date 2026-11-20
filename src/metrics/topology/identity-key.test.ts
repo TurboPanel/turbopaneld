@@ -95,3 +95,71 @@ test("topologyIdentityKey never consults the capability plan", () => {
   );
   assertEquals(source.includes("capability"), false);
 });
+
+const uplink = (id: string, defaultRoute?: boolean) => ({
+  deviceId: id,
+  kind: "uplink" as const,
+  name: id,
+  identity: { mac: id },
+  ...(defaultRoute ? { defaultRoute } : {}),
+});
+
+const fs = (
+  id: string,
+  roles: TopologySnapshot["filesystems"][number]["roles"],
+) => ({
+  filesystemId: id,
+  mountpoint: `/${id}`,
+  fsType: "ext4",
+  sourceDevice: id,
+  totalBytes: null,
+  totalInodes: null,
+  roles,
+});
+
+test("topologyIdentityKey: the default route moving between uplinks changes the key", () => {
+  const onA = snapshot({ networks: [uplink("mac:a", true), uplink("mac:b")] });
+  const onB = snapshot({ networks: [uplink("mac:a"), uplink("mac:b", true)] });
+  assertNotEquals(topologyIdentityKey(onA), topologyIdentityKey(onB));
+});
+
+test("topologyIdentityKey: a NIC changing kind changes the key", () => {
+  const asUplink = snapshot({ networks: [uplink("mac:a")] });
+  const asFabric = snapshot({
+    networks: [{ ...uplink("mac:a"), kind: "fabric" as const }],
+  });
+  assertNotEquals(topologyIdentityKey(asUplink), topologyIdentityKey(asFabric));
+});
+
+test("topologyIdentityKey: a filesystem role change changes the key, including a hosting role move", () => {
+  const before = snapshot({
+    filesystems: [fs("fs:a", ["root", "hosting"]), fs("fs:b", ["docker"])],
+  });
+  const moved = snapshot({
+    filesystems: [fs("fs:a", ["root"]), fs("fs:b", ["docker", "hosting"])],
+  });
+  assertNotEquals(topologyIdentityKey(before), topologyIdentityKey(moved));
+  // Role order alone is not a change.
+  const reordered = snapshot({
+    filesystems: [fs("fs:a", ["hosting", "root"]), fs("fs:b", ["docker"])],
+  });
+  assertEquals(topologyIdentityKey(before), topologyIdentityKey(reordered));
+});
+
+test("topologyIdentityKey: a block-device change changes the key, service or not", () => {
+  const dev = (
+    id: string,
+    deviceType: "physical" | "virtual" | "partition",
+    isServiceDevice: boolean,
+  ) => ({ deviceId: id, kernelName: id, deviceType, isServiceDevice });
+  const base = snapshot({ blockDevices: [dev("blk:a", "physical", true)] });
+  const added = snapshot({
+    blockDevices: [
+      dev("blk:a", "physical", true),
+      dev("blk:b", "physical", false),
+    ],
+  });
+  const retyped = snapshot({ blockDevices: [dev("blk:a", "virtual", true)] });
+  assertNotEquals(topologyIdentityKey(base), topologyIdentityKey(added));
+  assertNotEquals(topologyIdentityKey(base), topologyIdentityKey(retyped));
+});
