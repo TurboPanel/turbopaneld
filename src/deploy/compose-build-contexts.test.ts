@@ -122,3 +122,62 @@ test("a missing checkout context says the repository lacks it", async () => {
   assertEquals(error.message.includes("repository checkout"), true);
   assertEquals(error.message.includes("service vpn build context ./vpn"), true);
 });
+
+const IMAGE_AND_BUILD = {
+  app: {
+    image: "registry.example.net/app:1",
+    build: { context: `${DIRS.stageDir}/app` },
+  },
+};
+const NOTHING_ON_DISK = () => Promise.resolve(false);
+
+test("up -d skips a service that sets image", async () => {
+  await assertBuildContextsPresent(
+    [scanOf(IMAGE_AND_BUILD)],
+    { ...DIRS, services: IMAGE_AND_BUILD },
+    NOTHING_ON_DISK,
+  );
+});
+
+test("an image service is checked when a build always runs", async () => {
+  await assertRejects(
+    () =>
+      assertBuildContextsPresent(
+        [scanOf(IMAGE_AND_BUILD)],
+        { ...DIRS, services: IMAGE_AND_BUILD, alwaysBuilds: true },
+        NOTHING_ON_DISK,
+      ),
+    Error,
+    "service app build context ./app",
+  );
+});
+
+test("pull_policy: build is checked even on up -d", async () => {
+  const services = {
+    app: { ...IMAGE_AND_BUILD.app, pull_policy: "build" },
+  };
+  await assertRejects(
+    () =>
+      assertBuildContextsPresent(
+        [scanOf(services)],
+        { ...DIRS, services },
+        NOTHING_ON_DISK,
+      ),
+    Error,
+    "service app build context ./app",
+  );
+});
+
+test("a build-only service is checked on up -d", async () => {
+  const services = { app: { build: IMAGE_AND_BUILD.app.build } };
+  await assertRejects(
+    () =>
+      assertBuildContextsPresent(
+        [scanOf(services)],
+        { ...DIRS, services },
+        NOTHING_ON_DISK,
+      ),
+    Error,
+    "service app build context ./app",
+  );
+});

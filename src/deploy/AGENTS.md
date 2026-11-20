@@ -574,7 +574,10 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   a build secret file sits under the run dir, outside it. Right after
   confinement, `assertBuildContextsPresent` (`compose-build-contexts.ts`) refuses
   a local service build context that is not a folder in the deployment dir,
-  because the deploy copies no repository files there.
+  because the deploy copies no repository files there. Plain `up -d` pulls or
+  reuses a set `image` and builds only if that fails, so a service with `image`
+  is skipped there unless `pull_policy: build`; the sequential strategy and
+  no-cache always run `compose build`, so every service is checked.
 - **Staged write + validated cutover:** each deploy resets
   `<deploymentDir>/.staging/`, writes the compiled YAML there, resolves the
   merged Docker Compose model, merges the daemon overlay fragment into that

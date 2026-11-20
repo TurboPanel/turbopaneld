@@ -43,6 +43,16 @@ export type BuildContextDirs = {
    * Contexts under it resolve where they are; they are not staged.
    */
   checkoutRoot?: string;
+  /**
+   * The resolved compose `services` map. With it, a service that sets `image`
+   * is skipped unless a build is certain to read its context.
+   */
+  services?: Record<string, unknown>;
+  /**
+   * True when the deploy always runs `compose build` (sequential strategy or
+   * no-cache); every service context is then read, `image` or not.
+   */
+  alwaysBuilds?: boolean;
 };
 
 export type IsDirectoryFn = (path: string) => Promise<boolean>;
@@ -66,6 +76,24 @@ function escapesDir(rel: string): boolean {
   return rel === ".." || rel.startsWith("../") || rel.startsWith("/");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether the deploy may never read this service's build context: plain
+ * `up -d` pulls or reuses a set `image` and builds only when that fails, unless
+ * `pull_policy: build` forces the build.
+ */
+function skippedByUp(what: string, dirs: BuildContextDirs): boolean {
+  if (dirs.alwaysBuilds || !dirs.services) return false;
+  const name = /^service (\S+) build context$/.exec(what)?.[1];
+  const service = name === undefined ? undefined : dirs.services[name];
+  if (!isRecord(service)) return false;
+  const hasImage = typeof service.image === "string" && service.image !== "";
+  return hasImage && service.pull_policy !== "build";
+}
+
 /**
  * Service build contexts under the staging directory (looked up at the same
  * place under the live deployment directory) or under the checkout (looked up
@@ -78,6 +106,7 @@ function stagedContexts(
   const out: Array<{ label: string; path: string }> = [];
   for (const entry of scans.flatMap((scan) => scan.entries)) {
     if (!entry.build || !isServiceBuildContext(entry.what)) continue;
+    if (skippedByUp(entry.what, dirs)) continue;
     const inCheckout = dirs.checkoutRoot !== undefined &&
       !escapesDir(relative(dirs.checkoutRoot, entry.path));
     const base = inCheckout ? dirs.checkoutRoot! : dirs.stageDir;
