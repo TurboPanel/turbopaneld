@@ -42,7 +42,7 @@ export type BuildContextDirs = {
    * The repository checkout of a Git Compose project (`compose-checkout.ts`).
    * Contexts under it resolve where they are; they are not staged.
    */
-  checkoutRoot?: string | undefined;
+  checkoutRoot?: string;
   /**
    * The resolved compose `services` map. With it, a service that sets `image`
    * is skipped unless a build is certain to read its context.

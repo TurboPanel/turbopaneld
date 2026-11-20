@@ -2419,7 +2419,7 @@ async function deployContainerServices(
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
-      checkoutRoot: checkoutDirs?.root,
+      ...(checkoutDirs ? { checkoutRoot: checkoutDirs.root } : {}),
       exemptSecretNames: daemonSecretNames,
       remoteBuildSourcesApproved:
         parsedPayload.remoteBuildSourcesApproved === true,
@@ -2438,7 +2438,7 @@ async function deployContainerServices(
       {
         deploymentDir,
         stageDir,
-        checkout: checkoutDirs ?? undefined,
+        ...(checkoutDirs ? { checkout: checkoutDirs } : {}),
         hostLevelApproved: parsedPayload.hostLevelApproved === true,
         ownerTree: {
           homeRoot: layout.principalHomeRoot,
@@ -2460,7 +2460,7 @@ async function deployContainerServices(
     await assertBuildContextsPresent([resolvedHostPaths], {
       stageDir,
       deploymentDir,
-      checkoutRoot: checkoutDirs?.root,
+      ...(checkoutDirs ? { checkoutRoot: checkoutDirs.root } : {}),
       services: composeServices(resolved.document),
       alwaysBuilds: deployAlwaysBuilds(parsedPayload),
     });

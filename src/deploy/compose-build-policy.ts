@@ -491,7 +491,7 @@ export type BuildPolicyOptions = {
    * The repository checkout (`compose-checkout-marker.ts`), when the deployment
    * has one: it counts as inside the deployment directory.
    */
-  checkoutRoot?: string | undefined;
+  checkoutRoot?: string;
   /** Secrets the daemon rewrote to its own run directory. */
   exemptSecretNames?: ReadonlySet<string>;
   /**
