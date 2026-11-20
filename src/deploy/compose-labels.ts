@@ -4,6 +4,7 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { safeUrlPath } from "../contracts/config-values.ts";
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
+import { logInfo } from "../util/logger.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 import {
   LABEL_ENVIRONMENT,
@@ -33,6 +34,19 @@ function addLabel(
   value: string,
 ): void {
   labels[key] = value;
+}
+
+/**
+ * A service that sets `network_mode` (`service:<name>`, `container:<id>`,
+ * `host`, `none`) runs in another container's or the host's network
+ * namespace. Compose refuses `networks` on it, so the platform never adds a
+ * network, alias or attachment to such a service.
+ */
+export function sharesNetworkNamespace(
+  service: Record<string, unknown>,
+): boolean {
+  const mode = service.network_mode;
+  return typeof mode === "string" && mode.trim().length > 0;
 }
 
 function networkNamesFromService(
@@ -313,6 +327,35 @@ function stampIdentityLabels(
 }
 
 /**
+ * Adds the managed network to each listed service that can take one (a
+ * service in another namespace is skipped). Returns whether any service got it.
+ */
+function attachManagedNetwork(
+  services: Record<string, Record<string, unknown>>,
+  resolved: ResolvedComposeModel,
+  names: readonly string[],
+  managedNetwork: string,
+): boolean {
+  let attached = false;
+  for (const name of names) {
+    const resolvedService = requireResolvedService(resolved, name);
+    if (sharesNetworkNamespace(resolvedService)) continue;
+    services[name] = {
+      ...(services[name] ?? {
+        networks: networkNamesFromService(resolvedService),
+      }),
+      networks: unionServiceNetworks(
+        resolvedService,
+        services[name]?.networks ?? networkNamesFromService(resolvedService),
+        managedNetwork,
+      ),
+    };
+    attached = true;
+  }
+  return attached;
+}
+
+/**
  * Platform label / network attachment fragment for Traefik hostings and
  * managed-ingress network attachment. Emits only daemon-authored fields.
  */
@@ -335,12 +378,23 @@ export function buildHostingLabelsFragment(input: {
   // The overlay merges after the tenant's compose files, so these win.
   stampIdentityLabels(services, resolved, payload);
 
+  let ingressAttached = false;
   for (const hosting of hostings) {
     assertRouterId(hosting.hostingId, "hostings[].hostingId");
     const resolvedService = requireResolvedService(
       resolved,
       hosting.composeServiceName,
     );
+    // A service in another namespace cannot be reached through the ingress
+    // network: it gets no route labels and no network. The container that
+    // owns the namespace carries the hosting instead.
+    if (sharesNetworkNamespace(resolvedService)) {
+      logInfo(
+        "deploy",
+        `hosting ${hosting.hostingId} skipped: ${hosting.composeServiceName} sets network_mode and cannot join the ingress network`,
+      );
+      continue;
+    }
     const name = hosting.composeServiceName;
     if (!services[name]) {
       services[name] = {
@@ -374,39 +428,26 @@ export function buildHostingLabelsFragment(input: {
         ingressNetwork,
       ),
     };
+    ingressAttached = true;
   }
 
   // Only declare the external ingress network when something actually routes
   // through it — bare container deploys must not require Traefik/network.
-  if (hostings.length > 0) {
+  if (ingressAttached) {
     networks[ingressNetwork] = { external: true };
   }
 
-  const managedNames = payload.managedNetworkServices ?? [];
   // The contract requires `managedNetwork` exactly when `managedNetworkServices`
-  // is non-empty, so it is a non-null read inside this block.
-  const managedNetwork = payload.managedNetwork!;
-  for (const composeServiceName of managedNames) {
-    const resolvedService = requireResolvedService(
+  // is non-empty, so it is a non-null read when any service is listed.
+  if (
+    attachManagedNetwork(
+      services,
       resolved,
-      composeServiceName,
-    );
-    if (!services[composeServiceName]) {
-      services[composeServiceName] = {
-        networks: networkNamesFromService(resolvedService),
-      };
-    }
-    services[composeServiceName] = {
-      ...services[composeServiceName],
-      networks: unionServiceNetworks(
-        resolvedService,
-        services[composeServiceName]?.networks,
-        managedNetwork,
-      ),
-    };
-  }
-  if (managedNames.length > 0) {
-    networks[managedNetwork] = { external: true };
+      payload.managedNetworkServices ?? [],
+      payload.managedNetwork!,
+    )
+  ) {
+    networks[payload.managedNetwork!] = { external: true };
   }
 
   const fragment: ComposeOverlayFragment = {};

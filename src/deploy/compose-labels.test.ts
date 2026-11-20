@@ -653,3 +653,68 @@ test("buildHostingLabelsFragment stamps project and environment on every service
   );
   assertEquals(bare.networks, undefined);
 });
+
+const sharedNamespaceModes = ["service:vpn", "container:other", "host", "none"];
+
+for (const mode of sharedNamespaceModes) {
+  test(`buildHostingLabelsFragment leaves networks off a service with network_mode ${mode}`, () => {
+    const resolved = resolvedFromServices({
+      vpn: { image: "vpn:latest" },
+      app: { image: "nginx:alpine", network_mode: mode },
+    });
+    const fragment = buildHostingLabelsFragment({
+      payload: {
+        ...payload,
+        managedNetworkServices: ["vpn", "app"],
+        managedNetwork: MANAGED_NETWORK,
+      },
+      hostings: payload.hostings,
+      resolved,
+    });
+    const app = fragment.services?.app as Record<string, unknown>;
+    const labels = app.labels as Record<string, string>;
+    assertEquals("networks" in app, false);
+    assertEquals(labels["io.turbopanel.project"], "project_123");
+    assertEquals(labels["traefik.enable"], undefined);
+    // The service that owns the namespace still joins the managed network.
+    assertEquals(fragment.services?.vpn?.networks, [MANAGED_NETWORK]);
+    // The only hosting was skipped, so the ingress network is not declared.
+    assertEquals(Object.keys(fragment.networks as Record<string, unknown>), [
+      MANAGED_NETWORK,
+    ]);
+  });
+}
+
+test("buildHostingLabelsFragment routes the namespace owner and skips its dependent", () => {
+  const resolved = resolvedFromServices({
+    vpn: { image: "vpn:latest" },
+    app: { image: "nginx:alpine", network_mode: "service:vpn" },
+  });
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      hostings: [{ ...payload.hostings[0], composeServiceName: "vpn" }],
+    },
+    hostings: [{ ...payload.hostings[0], composeServiceName: "vpn" }],
+    resolved,
+  });
+  assertEquals(fragment.services?.vpn?.networks, [HOSTING_INGRESS_NETWORK]);
+  assertEquals("networks" in (fragment.services?.app ?? {}), false);
+});
+
+test("buildHostingLabelsFragment declares no managed network when only shared-namespace services want it", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      hostings: [],
+      managedNetworkServices: ["app"],
+      managedNetwork: MANAGED_NETWORK,
+    },
+    hostings: [],
+    resolved: resolvedFromServices({
+      app: { image: "nginx:alpine", network_mode: "host" },
+    }),
+  });
+  assertEquals("networks" in (fragment.services?.app ?? {}), false);
+  assertEquals(fragment.networks, undefined);
+});
