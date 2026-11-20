@@ -215,7 +215,7 @@ for (const series of SERIES) {
         assertEquals(seeded.success, true, seeded.stderr);
         assertEquals(await retention(), { state: "ok" });
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });
