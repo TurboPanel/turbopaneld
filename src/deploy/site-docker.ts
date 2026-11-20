@@ -7,7 +7,6 @@
  */
 
 import type { ComposeOverlayFragment } from "./compose-overlay.ts";
-import { sharesNetworkNamespace } from "./compose-labels.ts";
 import type { ResolvedComposeModel } from "./compose-services.ts";
 
 // Docker's default docker0 bridge gateway when `ip addr` lookup fails.
@@ -80,6 +79,21 @@ export function buildSiteEndpointMap(
 }
 
 /**
+ * True when the service takes another container's network namespace
+ * (`service:<name>` or `container:<id>`). Docker refuses `extra_hosts` there
+ * because the hosts file belongs to the namespace owner. `host` and `none`
+ * accept it, so they keep the mapping (a host-mode service needs it to
+ * resolve `host.docker.internal` on Linux).
+ */
+function joinsAnotherContainersNamespace(
+  service: Record<string, unknown>,
+): boolean {
+  const mode = service.network_mode;
+  return typeof mode === "string" &&
+    (mode.startsWith("service:") || mode.startsWith("container:"));
+}
+
+/**
  * Daemon-overlay fragment so every resolved container service can dial
  * sites on the host (`host.docker.internal:<listenPort>`).
  */
@@ -100,10 +114,10 @@ export function buildSiteReachabilityFragment(
 
   const services: Record<string, Record<string, unknown>> = {};
   for (const name of resolved.serviceNames) {
-    // A service in another namespace shares that container's hosts file
-    // (Docker refuses extra_hosts on it); the namespace owner carries the
-    // mapping for both.
-    const shared = sharesNetworkNamespace(resolved.services[name] ?? {});
+    // The namespace owner carries the mapping for a service that joins it.
+    const shared = joinsAnotherContainersNamespace(
+      resolved.services[name] ?? {},
+    );
     services[name] = {
       ...(shared ? {} : { extra_hosts: [HOST_DOCKER_INTERNAL] }),
       environment: { ...envEntries },
