@@ -166,3 +166,32 @@ test("a credential with no way to decrypt it fails before any clone", () =>
     );
     assertEquals(seen.length, 0);
   }));
+
+test("build contexts next to the compose file exist at the project directory", () =>
+  inTempDeployment(async (dir) => {
+    // A stack whose services set `build: ./vpn` with a local `image:`, as in
+    // a VPN plus torrent client project: the folders must be on the host.
+    const layouts = [
+      ["compose.yaml", SHA_A],
+      ["stack/compose.yaml", SHA_B],
+    ];
+    for (const [composePath, commitSha] of layouts) {
+      const base = composePath === "compose.yaml" ? "" : "stack/";
+      const outcome = await applyComposeCheckout(
+        dir,
+        { ...CHECKOUT, composePath, commitSha },
+        {
+          decryptSecrets: undefined,
+          checkoutFn: fakeClone({
+            [composePath]: "services: {}\n",
+            [`${base}vpn/Dockerfile`]: "FROM scratch\n",
+            [`${base}qbittorrent/Dockerfile`]: "FROM scratch\n",
+          }),
+        },
+      );
+      for (const context of ["vpn", "qbittorrent"]) {
+        const info = await Deno.stat(join(outcome.projectDir, context));
+        assert(info.isDirectory, `${context} exists at ${outcome.projectDir}`);
+      }
+    }
+  }));
