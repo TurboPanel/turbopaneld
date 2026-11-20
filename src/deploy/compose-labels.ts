@@ -324,6 +324,35 @@ function stampIdentityLabels(
 }
 
 /**
+ * Adds the managed network to each listed service that can take one (a
+ * service in another namespace is skipped). Returns whether any service got it.
+ */
+function attachManagedNetwork(
+  services: Record<string, Record<string, unknown>>,
+  resolved: ResolvedComposeModel,
+  names: readonly string[],
+  managedNetwork: string,
+): boolean {
+  let attached = false;
+  for (const name of names) {
+    const resolvedService = requireResolvedService(resolved, name);
+    if (sharesNetworkNamespace(resolvedService)) continue;
+    services[name] = {
+      ...(services[name] ?? {
+        networks: networkNamesFromService(resolvedService),
+      }),
+      networks: unionServiceNetworks(
+        resolvedService,
+        services[name]?.networks ?? networkNamesFromService(resolvedService),
+        managedNetwork,
+      ),
+    };
+    attached = true;
+  }
+  return attached;
+}
+
+/**
  * Platform label / network attachment fragment for Traefik hostings and
  * managed-ingress network attachment. Emits only daemon-authored fields.
  */
@@ -397,36 +426,17 @@ export function buildHostingLabelsFragment(input: {
     networks[ingressNetwork] = { external: true };
   }
 
-  const managedNames = payload.managedNetworkServices ?? [];
   // The contract requires `managedNetwork` exactly when `managedNetworkServices`
-  // is non-empty, so it is a non-null read inside this block.
-  const managedNetwork = payload.managedNetwork!;
-  for (const composeServiceName of managedNames) {
-    const resolvedService = requireResolvedService(
-      resolved,
-      composeServiceName,
-    );
-    if (sharesNetworkNamespace(resolvedService)) continue;
-    if (!services[composeServiceName]) {
-      services[composeServiceName] = {
-        networks: networkNamesFromService(resolvedService),
-      };
-    }
-    services[composeServiceName] = {
-      ...services[composeServiceName],
-      networks: unionServiceNetworks(
-        resolvedService,
-        services[composeServiceName]?.networks,
-        managedNetwork,
-      ),
-    };
-  }
+  // is non-empty, so it is a non-null read when any service is listed.
   if (
-    managedNames.some((name) =>
-      !sharesNetworkNamespace(requireResolvedService(resolved, name))
+    attachManagedNetwork(
+      services,
+      resolved,
+      payload.managedNetworkServices ?? [],
+      payload.managedNetwork!,
     )
   ) {
-    networks[managedNetwork] = { external: true };
+    networks[payload.managedNetwork!] = { external: true };
   }
 
   const fragment: ComposeOverlayFragment = {};
