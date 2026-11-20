@@ -421,42 +421,73 @@ export async function removeBuildWork(
   }
 }
 
-/**
- * The cgroup every container image build runs under (`tp-host
- * image-build-slice` prints it; its quota is the build-core budget). Passed as
- * `buildx build --cgroup-parent`: the Engine's BuildKit puts each build step's
- * container below it, so the slice's CPU quota caps all image builds together.
- */
-export const IMAGE_BUILD_CGROUP =
+/** The parent slice of every container image build's own slice. */
+const IMAGE_BUILD_PARENT_CGROUP =
   "/turbopanel.slice/turbopanel-imagebuild.slice";
 
+/** The cgroup `tp-host image-build-slice` makes for a build (`-` become `_`). */
+export function imageBuildCgroup(buildId: string): string {
+  return `${IMAGE_BUILD_PARENT_CGROUP}/turbopanel-imagebuild-${
+    buildId.replaceAll("-", "_")
+  }.slice`;
+}
+
 /**
- * `tp-host image-build-slice [cores]`: create the image-build slice if needed
- * and set its CPU quota from the build's core limit (the same number
- * `build-run` takes; none set means half the host's cores, decided by
- * `tp-host`). Idempotent. Returns the cgroup path for `--cgroup-parent`; throws
+ * `tp-host image-build-slice <id> [cores]`: make this build's own slice below
+ * the image-build parent slice, with a CPU quota from the build's core limit
+ * (the same number `build-run` takes; none set means half the host's cores,
+ * decided by `tp-host`). Idempotent. Returns the cgroup path for `buildx build
+ * --cgroup-parent` and the cores the quota allows, clamped to the host's; throws
  * when the slice could not be made, so an image build never starts without it.
+ * The caller removes it with {@link removeImageBuildSlice} when the build ends.
  */
 export async function ensureImageBuildSlice(
+  buildId: string,
   limits: BuildLimits | undefined,
   runFn: RunFn = runPrivileged,
-): Promise<string> {
+): Promise<{ cgroup: string; cores: number }> {
   const cores = limits?.cores === undefined
     ? "-"
     : String(roundCores(limits.cores.cores));
   const result = await runFn(
     "sudo",
-    hostSudoArgs(["-n", "image-build-slice", cores], MANAGED),
+    hostSudoArgs(["-n", "image-build-slice", buildId, cores], MANAGED),
   );
-  const printed = result.stdout.trim().split("\n").at(-1) ?? "";
-  if (!result.success || printed !== IMAGE_BUILD_CGROUP) {
+  const lines = result.stdout.trim().split("\n");
+  const cgroup = lines.at(-2) ?? "";
+  const allowed = Number(lines.at(-1));
+  if (
+    !result.success || cgroup !== imageBuildCgroup(buildId) ||
+    !Number.isFinite(allowed) || allowed <= 0
+  ) {
     throw new Error(
-      `could not set up the image build's CPU limit: ${
+      `could not set up the image build's CPU slice: ${
         result.stderr.trim() || "image-build-slice failed"
       }`,
     );
   }
-  return printed;
+  return { cgroup, cores: allowed };
+}
+
+/**
+ * `tp-host image-build-slice-remove [id]`: stop a build's slice and drop its
+ * runtime properties, or every build's slice with no id. Best effort: a slice
+ * that is left behind is removed by the next daemon start's sweep.
+ */
+export async function removeImageBuildSlice(
+  buildId?: string,
+  runFn: RunFn = runPrivileged,
+): Promise<void> {
+  try {
+    await runFn(
+      "sudo",
+      buildId === undefined
+        ? hostSudoArgs(["-n", "image-build-slice-remove"], MANAGED)
+        : hostSudoArgs(["-n", "image-build-slice-remove", buildId], MANAGED),
+    );
+  } catch {
+    // Left for the next sweep.
+  }
 }
 
 /** `tp-host build-return <id>`: the tree back to the daemon, unit gone. */

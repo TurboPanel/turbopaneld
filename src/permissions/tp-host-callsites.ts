@@ -1690,9 +1690,17 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice",cores],MANAGED',
-    { argv: ["image-build-slice", "-"] },
-    { argv: ["image-build-slice", "1.5"] },
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice",buildId,cores],MANAGED',
+    { argv: ["image-build-slice", BUILD_ID, "-"] },
+    { argv: ["image-build-slice", BUILD_ID, "1.5"] },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice-remove"],MANAGED',
+    { argv: ["image-build-slice-remove"] },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice-remove",buildId],MANAGED',
+    { argv: ["image-build-slice-remove", BUILD_ID] },
   ),
   tpHost(
     'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',

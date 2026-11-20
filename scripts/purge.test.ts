@@ -1212,13 +1212,47 @@ test("the build slice is stopped and its unit file removed although it is not tu
   assertEquals(await exists(join(units, "tpother.slice")), true);
 });
 
-test("the image-build slice is stopped first, before its parent slice, in the final unit step", async () => {
+test("the image-build slices are stopped and their runtime drop-ins removed, and nothing else in the control directory", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-imagebuild-" });
+  const control = join(dir, "system.control");
+  for (
+    const name of [
+      "turbopanel-imagebuild.slice.d",
+      "turbopanel-imagebuild-svc1_r1.slice.d",
+      "other.slice.d",
+    ]
+  ) {
+    await Deno.mkdir(join(control, name), { recursive: true });
+  }
+  const log = join(dir, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [`echo "$*" >> ${log}`].join("\n"),
+  );
+  const result = await runPurgeSh(
+    ["tp_remove_image_build_slices"],
+    `TP_SYSTEMD_CONTROL_DIR=${control}\ntp_remove_image_build_slices`,
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(
+    (await Deno.readTextFile(log)).trim(),
+    "stop turbopanel-imagebuild-*.slice turbopanel-imagebuild.slice",
+  );
+  assertEquals(
+    await exists(join(control, "turbopanel-imagebuild.slice.d")),
+    false,
+  );
+  assertEquals(
+    await exists(join(control, "turbopanel-imagebuild-svc1_r1.slice.d")),
+    false,
+  );
+  assertEquals(await exists(join(control, "other.slice.d")), true);
+  // The final unit step runs it before the TurboPanel slices.
   const source = await Deno.readTextFile(purgePath);
   const finalize = extractFunction(source, "tp_finalize_turbopanel_units") ??
     "";
-  const imagebuild = finalize.indexOf("turbopanel-imagebuild.slice");
-  assert(imagebuild >= 0, finalize);
-  assert(imagebuild < finalize.indexOf(" turbopanel.slice"), finalize);
+  assert(finalize.includes("tp_remove_image_build_slices"), finalize);
 });
 
 const TUNNEL_UNITS = [

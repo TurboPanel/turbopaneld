@@ -16,6 +16,10 @@ import {
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { syncAccountWallQuietly } from "../deploy/account-wall.ts";
+import {
+  buildSandboxEnabled,
+  removeImageBuildSlice,
+} from "../deploy/release/build-sandbox.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { armPhpPatchRestarts } from "../deploy/site/php-patch-restart.ts";
@@ -134,6 +138,8 @@ export type DaemonRunIo = {
   guardHostingCaddySites?: () => Promise<void>;
   /** Hold HA primaries after an unclean host restart; defaults to {@link applyManagedBootHoldAtStart}. */
   applyManagedBootHold?: () => Promise<void>;
+  /** Remove image-build slices a crashed run left; defaults to {@link sweepImageBuildSlicesAtStart}. */
+  sweepImageBuildSlices?: () => Promise<void>;
   /** Stamp a clean shutdown for the next start; defaults to {@link markCleanShutdown}. */
   markCleanShutdown?: () => Promise<void>;
   /** Boot-time ProxySQL frontend repair; defaults to {@link repairProxySqlFrontendAtBoot}. */
@@ -421,6 +427,15 @@ export async function applyManagedBootHoldAtStart(
   }
 }
 
+/**
+ * Remove the per-build image-build slices a crashed daemon left behind. Only
+ * where builds are sandboxed (a managed host); a development install has none.
+ */
+export async function sweepImageBuildSlicesAtStart(): Promise<void> {
+  if (!await buildSandboxEnabled()) return;
+  await removeImageBuildSlice();
+}
+
 /** Test seam: drop timers started by {@link applyManagedBootHoldAtStart}. */
 export function stopManagedRuntimeGuardsForTests(): void {
   bootHoldRetry?.stop();
@@ -637,6 +652,13 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     io.logWarn ?? logWarn,
     "boot hold check",
     io.applyManagedBootHold ?? applyManagedBootHoldAtStart,
+  );
+
+  // No image build is running yet, so any image-build slice is a leftover.
+  await bestEffort(
+    io.logWarn ?? logWarn,
+    "image build slice sweep",
+    io.sweepImageBuildSlices ?? sweepImageBuildSlicesAtStart,
   );
 
   const abort = new AbortController();

@@ -217,19 +217,13 @@ test("imageBuildBuildxArgs targets the Engine builder with the pinned frontend",
   assertEquals(args.some((arg) => arg.startsWith("--allow")), false);
 });
 
-test("the image build transcript names the core limit that holds for the build steps", () => {
+test("the image build transcript says the steps are not CPU limited yet, and names the slice's cores", () => {
   assertEquals(
-    imageBuildLimitsNotice({ cores: { cores: 2, source: "server" } }),
-    "Image build steps limited to 2 cores (server limit), shared by all image builds on this server; the memory limit applies to the prepare step only",
+    imageBuildLimitsNotice(2),
+    "Image build steps are not CPU limited yet; only the prepare step is. This build's slice is set to 2 cores for when they are",
   );
-  assertStringIncludes(
-    imageBuildLimitsNotice({ cores: { cores: 1, source: "service" } }),
-    "1 core (service limit)",
-  );
-  assertStringIncludes(
-    imageBuildLimitsNotice(),
-    "half the server's cores (default)",
-  );
+  assertStringIncludes(imageBuildLimitsNotice(1), "set to 1 core for");
+  assertStringIncludes(imageBuildLimitsNotice(1.5), "set to 1.5 cores for");
 });
 
 test("imageBuildFrontendRef names the frontend by digest only", () => {

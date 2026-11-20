@@ -232,14 +232,28 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `$P/tp-test/ip-route-kernel`; for `tp0` routes, `tp0`'s own subnet is
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
-  - sets up the image-build CPU slice only through `image-build-slice
-    [cores|-]` (cores is the same number `build-run` takes, validated the same
-    way; nothing else in argv): `systemctl set-property --runtime
-    turbopanel-imagebuild.slice CPUAccounting=yes CPUQuota=<N>%` (N from
-    `tp_build_cpu_quota`, default half the host's cores) then `systemctl start`,
-    idempotent, outside test mode it checks the slice's `cpu.max` and fails
-    closed, and it prints the cgroup path `/turbopanel.slice/turbopanel-imagebuild.slice`
-    the daemon passes to `docker buildx build --cgroup-parent`;
+  - sets up one image build's CPU slice only through `image-build-slice
+    BUILD-ID [cores|-]` (the id is checked like `build-run`'s, cores is the
+    same number `build-run` takes and is validated the same way; nothing else
+    in argv). It makes `turbopanel-imagebuild-<id>.slice` (the id's dashes
+    become underscores: a dash is a hierarchy level in a unit name) below the
+    parent `turbopanel-imagebuild.slice`, with `systemctl set-property
+    --runtime ... CPUAccounting=yes CPUQuota=<N>%`: the parent is capped at the
+    host's cores, the child at the build's cores (default half the host's, and
+    never more than the host has), then `systemctl start`. It is idempotent,
+    outside test mode it checks the child's `cpu.max` and fails closed, and it
+    prints two lines: the child's cgroup path (what the daemon passes to
+    `docker buildx build --cgroup-parent`) and the core count it really set
+    (the host-clamped one, for the build log). Nothing here claims the image
+    build steps are capped: the pinned frontend ignores the cgroup parent
+    today (`scripts/image-build-cgroup-proof.sh`);
+  - removes them only through `image-build-slice-remove [BUILD-ID]`: stops the
+    build's slice and deletes the runtime drop-in `set-property --runtime`
+    left under `/run/systemd/system.control`; with no id it does that for every
+    build slice (the daemon's start-up sweep). A missing slice is not an error;
+    the parent's own properties are left to `purge.sh`. Both verbs are in
+    `TP_HOST_ONLY_VERBS`, so a `tp-host` older than the daemon fails image
+    builds (they ship together; fine before the first release);
   - starts tenant builds only through
     `build-run <build-id> <project-id> <owner> [cores [memory-bytes [swap]]]` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid

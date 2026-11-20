@@ -372,21 +372,29 @@ copies the vendored tool into `work/<id>/tools/`, the spec runs it, and the
 plan comes back as one regular file checked on its open handle); with no site
 owner the build runs in `turbopanel-tpbuild.slice`. The image build itself
 (`docker buildx`) stays on the Docker lane (the Engine's BuildKit, driven by
-`tp`), but its CPU is capped: `ensureImageBuildSlice` (`build-sandbox.ts`) runs
-`sudo tp-host image-build-slice [cores]` first, which makes the transient
-`turbopanel-imagebuild.slice` (under `turbopanel.slice`) with a CPU quota from
-the same build-core limit (default half the host's cores), and prints its
-cgroup path; `imageBuildBuildxArgs` passes it as `--cgroup-parent`. Checked on
-Docker 29 / buildx 0.39 with systemd 257: the Engine's BuildKit honours a
-cgroup path with a leading slash (the build step's processes land in
-`.../turbopanel-imagebuild.slice/buildkit/<id>`); a systemd-style `x.slice:..`
-name is not honoured. A build never starts when the slice cannot be set up.
-The slice is shared by every image build on the server, so overlapping builds
-share one quota and the last build to start sets it. Memory is not limited for
+`tp`). **Its steps are not CPU limited yet; only the prepare step is.**
+`ensureImageBuildSlice` (`build-sandbox.ts`) runs `sudo tp-host
+image-build-slice <build-id> [cores]` first, which makes the build's own slice
+`turbopanel-imagebuild-<id>.slice` below `turbopanel-imagebuild.slice` (the
+parent is capped at the host's cores; the child gets the build-core limit,
+default half the host's) and returns its cgroup path and the host-clamped core
+count; `imageBuildBuildxArgs` passes the path as `--cgroup-parent`. That
+parameter is honoured by a plain Dockerfile (with a leading-slash cgroupfs
+path) but **ignored by the pinned frontend** (Checked on Docker 29 / buildx
+0.39, systemd 257: its RUN step lands in the Engine's own container slice), so
+no cap holds. The build log says so (`imageBuildLimitsNotice`) and never
+claims one; do not word anything else as a cap. The real step cap waits until
+after launch; `scripts/image-build-cgroup-proof.sh` runs the pinned frontend
+with the daemon's exact argv, prints the cgroup the step ran in and exits
+non-zero while the cap does not hold: re-run it when that work resumes. The
+slice is removed (`removeImageBuildSlice`, in a `finally`) when the build ends
+by success, failure or cancel, and the daemon sweeps leftovers at start
+(`sweepImageBuildSlicesAtStart` in `entry/run.ts`). A build never starts when
+its slice cannot be set up, and a `tp-host` older than the daemon lacks the
+verbs and fails image builds (both ship together). Memory is not limited for
 the build steps (the memory limit covers the prepare step only), and Compose
 `build:` is not limited at all (Compose offers no cgroup parent or CPU option
-for builds, only `--memory`); both say so in the transcript.
-`scripts/image-build-cgroup-proof.sh` proves placement and quota on a host.
+for builds, only `--memory`).
 
 **Build limits (`build-limits-v1`).** The control plane sends the smallest
 core limit and the smallest memory limit set among the organization (per

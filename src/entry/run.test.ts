@@ -95,6 +95,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     // No test waits on a real retry timer; the retry tests turn this off.
     shouldSkipOrchestration: () => true,
     applyManagedBootHold: () => Promise.resolve(),
+    sweepImageBuildSlices: () => Promise.resolve(),
     markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
     restoreFabricFromPersistedState: () => {

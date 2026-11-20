@@ -74,8 +74,11 @@ import { assertFileSha256 } from "../../orchestration/download-verify.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
 import { isReservedBuildEnvKey, sandboxBuildEnvironment } from "./build.ts";
-import { ensureImageBuildSlice, isSpecEnvName } from "./build-sandbox.ts";
-import type { BuildLimits } from "./build-limits.ts";
+import {
+  ensureImageBuildSlice,
+  isSpecEnvName,
+  removeImageBuildSlice,
+} from "./build-sandbox.ts";
 import { definedFields } from "../../util/optional-fields.ts";
 import {
   type ImagePrepareSandbox,
@@ -779,6 +782,8 @@ export type RunImageBuildBuildDeps = {
   runDocker?: RunDockerStreamedFn;
   /** The image-build slice setup; defaults to `tp-host image-build-slice`. */
   ensureImageBuildSlice?: typeof ensureImageBuildSlice;
+  /** The slice removal at the end; defaults to `tp-host image-build-slice-remove`. */
+  removeImageBuildSlice?: typeof removeImageBuildSlice;
   /** Non-docker helper commands (`tar`); defaults to a plain spawn. */
   runCommand?: EnsureBuildkitImageBuildDeps["runCommand"];
   inspectImage?: (imageTag: string) => Promise<string | undefined>;
@@ -907,23 +912,17 @@ async function ensureFrontendImage(
 }
 
 /**
- * The core limit holds for the image's own build steps as well as the prepare
- * step: `tp-host image-build-slice` makes a cgroup whose CPU quota is the
- * build's core limit, and `docker buildx build --cgroup-parent` puts the
- * Engine's BuildKit step containers below it (checked on Docker 29 with the
- * systemd cgroup driver: a cgroup path is honoured; a systemd-style slice name
- * only makes a literal directory under system.slice, outside the quota). The slice is shared by every image build on the server, so
- * overlapping builds share one quota. Memory is not limited there: the memory
- * limit still covers the prepare step only.
+ * What the build log says about the image build's CPU. Only the prepare step
+ * is limited so far: Docker's own BuildKit starts the image's build steps, and
+ * the pinned image builder's frontend does not pass `--cgroup-parent` on to
+ * them (checked: its steps run outside the build's slice). The slice is made
+ * anyway, with the build's core limit clamped to the host's, so the cap can
+ * start working once the frontend honours it.
  */
-export function imageBuildLimitsNotice(limits?: BuildLimits): string {
-  const cores = limits?.cores;
-  const coresText = cores === undefined
-    ? "half the server's cores (default)"
-    : `${cores.cores} ${
-      cores.cores === 1 ? "core" : "cores"
-    } (${cores.source} limit)`;
-  return `Image build steps limited to ${coresText}, shared by all image builds on this server; the memory limit applies to the prepare step only`;
+export function imageBuildLimitsNotice(cores: number): string {
+  return `Image build steps are not CPU limited yet; only the prepare step is. This build's slice is set to ${cores} ${
+    cores === 1 ? "core" : "cores"
+  } for when they are`;
 }
 
 /** `docker buildx build` argv for one image build (Engine builder, `--load`). */
@@ -943,7 +942,8 @@ export function imageBuildBuildxArgs(
     "--builder",
     "default",
     "--progress=plain",
-    // The cgroup the build steps run under (the image-build slice's CPU quota).
+    // The build's own slice. The pinned frontend does not apply it to the
+    // build steps yet (scripts/image-build-cgroup-proof.sh checks that).
     ...(cgroupParent === undefined ? [] : ["--cgroup-parent", cgroupParent]),
     // A single-platform image in the store, without attestation manifests.
     "--provenance=false",
@@ -1115,43 +1115,55 @@ export async function runImageBuildBuild(
     );
   }
 
-  let cgroupParent: string | undefined;
-  if (params.sandbox) {
-    const limits = params.sandbox.work.buildLimits;
-    cgroupParent = await (deps?.ensureImageBuildSlice ?? ensureImageBuildSlice)(
-      limits,
-      params.sandbox.runFn,
+  const sandbox = params.sandbox;
+  try {
+    let cgroupParent: string | undefined;
+    if (sandbox) {
+      const made = await (deps?.ensureImageBuildSlice ?? ensureImageBuildSlice)(
+        sandbox.work.buildId,
+        sandbox.work.buildLimits,
+        sandbox.runFn,
+      );
+      cgroupParent = made.cgroup;
+      params.onOutput?.("stdout", imageBuildLimitsNotice(made.cores));
+    }
+
+    await ensureFrontendImage(
+      params,
+      runDocker,
+      deps?.runCommand ?? runDefault,
     );
-    params.onOutput?.("stdout", imageBuildLimitsNotice(limits));
+
+    const args = imageBuildBuildxArgs(params, planPath, cgroupParent);
+    params.onOutput?.(
+      "stdout",
+      `$ docker buildx build (${
+        imageBuildFrontendRef(params.tools.frontendDigest)
+      })`,
+    );
+    await runBuildx(runDocker, args, {
+      ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
+      redact,
+      timeoutMs,
+      ...(params.signal === undefined ? {} : { cancelSignal: params.signal }),
+    });
+
+    const imageDigest = deps?.inspectImage
+      ? await deps.inspectImage(params.imageTag)
+      : await resolveBuiltImageDigest(runDocker, params.imageTag);
+    return {
+      imageTag: params.imageTag,
+      ...(imageDigest === undefined ? {} : { imageDigest }),
+      builderFrontendVersion: IMAGE_BUILD_FRONTEND_VERSION,
+      builderPlanVersion: await readPlanVersion(planPath),
+    };
+  } finally {
+    // Success, failure or cancel: the build's slice goes with it.
+    if (sandbox) {
+      await (deps?.removeImageBuildSlice ?? removeImageBuildSlice)(
+        sandbox.work.buildId,
+        sandbox.runFn,
+      );
+    }
   }
-
-  await ensureFrontendImage(
-    params,
-    runDocker,
-    deps?.runCommand ?? runDefault,
-  );
-
-  const args = imageBuildBuildxArgs(params, planPath, cgroupParent);
-  params.onOutput?.(
-    "stdout",
-    `$ docker buildx build (${
-      imageBuildFrontendRef(params.tools.frontendDigest)
-    })`,
-  );
-  await runBuildx(runDocker, args, {
-    ...(params.onOutput === undefined ? {} : { onOutput: params.onOutput }),
-    redact,
-    timeoutMs,
-    ...(params.signal === undefined ? {} : { cancelSignal: params.signal }),
-  });
-
-  const imageDigest = deps?.inspectImage
-    ? await deps.inspectImage(params.imageTag)
-    : await resolveBuiltImageDigest(runDocker, params.imageTag);
-  return {
-    imageTag: params.imageTag,
-    ...(imageDigest === undefined ? {} : { imageDigest }),
-    builderFrontendVersion: IMAGE_BUILD_FRONTEND_VERSION,
-    builderPlanVersion: await readPlanVersion(planPath),
-  };
 }

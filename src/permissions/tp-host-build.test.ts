@@ -1360,33 +1360,48 @@ test("removing a site owner removes their build caches, and nobody else's", asyn
   });
 });
 
-test("image-build-slice sets the slice's CPU quota from the build cores, like build-run, and prints its cgroup", async () => {
+const SLICE_ID = "svc1-20260927-120000";
+const SLICE_UNIT = "turbopanel-imagebuild-svc1_20260927_120000.slice";
+
+test("image-build-slice makes the build's own slice below a parent capped at the host's cores, with the build's quota", async () => {
   await withHost(async (host) => {
-    const cases: Array<[string[], Record<string, string>, string]> = [
+    const cases: Array<[string[], Record<string, string>, string, string]> = [
       // Nothing requested: half of the fixture's 8 cores.
-      [[], {}, "400%"],
-      [["-"], {}, "400%"],
-      [["-"], { TP_TEST_CORES: "5" }, "200%"],
-      [["2"], {}, "200%"],
-      [["1.5"], {}, "150%"],
+      [[], {}, "400%", "4"],
+      [["-"], {}, "400%", "4"],
+      [["-"], { TP_TEST_CORES: "5" }, "200%", "2"],
+      [["2"], {}, "200%", "2"],
+      [["1.5"], {}, "150%", "1.5"],
       // Above the host's cores: the host's cores.
-      [["64"], {}, "800%"],
-      [["999.99"], { TP_TEST_CORES: "3" }, "300%"],
+      [["64"], {}, "800%", "8"],
+      [["999.99"], { TP_TEST_CORES: "3" }, "300%", "3"],
     ];
-    await forEachSequential(cases, async ([args, env, quota]) => {
-      const result = await host.run(["image-build-slice", ...args], "", env);
+    await forEachSequential(cases, async ([args, env, quota, cores]) => {
+      const result = await host.run(
+        ["image-build-slice", SLICE_ID, ...args],
+        "",
+        env,
+      );
       assertEquals(result.code, 0, result.stderr);
+      const hostCores = env["TP_TEST_CORES"] ?? "8";
       assertStringIncludes(
         result.stdout,
-        `EXEC [systemctl] [set-property] [--runtime] [turbopanel-imagebuild.slice] [CPUAccounting=yes] [CPUQuota=${quota}]\n`,
+        `EXEC [systemctl] [set-property] [--runtime] [turbopanel-imagebuild.slice] [CPUAccounting=yes] [CPUQuota=${hostCores}00%]\n`,
       );
       assertStringIncludes(
         result.stdout,
-        "EXEC [systemctl] [start] [turbopanel-imagebuild.slice]\n",
+        `EXEC [systemctl] [set-property] [--runtime] [${SLICE_UNIT}] [CPUAccounting=yes] [CPUQuota=${quota}]\n`,
+      );
+      assertStringIncludes(
+        result.stdout,
+        `EXEC [systemctl] [start] [${SLICE_UNIT}]\n`,
       );
       assertEquals(
-        result.stdout.trim().split("\n").at(-1),
-        "/turbopanel.slice/turbopanel-imagebuild.slice",
+        result.stdout.trim().split("\n").slice(-2),
+        [
+          `/turbopanel.slice/turbopanel-imagebuild.slice/${SLICE_UNIT}`,
+          cores,
+        ],
       );
     });
   });
@@ -1394,24 +1409,64 @@ test("image-build-slice sets the slice's CPU quota from the build cores, like bu
 
 test("image-build-slice is idempotent: the same call prints the same commands", async () => {
   await withHost(async (host) => {
-    const first = await host.run(["image-build-slice", "2"]);
-    const second = await host.run(["image-build-slice", "2"]);
+    const first = await host.run(["image-build-slice", SLICE_ID, "2"]);
+    const second = await host.run(["image-build-slice", SLICE_ID, "2"]);
     assertEquals(first.code, 0, first.stderr);
     assertEquals(second.stdout, first.stdout);
   });
 });
 
-test("image-build-slice refuses a core limit build-run would refuse, and extra arguments", async () => {
+test("image-build-slice refuses a core limit build-run would refuse, a bad build id and extra arguments", async () => {
   await withHost(async (host) => {
     await forEachSequential([
-      ["0"],
-      ["0.5"],
-      ["1000"],
-      ["1.234"],
-      ["01"],
-      ["2;reboot"],
-      ["-1"],
-      ["2", "3"],
+      [],
+      ["-bad"],
+      ["Bad"],
+      ["a;b"],
+      [SLICE_ID, "0"],
+      [SLICE_ID, "0.5"],
+      [SLICE_ID, "1000"],
+      [SLICE_ID, "1.234"],
+      [SLICE_ID, "01"],
+      [SLICE_ID, "2;reboot"],
+      [SLICE_ID, "-1"],
+      [SLICE_ID, "2", "3"],
     ], (args) => refused(host, ["image-build-slice", ...args]));
+  });
+});
+
+test("image-build-slice-remove stops the build's slice and drops its runtime drop-in, or every build's with no id", async () => {
+  await withHost(async (host) => {
+    const control = join(host.prefix, "run/systemd/system.control");
+    const dropIn = join(control, `${SLICE_UNIT}.d`);
+    const other = join(control, "turbopanel-imagebuild-other.slice.d");
+    const parent = join(control, "turbopanel-imagebuild.slice.d");
+    for (const dir of [dropIn, other, parent]) {
+      await Deno.mkdir(dir, { recursive: true });
+    }
+    const one = await host.run(["image-build-slice-remove", SLICE_ID]);
+    assertEquals(one.code, 0, one.stderr);
+    assertStringIncludes(
+      one.stdout,
+      `EXEC [systemctl] [stop] [${SLICE_UNIT}]\n`,
+    );
+    assertEquals(await exists(dropIn), false);
+    assertEquals(await exists(other), true);
+    // Again with nothing left of it: not an error.
+    assertEquals(
+      (await host.run(["image-build-slice-remove", SLICE_ID])).code,
+      0,
+    );
+    const all = await host.run(["image-build-slice-remove"]);
+    assertEquals(all.code, 0, all.stderr);
+    assertStringIncludes(
+      all.stdout,
+      "EXEC [systemctl] [stop] [turbopanel-imagebuild-*.slice]\n",
+    );
+    assertEquals(await exists(other), false);
+    // The parent's own properties are purge's, not a build's.
+    assertEquals(await exists(parent), true);
+    await refused(host, ["image-build-slice-remove", "Bad Id"]);
+    await refused(host, ["image-build-slice-remove", SLICE_ID, "x"]);
   });
 });
