@@ -35,6 +35,17 @@ function addLabel(
   labels[key] = value;
 }
 
+/**
+ * A service that sets `network_mode` (`service:<name>`, `container:<id>`,
+ * `host`, `none`) runs in another container's or the host's network
+ * namespace. Compose refuses `networks` on it, so the platform never adds a
+ * network, alias or attachment to such a service.
+ */
+function sharesNetworkNamespace(service: Record<string, unknown>): boolean {
+  const mode = service.network_mode;
+  return typeof mode === "string" && mode.trim().length > 0;
+}
+
 function networkNamesFromService(
   service: Record<string, unknown>,
 ): string[] {
@@ -341,6 +352,10 @@ export function buildHostingLabelsFragment(input: {
       resolved,
       hosting.composeServiceName,
     );
+    // A service in another namespace cannot be reached through the ingress
+    // network: it gets no route labels and no network. The container that
+    // owns the namespace carries the hosting instead.
+    if (sharesNetworkNamespace(resolvedService)) continue;
     const name = hosting.composeServiceName;
     if (!services[name]) {
       services[name] = {
@@ -391,6 +406,7 @@ export function buildHostingLabelsFragment(input: {
       resolved,
       composeServiceName,
     );
+    if (sharesNetworkNamespace(resolvedService)) continue;
     if (!services[composeServiceName]) {
       services[composeServiceName] = {
         networks: networkNamesFromService(resolvedService),
@@ -405,7 +421,11 @@ export function buildHostingLabelsFragment(input: {
       ),
     };
   }
-  if (managedNames.length > 0) {
+  if (
+    managedNames.some((name) =>
+      !sharesNetworkNamespace(requireResolvedService(resolved, name))
+    )
+  ) {
     networks[managedNetwork] = { external: true };
   }
 
