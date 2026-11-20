@@ -2866,6 +2866,9 @@ const SITES: CallSite[] = [
   tpHost('src/managed/firewall.ts|runIptables(["-C",...checkArgs])', {
     argv: ["iptables", "-w", "5", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
   }),
+  tpHost('src/managed/firewall.ts|runIptables(["-S",chain])', {
+    argv: ["iptables", "-w", "5", "-S", MGD_CHAIN],
+  }),
   tpHost('src/managed/firewall.ts|runIptables(["-N",name])', {
     argv: ["iptables", "-w", "5", "-N", "TP-MANAGED-PUB"],
   }),

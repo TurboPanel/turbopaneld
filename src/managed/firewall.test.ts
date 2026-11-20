@@ -171,7 +171,7 @@ const EXPECTED_DOCUMENT = [
 
 test("reconcile scopes the public listener to known peers and drops the rest", async () => {
   await withRunner(async (invocations) => {
-    await reconcileManagedPublicFirewall(publicPayload());
+    await reconcileManagedPublicFirewall(publicPayload(), "before");
 
     assertEquals(invocations.includes(`-N ${MANAGED_PUBLIC_CHAIN}`), true);
     assertEquals(
@@ -369,41 +369,180 @@ test("stage 6: a listener TP-FWD already narrows drops its legacy chain and buil
   });
 });
 
-test("a failed restore throws and leaves the old chain rules in place", async () => {
-  // Model the kernel: the chain only changes when a restore succeeds.
-  const kernelChain = ["old-accept", "old-drop"];
-  const attempts: string[] = [];
-  const invocations: string[] = [];
-  setManagedFirewallRunForTests(async (cmd, waited, options) => {
+/**
+ * Fake kernel for one cluster chain: `-S chain` prints the stored rules and a
+ * restore replaces them only when it succeeds (the kernel's atomic replace).
+ */
+function fakeKernel(failRestore: () => boolean) {
+  const state = { rules: [] as string[], invocations: [] as string[] };
+  const run = async (
+    cmd: string,
+    waited: string[],
+    options?: { stdin?: string },
+  ): Promise<ManagedFirewallRunResult> => {
     await Promise.resolve();
     const args = waited.slice(2);
-    invocations.push(`${cmd} ${args.join(" ")}`);
+    state.invocations.push(`${cmd} ${args.join(" ")}`);
     if (cmd === "iptables-restore") {
-      attempts.push(options?.stdin ?? "");
-      // Lock contention outlasting -w: the transaction is rejected whole.
-      return fail("Another app is currently holding the xtables lock");
+      if (failRestore()) {
+        return fail("Another app is currently holding the xtables lock");
+      }
+      state.rules = (options?.stdin ?? "").split("\n")
+        .filter((line) => line.startsWith("-A "));
+      return ok();
+    }
+    if (args[0] === "-S" && args[1] === CHAIN) {
+      return ok(state.rules.join("\n"));
     }
     if (args[0] === "-C") return fail("Bad rule");
     if (args[0] === "-N") return fail("Chain already exists.");
+    if (args[0] === "-X" && args[1] === CHAIN) state.rules = [];
     return ok();
-  });
+  };
+  return { state, run };
+}
+
+function matchFor(port: number): string {
+  return `-p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport ${port}`;
+}
+
+function listenerOn(port: number): Partial<ManagedApplyPayload> {
+  return {
+    privateListener: {
+      address: "203.0.113.50",
+      port,
+      transport: "public",
+    },
+  };
+}
+
+test("a failed restore throws and leaves the old chain rules in place", async () => {
+  let failing = false;
+  const kernel = fakeKernel(() => failing);
+  setManagedFirewallRunForTests(kernel.run);
   try {
+    await reconcileManagedPublicFirewall(publicPayload(), "before");
+    const before = [...kernel.state.rules];
+    assertEquals(before.length, 2);
+
+    // A changed peer list, rejected by lock contention that outlasts -w.
+    failing = true;
     let threw = false;
     try {
-      await reconcileManagedPublicFirewall(publicPayload());
+      await reconcileManagedPublicFirewall(
+        publicPayload({
+          replication: {
+            role: "primary",
+            username: "tp_repl",
+            peerAddresses: ["203.0.113.99"],
+          },
+        }),
+        "before",
+      );
     } catch {
       threw = true;
     }
     assertEquals(threw, true);
-    assertEquals(attempts, [EXPECTED_DOCUMENT]);
-    assertEquals(kernelChain, ["old-accept", "old-drop"]);
-    // Never flushes, so nothing can empty the chain, and the child jump is
-    // not added after a failed rebuild.
-    assertEquals(invocations.some((line) => line.includes(" -F ")), false);
+    assertEquals(kernel.state.rules, before);
+    // Never flushes, so nothing can empty the chain.
     assertEquals(
-      invocations.includes(`iptables -A ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`),
+      kernel.state.invocations.some((line) => line.includes(" -F ")),
       false,
     );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+});
+
+test("before compose a cleared listener keeps its scoping; after compose it is removed", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    await reconcileManagedPublicFirewall(publicPayload(), "before");
+    const old = [...kernel.state.rules];
+    kernel.state.invocations.length = 0;
+
+    const cleared = basePayload();
+    await reconcileManagedPublicFirewall(cleared, "before");
+    // The old container still publishes the port: nothing was touched.
+    assertEquals(kernel.state.invocations, []);
+    assertEquals(kernel.state.rules, old);
+
+    await reconcileManagedPublicFirewall(cleared, "after");
+    assertEquals(kernel.state.rules, []);
+    assertEquals(
+      kernel.state.invocations.includes(`iptables -X ${CHAIN}`),
+      true,
+    );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+});
+
+test("a port change covers both ports before compose and only the new one after", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    await reconcileManagedPublicFirewall(
+      publicPayload(listenerOn(45001)),
+      "before",
+    );
+    const moved = publicPayload(listenerOn(45002));
+
+    await reconcileManagedPublicFirewall(moved, "before");
+    const wide = kernel.state.rules.join("\n");
+    for (const port of [45001, 45002]) {
+      assertEquals(wide.includes(`--ctorigdstport ${port} -j DROP`), true);
+      assertEquals(wide.includes(`--ctorigdstport ${port} -j ACCEPT`), true);
+    }
+
+    await reconcileManagedPublicFirewall(moved, "after");
+    assertEquals(kernel.state.rules, [
+      `-A ${CHAIN} -s 203.0.113.51 ${matchFor(45002)} -j ACCEPT`,
+      `-A ${CHAIN} ${matchFor(45002)} -j DROP`,
+    ]);
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+});
+
+test("a failed compose (no after phase) leaves the old port scoped alongside the new one", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    await reconcileManagedPublicFirewall(
+      publicPayload(listenerOn(45001)),
+      "before",
+    );
+    await reconcileManagedPublicFirewall(
+      publicPayload(listenerOn(45002)),
+      "before",
+    );
+    // compose fails here: the after phase never runs.
+    assertEquals(
+      kernel.state.rules.includes(`-A ${CHAIN} ${matchFor(45001)} -j DROP`),
+      true,
+    );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+});
+
+test("a failed narrowing after compose is logged and leaves the wider chain in place", async () => {
+  let failing = false;
+  const kernel = fakeKernel(() => failing);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    await reconcileManagedPublicFirewall(
+      publicPayload(listenerOn(45001)),
+      "before",
+    );
+    const moved = publicPayload(listenerOn(45002));
+    await reconcileManagedPublicFirewall(moved, "before");
+    const wide = [...kernel.state.rules];
+    failing = true;
+    await reconcileManagedPublicFirewall(moved, "after");
+    assertEquals(kernel.state.rules, wide);
   } finally {
     setManagedFirewallRunForTests(null);
   }

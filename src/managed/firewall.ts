@@ -94,7 +94,11 @@ async function spawnHost(
       try {
         await writer.write(new TextEncoder().encode(options.stdin));
       } finally {
-        await writer.close();
+        try {
+          await writer.close();
+        } catch {
+          // Keep the original error (a timeout kills the child first).
+        }
       }
     }
     const output = await child.output();
@@ -188,18 +192,22 @@ function originMatch(address: string, port: number): string {
 
 /**
  * The `iptables-restore --noflush` document for one cluster chain: declaring
- * `:<chain> - [0:0]` resets it, then each peer ACCEPT, then the DROP last.
+ * `:<chain> - [0:0]` resets it, then rules kept for another listener of the
+ * same cluster (a port change, until compose has replaced the old publish),
+ * each peer ACCEPT, then the DROP last.
  */
 export function managedChainDocument(
   chain: string,
   address: string,
   port: number,
   sources: string[],
+  preserved: string[] = [],
 ): string {
   const match = originMatch(address, port);
   return [
     "*filter",
     `:${chain} - [0:0]`,
+    ...preserved,
     ...sources.map((source) => `-A ${chain} -s ${source} ${match} -j ACCEPT`),
     `-A ${chain} ${match} -j DROP`,
     "COMMIT",
@@ -227,27 +235,93 @@ async function ensureRule(
 }
 
 /**
+ * Which half of an apply this reconcile belongs to.
+ *
+ * - `before`: runs ahead of compose. Installs or widens scoping only; it never
+ *   removes it, because the previous container still publishes its old port
+ *   until compose has replaced it. If the listener moved to another port the
+ *   chain covers the old and the new port together.
+ * - `after`: runs once compose succeeded. Failures are logged, not thrown
+ *   (the chain only stays wider, never open). Removes the scoping when the
+ *   listener is gone or no longer public, and narrows the chain to the new
+ *   port only. A failed compose never reaches it, so the old scoping stays.
+ * - `all`: both in order (the proof tool and tests).
+ */
+export type ManagedFirewallPhase = "before" | "after" | "all";
+
+/**
  * Restrict a public managed listener to the cluster's known peer addresses.
  *
- * When the listener is absent or not public, drop this cluster's `TP-MGD-<id>`
- * chain (idempotent if already gone). Clearing the listener is a normal apply
- * for a single-member cluster that only publishes while a remote app is bound;
- * a leftover DROP would block a later cluster that reuses the same address/port.
+ * When the listener is absent or not public, the `after` phase drops this
+ * cluster's `TP-MGD-<id>` chain (idempotent if already gone). Clearing the
+ * listener is a normal apply for a single-member cluster that only publishes
+ * while a remote app is bound; a leftover DROP would block a later cluster
+ * that reuses the same address/port.
  *
  * No rule is installed when the bind is not IPv4 or no stable peer address is
  * known — an overly-broad fallback is worse than leaving the port as the
  * operator's firewall found it.
  */
-export function reconcileManagedPublicFirewall(
+export async function reconcileManagedPublicFirewall(
   payload: ManagedApplyPayload,
+  phase: ManagedFirewallPhase = "all",
 ): Promise<void> {
-  return withFirewallLock(() => reconcileLocked(payload));
+  if (phase !== "after") {
+    await withFirewallLock(() => reconcileLocked(payload, "before"));
+  }
+  if (phase !== "before") {
+    // Compose already replaced the container. A failure here can only leave
+    // the chain wider than needed (still scoped, never open), so it is
+    // logged and the apply goes on to the engine state and users.
+    try {
+      await withFirewallLock(() => reconcileLocked(payload, "after"));
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managed firewall could not narrow or remove scoping managed=${
+          sanitizeForLog(payload.managedId)
+        }: ${sanitizeForLog(err)}`,
+      );
+    }
+  }
 }
 
-async function reconcileLocked(payload: ManagedApplyPayload): Promise<void> {
+/** Address of an `iptables -S` match, without a `/32` suffix. */
+function bareAddress(value: string): string {
+  return value.endsWith("/32") ? value.slice(0, -3) : value;
+}
+
+/**
+ * Rules of this chain that guard a listener OTHER than `address:port`, as
+ * `iptables -S` printed them (restore input format). They are carried into the
+ * rebuild while the old container still publishes the old port.
+ */
+function otherListenerRules(
+  listing: string,
+  chain: string,
+  address: string,
+  port: number,
+): string[] {
+  const kept: string[] = [];
+  for (const line of listing.split("\n")) {
+    if (!line.startsWith(`-A ${chain} `)) continue;
+    const dest = /--ctorigdst (\S+)/.exec(line)?.[1];
+    const destPort = /--ctorigdstport (\d+)/.exec(line)?.[1];
+    if (dest === undefined || destPort === undefined) continue;
+    if (bareAddress(dest) === address && destPort === String(port)) continue;
+    kept.push(line.trim());
+  }
+  return kept;
+}
+
+async function reconcileLocked(
+  payload: ManagedApplyPayload,
+  phase: "before" | "after",
+): Promise<void> {
   const listener = payload.privateListener;
   if (listener?.transport !== "public") {
-    await removeUnlocked(payload.managedId);
+    // The old container may still publish the port until compose replaced it.
+    if (phase === "after") await removeUnlocked(payload.managedId);
     return;
   }
   if (!isValidIpv4Literal(listener.address)) return;
@@ -278,11 +352,31 @@ async function reconcileLocked(payload: ManagedApplyPayload): Promise<void> {
   );
   await ensureChain(chain);
 
+  let preserved: string[] = [];
+  if (phase === "before") {
+    const listed = await runIptables(["-S", chain]);
+    if (!listed.success) {
+      throw new Error(listed.stderr || `failed to read chain ${chain}`);
+    }
+    preserved = otherListenerRules(
+      listed.stdout,
+      chain,
+      listener.address,
+      listener.port,
+    );
+  }
+
   // Rebuild this cluster's rules in one transaction. `:chain - [0:0]` resets
   // the chain inside the same atomic replace, so a removed peer loses its
   // ACCEPT, the DROP stays last, and a failure keeps the old rules.
   const restored = await runIptablesRestore(
-    managedChainDocument(chain, listener.address, listener.port, sources),
+    managedChainDocument(
+      chain,
+      listener.address,
+      listener.port,
+      sources,
+      preserved,
+    ),
   );
   if (!restored.success) {
     throw new Error(
