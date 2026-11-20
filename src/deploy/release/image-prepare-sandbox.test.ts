@@ -277,15 +277,17 @@ test("an image build on a managed host prepares in the sandbox with the build's 
   });
 });
 
-test("a failed or cancelled image build still removes the build's slice, and a slice that cannot be made stops the build before docker runs", async () => {
+test("a failed or cancelled image build still removes the build's slice, and a slice that cannot be made only warns and builds without --cgroup-parent", async () => {
   await withWork(async ({ root, work, capture }) => {
     const tool = join(root, "vendor-tool");
     await Deno.writeTextFile(tool, fakeTool(capture), { mode: 0o750 });
     const removed: string[] = [];
     const docker: string[][] = [];
+    const lines: string[] = [];
     const build = (
       failBuildx: boolean,
       slice: () => Promise<{ cgroup: string; cores: number }>,
+      signal?: AbortSignal,
     ) =>
       runImageBuildBuild({
         build: { kind: "image", installCommand: "npm ci", env: {} },
@@ -299,6 +301,8 @@ test("a failed or cancelled image build still removes the build's slice, and a s
           frontendDigest: DIGEST,
         },
         sandbox: { work, cwd: "source", run: runnerSeam([]) },
+        onOutput: (_stream, line) => lines.push(line),
+        ...(signal === undefined ? {} : { signal }),
       }, {
         runDocker: (args) => {
           docker.push(args);
@@ -320,22 +324,42 @@ test("a failed or cancelled image build still removes the build's slice, and a s
           return Promise.resolve();
         },
       });
+    const buildxRuns = () =>
+      docker.filter((args) => args[0] === "buildx" && args[1] === "build");
     const made = () =>
       Promise.resolve({ cgroup: imageBuildCgroup(work.buildId), cores: 1 });
     await assertRejects(() => build(true, made));
     assertEquals(removed, [work.buildId]);
-    await assertRejects(
-      () => build(false, () => Promise.reject(new Error("no slice"))),
-      Error,
-      "no slice",
+    assertEquals(buildxRuns().length, 1);
+    assert(buildxRuns()[0]?.includes("--cgroup-parent"));
+
+    // A slice that cannot be made: a warning, no --cgroup-parent, the build
+    // still runs and still cleans up.
+    lines.length = 0;
+    const result = await build(
+      false,
+      () => Promise.reject(new Error("no cpu controller")),
     );
-    // Only the first, failing build reached `docker buildx build`.
-    assertEquals(
-      docker.filter((args) => args[0] === "buildx" && args[1] === "build")
-        .length,
-      1,
+    assertEquals(result.imageTag, "turbopanel-app/web:r1");
+    assertEquals(buildxRuns().length, 2);
+    assertEquals(buildxRuns()[1]?.includes("--cgroup-parent"), false);
+    assert(
+      lines.some((line) => line.includes("could not set up the build's CPU")),
+      lines.join("\n"),
     );
     assertEquals(removed, [work.buildId, work.buildId]);
+
+    // Cancelled while the slice is being made: the build stops before docker
+    // builds anything, and the slice is still removed.
+    const controller = new AbortController();
+    await assertRejects(() =>
+      build(false, () => {
+        controller.abort();
+        return Promise.reject(new Error("no slice"));
+      }, controller.signal)
+    );
+    assertEquals(buildxRuns().length, 2);
+    assertEquals(removed, [work.buildId, work.buildId, work.buildId]);
   });
 });
 

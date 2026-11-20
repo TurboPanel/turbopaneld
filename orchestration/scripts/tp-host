@@ -4845,7 +4845,7 @@ tp_image_build_unit() {
 # --cgroup-parent`) and the cores its quota allows. Idempotent: the properties
 # are set with --runtime (they live in /run and never outlive a reboot) and
 # setting them again changes nothing. Fails closed: when the kernel's cpu.max
-# does not show the quota afterwards, the build must not start.
+# does not show the quota afterwards the verb fails (the daemon then builds without the slice).
 tp_verb_image_build_slice() {
   { [ $# -ge 1 ] && [ $# -le 2 ]; } ||
     tp_die "image-build-slice: only image-build-slice BUILD-ID [CORES]"
@@ -4892,6 +4892,7 @@ tp_verb_image_build_slice_remove() {
     _ir_unit="$(tp_image_build_unit "$1")"
     tp_run systemctl stop "$_ir_unit" || true
     rm -rf "$IMAGE_BUILD_CONTROL_DIR/$_ir_unit.d"
+    tp_run systemctl daemon-reload || true
     return 0
   fi
   tp_run systemctl stop 'turbopanel-imagebuild-*.slice' || true

@@ -1452,6 +1452,7 @@ test("image-build-slice-remove stops the build's slice and drops its runtime dro
     );
     assertEquals(await exists(dropIn), false);
     assertEquals(await exists(other), true);
+    assertStringIncludes(one.stdout, "EXEC [systemctl] [daemon-reload]\n");
     // Again with nothing left of it: not an error.
     assertEquals(
       (await host.run(["image-build-slice-remove", SLICE_ID])).code,

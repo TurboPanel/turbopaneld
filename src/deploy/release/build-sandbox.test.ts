@@ -1015,4 +1015,10 @@ test("a build's slice is removed by id, every one with no id, and a failing remo
     managed("image-build-slice-remove"),
   ]);
   await removeImageBuildSlice("x", () => Promise.reject(new Error("no sudo")));
+  // A verb that exits non-zero is logged and left for the sweep, never thrown.
+  await removeImageBuildSlice(
+    "x",
+    () =>
+      Promise.resolve({ success: false, code: 1, stdout: "", stderr: "boom" }),
+  );
 });

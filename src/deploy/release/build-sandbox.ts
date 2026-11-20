@@ -49,6 +49,7 @@ import { roundCores } from "../../contracts/build-limits.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { logWarn } from "../../util/logger.ts";
 import { throwIfAborted } from "../deploy-cancel.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
@@ -438,7 +439,7 @@ export function imageBuildCgroup(buildId: string): string {
  * (the same number `build-run` takes; none set means half the host's cores,
  * decided by `tp-host`). Idempotent. Returns the cgroup path for `buildx build
  * --cgroup-parent` and the cores the quota allows, clamped to the host's; throws
- * when the slice could not be made, so an image build never starts without it.
+ * when the slice could not be made (the image build only warns and goes on).
  * The caller removes it with {@link removeImageBuildSlice} when the build ends.
  */
 export async function ensureImageBuildSlice(
@@ -479,12 +480,18 @@ export async function removeImageBuildSlice(
   runFn: RunFn = runPrivileged,
 ): Promise<void> {
   try {
-    await runFn(
+    const result = await runFn(
       "sudo",
       buildId === undefined
         ? hostSudoArgs(["-n", "image-build-slice-remove"], MANAGED)
         : hostSudoArgs(["-n", "image-build-slice-remove", buildId], MANAGED),
     );
+    if (!result.success) {
+      logWarn(
+        "build-sandbox",
+        `image-build-slice-remove failed: ${result.stderr.trim()}`,
+      );
+    }
   } catch {
     // Left for the next sweep.
   }

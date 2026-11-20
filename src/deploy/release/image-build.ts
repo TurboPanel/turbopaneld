@@ -64,7 +64,7 @@ import {
 } from "../docker-cli.ts";
 import type { CommandSummaryRedactor } from "../../logs/contracts.ts";
 import { redactCommandSummary } from "../../logs/redactor.ts";
-import { logInfo, logWarn } from "../../util/logger.ts";
+import { errorText, logInfo, logWarn } from "../../util/logger.ts";
 import { runBuildkitSetup as defaultRunBuildkitSetup } from "../../orchestration/ansible.ts";
 import type { AnsibleEventHandler } from "../../orchestration/ansible-events.ts";
 import { createSymlink } from "../../permissions/scoped-writes.ts";
@@ -1119,13 +1119,34 @@ export async function runImageBuildBuild(
   try {
     let cgroupParent: string | undefined;
     if (sandbox) {
-      const made = await (deps?.ensureImageBuildSlice ?? ensureImageBuildSlice)(
-        sandbox.work.buildId,
-        sandbox.work.buildLimits,
-        sandbox.runFn,
-      );
-      cgroupParent = made.cgroup;
-      params.onOutput?.("stdout", imageBuildLimitsNotice(made.cores));
+      // Best effort: the slice caps nothing yet (the pinned frontend ignores
+      // --cgroup-parent), so a host that cannot make it (no cpu controller,
+      // cgroup v1, nested without delegation) still builds, without the flag.
+      // The build id is shared by overlapping builds of one release: make it
+      // unique per build before the real cap lands, or one build's removal
+      // takes the other's slice.
+      try {
+        const made = await (deps?.ensureImageBuildSlice ??
+          ensureImageBuildSlice)(
+            sandbox.work.buildId,
+            sandbox.work.buildLimits,
+            sandbox.runFn,
+          );
+        cgroupParent = made.cgroup;
+        params.onOutput?.("stdout", imageBuildLimitsNotice(made.cores));
+      } catch (error) {
+        throwIfAborted(params.signal, "before the image build started");
+        logWarn(
+          "image-build",
+          `no CPU slice for this build, continuing without one: ${
+            errorText(error)
+          }`,
+        );
+        params.onOutput?.(
+          "stderr",
+          "Warning: could not set up the build's CPU slice; building without it (image build steps are not CPU limited yet either way)",
+        );
+      }
     }
 
     await ensureFrontendImage(

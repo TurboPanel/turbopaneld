@@ -389,9 +389,11 @@ with the daemon's exact argv, prints the cgroup the step ran in and exits
 non-zero while the cap does not hold: re-run it when that work resumes. The
 slice is removed (`removeImageBuildSlice`, in a `finally`) when the build ends
 by success, failure or cancel, and the daemon sweeps leftovers at start
-(`sweepImageBuildSlicesAtStart` in `entry/run.ts`). A build never starts when
-its slice cannot be set up, and a `tp-host` older than the daemon lacks the
-verbs and fails image builds (both ship together). Memory is not limited for
+(`sweepImageBuildSlicesAtStart` in `entry/run.ts`). The slice is best
+effort until the proof script passes: when it cannot be set up (no cpu
+controller or `cpu.max`, cgroup v1, nested without delegation, or a `tp-host`
+older than the daemon without the verbs) the build logs a warning, leaves out
+`--cgroup-parent` and goes on, as native `build-run` does there. Memory is not limited for
 the build steps (the memory limit covers the prepare step only), and Compose
 `build:` is not limited at all (Compose offers no cgroup parent or CPU option
 for builds, only `--memory`).
