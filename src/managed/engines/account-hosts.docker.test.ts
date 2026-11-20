@@ -152,7 +152,7 @@ for (const engine of ENGINES) {
         await sql("DROP TRIGGER shop.t_bi");
         await dropUserOnEveryHost(spec("owner_u"));
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });

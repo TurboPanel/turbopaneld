@@ -362,7 +362,7 @@ test({
       assertEquals(formatLsn(parseLsn(promoted!.lsn)!), final.lsn);
     } finally {
       for (const container of [primary, standby]) {
-        await docker(["rm", "-f", container]);
+        await docker(["rm", "-f", "-v", container]);
       }
       for (const volume of [primaryVolume, standbyVolume]) {
         await docker(["volume", "rm", "-f", volume]);

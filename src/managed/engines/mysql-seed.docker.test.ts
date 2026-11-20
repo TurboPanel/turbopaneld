@@ -151,7 +151,7 @@ test({
         refused.stderr,
       );
     } finally {
-      await docker(["rm", "-f", primary, standby]);
+      await docker(["rm", "-f", "-v", primary, standby]);
       await docker(["network", "rm", network]);
     }
   },

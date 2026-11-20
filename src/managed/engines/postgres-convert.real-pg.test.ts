@@ -349,7 +349,7 @@ for (const series of SERIES) {
         assertEquals(await owners(), "tp_legacy_owner");
         assertEquals(await value(`SELECT count(*) FROM public.orders`), "2");
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });
