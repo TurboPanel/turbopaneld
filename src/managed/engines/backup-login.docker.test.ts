@@ -225,7 +225,7 @@ for (const engine of ENGINES) {
           assertStringIncludes(blocked.stderr, "(1227)");
         }
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });
