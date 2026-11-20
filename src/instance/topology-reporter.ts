@@ -94,10 +94,9 @@ export class TopologyReporter {
   }
 
   /**
-   * Force an out-of-band recompute — e.g. right after an operator override
-   * push, so a slot reassignment is reported without waiting for the next
-   * scheduled tick. A no-op when not attached, or when a collect from the
-   * timer (or a previous call) is still in flight.
+   * Force an out-of-band recompute, so a change is reported without waiting
+   * for the next scheduled tick. A no-op when not attached, or when a collect
+   * from the timer (or a previous call) is still in flight.
    */
   async reportNow(): Promise<void> {
     const send = this.#send;
