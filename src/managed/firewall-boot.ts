@@ -44,8 +44,12 @@ type ListenerScopeRecord = {
   port: number;
   /** Sources the installed chain accepts, as the last apply left it. */
   peers: string[];
-  /** Read side only: the apply knew no peers and installed no rules. */
-  noRules?: boolean;
+  /**
+   * `false` only when the apply deliberately installed no rules (no known
+   * peers). Absent or `true` means a chain is scoped: an empty `peers` is then
+   * DROP only, never "no chain" (it also is what a narrowing leaves).
+   */
+  scoped?: boolean;
 };
 
 function scopePath(layout: LayoutPaths, managedId: string): string {
@@ -65,11 +69,13 @@ function isValidPeerSource(value: unknown): value is string {
 function scopeRecordFor(payload: ManagedApplyPayload): ListenerScopeRecord {
   const listener = payload.privateListener;
   if (listener?.transport === "public") {
+    const peers = resolveManagedPublicAllowedSources(payload);
     return {
       public: true,
       address: listener.address,
       port: listener.port,
-      peers: resolveManagedPublicAllowedSources(payload),
+      peers,
+      scoped: peers.length > 0,
     };
   }
   return { public: false, address: "", port: 0, peers: [] };
@@ -144,10 +150,9 @@ function parseScope(text: string, managedId: string): ScopeRead {
         address: value.address,
         port: value.port,
         peers: peers ?? [],
-        // A list that is present and valid but empty means "no rules": the
-        // apply installed nothing. Anything else is DROP only.
-        noRules: peers !== null && value.peers !== undefined &&
-          peers.length === 0,
+        // Only an explicit `false` skips the boot chain; anything else is
+        // scoped, so a narrowed `[]` still gets a DROP-only chain.
+        scoped: value.scoped !== false,
       },
     };
   } catch {
@@ -196,7 +201,11 @@ export async function reconcileManagedFirewallBefore(
       ? next.peers.filter((peer) => previous.peers.includes(peer))
       : [];
     if (
-      !await writeScope(layout, payload.managedId, { ...next, peers: kept })
+      !await writeScope(layout, payload.managedId, {
+        ...next,
+        peers: kept,
+        scoped: true,
+      })
     ) {
       throw new Error("listener scope record could not be written");
     }
@@ -278,9 +287,9 @@ async function publicListenerOf(
   const read = await readScope(layout, managedId);
   if (read.kind === "record") {
     const { record } = read;
-    // No known peers: apply installed no rules, so none are installed here
-    // either (a DROP-only chain would block the port for good).
-    if (!record.public || record.noRules) return null;
+    // `scoped: false`: apply installed no rules (no known peers), so none are
+    // installed here either (a DROP-only chain would block the port for good).
+    if (!record.public || record.scoped === false) return null;
     return {
       managedId,
       address: record.address,
@@ -295,7 +304,8 @@ async function publicListenerOf(
   const published = await composePublish(layout, managedId);
   if (published === null) return null;
   const counts = read.kind === "invalid"
-    ? isValidIpv4Literal(published.address) && published.address !== "127.0.0.1"
+    ? isValidIpv4Literal(published.address) &&
+      !published.address.startsWith("127.")
     : isPubliclyRoutableIpv4(published.address);
   return counts ? { managedId, ...published, peers: [] } : null;
 }

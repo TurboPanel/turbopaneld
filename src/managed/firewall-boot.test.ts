@@ -113,12 +113,15 @@ test("a boot with public listeners hands each to the firewall once", async () =>
 
 const noFirewall = () => Promise.resolve();
 
-function publicPayload(peerAddresses: string[]): ManagedApplyPayload {
+function publicPayload(
+  peerAddresses: string[],
+  port = 45001,
+): ManagedApplyPayload {
   return {
     managedId: ID_A,
     privateListener: {
       address: "203.0.113.50",
-      port: 45001,
+      port,
       transport: "public",
     },
     peers: peerAddresses.map((address) => ({ address, transport: "public" })),
@@ -194,13 +197,70 @@ test("a malformed peers field falls back to DROP-only and still scopes the liste
   }
 });
 
-test("a record with an empty peers list gets no boot chain", async () => {
+test("an apply with no known peers records scoped false: no boot chain", async () => {
   await withState(async (layout, dir) => {
     await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
     await reconcileManagedFirewallBefore(layout, publicPayload([]), noFirewall);
     assertEquals((await scopeFile(dir)).peers, []);
+    assertEquals((await scopeFile(dir)).scoped, false);
     assertEquals(await listBootPublicListeners(layout), []);
   });
+});
+
+test("an empty peers list without scoped false is DROP only, never no chain", async () => {
+  for (const extra of [{}, { scoped: true }]) {
+    await withState(async (layout, dir) => {
+      await putFile(
+        dir,
+        ID_A,
+        "listener-scope.json",
+        JSON.stringify({
+          public: true,
+          address: "203.0.113.50",
+          port: 45001,
+          peers: [],
+          ...extra,
+        }),
+      );
+      assertEquals(await listBootPublicListeners(layout), [
+        { managedId: ID_A, address: "203.0.113.50", port: 45001, peers: [] },
+      ]);
+    });
+  }
+});
+
+const crashingRestore = () => Promise.reject(new Error("crash"));
+
+test("a crash after the narrowing write with nothing shared boots DROP only", async () => {
+  // first apply, port change and a full peer swap
+  const cases: Array<{
+    first: ManagedApplyPayload | null;
+    second: ManagedApplyPayload;
+  }> = [
+    { first: null, second: publicPayload(["198.51.100.7"]) },
+    {
+      first: publicPayload(["198.51.100.7"]),
+      second: publicPayload(["198.51.100.7"], 45002),
+    },
+    {
+      first: publicPayload(["198.51.100.7"]),
+      second: publicPayload(["198.51.100.9"]),
+    },
+  ];
+  for (const { first, second } of cases) {
+    await withState(async (layout, dir) => {
+      await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
+      if (first) {
+        await reconcileManagedFirewallBefore(layout, first, noFirewall);
+      }
+      await reconcileManagedFirewallBefore(layout, second, crashingRestore)
+        .catch(() => {});
+      const listeners = await listBootPublicListeners(layout);
+      assertEquals(listeners.length, 1);
+      assertEquals(listeners[0].peers, []);
+      assertEquals(listeners[0].port, second.privateListener!.port);
+    });
+  }
 });
 
 test("an invalid port makes the record unusable: compose, DROP only, any IPv4 bind", async () => {
@@ -228,6 +288,19 @@ test("an invalid port makes the record unusable: compose, DROP only, any IPv4 bi
       ]);
     });
   }
+});
+
+test("the invalid-record fallback skips the whole loopback range", async () => {
+  await withState(async (layout, dir) => {
+    await putFile(dir, ID_A, "listener-scope.json", "{not json");
+    await putFile(
+      dir,
+      ID_A,
+      "docker-compose.yml",
+      'services:\n  db:\n    ports:\n      - "127.0.0.2:45001:5432"\n',
+    );
+    assertEquals(await listBootPublicListeners(layout), []);
+  });
 });
 
 test("an unparseable record is not trusted and never widens: nothing in compose means nothing to close", async () => {
