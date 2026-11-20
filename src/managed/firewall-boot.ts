@@ -29,6 +29,7 @@ import {
   scopePublicListenersClosedAtBoot,
 } from "./firewall.ts";
 import { writeFileAtomic } from "./ha-intent.ts";
+import { mapSequential } from "../util/sequential.ts";
 
 const SCOPE_FILE = "listener-scope.json";
 
@@ -39,13 +40,19 @@ function scopePath(layout: LayoutPaths, managedId: string): string {
 }
 
 /**
- * Remember what this apply publishes. Best effort: a failure is logged and
- * never fails the apply (the compose fallback still covers a public address).
+ * Remember what this apply publishes. A public listener is recorded in the
+ * `before` call (ahead of compose), anything else in the `after` call (the old
+ * container may still publish until then); the other call does nothing. Best
+ * effort: a failure is logged and never fails the apply (the compose fallback
+ * still covers a public address).
  */
 export async function recordManagedListenerScope(
   layout: LayoutPaths,
   payload: ManagedApplyPayload,
+  phase: "before" | "after",
 ): Promise<void> {
+  const isPublic = payload.privateListener?.transport === "public";
+  if (isPublic !== (phase === "before")) return;
   const listener = payload.privateListener;
   const record: ListenerScopeRecord = listener
     ? {
@@ -123,12 +130,8 @@ async function composePublish(
   return null;
 }
 
-/** Every managed listener on disk that publishes a port publicly. */
-export async function listBootPublicListeners(
-  layout: LayoutPaths,
-): Promise<BootPublicListener[]> {
-  const found: BootPublicListener[] = [];
-  let ids: string[] = [];
+async function managedIdsOnDisk(layout: LayoutPaths): Promise<string[]> {
+  const ids: string[] = [];
   try {
     for await (const entry of Deno.readDir(join(layout.stateDir, "managed"))) {
       if (entry.isDirectory && SAFE_MANAGED_ID_RE.test(entry.name)) {
@@ -136,30 +139,48 @@ export async function listBootPublicListeners(
       }
     }
   } catch {
-    return found;
+    return [];
   }
-  ids = ids.sort((a, b) => a.localeCompare(b));
-  for (const managedId of ids) {
-    let record: ListenerScopeRecord | null = null;
-    try {
-      record = parseScope(
-        await Deno.readTextFile(scopePath(layout, managedId)),
-      );
-    } catch {
-      // Applied by an older daemon (or unreadable): fall back to compose.
-    }
-    if (record !== null) {
-      if (record.public) {
-        found.push({ managedId, address: record.address, port: record.port });
-      }
-      continue;
-    }
-    const published = await composePublish(layout, managedId);
-    if (published !== null && isPubliclyRoutableIpv4(published.address)) {
-      found.push({ managedId, ...published });
-    }
+  return ids.sort((a, b) => a.localeCompare(b));
+}
+
+async function readScope(
+  layout: LayoutPaths,
+  managedId: string,
+): Promise<ListenerScopeRecord | null> {
+  try {
+    return parseScope(await Deno.readTextFile(scopePath(layout, managedId)));
+  } catch {
+    // Applied by an older daemon (or unreadable): fall back to compose.
+    return null;
   }
-  return found;
+}
+
+async function publicListenerOf(
+  layout: LayoutPaths,
+  managedId: string,
+): Promise<BootPublicListener | null> {
+  const record = await readScope(layout, managedId);
+  if (record !== null) {
+    return record.public
+      ? { managedId, address: record.address, port: record.port }
+      : null;
+  }
+  const published = await composePublish(layout, managedId);
+  return published !== null && isPubliclyRoutableIpv4(published.address)
+    ? { managedId, ...published }
+    : null;
+}
+
+/** Every managed listener on disk that publishes a port publicly. */
+export async function listBootPublicListeners(
+  layout: LayoutPaths,
+): Promise<BootPublicListener[]> {
+  const found = await mapSequential(
+    await managedIdsOnDisk(layout),
+    (managedId) => publicListenerOf(layout, managedId),
+  );
+  return found.filter((entry): entry is BootPublicListener => entry !== null);
 }
 
 /**

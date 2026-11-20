@@ -114,11 +114,17 @@ test("an apply records its listener and a cleared one flips the record", async (
         transport: "public",
       },
     } as ManagedApplyPayload;
-    await recordManagedListenerScope(layout, payload);
+    await recordManagedListenerScope(layout, payload, "before");
+    assertEquals((await listBootPublicListeners(layout)).length, 1);
+    await recordManagedListenerScope(layout, payload, "after");
     assertEquals((await listBootPublicListeners(layout)).length, 1);
     await recordManagedListenerScope(layout, {
       managedId: ID_A,
-    } as ManagedApplyPayload);
+    } as ManagedApplyPayload, "before");
+    assertEquals((await listBootPublicListeners(layout)).length, 1);
+    await recordManagedListenerScope(layout, {
+      managedId: ID_A,
+    } as ManagedApplyPayload, "after");
     assertEquals(await listBootPublicListeners(layout), []);
   });
 });

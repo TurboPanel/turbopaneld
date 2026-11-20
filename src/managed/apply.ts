@@ -995,9 +995,7 @@ async function applyManagedEngine(
   await reconcileManagedPublicFirewall(payload, "before");
   // A public listener is recorded before it is published; a cleared one only
   // after compose, while the old container may still publish.
-  if (payload.privateListener?.transport === "public") {
-    await recordManagedListenerScope(layout, payload);
-  }
+  await recordManagedListenerScope(layout, payload, "before");
   const project = await composeUpManagedEngine({
     layout,
     payload,
@@ -1015,9 +1013,7 @@ async function applyManagedEngine(
   // Compose replaced the container: now drop scoping for a listener that is
   // gone and narrow the chain to the new port only.
   await reconcileManagedPublicFirewall(payload, "after");
-  if (payload.privateListener?.transport !== "public") {
-    await recordManagedListenerScope(layout, payload);
-  }
+  await recordManagedListenerScope(layout, payload, "after");
 
   const engineContainers = await collectManagedContainers(project, redact, run);
   const containerId = resolveEngineContainerId(

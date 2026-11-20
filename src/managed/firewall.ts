@@ -38,6 +38,7 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { isManagedListenerCovered } from "../firewall/fold.ts";
 import { withFirewallLock } from "../firewall/lock.ts";
+import { mapSequential } from "../util/sequential.ts";
 import {
   FIREWALL_COMMAND_TIMEOUT_MS,
   XTABLES_LOCK_WAIT_SECONDS,
@@ -531,12 +532,11 @@ async function scopeClosedLocked(
 export async function scopePublicListenersClosedAtBoot(
   listeners: BootPublicListener[],
 ): Promise<number> {
-  let scoped = 0;
-  for (const listener of listeners) {
+  const results = await mapSequential(listeners, async (listener) => {
     try {
-      if (!isValidIpv4Literal(listener.address)) continue;
+      if (!isValidIpv4Literal(listener.address)) return false;
       await withFirewallLock(() => scopeClosedLocked(listener));
-      scoped += 1;
+      return true;
     } catch (err) {
       logWarn(
         "managed",
@@ -544,7 +544,8 @@ export async function scopePublicListenersClosedAtBoot(
           sanitizeForLog(listener.managedId)
         }: ${sanitizeForLog(err)}`,
       );
+      return false;
     }
-  }
-  return scoped;
+  });
+  return results.filter(Boolean).length;
 }
