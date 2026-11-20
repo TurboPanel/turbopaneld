@@ -19,6 +19,11 @@ import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import {
+  assertBuildContextsPresent,
+  composeServices,
+  deployAlwaysBuilds,
+} from "../deploy/compose-build-contexts.ts";
+import {
   DeployCancelledError,
   type DeployCancelToken,
 } from "../deploy/deploy-cancel.ts";
@@ -2370,15 +2375,13 @@ async function deployContainerServices(
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
     // excuses a symlink escape, a nested writable bind, or the staging dir.
+    const resolvedHostPaths = collectResolvedHostPaths(
+      resolved.document ?? {},
+      daemonSecretNames,
+      daemonConfigFiles,
+    );
     await assertComposeHostPathsConfined(
-      [
-        collectResolvedHostPaths(
-          resolved.document ?? {},
-          daemonSecretNames,
-          daemonConfigFiles,
-        ),
-        collectAuthoredHostPaths(yaml),
-      ],
+      [resolvedHostPaths, collectAuthoredHostPaths(yaml)],
       {
         deploymentDir,
         stageDir,
@@ -2394,6 +2397,17 @@ async function deployContainerServices(
         ),
       },
     );
+
+    // The deploy copies no repository files to the host: say so up front when
+    // a local build context has nothing behind it.
+    // `up -d` only builds when an image is missing, so a service that sets
+    // `image` is checked only where `compose build` always runs.
+    await assertBuildContextsPresent([resolvedHostPaths], {
+      stageDir,
+      deploymentDir,
+      services: composeServices(resolved.document),
+      alwaysBuilds: deployAlwaysBuilds(parsedPayload),
+    });
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],

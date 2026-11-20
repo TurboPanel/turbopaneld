@@ -16,7 +16,7 @@
  * development host whose user has full sudo.
  */
 
-import { join } from "@std/path";
+import { dirname, isAbsolute, join } from "@std/path";
 import { emitBufferedLines, pumpLines } from "../logs/line-stream.ts";
 import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
 
@@ -179,10 +179,42 @@ export type RunDockerOptions = {
   input?: string;
 };
 
-/** What the raw runner takes: stdin and the environment added to the child's. */
+/**
+ * What the raw runner takes: stdin, the environment added to the child's and
+ * the folder it starts in.
+ */
 export type RunRawOptions = RunDockerOptions & {
   env?: Record<string, string>;
+  cwd?: string;
 };
+
+/**
+ * The folder a `docker compose -f <file> …` call runs from: the folder of its
+ * first compose file, which is also Compose's own project directory.
+ *
+ * Compose hands image builds to the builder's bake step, which refuses a build
+ * context outside the folder the process started in unless it was granted
+ * (`additional privileges requested: pass "--allow=fs.read=…"`). Build
+ * contexts are confined to the deployment directory (`compose-host-paths.ts`),
+ * which is where the live compose files sit, so starting there keeps every
+ * allowed context inside bake's working directory. Nothing is granted and the
+ * entitlement check stays on for anything else a build names. `undefined` for
+ * any call that is not a compose call with an absolute file path.
+ */
+export function composeWorkingDirectory(
+  args: readonly string[],
+): string | undefined {
+  if (args[0] !== "compose") return undefined;
+  const flag = args.indexOf("-f");
+  const file = flag === -1 ? undefined : args[flag + 1];
+  if (file === undefined || !isAbsolute(file)) return undefined;
+  return dirname(file);
+}
+
+function cwdOption(args: readonly string[]): { cwd?: string } {
+  const cwd = composeWorkingDirectory(args);
+  return cwd === undefined ? {} : { cwd };
+}
 
 export type DockerCliRunRawFn = (
   command: string,
@@ -363,6 +395,7 @@ async function runRawDefault(
     const child = new Deno.Command(command, {
       args,
       ...(options?.env === undefined ? {} : { env: options.env }),
+      ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
@@ -410,7 +443,7 @@ async function currentUsername(): Promise<string> {
  */
 async function runDockerWithFreshGroups(
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   const user = await currentUsername();
   return await runRaw(
@@ -431,7 +464,7 @@ async function runDockerWithFreshGroups(
 /** Last-resort: passwordless root docker when the daemon user cannot open the socket. */
 async function runDockerAsRoot(
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   return await runRaw(
     SUDO_BIN,
@@ -489,8 +522,10 @@ export async function runDocker(
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
   const args = withDockerConfig(userArgs);
+  const cwd = cwdOption(userArgs);
   const direct = await runRaw(resolvedDockerBin(), args, {
     ...options,
+    ...cwd,
     env: dockerConfigEnv(),
   });
   if (
@@ -500,13 +535,16 @@ export async function runDocker(
     return direct;
   }
 
-  const refreshed = await runDockerWithFreshGroups(args, options);
+  const refreshed = await runDockerWithFreshGroups(args, {
+    ...options,
+    ...cwd,
+  });
   // A non-blocked failure means the command actually ran via sudo and failed
   // on its own merits — return it verbatim instead of re-running as root and
   // masking the real error behind the direct socket-permission message.
   if (refreshed.success || !escalationBlocked(refreshed)) return refreshed;
 
-  const asRoot = await runDockerAsRoot(args, options);
+  const asRoot = await runDockerAsRoot(args, { ...options, ...cwd });
   if (asRoot.success || !escalationBlocked(asRoot)) return asRoot;
   // Every rung failed to reach the socket; report the original docker.sock error.
   return preferOriginalSocketError(direct, asRoot);
@@ -597,6 +635,8 @@ export type SpawnDockerStreamingOptions = {
   stdout?: "piped" | "inherit";
   /** Kills the child when aborted (a bounded build, say). */
   signal?: AbortSignal;
+  /** The folder the child starts in (see {@link composeWorkingDirectory}). */
+  cwd?: string;
 };
 
 /**
@@ -628,6 +668,7 @@ export async function spawnDockerStreaming(
     stdin: options?.stdin ?? "null",
     stdout: options?.stdout ?? "piped",
     stderr: "piped",
+    ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options?.signal === undefined ? {} : { signal: options.signal }),
   }).spawn();
 }
@@ -687,6 +728,7 @@ export async function runDockerStreamed(
     const child = await spawnDockerStreaming(args, {
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
+      ...cwdOption(args),
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
 

@@ -560,6 +560,24 @@ entry. There is no `composeYaml` fallback on `environment.deploy`.
   on the engine until builds leave it (unprivileged-builds phase 2), and anyone
   who can deploy may define one. The control plane runs the same rules
   (`src/features/compose/build-policy.ts`).
+- **Compose runs from its deployment directory
+  (`composeWorkingDirectory` in `docker-cli.ts`):** `runDocker` and
+  `runDockerStreamed` start any `docker compose -f <abs file> …` call in the
+  folder of its first file (also Compose's project directory). Compose hands
+  image builds to the builder's bake step, which refuses a build context outside
+  its working directory unless granted (`additional privileges requested: pass
+  "--allow=fs.read=…"`), so a daemon started elsewhere failed every compose
+  build at once. Build contexts are confined to the deployment dir, so starting
+  there keeps them inside bake's directory with no grant and no
+  `BUILDX_BAKE_ENTITLEMENTS_FS=0` (which would also lift the check on cache
+  destinations and outputs, which the build policy does not read). Known limit:
+  a build secret file sits under the run dir, outside it. Right after
+  confinement, `assertBuildContextsPresent` (`compose-build-contexts.ts`) refuses
+  a local service build context that is not a folder in the deployment dir,
+  because the deploy copies no repository files there. Plain `up -d` pulls or
+  reuses a set `image` and builds only if that fails, so a service with `image`
+  is skipped there unless `pull_policy: build`; the sequential strategy and
+  no-cache always run `compose build`, so every service is checked.
 - **Staged write + validated cutover:** each deploy resets
   `<deploymentDir>/.staging/`, writes the compiled YAML there, resolves the
   merged Docker Compose model, merges the daemon overlay fragment into that

@@ -1,0 +1,136 @@
+/**
+ * A local build context must exist where the build will read it.
+ *
+ * Compose resolves a relative `build:` against the folder of its compose file,
+ * and the deploy only writes the compiled compose file (and the files the plan
+ * lists) into the deployment directory: it does not copy a repository's files
+ * there. A context such as `./vpn` therefore points at a folder that is not on
+ * the host, and the builder's own error ("path not found" deep in a build
+ * step) does not say why. This names it before anything is built.
+ *
+ * Contexts are resolved on the staged file, so a path under the staging
+ * directory is looked up at the same place under the live deployment
+ * directory, where the published compose file will run the build. Paths
+ * outside both are not this check's business: `compose-host-paths.ts` refuses
+ * them.
+ */
+
+import { join, relative } from "@std/path";
+import type { ComposeHostPathScan } from "./compose-host-paths.ts";
+
+export class ComposeBuildContextMissingError extends Error {
+  constructor(readonly missing: readonly string[]) {
+    super(
+      `compose deploy refused — build context not found in the deployment directory: ${
+        missing.join("; ")
+      }. The deploy does not copy repository files to the host, so a local build context has nothing to build from; use a remote context or build the service from its repository source`,
+    );
+    this.name = "ComposeBuildContextMissingError";
+  }
+}
+
+export type BuildContextDirs = {
+  /** Where the staged compose file (and so its relative contexts) resolve. */
+  stageDir: string;
+  /** Where the published compose file runs the build. */
+  deploymentDir: string;
+  /**
+   * The resolved compose `services` map. With it, a service that sets `image`
+   * is skipped unless a build is certain to read its context.
+   */
+  services?: Record<string, unknown>;
+  /**
+   * True when the deploy always runs `compose build` (sequential strategy or
+   * no-cache); every service context is then read, `image` or not.
+   */
+  alwaysBuilds?: boolean;
+};
+
+export type IsDirectoryFn = (path: string) => Promise<boolean>;
+
+async function isDirectory(path: string): Promise<boolean> {
+  try {
+    return (await Deno.stat(path)).isDirectory;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false;
+    throw err;
+  }
+}
+
+/** Labels of the service build contexts (not Dockerfiles or named extras). */
+function isServiceBuildContext(what: string): boolean {
+  return /^service \S+ build context$/.test(what);
+}
+
+/** True when `rel` (from `relative`) leaves the directory it is relative to. */
+function escapesDir(rel: string): boolean {
+  return rel === ".." || rel.startsWith("../") || rel.startsWith("/");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** The resolved model's `services` map, when it has one. */
+export function composeServices(
+  document: unknown,
+): Record<string, unknown> | undefined {
+  const services = isRecord(document) ? document.services : undefined;
+  return isRecord(services) ? services : undefined;
+}
+
+/** True when the deploy always runs `compose build` (sequential or no-cache). */
+export function deployAlwaysBuilds(
+  payload: { deployStrategy?: unknown; noCache?: unknown },
+): boolean {
+  return payload.deployStrategy === "sequential" || payload.noCache === true;
+}
+
+/**
+ * Whether the deploy may never read this service's build context: plain
+ * `up -d` pulls or reuses a set `image` and builds only when that fails, unless
+ * `pull_policy: build` forces the build.
+ */
+function skippedByUp(what: string, dirs: BuildContextDirs): boolean {
+  if (dirs.alwaysBuilds || !dirs.services) return false;
+  const name = /^service (\S+) build context$/.exec(what)?.[1];
+  const service = name === undefined ? undefined : dirs.services[name];
+  if (!isRecord(service)) return false;
+  const hasImage = typeof service.image === "string" && service.image !== "";
+  return hasImage && service.pull_policy !== "build";
+}
+
+/** Service build contexts under the staging directory, as relative paths. */
+function stagedContexts(
+  scans: readonly ComposeHostPathScan[],
+  dirs: BuildContextDirs,
+): Array<{ label: string; rel: string }> {
+  const { stageDir } = dirs;
+  const out: Array<{ label: string; rel: string }> = [];
+  for (const entry of scans.flatMap((scan) => scan.entries)) {
+    if (!entry.build || !isServiceBuildContext(entry.what)) continue;
+    if (skippedByUp(entry.what, dirs)) continue;
+    const rel = relative(stageDir, entry.path);
+    if (escapesDir(rel)) continue;
+    const shown = rel === "" ? "." : `./${rel}`;
+    out.push({ label: `${entry.what} ${shown}`, rel });
+  }
+  return out;
+}
+
+/**
+ * Throws {@link ComposeBuildContextMissingError} when a service's local build
+ * context is not a folder in the deployment directory.
+ */
+export async function assertBuildContextsPresent(
+  scans: readonly ComposeHostPathScan[],
+  dirs: BuildContextDirs,
+  exists: IsDirectoryFn = isDirectory,
+): Promise<void> {
+  const contexts = stagedContexts(scans, dirs);
+  const present = await Promise.all(
+    contexts.map(({ rel }) => exists(join(dirs.deploymentDir, rel))),
+  );
+  const missing = contexts.filter((_, i) => !present[i]).map((c) => c.label);
+  if (missing.length > 0) throw new ComposeBuildContextMissingError(missing);
+}
