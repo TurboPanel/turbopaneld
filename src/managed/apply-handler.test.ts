@@ -8,6 +8,7 @@ import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { handleManagedApply } from "./apply.ts";
+import { setManagedFirewallRunForTests } from "./firewall.ts";
 import {
   isManagedMemberDemoted,
   writeManagedDemotedMarker,
@@ -975,5 +976,78 @@ test("handleManagedApply standby mysql requires replication credential", async (
       Error,
       "requires a replication credential",
     );
+  });
+});
+
+test("handleManagedApply removes a cleared listener's scoping only after compose up", async () => {
+  await withApplyEnv(async () => {
+    const events: string[] = [];
+    setManagedFirewallRunForTests((cmd, args) => {
+      events.push(`fw ${cmd} ${args.slice(2).join(" ")}`);
+      return Promise.resolve(dockerOk());
+    });
+    try {
+      await handleManagedApply(
+        basePayload(),
+        new Date().toISOString(),
+        {
+          decryptSecrets: decryptOk,
+          ensureDocker: () => Promise.resolve(),
+          runDocker: (args, options) => {
+            if (args[0] === "compose" && args.includes("up")) {
+              events.push("compose up");
+            }
+            return primaryPostgresRun(args, options);
+          },
+        },
+      );
+    } finally {
+      setManagedFirewallRunForTests(null);
+    }
+    const up = events.indexOf("compose up");
+    const removal = events.findIndex((line) =>
+      line.startsWith("fw iptables -D")
+    );
+    assertEquals(up >= 0, true);
+    assertEquals(removal > up, true);
+    assertEquals(
+      events.slice(0, up).some((line) => line.startsWith("fw")),
+      false,
+    );
+  });
+});
+
+test("handleManagedApply leaves the old scoping in place when compose up fails", async () => {
+  await withApplyEnv(async () => {
+    const events: string[] = [];
+    setManagedFirewallRunForTests((cmd, args) => {
+      events.push(`fw ${cmd} ${args.slice(2).join(" ")}`);
+      return Promise.resolve(dockerOk());
+    });
+    try {
+      await assertRejects(
+        () =>
+          handleManagedApply(
+            basePayload(),
+            new Date().toISOString(),
+            {
+              decryptSecrets: decryptOk,
+              ensureDocker: () => Promise.resolve(),
+              runDocker: (args, options) => {
+                if (args[0] === "compose" && args.includes("up")) {
+                  return Promise.resolve(dockerFail("compose up denied"));
+                }
+                return primaryPostgresRun(args, options);
+              },
+            },
+          ),
+        Error,
+        "compose up denied",
+      );
+    } finally {
+      setManagedFirewallRunForTests(null);
+    }
+    // The old container may still publish the port: no teardown ran.
+    assertEquals(events, []);
   });
 });

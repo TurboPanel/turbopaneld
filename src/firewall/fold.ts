@@ -233,7 +233,11 @@ async function liveForwardRules(
   ]);
   if (!hung.success) return null;
   const listed = await run("iptables", ["-S", FIREWALL_FORWARD_CHAIN]);
-  return listed.success ? parseRules(listed.stdout) : null;
+  if (!listed.success) return null;
+  // A ruleset armed while the chain was being read is not cover: the rules just
+  // read may be the unconfirmed ones. Look again after the read.
+  if (await pendingNow(layout)) return null;
+  return parseRules(listed.stdout);
 }
 
 /**

@@ -9,9 +9,18 @@
  * Mirrors the TurboFabric `TP-FORWARD` pattern in
  * `../commands/fabric.ts`: a dedicated chain hung off `DOCKER-USER`,
  * `iptables -C` before insert, `-D` on teardown (destroy, and apply when the
- * listener is cleared or no longer public), and every failure logged and
- * swallowed — firewall scoping must never block apply or destroy. A leftover
+ * listener is cleared or no longer public). Teardown is best effort (a failure
+ * is logged and never blocks destroy). Installing is not: a failure throws so
+ * the apply reports it. The per-cluster chain is rebuilt in ONE
+ * `iptables-restore --noflush` transaction (chain reset, ACCEPTs, DROP last),
+ * which the kernel swaps in atomically: a failure or crash leaves the old
+ * rules in place, and the chain is never empty (open) in between. A leftover
  * DROP must not block a later cluster that reuses the same address/port.
+ *
+ * Every `iptables` call carries `-w <seconds>` (the fold's value) so another
+ * holder of the xtables lock delays a call instead of failing it, and the
+ * installer and teardown run under the daemon's firewall lock
+ * (`../firewall/lock.ts`) together with the ruleset apply / confirm path.
  *
  * Published container ports traverse `DOCKER-USER` **post-DNAT**, so the
  * original host address/port is matched via `conntrack --ctorigdst` /
@@ -27,8 +36,12 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
-import { forEachSequential } from "../util/sequential.ts";
 import { isManagedListenerCovered } from "../firewall/fold.ts";
+import { withFirewallLock } from "../firewall/lock.ts";
+import {
+  FIREWALL_COMMAND_TIMEOUT_MS,
+  XTABLES_LOCK_WAIT_SECONDS,
+} from "../firewall/run.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
 export const MANAGED_PUBLIC_CHAIN = "TP-MANAGED-PUB";
@@ -44,9 +57,12 @@ export type ManagedFirewallRunResult = {
   stderr: string;
 };
 
+export type ManagedFirewallRunOptions = { stdin?: string };
+
 export type ManagedFirewallRunFn = (
   cmd: string,
   args: string[],
+  options?: ManagedFirewallRunOptions,
 ) => Promise<ManagedFirewallRunResult>;
 
 let runOverride: ManagedFirewallRunFn | null = null;
@@ -61,14 +77,31 @@ export function setManagedFirewallRunForTests(
 async function spawnHost(
   cmd: string,
   args: string[],
+  options?: ManagedFirewallRunOptions,
 ): Promise<ManagedFirewallRunResult> {
   try {
-    const output = await new Deno.Command(cmd, {
+    const hasStdin = options?.stdin !== undefined;
+    const child = new Deno.Command(cmd, {
       args,
-      stdin: "null",
+      stdin: hasStdin ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
-    }).output();
+      // Runs inside the global firewall lock: never hang it.
+      signal: AbortSignal.timeout(FIREWALL_COMMAND_TIMEOUT_MS),
+    }).spawn();
+    if (hasStdin) {
+      const writer = child.stdin.getWriter();
+      try {
+        await writer.write(new TextEncoder().encode(options.stdin));
+      } finally {
+        try {
+          await writer.close();
+        } catch {
+          // Keep the original error (a timeout kills the child first).
+        }
+      }
+    }
+    const output = await child.output();
     return {
       success: output.success,
       code: output.code,
@@ -90,10 +123,30 @@ function isPermissionDenied(result: ManagedFirewallRunResult): boolean {
 async function runIptables(
   args: string[],
 ): Promise<ManagedFirewallRunResult> {
+  args = ["-w", String(XTABLES_LOCK_WAIT_SECONDS), ...args];
   if (runOverride) return await runOverride("iptables", args);
   const direct = await spawnHost("iptables", args);
   if (direct.success || !isPermissionDenied(direct)) return direct;
   return await spawnHost("sudo", hostSudoArgs(["-n", "iptables", ...args]));
+}
+
+/**
+ * Load a `*filter` document with `iptables-restore --noflush` (the other
+ * chains are untouched). The kernel applies it as one replace or not at all.
+ */
+async function runIptablesRestore(
+  stdin: string,
+): Promise<ManagedFirewallRunResult> {
+  const args = ["-w", String(XTABLES_LOCK_WAIT_SECONDS), "--noflush"];
+  const options = { stdin };
+  if (runOverride) return await runOverride("iptables-restore", args, options);
+  const direct = await spawnHost("iptables-restore", args, options);
+  if (direct.success || !isPermissionDenied(direct)) return direct;
+  return await spawnHost(
+    "sudo",
+    hostSudoArgs(["-n", "iptables-restore", ...args]),
+    options,
+  );
 }
 
 function alreadyExists(result: ManagedFirewallRunResult): boolean {
@@ -133,17 +186,33 @@ export function resolveManagedPublicAllowedSources(
   return [...sources].sort((a, b) => a.localeCompare(b));
 }
 
-function originMatch(address: string, port: number): string[] {
+function originMatch(address: string, port: number): string {
+  return `-p tcp -m conntrack --ctorigdst ${address} --ctorigdstport ${port}`;
+}
+
+/**
+ * The `iptables-restore --noflush` document for one cluster chain: declaring
+ * `:<chain> - [0:0]` resets it, then rules kept for another listener of the
+ * same cluster (a port change, until compose has replaced the old publish),
+ * each peer ACCEPT, then the DROP last.
+ */
+export function managedChainDocument(
+  chain: string,
+  address: string,
+  port: number,
+  sources: string[],
+  preserved: string[] = [],
+): string {
+  const match = originMatch(address, port);
   return [
-    "-p",
-    "tcp",
-    "-m",
-    "conntrack",
-    "--ctorigdst",
-    address,
-    "--ctorigdstport",
-    String(port),
-  ];
+    "*filter",
+    `:${chain} - [0:0]`,
+    ...preserved,
+    ...sources.map((source) => `-A ${chain} -s ${source} ${match} -j ACCEPT`),
+    `-A ${chain} ${match} -j DROP`,
+    "COMMIT",
+    "",
+  ].join("\n");
 }
 
 async function ensureChain(name: string): Promise<void> {
@@ -166,12 +235,28 @@ async function ensureRule(
 }
 
 /**
+ * Which half of an apply this reconcile belongs to.
+ *
+ * - `before`: runs ahead of compose. Installs or widens scoping only; it never
+ *   removes it, because the previous container still publishes its old port
+ *   until compose has replaced it. If the listener moved to another port the
+ *   chain covers the old and the new port together.
+ * - `after`: runs once compose succeeded. Failures are logged, not thrown
+ *   (the chain only stays wider, never open). Removes the scoping when the
+ *   listener is gone or no longer public, and narrows the chain to the new
+ *   port only. A failed compose never reaches it, so the old scoping stays.
+ * - `all`: both in order (the proof tool and tests).
+ */
+export type ManagedFirewallPhase = "before" | "after" | "all";
+
+/**
  * Restrict a public managed listener to the cluster's known peer addresses.
  *
- * When the listener is absent or not public, drop this cluster's `TP-MGD-<id>`
- * chain (idempotent if already gone). Clearing the listener is a normal apply
- * for a single-member cluster that only publishes while a remote app is bound;
- * a leftover DROP would block a later cluster that reuses the same address/port.
+ * When the listener is absent or not public, the `after` phase drops this
+ * cluster's `TP-MGD-<id>` chain (idempotent if already gone). Clearing the
+ * listener is a normal apply for a single-member cluster that only publishes
+ * while a remote app is bound; a leftover DROP would block a later cluster
+ * that reuses the same address/port.
  *
  * No rule is installed when the bind is not IPv4 or no stable peer address is
  * known — an overly-broad fallback is worse than leaving the port as the
@@ -179,10 +264,64 @@ async function ensureRule(
  */
 export async function reconcileManagedPublicFirewall(
   payload: ManagedApplyPayload,
+  phase: ManagedFirewallPhase = "all",
+): Promise<void> {
+  if (phase !== "after") {
+    await withFirewallLock(() => reconcileLocked(payload, "before"));
+  }
+  if (phase !== "before") {
+    // Compose already replaced the container. A failure here can only leave
+    // the chain wider than needed (still scoped, never open), so it is
+    // logged and the apply goes on to the engine state and users.
+    try {
+      await withFirewallLock(() => reconcileLocked(payload, "after"));
+    } catch (err) {
+      logWarn(
+        "managed",
+        `managed firewall could not narrow or remove scoping managed=${
+          sanitizeForLog(payload.managedId)
+        }: ${sanitizeForLog(err)}`,
+      );
+    }
+  }
+}
+
+/** Address of an `iptables -S` match, without a `/32` suffix. */
+function bareAddress(value: string): string {
+  return value.endsWith("/32") ? value.slice(0, -3) : value;
+}
+
+/**
+ * Rules of this chain that guard a listener OTHER than `address:port`, as
+ * `iptables -S` printed them (restore input format). They are carried into the
+ * rebuild while the old container still publishes the old port.
+ */
+function otherListenerRules(
+  listing: string,
+  chain: string,
+  address: string,
+  port: number,
+): string[] {
+  const kept: string[] = [];
+  for (const line of listing.split("\n")) {
+    if (!line.startsWith(`-A ${chain} `)) continue;
+    const dest = /--ctorigdst (\S+)/.exec(line)?.[1];
+    const destPort = /--ctorigdstport (\d+)/.exec(line)?.[1];
+    if (dest === undefined || destPort === undefined) continue;
+    if (bareAddress(dest) === address && destPort === String(port)) continue;
+    kept.push(line.trim());
+  }
+  return kept;
+}
+
+async function reconcileLocked(
+  payload: ManagedApplyPayload,
+  phase: "before" | "after",
 ): Promise<void> {
   const listener = payload.privateListener;
   if (listener?.transport !== "public") {
-    await removeManagedPublicFirewall(payload.managedId);
+    // The old container may still publish the port until compose replaced it.
+    if (phase === "after") await removeUnlocked(payload.managedId);
     return;
   }
   if (!isValidIpv4Literal(listener.address)) return;
@@ -200,12 +339,11 @@ export async function reconcileManagedPublicFirewall(
     sources,
   }, { run: (_cmd, args) => runIptables(args) });
   if (covered) {
-    await removeManagedPublicFirewall(payload.managedId);
+    await removeUnlocked(payload.managedId);
     return;
   }
 
   const chain = managedFirewallChain(payload.managedId);
-  const match = originMatch(listener.address, listener.port);
 
   await ensureChain(MANAGED_PUBLIC_CHAIN);
   await ensureRule(
@@ -214,22 +352,36 @@ export async function reconcileManagedPublicFirewall(
   );
   await ensureChain(chain);
 
-  // Rebuild this cluster's rules so a removed peer loses its ACCEPT and the
-  // trailing DROP always sorts last within the chain.
-  const flushed = await runIptables(["-F", chain]);
-  if (!flushed.success) {
-    throw new Error(flushed.stderr || `failed to flush chain ${chain}`);
-  }
-  await forEachSequential(sources, async (source) => {
-    const rule = [chain, "-s", source, ...match, "-j", "ACCEPT"];
-    const added = await runIptables(["-A", ...rule]);
-    if (!added.success) {
-      throw new Error(added.stderr || "failed to allow managed peer");
+  let preserved: string[] = [];
+  if (phase === "before") {
+    const listed = await runIptables(["-S", chain]);
+    if (!listed.success) {
+      throw new Error(listed.stderr || `failed to read chain ${chain}`);
     }
-  });
-  const dropped = await runIptables(["-A", chain, ...match, "-j", "DROP"]);
-  if (!dropped.success) {
-    throw new Error(dropped.stderr || "failed to install managed drop rule");
+    preserved = otherListenerRules(
+      listed.stdout,
+      chain,
+      listener.address,
+      listener.port,
+    );
+  }
+
+  // Rebuild this cluster's rules in one transaction. `:chain - [0:0]` resets
+  // the chain inside the same atomic replace, so a removed peer loses its
+  // ACCEPT, the DROP stays last, and a failure keeps the old rules.
+  const restored = await runIptablesRestore(
+    managedChainDocument(
+      chain,
+      listener.address,
+      listener.port,
+      sources,
+      preserved,
+    ),
+  );
+  if (!restored.success) {
+    throw new Error(
+      restored.stderr || `failed to rebuild managed chain ${chain}`,
+    );
   }
 
   await ensureRule(
@@ -257,32 +409,17 @@ async function removeBestEffort(args: string[]): Promise<void> {
 }
 
 /** Best-effort removal of a cluster's scoping chain. Never throws. */
-export async function removeManagedPublicFirewall(
+export function removeManagedPublicFirewall(
   managedId: string,
 ): Promise<void> {
+  return withFirewallLock(() => removeUnlocked(managedId));
+}
+
+async function removeUnlocked(managedId: string): Promise<void> {
   const chain = managedFirewallChain(managedId);
   await removeBestEffort(["-D", MANAGED_PUBLIC_CHAIN, "-j", chain]);
   await removeBestEffort(["-F", chain]);
   await removeBestEffort(["-X", chain]);
-}
-
-/**
- * Wrap {@link reconcileManagedPublicFirewall} so apply never fails on host
- * firewall problems (mirrors `reinstallFabricForwardingIfEnabled`).
- */
-export async function reconcileManagedPublicFirewallBestEffort(
-  payload: ManagedApplyPayload,
-): Promise<void> {
-  try {
-    await reconcileManagedPublicFirewall(payload);
-  } catch (err) {
-    logWarn(
-      "managed",
-      `managed public listener firewall scoping failed managed=${
-        sanitizeForLog(payload.managedId)
-      }: ${sanitizeForLog(err)}`,
-    );
-  }
 }
 
 /** Best-effort teardown wrapper for `managed.destroy`. */

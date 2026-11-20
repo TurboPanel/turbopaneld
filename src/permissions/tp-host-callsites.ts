@@ -2467,6 +2467,12 @@ const SITES: CallSite[] = [
       stdin: "*filter\nCOMMIT\n",
     },
   ),
+  tpHost('src/managed/firewall.ts|["-n","iptables-restore",...args]', {
+    argv: ["iptables-restore", "-w", "5", "--noflush"],
+    stdin: `*filter\n:${MGD_CHAIN} - [0:0]\n-A ${MGD_CHAIN} ${
+      MGD_MATCH.join(" ")
+    } -j DROP\nCOMMIT\n`,
+  }),
   tpHost('src/managed/firewall.ts|["-n","iptables",...args]', {
     argv: [
       "iptables",
@@ -2727,16 +2733,36 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost('src/commands/fabric.ts|runHost("iptables",["-C",...checkArgs])', {
-    argv: ["iptables", "-C", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
+    argv: [
+      "iptables",
+      "-w",
+      "5",
+      "-C",
+      "TP-FORWARD",
+      "-i",
+      "tp0",
+      "-j",
+      "ACCEPT",
+    ],
   }),
   tpHost('src/commands/fabric.ts|runHost("iptables",["-D",...checkArgs])', {
-    argv: ["iptables", "-D", "DOCKER-USER", "-j", "TP-FORWARD"],
+    argv: ["iptables", "-w", "5", "-D", "DOCKER-USER", "-j", "TP-FORWARD"],
   }),
   tpHost('src/commands/fabric.ts|runHost("iptables",["-N",name])', {
-    argv: ["iptables", "-N", "TP-FORWARD"],
+    argv: ["iptables", "-w", "5", "-N", "TP-FORWARD"],
   }),
   tpHost('src/commands/fabric.ts|runHost("iptables",addArgs)', {
-    argv: ["iptables", "-A", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
+    argv: [
+      "iptables",
+      "-w",
+      "5",
+      "-A",
+      "TP-FORWARD",
+      "-i",
+      "tp0",
+      "-j",
+      "ACCEPT",
+    ],
   }),
   tpHost(
     'src/commands/fabric.ts|runHost("sysctl",["-p",FABRIC_SYSCTL_DROPIN])',
@@ -2822,66 +2848,57 @@ const SITES: CallSite[] = [
   // TP-FORWARD hangs off DOCKER-USER, or off FORWARD on a host without Docker.
   tpHost(
     'src/commands/fabric.ts|runHost("iptables",["-S",DOCKER_USER_CHAIN])',
-    { argv: ["iptables", "-S", "DOCKER-USER"] },
+    { argv: ["iptables", "-w", "5", "-S", "DOCKER-USER"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",parent,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-D", "FORWARD", "-j", "TP-FORWARD"] },
+    { argv: ["iptables", "-w", "5", "-D", "FORWARD", "-j", "TP-FORWARD"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-F",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-F", "TP-FORWARD"] },
+    { argv: ["iptables", "-w", "5", "-F", "TP-FORWARD"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-X",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-X", "TP-FORWARD"] },
+    { argv: ["iptables", "-w", "5", "-X", "TP-FORWARD"] },
   ),
 
   // Managed-database public listener scoping.
   tpHost(
     'src/managed/firewall.ts|removeBestEffort(["-D",MANAGED_PUBLIC_CHAIN,"-j",chain])',
     {
-      argv: ["iptables", "-D", "TP-MANAGED-PUB", "-j", MGD_CHAIN],
+      argv: ["iptables", "-w", "5", "-D", "TP-MANAGED-PUB", "-j", MGD_CHAIN],
     },
   ),
   tpHost('src/managed/firewall.ts|removeBestEffort(["-F",chain])', {
-    argv: ["iptables", "-F", MGD_CHAIN],
+    argv: ["iptables", "-w", "5", "-F", MGD_CHAIN],
   }),
   tpHost('src/managed/firewall.ts|removeBestEffort(["-X",chain])', {
-    argv: ["iptables", "-X", MGD_CHAIN],
+    argv: ["iptables", "-w", "5", "-X", MGD_CHAIN],
   }),
-  tpHost('src/managed/firewall.ts|runIptables(["-A",...rule])', {
-    argv: [
-      "iptables",
-      "-A",
-      MGD_CHAIN,
-      "-s",
-      "203.0.113.7",
-      ...MGD_MATCH,
-      "-j",
-      "ACCEPT",
-    ],
-  }),
-  tpHost(
-    'src/managed/firewall.ts|runIptables(["-A",chain,...match,"-j","DROP"])',
-    {
-      argv: ["iptables", "-A", MGD_CHAIN, ...MGD_MATCH, "-j", "DROP"],
-    },
-  ),
   tpHost('src/managed/firewall.ts|runIptables(["-C",...checkArgs])', {
-    argv: ["iptables", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
+    argv: ["iptables", "-w", "5", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
   }),
-  tpHost('src/managed/firewall.ts|runIptables(["-F",chain])', {
-    argv: ["iptables", "-F", MGD_CHAIN],
+  tpHost('src/managed/firewall.ts|runIptables(["-S",chain])', {
+    argv: ["iptables", "-w", "5", "-S", MGD_CHAIN],
   }),
   tpHost('src/managed/firewall.ts|runIptables(["-N",name])', {
-    argv: ["iptables", "-N", "TP-MANAGED-PUB"],
+    argv: ["iptables", "-w", "5", "-N", "TP-MANAGED-PUB"],
   }),
   tpHost("src/managed/firewall.ts|runIptables(addArgs)", {
-    argv: ["iptables", "-I", "DOCKER-USER", "1", "-j", "TP-MANAGED-PUB"],
+    argv: [
+      "iptables",
+      "-w",
+      "5",
+      "-I",
+      "DOCKER-USER",
+      "1",
+      "-j",
+      "TP-MANAGED-PUB",
+    ],
   }),
   tpHost("src/managed/firewall.ts|runIptables(args)", {
-    argv: ["iptables", "-X", MGD_CHAIN],
+    argv: ["iptables", "-w", "5", "-X", MGD_CHAIN],
   }),
 
   // Cron, scheduled-backup and native-app units.

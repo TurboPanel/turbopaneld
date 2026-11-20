@@ -29,6 +29,7 @@ import {
   writeFileAtomic,
 } from "./pending.ts";
 import { foldManagedPublicChainBestEffort } from "./fold.ts";
+import { withFirewallLock } from "./lock.ts";
 import { runFirewallHost } from "./run.ts";
 
 export type FirewallConfirmState =
@@ -98,9 +99,16 @@ async function noPendingOutcome(
  * window. Throws when the pending documents are missing or unreadable: the
  * guard then rolls the ruleset back at the deadline, which is the safe outcome.
  */
-export async function confirmPendingFirewall(
+export function confirmPendingFirewall(
   digest: string,
   options: FirewallConfirmOptions = {},
+): Promise<FirewallConfirmOutcome> {
+  return withFirewallLock(() => confirmLocked(digest, options));
+}
+
+async function confirmLocked(
+  digest: string,
+  options: FirewallConfirmOptions,
 ): Promise<FirewallConfirmOutcome> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());

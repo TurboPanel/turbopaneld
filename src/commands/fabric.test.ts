@@ -36,6 +36,10 @@ import {
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
+import {
+  assertXtablesWaitHonoured,
+  stripXtablesWait,
+} from "../testing/xtables-wait.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -130,7 +134,7 @@ function recordingRun(
   extras?: (cmd: string, args: string[]) => FabricRunResult | null,
 ): FabricRunFn {
   const routeTable = fakeRouteTable();
-  return async (cmd, args) => {
+  return stripXtablesWait(async (cmd, args) => {
     await Promise.resolve();
     invocations.push(invocationKey(cmd, args));
     const extra = extras?.(cmd, args);
@@ -178,7 +182,7 @@ function recordingRun(
       return fail("inactive");
     }
     return ok();
-  };
+  });
 }
 
 async function withFabricDir(
@@ -2323,4 +2327,8 @@ test("a dial-in peer (no endpoint) is configured without an Endpoint line", asyn
     assertEquals(conf.includes(`PublicKey = ${WG_PUBKEY_B}`), true);
     assertEquals(conf.includes("Endpoint ="), false);
   });
+});
+
+test("every fabric iptables call waited on the xtables lock", () => {
+  assertXtablesWaitHonoured();
 });
