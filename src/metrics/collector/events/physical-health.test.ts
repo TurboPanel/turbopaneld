@@ -7,10 +7,11 @@ import type {
 } from "./types.ts";
 import type {
   PhysicalSignalTopology,
-  TopologySnapshot,
 } from "../../../contracts/topology-types.ts";
 import type { SensorIo } from "../sensors/discovery.ts";
 import type { SensorCandidate } from "../types.ts";
+
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -72,9 +73,8 @@ function candidates(): HardwareSignalCandidateMap {
   ]);
 }
 
-function snapshot(signals: PhysicalSignalTopology[]): TopologySnapshot {
+function snapshot(signals: PhysicalSignalTopology[]): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 1,
     networks: [],
     filesystems: [],

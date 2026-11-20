@@ -76,20 +76,20 @@ test("device replacement: the old entity's key is simply abandoned, the new enti
   assertEquals(tracker.rate("nic:eth2:rx", 650, 0, 60), 10);
 });
 
-test("topology change mid-stream: a slot reorder / GPU swap bumps topologyGeneration but the same device identity keeps counting — rate stays continuous, no spurious reset", () => {
+test("topology change mid-stream: a slot reorder / GPU swap changes the report but the same device identity keeps counting — rate stays continuous, no spurious reset", () => {
   const tracker = new CounterBaselineTracker();
-  // `CounterBaselineTracker` has no notion of topologyGeneration at all —
+  // `CounterBaselineTracker` has no notion of a topology change at all —
   // its key is the caller-assembled stable deviceId (e.g. `net:<deviceId>:rx`,
   // never a slot/kernel name), and `rate`/`delta` only ever branch on
   // bootGeneration. A NIC reordered to a different PCI slot, or a GPU swap
-  // that reassigns a slot, changes topologyGeneration while the device's own
+  // that reassigns a slot, changes the report while the device's own
   // identity and counters continue uninterrupted — bootGeneration never
   // changes and the value never decreases, so this must read as an ordinary
   // continuing counter, never a reset.
   assertEquals(tracker.rate("net:nic-stable-id-7:rx", 1000, 0, 60), null);
   assertEquals(tracker.rate("net:nic-stable-id-7:rx", 1600, 0, 60), 10);
   // Topology change lands here: hardware got reordered into a different PCI
-  // slot (topologyGeneration bumps 0 -> 1 at the caller/wire level), but
+  // slot (the topology report changes at the caller/wire level), but
   // this same device's deviceId and counters are untouched — bootGeneration
   // stays 0 and the value keeps climbing monotonically.
   assertEquals(tracker.rate("net:nic-stable-id-7:rx", 2200, 0, 60), 10);
@@ -102,8 +102,8 @@ test("topology change mid-stream: an operator/uplink-detection NIC1/NIC2 slot sw
   // deviceId, and `slot-mapping.ts` layers a separate `nicSlotDeviceIds`
   // resolution on top of that stable identity set — an
   // operator override or a re-detected uplink order can flip which
-  // deviceId is reported as "NIC1" vs "NIC2" (bumping topologyGeneration
-  // via the resolved `SlotMapping`) without touching either device's own
+  // deviceId is reported as "NIC1" vs "NIC2" (a change of the
+  // resolved `SlotMapping`) without touching either device's own
   // deviceId, bootGeneration, or counters at all.
   const nicA = "net:mac:aa:bb:cc:dd:ee:01:rx";
   const nicB = "net:mac:aa:bb:cc:dd:ee:02:rx";
@@ -116,7 +116,7 @@ test("topology change mid-stream: an operator/uplink-detection NIC1/NIC2 slot sw
   assertEquals(tracker.rate(nicB, 5300, 0, 60), 5);
 
   // t2: the slot mapping flips — NIC B is now reported as "NIC1", NIC A as
-  // "NIC2" (topologyGeneration bumps at the wire level). Because the
+  // "NIC2" (the report changes at the wire level). Because the
   // tracker is keyed by each device's own deviceId, never by its current
   // "NIC1"/"NIC2" label, neither device's rate is disturbed by the swap.
   assertEquals(tracker.rate(nicA, 2200, 0, 60), 10);

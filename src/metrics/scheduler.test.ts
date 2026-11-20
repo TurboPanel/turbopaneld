@@ -10,7 +10,7 @@ import {
   buildMetricsSample,
   METRICS_SCHEMA_VERSION,
 } from "../contracts/metrics-contract.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "./topology/topology.ts";
 import {
   deterministicJitterMs,
   METRICS_INTERVAL_MS,
@@ -177,9 +177,8 @@ function fixture(name: string): string {
 }
 
 /** Minimal fixed topology snapshot: one service block device, nothing else. */
-function fixtureTopologySnapshot(): TopologySnapshot {
+function fixtureTopologySnapshot(): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 0,
     networks: [],
     filesystems: [],

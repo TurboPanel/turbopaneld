@@ -696,7 +696,6 @@ export const METRIC_EVENT_KINDS = [
   "gpu_disappeared",
   "clock_sync_lost",
   "clock_sync_restored",
-  "topology_generation_changed",
   "boot_generation_changed",
 ] as const;
 
@@ -758,7 +757,6 @@ export const HARDWARE_HEALTH_EVENT_KIND: Record<MetricEventKind, boolean> = {
   gpu_disappeared: true,
   clock_sync_lost: false,
   clock_sync_restored: false,
-  topology_generation_changed: false,
   boot_generation_changed: false,
 };
 

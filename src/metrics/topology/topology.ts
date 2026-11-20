@@ -1,8 +1,6 @@
 /**
  * Topology orchestrator — the module's public entry point. Composes every
- * `*-topology.ts` discovery module (in parallel where independent), then
- * stamps the result with this tick's topology generation via
- * `generation.ts`.
+ * `*-topology.ts` discovery module (in parallel where independent).
  *
  * Discovery only: no telemetry (GPU utilization, hardware-signal readings)
  * is collected here — that's a later phase's job (see `../AGENTS.md`).
@@ -28,16 +26,12 @@ import { collectHardwareSignals as defaultCollectHardwareSignals } from "./hardw
 import type { IdentityIo } from "./identity.ts";
 import { collectNetworkTopology } from "./network-topology.ts";
 import { collectNumaTopology } from "./numa-topology.ts";
-import { resolveTopologyOverrides } from "./overrides.ts";
 import { isPhysicalMachine } from "./physical-classifier.ts";
-import { resolveTopologyGeneration } from "./generation.ts";
 import type {
   BlockDeviceTopology,
   GpuTopology,
   PhysicalSignalTopology,
-  TopologyOverrides,
   TopologySnapshot,
-  TopologySnapshotInputs,
 } from "../../contracts/topology-types.ts";
 
 async function defaultStatfs(path: string): Promise<StatfsResult | null> {
@@ -76,8 +70,6 @@ export type TopologyDeps = {
   resolveFabricInterfaces: () => Promise<string[]>;
   io: IdentityIo;
   sysRoot?: string;
-  daemonStateDir?: string;
-  resolveTopologyOverrides: () => Promise<TopologyOverrides>;
   resolveBootGeneration: () => Promise<number>;
   /**
    * Physical (non-VM) hardware signals — hwmon/RAPL temperature and power
@@ -108,16 +100,22 @@ function defaultDeps(): TopologyDeps {
     resolveLogsPath: () => resolveLayout(Deno.env.toObject()).logDir,
     resolveFabricInterfaces: () => Promise.resolve([FABRIC_INTERFACE_NAME]),
     io: defaultSensorIo(),
-    resolveTopologyOverrides: () => resolveTopologyOverrides(),
     resolveBootGeneration: () => resolveBootGeneration(),
     collectHardwareSignals: (deps) => defaultCollectHardwareSignals(deps),
   };
 }
 
-/** Discover every topology entity, without stamping a generation yet. */
-export async function collectTopologyInputs(
+/**
+ * What the daemon collects each tick: the reported snapshot plus the host's
+ * boot generation. The boot generation stays local: the metrics collector
+ * keys its counter baselines on it, and it is never part of a topology report.
+ */
+export type CollectedTopology = TopologySnapshot & { bootGeneration: number };
+
+/** Discover every topology entity. */
+export async function collectTopology(
   deps?: Partial<TopologyDeps>,
-): Promise<TopologySnapshotInputs> {
+): Promise<CollectedTopology> {
   const merged: TopologyDeps = { ...defaultDeps(), ...deps };
   const root = merged.sysRoot ?? "/sys";
 
@@ -217,19 +215,4 @@ export async function collectTopologyInputs(
       logs: merged.resolveLogsPath(),
     },
   };
-}
-
-/** Discover topology and stamp it with this tick's generation, persisting the comparison state. */
-export async function collectTopology(
-  deps?: Partial<TopologyDeps>,
-): Promise<TopologySnapshot> {
-  const merged: TopologyDeps = { ...defaultDeps(), ...deps };
-  const [inputs, overrides] = await Promise.all([
-    collectTopologyInputs(merged),
-    merged.resolveTopologyOverrides(),
-  ]);
-  const generation = await resolveTopologyGeneration(inputs, overrides, {
-    daemonStateDir: merged.daemonStateDir,
-  });
-  return { ...inputs, generation };
 }

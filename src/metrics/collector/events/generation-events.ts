@@ -1,36 +1,20 @@
 /**
- * Topology/boot generation bump edge-detectors — both trivial diffs over
- * fields `linux-collector.ts` already has every tick
- * (`snapshot.generation`/`snapshot.bootGeneration`). First tick establishes
- * the baseline (no fabricated "changed" event just because there was no
- * prior value to compare against). The topology event is not sent once the
- * control plane lists `topology-generation-optional-v1`; the baseline is
- * still kept so a later switch back cannot fabricate one.
+ * Boot generation bump edge-detector — a trivial diff over the field
+ * `linux-collector.ts` already has every tick (`snapshot.bootGeneration`).
+ * First tick establishes the baseline (no fabricated "changed" event just
+ * because there was no prior value to compare against).
  */
-import { topologyGenerationOptional } from "../../topology/generation.ts";
 import type { EventCollector, EventDetectContext } from "./types.ts";
 import { makeEvent } from "./types.ts";
 import type { MetricEvent } from "../../../contracts/metrics-contract.ts";
 
 export class GenerationEventCollector implements EventCollector {
-  #lastTopologyGeneration: number | undefined;
   #lastBootGeneration: number | undefined;
 
   detect(ctx: EventDetectContext): MetricEvent[] {
     const events: MetricEvent[] = [];
-    const { generation, bootGeneration } = ctx.snapshot;
+    const { bootGeneration } = ctx.snapshot;
 
-    if (
-      !topologyGenerationOptional() &&
-      this.#lastTopologyGeneration !== undefined &&
-      this.#lastTopologyGeneration !== generation
-    ) {
-      events.push(
-        makeEvent("topology_generation_changed", "info", ctx.nowMs, {
-          payload: { from: this.#lastTopologyGeneration, to: generation },
-        }),
-      );
-    }
     if (
       this.#lastBootGeneration !== undefined &&
       this.#lastBootGeneration !== bootGeneration
@@ -42,7 +26,6 @@ export class GenerationEventCollector implements EventCollector {
       );
     }
 
-    this.#lastTopologyGeneration = generation;
     this.#lastBootGeneration = bootGeneration;
     return events;
   }

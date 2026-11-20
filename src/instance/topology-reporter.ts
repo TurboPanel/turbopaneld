@@ -1,65 +1,42 @@
 /**
  * Periodic + event-driven `topology-report` emission over the daemon
- * WebSocket. Wraps `collectTopology()` (which itself persists/re-stamps the
- * topology generation on every call, see `../metrics/topology/generation.ts`)
- * with a per-attach "already collecting" guard — the same drop-not-queue
- * discipline `MetricsScheduler`'s `#activeEmitGeneration` follows — so an
- * interval tick racing a forced recompute (right after
- * `topology-overrides-update`) can never make `resolveTopologyGeneration`'s
- * tmp-write+rename race itself.
+ * WebSocket. Wraps `collectTopology()` with a per-attach "already collecting"
+ * guard — the same drop-not-queue discipline `MetricsScheduler`'s
+ * `#activeEmitGeneration` follows — so an interval tick racing a forced
+ * recompute can never run two collects at once.
  *
- * Sends only when the collected generation differs from the last one this
- * attach reported — cosmetic re-collects (nothing changed) never resend —
- * except the very first collect after {@link TopologyReporter.attach}, which
- * always sends so the control plane starts recording generations on
- * connect/startup without waiting for a later phase.
+ * Sends only when the collected topology's identity key differs from the last
+ * one this attach reported (`../metrics/topology/identity-key.ts`) — cosmetic
+ * re-collects (nothing changed) never resend — except the very first collect
+ * after {@link TopologyReporter.attach}, which always sends so the control
+ * plane records the topology on connect/startup without waiting for a later
+ * phase.
  */
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
-import type {
-  TopologyReportSnapshot,
-  TopologySnapshot,
-} from "../contracts/topology-types.ts";
+import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
+import { topologyIdentityKey } from "../metrics/topology/identity-key.ts";
 
 /** Steady recheck cadence — catches organic hardware changes with no operator override push. */
 export const TOPOLOGY_REPORT_INTERVAL_MS = 60_000;
 
 export type TopologyReport = {
-  generation: number;
-  bootGeneration: number;
   snapshot: TopologySnapshot;
   at: string;
 };
 
 export type TopologyReportSink = (report: TopologyReport) => void;
 
-/** A report as it goes on the wire: the generation numbers are optional there. */
-export type TopologyReportWire = {
-  generation?: number;
-  bootGeneration?: number;
-  snapshot: TopologyReportSnapshot;
-  at: string;
-};
-
-/**
- * The report to send: as collected, or, once the control plane lists
- * `topology-generation-optional-v1`, without `generation` and
- * `bootGeneration` (on the report and inside its snapshot).
- */
-export function topologyReportForWire(
-  report: TopologyReport,
-  generationOptional: boolean,
-): TopologyReportWire {
-  if (!generationOptional) return report;
-  const {
-    generation: _generation,
-    bootGeneration: _bootGeneration,
-    ...snapshot
-  } = report.snapshot;
-  return { snapshot, at: report.at };
+/** The reported snapshot: the collected topology without the local boot generation. */
+export function topologyForReport(
+  collected: CollectedTopology,
+): TopologySnapshot {
+  const { bootGeneration: _bootGeneration, ...snapshot } = collected;
+  return snapshot;
 }
 
 export type TopologyReporterOptions = {
-  collectTopology: () => Promise<TopologySnapshot>;
+  collectTopology: () => Promise<CollectedTopology>;
   intervalMs?: number;
   now?: () => string;
   setIntervalFn?: typeof setInterval;
@@ -68,7 +45,7 @@ export type TopologyReporterOptions = {
 };
 
 export class TopologyReporter {
-  readonly #collectTopology: () => Promise<TopologySnapshot>;
+  readonly #collectTopology: () => Promise<CollectedTopology>;
   readonly #intervalMs: number;
   readonly #now: () => string;
   readonly #setIntervalFn: typeof setInterval;
@@ -77,7 +54,7 @@ export class TopologyReporter {
 
   #send: TopologyReportSink | undefined;
   #intervalTimer: ReturnType<typeof setInterval> | undefined;
-  #lastReportedGeneration: number | undefined;
+  #lastReportedKey: string | undefined;
   /** `true` while a collect is in flight — an overlapping call is dropped, never queued. */
   #collecting = false;
 
@@ -94,14 +71,14 @@ export class TopologyReporter {
   /**
    * Begin reporting to `send`: an immediate report (connect/startup), then a
    * steady recheck every `intervalMs`. Re-attaching (e.g. a reconnect) resets
-   * the "last reported generation" so the new session always gets an initial
-   * report, even if this process already reported that same generation on a
-   * prior session.
+   * the "last reported" key so the new session always gets an initial report,
+   * even if this process already reported that same topology on a prior
+   * session.
    */
   attach(send: TopologyReportSink): void {
     this.detach();
     this.#send = send;
-    this.#lastReportedGeneration = undefined;
+    this.#lastReportedKey = undefined;
     void this.reportNow();
     this.#intervalTimer = this.#setIntervalFn(() => {
       void this.reportNow();
@@ -128,16 +105,12 @@ export class TopologyReporter {
     if (this.#collecting) return;
     this.#collecting = true;
     try {
-      const snapshot = await this.#collectTopology();
+      const snapshot = topologyForReport(await this.#collectTopology());
       if (this.#send !== send) return; // detached mid-collect
-      if (snapshot.generation === this.#lastReportedGeneration) return;
-      this.#lastReportedGeneration = snapshot.generation;
-      send({
-        generation: snapshot.generation,
-        bootGeneration: snapshot.bootGeneration,
-        snapshot,
-        at: this.#now(),
-      });
+      const key = topologyIdentityKey(snapshot);
+      if (key === this.#lastReportedKey) return;
+      this.#lastReportedKey = key;
+      send({ snapshot, at: this.#now() });
     } catch (err) {
       this.#onLog(`collect failed: ${sanitizeForLog(err)}`);
     } finally {

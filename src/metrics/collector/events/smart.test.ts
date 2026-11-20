@@ -6,10 +6,9 @@ import {
   SmartEventCollector,
 } from "./smart.ts";
 import type { EventDetectContext } from "./types.ts";
-import type {
-  BlockDeviceTopology,
-  TopologySnapshot,
-} from "../../../contracts/topology-types.ts";
+import type { BlockDeviceTopology } from "../../../contracts/topology-types.ts";
+
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -63,9 +62,8 @@ const VIRTUAL_DISK: BlockDeviceTopology = {
   isServiceDevice: true,
 };
 
-function snapshot(blockDevices: BlockDeviceTopology[]): TopologySnapshot {
+function snapshot(blockDevices: BlockDeviceTopology[]): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 1,
     networks: [],
     filesystems: [],

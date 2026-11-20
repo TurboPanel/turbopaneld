@@ -1,17 +1,19 @@
 import { assertEquals } from "@std/assert";
-import {
-  TopologyReporter,
-  topologyReportForWire,
-} from "./topology-reporter.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import { topologyForReport, TopologyReporter } from "./topology-reporter.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
-function fakeSnapshot(generation: number): TopologySnapshot {
+/** A topology with `nics` network devices, so a different count is a different identity. */
+function fakeSnapshot(nics: number): CollectedTopology {
   return {
-    generation,
     bootGeneration: 0,
-    networks: [],
+    networks: Array.from({ length: nics }, (_, i) => ({
+      deviceId: `mac:${i}`,
+      kind: "uplink" as const,
+      name: `eth${i}`,
+      identity: { mac: `${i}` },
+    })),
     filesystems: [],
     blockDevices: [],
     gpus: [],
@@ -62,10 +64,13 @@ test("attach immediately sends an initial report", async () => {
   await Promise.resolve();
 
   assertEquals(sent.length, 1);
-  assertEquals((sent[0] as { generation: number }).generation, 0);
+  const report = sent[0] as Record<string, unknown>;
+  assertEquals("generation" in report, false);
+  assertEquals("bootGeneration" in report, false);
+  assertEquals("bootGeneration" in (report.snapshot as object), false);
 });
 
-test("reportNow does not resend when the generation is unchanged", async () => {
+test("reportNow does not resend when the identity is unchanged", async () => {
   const timer = fakeTimer();
   const sent: unknown[] = [];
   const reporter = new TopologyReporter({
@@ -81,23 +86,22 @@ test("reportNow does not resend when the generation is unchanged", async () => {
   assertEquals(sent.length, 1);
 });
 
-test("reportNow resends when the generation changes", async () => {
+test("reportNow resends when the identity changes", async () => {
   const timer = fakeTimer();
   const sent: unknown[] = [];
-  let generation = 0;
+  let nics = 0;
   const reporter = new TopologyReporter({
-    collectTopology: () => Promise.resolve(fakeSnapshot(generation)),
+    collectTopology: () => Promise.resolve(fakeSnapshot(nics)),
     setIntervalFn: timer.setIntervalFn,
     clearIntervalFn: timer.clearIntervalFn,
   });
 
   reporter.attach((report) => sent.push(report));
   await Promise.resolve();
-  generation = 1;
+  nics = 1;
   await reporter.reportNow();
 
   assertEquals(sent.length, 2);
-  assertEquals((sent[1] as { generation: number }).generation, 1);
 });
 
 test("an overlapping collect is dropped, never queued", async () => {
@@ -218,7 +222,7 @@ test("the interval fires reportNow on the configured cadence", async () => {
   assertEquals(timer.intervalMs(), 5000);
   assertEquals(sent.length, 1);
 
-  // Same generation on the next tick — no resend.
+  // Same topology on the next tick — no resend.
   timer.fire();
   await Promise.resolve();
   await Promise.resolve();
@@ -234,21 +238,11 @@ test("topology-reporter never consults the capability plan", () => {
   assertEquals(source.includes("truncateSample"), false);
 });
 
-test("topologyReportForWire keeps the numbers until the control plane no longer needs them", () => {
-  const report = {
-    generation: 4,
-    bootGeneration: 0,
-    snapshot: fakeSnapshot(4),
-    at: "2026-11-05T00:00:00.000Z",
-  };
-  assertEquals(topologyReportForWire(report, false), report);
-  const wire = topologyReportForWire(report, true);
-  assertEquals("generation" in wire, false);
-  assertEquals("bootGeneration" in wire, false);
-  assertEquals("generation" in wire.snapshot, false);
-  assertEquals("bootGeneration" in wire.snapshot, false);
-  assertEquals(wire.at, report.at);
-  assertEquals(wire.snapshot.networks, []);
-  // The collected report itself is untouched: the reporter still compares generations.
-  assertEquals(report.snapshot.generation, 4);
+test("topologyForReport drops the local boot generation and nothing else", () => {
+  const collected = { ...fakeSnapshot(2), bootGeneration: 5 };
+  const snapshot = topologyForReport(collected);
+  assertEquals("bootGeneration" in snapshot, false);
+  assertEquals(snapshot.networks, collected.networks);
+  // The collected topology itself is untouched: the collector still reads it.
+  assertEquals(collected.bootGeneration, 5);
 });

@@ -1,10 +1,8 @@
 import type { HostTextSample } from "./host-text.ts";
 import type { MetricsCapabilityPlan } from "../capability-plan.ts";
 import type { MetricsSample } from "../../contracts/metrics-contract.ts";
-import type {
-  TopologyOverrides,
-  TopologySnapshot,
-} from "../../contracts/topology-types.ts";
+import type { TopologyOverrides } from "../../contracts/topology-types.ts";
+import type { CollectedTopology } from "../topology/topology.ts";
 import type { DatabaseProxyAdapterSet } from "./database-proxy/adapter.ts";
 import type { DirectoryUsageSnapshot } from "./directory-usage.ts";
 import type { DockerUsageReading } from "./docker-usage.ts";
@@ -290,13 +288,13 @@ export type CollectorDeps = {
     path: string,
   ) => StatfsResult | null | Promise<StatfsResult | null>;
   now: () => number;
-  /** This tick's topology discovery — networks/filesystems/blockDevices identity, generation, boot generation. */
-  collectTopology: () => Promise<TopologySnapshot>;
+  /** This tick's topology discovery — networks/filesystems/blockDevices identity and the boot generation. */
+  collectTopology: () => Promise<CollectedTopology>;
   /**
    * The operator's topology overrides (`topology/overrides.ts`'s
    * `resolveTopologyOverrides`), re-read each tick alongside
    * `collectTopology` so `linux-collector.ts` can recompute the same
-   * `SlotMapping` the topology generation was stamped with and emit only the
+   * `SlotMapping` the topology report uses and emit only the
    * monitored NICs (`normalNicSlots` in slot order, then fabric devices).
    * Optional: absent means `EMPTY_TOPOLOGY_OVERRIDES` — auto slot selection
    * (the default-route uplink only).
