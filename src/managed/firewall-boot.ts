@@ -193,7 +193,11 @@ export async function reconcileManagedFirewallBefore(
   ) => Promise<void> = reconcileManagedPublicFirewall,
 ): Promise<void> {
   const next = scopeRecordFor(payload);
-  if (next.public) {
+  // An apply without known peers installs no rules: until compose succeeded
+  // the old chain still scopes what the old container publishes, so the record
+  // stays as it was (see recordManagedListenerCleared).
+  const scopes = next.public && next.scoped !== false;
+  if (scopes) {
     const read = await readScope(layout, payload.managedId);
     const previous = read.kind === "record" ? read.record : null;
     const kept = previous?.public === true &&
@@ -211,12 +215,12 @@ export async function reconcileManagedFirewallBefore(
     }
   }
   await reconcile(payload, "before");
-  if (next.public) await writeScope(layout, payload.managedId, next);
+  if (scopes) await writeScope(layout, payload.managedId, next);
 }
 
 /**
- * After compose: a listener that is cleared, not public or not scoped is
- * recorded as such BEFORE the firewall's `after` phase removes its chain, so a
+ * After compose succeeded: a listener that is cleared, not public or has no
+ * known peers (`scoped: false`) is recorded as such BEFORE the firewall's `after` phase removes its chain, so a
  * crash in between leaves the chain (never an open port) and a record that
  * is not wider than it.
  */
@@ -225,7 +229,9 @@ export async function recordManagedListenerCleared(
   payload: ManagedApplyPayload,
 ): Promise<void> {
   const next = scopeRecordFor(payload);
-  if (!next.public) await writeScope(layout, payload.managedId, next);
+  if (!next.public || next.scoped === false) {
+    await writeScope(layout, payload.managedId, next);
+  }
 }
 
 /** True for an IPv4 address that is not private, shared, loopback or link-local. */

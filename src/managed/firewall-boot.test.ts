@@ -201,8 +201,36 @@ test("an apply with no known peers records scoped false: no boot chain", async (
   await withState(async (layout, dir) => {
     await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
     await reconcileManagedFirewallBefore(layout, publicPayload([]), noFirewall);
+    // Compose has not run yet: nothing is recorded (no record, no chain).
+    assertEquals((await listBootPublicListeners(layout)).length, 0);
+    await recordManagedListenerCleared(layout, publicPayload([]));
     assertEquals((await scopeFile(dir)).peers, []);
     assertEquals((await scopeFile(dir)).scoped, false);
+    assertEquals(await listBootPublicListeners(layout), []);
+  });
+});
+
+test("a port change with no peers and a failed compose keeps boot DROP only on the old port", async () => {
+  await withState(async (layout, dir) => {
+    await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
+    await reconcileManagedFirewallBefore(
+      layout,
+      publicPayload(["198.51.100.7"], 45001),
+      noFirewall,
+    );
+    // Moves to 45002 with no known peers; compose fails or the daemon
+    // crashes, so recordManagedListenerCleared never runs.
+    await reconcileManagedFirewallBefore(
+      layout,
+      publicPayload([], 45002),
+      noFirewall,
+    );
+    const listeners = await listBootPublicListeners(layout);
+    assertEquals(listeners.length, 1);
+    assertEquals(listeners[0].port, 45001);
+    assertEquals(listeners[0].peers, ["198.51.100.7"]);
+    // Once compose succeeded the move is recorded and boot installs nothing.
+    await recordManagedListenerCleared(layout, publicPayload([], 45002));
     assertEquals(await listBootPublicListeners(layout), []);
   });
 });
