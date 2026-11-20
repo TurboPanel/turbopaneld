@@ -6,10 +6,12 @@ import {
   managedChainDocument,
   managedFirewallChain,
   type ManagedFirewallRunResult,
+  otherListenerRules,
   reconcileManagedPublicFirewall,
   removeManagedPublicFirewall,
   removeManagedPublicFirewallBestEffort,
   resolveManagedPublicAllowedSources,
+  scopePublicListenersClosedAtBoot,
   setManagedFirewallRunForTests,
 } from "./firewall.ts";
 
@@ -621,4 +623,150 @@ test("the firewall lock serialises the ruleset apply and the managed reconcile",
   } finally {
     setManagedFirewallRunForTests(null);
   }
+});
+
+test("otherListenerRules reads -S output with a comment and a /32 suffix", () => {
+  const listing = [
+    `-N ${CHAIN}`,
+    `-A ${CHAIN} -s 203.0.113.51/32 -d 203.0.113.60/32 -p tcp -m conntrack --ctorigdst 203.0.113.60/32 --ctorigdstport 45002 -m comment --comment "peer of other db" -j ACCEPT`,
+    `-A ${CHAIN} -s 203.0.113.51/32 -p tcp -m conntrack --ctorigdst 203.0.113.50/32 --ctorigdstport 45001 -m comment --comment "this listener" -j ACCEPT`,
+    `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.60/32 --ctorigdstport 45002 -j DROP`,
+    `-A ${CHAIN} -p tcp -j RETURN`,
+  ].join("\n");
+  assertEquals(otherListenerRules(listing, CHAIN, "203.0.113.50", 45001), [
+    `-A ${CHAIN} -s 203.0.113.51/32 -d 203.0.113.60/32 -p tcp -m conntrack --ctorigdst 203.0.113.60/32 --ctorigdstport 45002 -m comment --comment "peer of other db" -j ACCEPT`,
+    `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.60/32 --ctorigdstport 45002 -j DROP`,
+  ]);
+});
+
+test("otherListenerRules reads the iptables-legacy order (port before address, no comment)", () => {
+  const listing = [
+    `-A ${CHAIN} -s 203.0.113.51/32 -p tcp -m conntrack --ctorigdstport 45001 --ctorigdst 203.0.113.50/32 -j ACCEPT`,
+    `-A ${CHAIN} -p tcp -m conntrack --ctorigdstport 45002 --ctorigdst 203.0.113.60/32 -j DROP`,
+  ].join("\n");
+  assertEquals(otherListenerRules(listing, CHAIN, "203.0.113.50", 45001), [
+    `-A ${CHAIN} -p tcp -m conntrack --ctorigdstport 45002 --ctorigdst 203.0.113.60/32 -j DROP`,
+  ]);
+  // The same listener written without the /32 suffix is still this listener.
+  assertEquals(
+    otherListenerRules(
+      `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`,
+      CHAIN,
+      "203.0.113.50",
+      45001,
+    ),
+    [],
+  );
+});
+
+const BOOT_LISTENER = {
+  managedId: MANAGED_ID,
+  address: "203.0.113.50",
+  port: 45001,
+};
+
+test("boot scoping installs a DROP-only chain and the jumps when the chain is new", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    assertEquals(await scopePublicListenersClosedAtBoot([BOOT_LISTENER]), 1);
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+  assertEquals(kernel.state.rules, [
+    `-A ${CHAIN} ${matchFor(45001)} -j DROP`,
+  ]);
+  const joined = kernel.state.invocations.join("\n");
+  assertEquals(joined.includes("-A TP-MANAGED-PUB -j " + CHAIN), true);
+  assertEquals(joined.includes("-I DOCKER-USER 1 -j TP-MANAGED-PUB"), true);
+  assertEquals(joined.includes("-s "), false);
+});
+
+test("boot scoping after a daemon restart keeps the chain's existing ACCEPTs", async () => {
+  const kernel = fakeKernel(() => false);
+  const accept = `-A ${CHAIN} -s 203.0.113.51/32 ${matchFor(45001)} -j ACCEPT`;
+  const drop = `-A ${CHAIN} ${matchFor(45001)} -j DROP`;
+  kernel.state.rules = [accept, drop];
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    assertEquals(await scopePublicListenersClosedAtBoot([BOOT_LISTENER]), 1);
+    assertEquals(await scopePublicListenersClosedAtBoot([BOOT_LISTENER]), 1);
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+  assertEquals(kernel.state.rules, [accept, drop]);
+  assertEquals(
+    kernel.state.invocations.some((line) =>
+      line.startsWith("iptables-restore")
+    ),
+    false,
+  );
+});
+
+test("boot DROP chain is widened to the peer ACCEPTs by the next apply", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    await scopePublicListenersClosedAtBoot([BOOT_LISTENER]);
+    await reconcileManagedPublicFirewall(publicPayload(), "before");
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+  assertEquals(kernel.state.rules, [
+    `-A ${CHAIN} -s 203.0.113.51 ${matchFor(45001)} -j ACCEPT`,
+    `-A ${CHAIN} ${matchFor(45001)} -j DROP`,
+  ]);
+});
+
+test("boot scoping carries another listener's rules and continues past a failure", async () => {
+  const kernel = fakeKernel(() => false);
+  const other = `-A ${CHAIN} ${matchFor(45009)} -j DROP`;
+  kernel.state.rules = [other];
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    assertEquals(
+      await scopePublicListenersClosedAtBoot([
+        { managedId: "bad", address: "not-an-ip", port: 1 },
+        BOOT_LISTENER,
+      ]),
+      1,
+    );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+  assertEquals(kernel.state.rules, [
+    other,
+    `-A ${CHAIN} ${matchFor(45001)} -j DROP`,
+  ]);
+});
+
+test("boot scoping reports a failed restore and leaves the port to the next try", async () => {
+  const kernel = fakeKernel(() => true);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    assertEquals(await scopePublicListenersClosedAtBoot([BOOT_LISTENER]), 0);
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+});
+
+test("covered listener: the before phase keeps the chain, the after phase removes it", async () => {
+  const tpFwd = (args: string[]) => {
+    const line = args.join(" ");
+    if (line === "-C DOCKER-USER -j TP-FWD") return ok();
+    if (line === "-S TP-FWD") return ok(FOLDED_FORWARD);
+    return null;
+  };
+  await withRunner(async (invocations) => {
+    await reconcileManagedPublicFirewall(publicPayload(), "before");
+    assertEquals(invocations.some((line) => line.startsWith("-F ")), false);
+    assertEquals(invocations.some((line) => line.startsWith("-X ")), false);
+    assertEquals(
+      invocations.some((line) => line.startsWith("-D TP-MANAGED-PUB")),
+      false,
+    );
+    await reconcileManagedPublicFirewall(publicPayload(), "after");
+    assertEquals(invocations.includes(`-F ${CHAIN}`), true);
+    assertEquals(invocations.includes(`-X ${CHAIN}`), true);
+  }, tpFwd);
 });

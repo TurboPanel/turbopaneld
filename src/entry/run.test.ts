@@ -95,6 +95,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     // No test waits on a real retry timer; the retry tests turn this off.
     shouldSkipOrchestration: () => true,
     applyManagedBootHold: () => Promise.resolve(),
+    scopeManagedPublicListeners: () => Promise.resolve(),
     sweepImageBuildSlices: () => Promise.resolve(),
     markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
@@ -281,6 +282,27 @@ test("runDaemon holds primaries first and stamps a clean shutdown last", async (
   });
   await runDaemon(stub.io);
   assertEquals(order, ["hold", "orchestration", "clean", "exit"]);
+});
+
+test("runDaemon scopes public managed ports before anything else and survives a failure", async () => {
+  const order: string[] = [];
+  const stub = stubIo({
+    scopeManagedPublicListeners: () => {
+      order.push("scope");
+      return Promise.reject(new Error("iptables missing"));
+    },
+    applyManagedBootHold: () => {
+      order.push("hold");
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(order, ["scope", "hold"]);
+  assertEquals(stub.exits, [0]);
+  assertEquals(
+    stub.warns.some((line) => line.includes("boot firewall scoping failed")),
+    true,
+  );
 });
 
 test("runDaemon still starts when the boot hold check or the shutdown stamp fails", async () => {
