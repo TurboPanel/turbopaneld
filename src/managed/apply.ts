@@ -60,6 +60,10 @@ import {
   ManagedDestroyedError,
 } from "./destroyed-marker.ts";
 import { reconcileManagedPublicFirewall } from "./firewall.ts";
+import {
+  reconcileManagedFirewallBefore,
+  recordManagedListenerCleared,
+} from "./firewall-boot.ts";
 import { sessionEndsFor } from "./session-end-marker.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
@@ -991,7 +995,7 @@ async function applyManagedEngine(
   // the old container keeps publishing its old port until then, and a failed
   // compose leaves the old scoping in place. A failure to scope a public
   // listener fails the apply before anything is published.
-  await reconcileManagedPublicFirewall(payload, "before");
+  await reconcileManagedFirewallBefore(layout, payload);
   const project = await composeUpManagedEngine({
     layout,
     payload,
@@ -1008,6 +1012,7 @@ async function applyManagedEngine(
 
   // Compose replaced the container: now drop scoping for a listener that is
   // gone and narrow the chain to the new port only.
+  await recordManagedListenerCleared(layout, payload);
   await reconcileManagedPublicFirewall(payload, "after");
 
   const engineContainers = await collectManagedContainers(project, redact, run);

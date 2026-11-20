@@ -38,6 +38,7 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { isManagedListenerCovered } from "../firewall/fold.ts";
 import { withFirewallLock } from "../firewall/lock.ts";
+import { mapSequential } from "../util/sequential.ts";
 import {
   FIREWALL_COMMAND_TIMEOUT_MS,
   XTABLES_LOCK_WAIT_SECONDS,
@@ -286,6 +287,16 @@ export async function reconcileManagedPublicFirewall(
   }
 }
 
+/** Destination address and port a `-S` rule line matches, or null. */
+function ruleListener(
+  line: string,
+): { address: string; port: string } | null {
+  const dest = /--ctorigdst (\S+)/.exec(line)?.[1];
+  const port = /--ctorigdstport (\d+)/.exec(line)?.[1];
+  if (dest === undefined || port === undefined) return null;
+  return { address: bareAddress(dest), port };
+}
+
 /** Address of an `iptables -S` match, without a `/32` suffix. */
 function bareAddress(value: string): string {
   return value.endsWith("/32") ? value.slice(0, -3) : value;
@@ -296,7 +307,7 @@ function bareAddress(value: string): string {
  * `iptables -S` printed them (restore input format). They are carried into the
  * rebuild while the old container still publishes the old port.
  */
-function otherListenerRules(
+export function otherListenerRules(
   listing: string,
   chain: string,
   address: string,
@@ -305,10 +316,9 @@ function otherListenerRules(
   const kept: string[] = [];
   for (const line of listing.split("\n")) {
     if (!line.startsWith(`-A ${chain} `)) continue;
-    const dest = /--ctorigdst (\S+)/.exec(line)?.[1];
-    const destPort = /--ctorigdstport (\d+)/.exec(line)?.[1];
-    if (dest === undefined || destPort === undefined) continue;
-    if (bareAddress(dest) === address && destPort === String(port)) continue;
+    const matched = ruleListener(line);
+    if (matched === null) continue;
+    if (matched.address === address && matched.port === String(port)) continue;
     kept.push(line.trim());
   }
   return kept;
@@ -327,7 +337,13 @@ async function reconcileLocked(
   if (!isValidIpv4Literal(listener.address)) return;
 
   const sources = resolveManagedPublicAllowedSources(payload);
-  if (sources.length === 0) return;
+  if (sources.length === 0) {
+    // No known peers: no rules (the documented behaviour). A chain a boot or an
+    // earlier apply left for this cluster would block the port for good, so
+    // once compose ran it is removed and the state converges to the apply.
+    if (phase === "after") await removeUnlocked(payload.managedId);
+    return;
+  }
 
   // Stage 6 fold: once the confirmed managed rule set (TP-FWD) already narrows
   // this listener to the same peers, the legacy chain is redundant. Drop this
@@ -339,7 +355,10 @@ async function reconcileLocked(
     sources,
   }, { run: (_cmd, args) => runIptables(args) });
   if (covered) {
-    await removeUnlocked(payload.managedId);
+    // Only once compose replaced the container: before it the old container
+    // may still publish a previous port that TP-FWD does not cover, and this
+    // chain is what scopes it.
+    if (phase === "after") await removeUnlocked(payload.managedId);
     return;
   }
 
@@ -436,4 +455,119 @@ export async function removeManagedPublicFirewallBestEffort(
       }: ${sanitizeForLog(err)}`,
     );
   }
+}
+
+/** A published port found on disk at daemon start. */
+export type BootPublicListener = {
+  managedId: string;
+  address: string;
+  port: number;
+  /** Sources the last apply allowed; empty means DROP only. */
+  peers: string[];
+};
+
+/** The chain already ends this listener in a DROP, so it is scoped. */
+function chainDropsListener(
+  listing: string,
+  chain: string,
+  address: string,
+  port: number,
+): boolean {
+  return listing.split("\n").some((line) => {
+    if (!line.startsWith(`-A ${chain} `) || !line.trim().endsWith("-j DROP")) {
+      return false;
+    }
+    const matched = ruleListener(line);
+    return matched?.address === address && matched.port === String(port);
+  });
+}
+
+async function scopeClosedLocked(
+  listener: BootPublicListener,
+): Promise<void> {
+  const chain = managedFirewallChain(listener.managedId);
+  // Docker creates DOCKER-USER too and keeps a chain that already exists.
+  await ensureChain(DOCKER_USER_CHAIN);
+  await ensureChain(MANAGED_PUBLIC_CHAIN);
+  await ensureRule(
+    [DOCKER_USER_CHAIN, "-j", MANAGED_PUBLIC_CHAIN],
+    ["-I", DOCKER_USER_CHAIN, "1", "-j", MANAGED_PUBLIC_CHAIN],
+  );
+  await ensureChain(chain);
+  const listed = await runIptables(["-S", chain]);
+  if (!listed.success) {
+    throw new Error(listed.stderr || `failed to read chain ${chain}`);
+  }
+  // A daemon restart without a reboot finds the chain as the last apply left
+  // it, peer ACCEPTs included: leave it alone and only make sure it is hung.
+  if (
+    !chainDropsListener(listed.stdout, chain, listener.address, listener.port)
+  ) {
+    const restored = await runIptablesRestore(
+      managedChainDocument(
+        chain,
+        listener.address,
+        listener.port,
+        listener.peers,
+        otherListenerRules(
+          listed.stdout,
+          chain,
+          listener.address,
+          listener.port,
+        ),
+      ),
+    );
+    if (!restored.success) {
+      throw new Error(
+        restored.stderr || `failed to rebuild managed chain ${chain}`,
+      );
+    }
+  }
+  await ensureRule(
+    [MANAGED_PUBLIC_CHAIN, "-j", chain],
+    ["-A", MANAGED_PUBLIC_CHAIN, "-j", chain],
+  );
+}
+
+/**
+ * Daemon start (and Docker coming back): give every published public listener
+ * a chain that accepts the peers the last apply allowed (none: drops everyone),
+ * unless its chain already scopes it. The rules are gone after a host reboot
+ * while Docker republishes the port at once, so the port must not wait for the
+ * next managed apply. The listeners are loaded INSIDE the firewall lock, so a
+ * concurrent apply's `after` phase can never be followed by a stale record
+ * recreating the chain it just removed. One failure never stops the others.
+ * Returns how many listeners are now scoped.
+ */
+export function scopePublicListenersClosedAtBootLocked(
+  load: () => Promise<BootPublicListener[]>,
+): Promise<number> {
+  return withFirewallLock(async () => {
+    const listeners = await load();
+    const results = await mapSequential(listeners, async (listener) => {
+      try {
+        if (!isValidIpv4Literal(listener.address)) return false;
+        await scopeClosedLocked(listener);
+        return true;
+      } catch (err) {
+        logWarn(
+          "managed",
+          `boot firewall could not scope managed=${
+            sanitizeForLog(listener.managedId)
+          }: ${sanitizeForLog(err)}`,
+        );
+        return false;
+      }
+    });
+    return results.filter(Boolean).length;
+  });
+}
+
+/** {@link scopePublicListenersClosedAtBootLocked} for a list already in hand. */
+export function scopePublicListenersClosedAtBoot(
+  listeners: BootPublicListener[],
+): Promise<number> {
+  return scopePublicListenersClosedAtBootLocked(() =>
+    Promise.resolve(listeners)
+  );
 }

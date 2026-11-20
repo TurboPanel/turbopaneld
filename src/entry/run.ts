@@ -35,6 +35,7 @@ import {
   guardHostingCaddySites,
 } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
+import { scopeManagedPublicListenersAtBoot } from "../managed/firewall-boot.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import { DemotedMemberGuard } from "../managed/demoted-guard.ts";
 import { ManagedEngineExitGuard } from "../managed/engine-exit-guard.ts";
@@ -136,6 +137,8 @@ export type DaemonRunIo = {
   scanLiveReleases?: () => Promise<void>;
   /** Set aside hosting Caddy snippets it cannot load; defaults to {@link guardHostingSites}. */
   guardHostingCaddySites?: () => Promise<void>;
+  /** Close published public managed ports at start; defaults to {@link scopeManagedPublicListenersAtStart}. */
+  scopeManagedPublicListeners?: () => Promise<unknown>;
   /** Hold HA primaries after an unclean host restart; defaults to {@link applyManagedBootHoldAtStart}. */
   applyManagedBootHold?: () => Promise<void>;
   /** Remove image-build slices a crashed run left; defaults to {@link sweepImageBuildSlicesAtStart}. */
@@ -304,6 +307,15 @@ async function maybeAttachDocker(
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
     void reinstallForwardingJumps();
+    // Docker may have rebuilt DOCKER-USER without our jump.
+    void (io.scopeManagedPublicListeners ??
+      scopeManagedPublicListenersAtStart)().catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "managed",
+          "re-scoping public managed listeners after Docker returned failed:",
+          sanitizeForLog(err),
+        );
+      });
     // Docker may have recreated its bridges while it was away.
     void syncWall(io);
     void (io.healManagedStacks ?? healManagedStacksAfterDockerReturn)()
@@ -425,6 +437,13 @@ export async function applyManagedBootHoldAtStart(
   if (holdSucceeded) {
     await persist(layout);
   }
+}
+
+/** Close the public managed listeners on disk (`managed/firewall-boot.ts`). */
+export async function scopeManagedPublicListenersAtStart(): Promise<void> {
+  await scopeManagedPublicListenersAtBoot(
+    resolveLayout(Deno.env.toObject()),
+  );
 }
 
 /**
@@ -641,6 +660,17 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
   };
 
   info("daemon", "starting up");
+
+  // First of all, before the control plane and before Docker is waited for: a
+  // reboot clears the iptables rules while Docker republishes managed ports.
+  await bestEffort(
+    io.logWarn ?? logWarn,
+    "boot firewall scoping",
+    async () => {
+      await (io.scopeManagedPublicListeners ??
+        scopeManagedPublicListenersAtStart)();
+    },
+  );
 
   // Before any orchestration step: tp-host and lib/tp-php-loopback are root
   // helpers an earlier converge installed, and orchestration may not be ready
