@@ -1,11 +1,11 @@
 import { assertEquals } from "@std/assert";
+import { withFirewallLock } from "../firewall/lock.ts";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   MANAGED_PUBLIC_CHAIN,
   managedFirewallChain,
   type ManagedFirewallRunResult,
   reconcileManagedPublicFirewall,
-  reconcileManagedPublicFirewallBestEffort,
   removeManagedPublicFirewall,
   removeManagedPublicFirewallBestEffort,
   resolveManagedPublicAllowedSources,
@@ -39,8 +39,12 @@ function recordingRun(
   invocations: string[],
   extras?: (args: string[]) => ManagedFirewallRunResult | null,
 ) {
-  return async (_cmd: string, args: string[]) => {
+  return async (_cmd: string, waited: string[]) => {
     await Promise.resolve();
+    // Every call must wait on the xtables lock; the rest of the file reads the
+    // argv without that prefix.
+    assertEquals(waited.slice(0, 2), ["-w", "5"]);
+    const args = waited.slice(2);
     invocations.push(args.join(" "));
     const extra = extras?.(args);
     if (extra) return extra;
@@ -158,12 +162,13 @@ test("reconcile scopes the public listener to known peers and drops the rest", a
     const match =
       "-p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001";
     const accept = invocations.indexOf(
-      `-A ${CHAIN} -s 203.0.113.51 ${match} -j ACCEPT`,
+      `-I ${CHAIN} 1 -s 203.0.113.51 ${match} -j ACCEPT`,
     );
     const drop = invocations.indexOf(`-A ${CHAIN} ${match} -j DROP`);
     assertEquals(accept >= 0, true);
-    // The catch-all DROP must always land after every peer ACCEPT.
-    assertEquals(drop > accept, true);
+    // The DROP goes in first and each ACCEPT is inserted ahead of it, so the
+    // chain never holds peer rules without the DROP (fail closed).
+    assertEquals(drop >= 0 && drop < accept, true);
     assertEquals(
       invocations.includes(`-A ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`),
       true,
@@ -281,16 +286,6 @@ test("removal logs unexpected iptables failures without throwing", async () => {
   }, () => fail("unexpected iptables error"));
 });
 
-test("best-effort reconcile swallows reconcile failures", async () => {
-  await withRunner(async (invocations) => {
-    await reconcileManagedPublicFirewallBestEffort(publicPayload());
-    assertEquals(invocations.length > 0, true);
-  }, (args) => {
-    if (args[0] === "-F") return fail("flush denied");
-    return null;
-  });
-});
-
 test("best-effort removal swallows teardown failures", async () => {
   setManagedFirewallRunForTests(async () => {
     await Promise.resolve();
@@ -313,7 +308,7 @@ test("reconcile throws when a peer ACCEPT or trailing DROP cannot be installed",
     }
     assertEquals(threw, true);
   }, (args) => {
-    if (args[0] === "-A" && args.includes("ACCEPT")) {
+    if (args[0] === "-I" && args.includes("ACCEPT")) {
       return fail("failed to allow managed peer");
     }
     return null;
@@ -377,4 +372,143 @@ test("stage 6: a listener TP-FWD already narrows drops its legacy chain and buil
     if (line === "-S TP-FWD") return ok(FOLDED_FORWARD);
     return null;
   });
+});
+
+const DROP_RULE =
+  `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`;
+
+test("lock contention after the flush leaves the chain closed and fails the command", async () => {
+  // The call after the flush loses the xtables lock race (as a bare iptables
+  // would, without -w): the chain must still end in the DROP and the reconcile
+  // must report failure rather than only log it.
+  let afterFlush = false;
+  const chain: string[] = [];
+  await withRunner(async (invocations) => {
+    let threw = false;
+    try {
+      await reconcileManagedPublicFirewall(publicPayload());
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+    assertEquals(chain.includes(DROP_RULE), true);
+    // The DROP was installed before the lock-losing call, and no peer rule was.
+    assertEquals(invocations.includes(DROP_RULE), true);
+  }, (args) => {
+    const line = args.join(" ");
+    if (line === `-F ${CHAIN}`) {
+      afterFlush = true;
+      chain.length = 0;
+      return ok();
+    }
+    if (line.startsWith(`-C ${CHAIN} `)) {
+      return chain.includes(`-A ${line.slice(3)}`)
+        ? ok()
+        : fail("Bad rule (does a matching rule exist in that chain?)");
+    }
+    if (afterFlush && line.startsWith(`-I ${CHAIN} 1 -s`)) {
+      return fail("Another app is currently holding the xtables lock");
+    }
+    if (line.startsWith(`-A ${CHAIN} `)) chain.push(line);
+    return null;
+  });
+});
+
+test("a failed first DROP after the flush is retried so the chain is not left open", async () => {
+  let drops = 0;
+  const chain: string[] = [];
+  await withRunner(async () => {
+    let threw = false;
+    try {
+      await reconcileManagedPublicFirewall(publicPayload());
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+    assertEquals(chain.includes(DROP_RULE), true);
+  }, (args) => {
+    const line = args.join(" ");
+    if (line.startsWith(`-A ${CHAIN} `) && line.endsWith("-j DROP")) {
+      drops += 1;
+      if (drops === 1) return fail("Another app is currently holding the lock");
+      chain.push(line);
+    }
+    return null;
+  });
+});
+
+test("a pending ruleset keeps the legacy chain even when TP-FWD looks like cover", async () => {
+  const root = await Deno.makeTempDir({ prefix: "tp-mgd-pending-" });
+  const saved = Deno.env.toObject();
+  try {
+    await Deno.mkdir(`${root}/run`, { recursive: true });
+    await Deno.writeTextFile(
+      `${root}/run/firewall-pending.json`,
+      JSON.stringify({
+        version: 1,
+        digest: "a".repeat(64),
+        generation: 1,
+        armedAt: "2099-01-01T00:00:00.000Z",
+        windowSeconds: 120,
+        deadlineAt: "2099-01-01T00:00:00.000Z",
+        v6: "keep",
+      }),
+    );
+    Deno.env.set("TURBOPANEL_RUN_DIR", `${root}/run`);
+    await withRunner(async (invocations) => {
+      await reconcileManagedPublicFirewall(publicPayload());
+      // TP-MGD is rebuilt, never dropped, while the cover is unconfirmed.
+      assertEquals(
+        invocations.includes(
+          `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`,
+        ),
+        true,
+      );
+      assertEquals(
+        invocations.includes(`-D ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`),
+        false,
+      );
+    }, (args) => {
+      const line = args.join(" ");
+      if (line === "-C DOCKER-USER -j TP-FWD") return ok();
+      if (line === "-S TP-FWD") return ok(FOLDED_FORWARD);
+      return null;
+    });
+  } finally {
+    if (saved.TURBOPANEL_RUN_DIR === undefined) {
+      Deno.env.delete("TURBOPANEL_RUN_DIR");
+    } else Deno.env.set("TURBOPANEL_RUN_DIR", saved.TURBOPANEL_RUN_DIR);
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+test("the firewall lock serialises the ruleset apply and the managed reconcile", async () => {
+  const events: string[] = [];
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => release = resolve);
+  const first = withFirewallLock(async () => {
+    events.push("apply:start");
+    await held;
+    events.push("apply:end");
+  });
+  setManagedFirewallRunForTests(async (_cmd, waited) => {
+    await Promise.resolve();
+    events.push(`reconcile:${waited.slice(2).join(" ")}`);
+    if (waited[2] === "-C") return fail("Bad rule");
+    if (waited[2] === "-N") return fail("Chain already exists.");
+    return ok();
+  });
+  try {
+    const second = reconcileManagedPublicFirewall(publicPayload());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The reconcile has not touched iptables while the apply holds the lock.
+    assertEquals(events, ["apply:start"]);
+    release();
+    await first;
+    await second;
+    assertEquals(events.slice(0, 2), ["apply:start", "apply:end"]);
+    assertEquals(events[2].startsWith("reconcile:"), true);
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
 });

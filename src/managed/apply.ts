@@ -59,7 +59,7 @@ import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
 } from "./destroyed-marker.ts";
-import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { reconcileManagedPublicFirewall } from "./firewall.ts";
 import { sessionEndsFor } from "./session-end-marker.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
@@ -1000,8 +1000,9 @@ async function applyManagedEngine(
   });
 
   // Scope a public listener once the publish exists; drop the legacy chain
-  // when the listener is gone. Never blocks apply.
-  await reconcileManagedPublicFirewallBestEffort(payload);
+  // when the listener is gone. A failure to scope a public listener fails the
+  // apply so it is reported and retried, never only logged.
+  await reconcileManagedPublicFirewall(payload);
 
   const engineContainers = await collectManagedContainers(project, redact, run);
   const containerId = resolveEngineContainerId(

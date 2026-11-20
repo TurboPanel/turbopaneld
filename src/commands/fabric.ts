@@ -33,6 +33,7 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { join } from "@std/path";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { XTABLES_LOCK_WAIT_SECONDS } from "../firewall/run.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
 import { collectServerIps } from "../host/server-addresses.ts";
 import { FABRIC_INTERFACE_NAME } from "../host/fabric-interface.ts";
@@ -344,11 +345,22 @@ async function runDefault(
   );
 }
 
+/**
+ * `iptables` calls wait for the xtables lock (`-w`, the firewall fold's
+ * seconds) instead of failing while Docker or the firewall apply holds it. The
+ * `--version` probe takes no lock and stays as the tp-host argv allows it.
+ */
+function withXtablesWait(cmd: string, args: string[]): string[] {
+  if (cmd !== "iptables" || args[0] === "--version") return args;
+  return ["-w", String(XTABLES_LOCK_WAIT_SECONDS), ...args];
+}
+
 async function runHost(
   cmd: string,
   args: string[],
   options?: { stdin?: string; timeoutMs?: number },
 ): Promise<FabricRunResult> {
+  args = withXtablesWait(cmd, args);
   if (runOverride) return await runOverride(cmd, args, options);
   if (skipRealSyscalls) {
     return { success: true, code: 0, stdout: "", stderr: "" };

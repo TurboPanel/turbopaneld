@@ -290,3 +290,39 @@ test("isManagedListenerCovered gates the legacy installer and fails closed", asy
     );
   }, true);
 });
+
+test("a ruleset armed while TP-FWD is being read is not cover", async () => {
+  const listener = {
+    dest: "10.0.0.5",
+    port: "3306",
+    hasDrop: true,
+    sources: ["10.0.0.7"],
+  };
+  await withLayout(async (layout) => {
+    const inner = fakeIptables({
+      legacy: false,
+      forward: NEW_FORWARD,
+      jump: true,
+    });
+    // The marker is written between the pending check and the `-S` result.
+    const run: FirewallRunFn = async (cmd, args, options) => {
+      const result = await inner.run(cmd, args, options);
+      if (args.join(" ") === "-S TP-FWD") {
+        await Deno.writeTextFile(
+          join(layout.runDir, "firewall-pending.json"),
+          JSON.stringify({
+            version: 1,
+            digest: "a".repeat(64),
+            generation: 1,
+            armedAt: "2099-01-01T00:00:00.000Z",
+            windowSeconds: 120,
+            deadlineAt: "2099-01-01T00:00:00.000Z",
+            v6: "keep",
+          }),
+        );
+      }
+      return result;
+    };
+    assert(!await isManagedListenerCovered(listener, { run, layout }));
+  });
+});

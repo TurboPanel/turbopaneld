@@ -36,6 +36,7 @@ import {
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
+import { stripXtablesWait } from "../testing/xtables-wait.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -130,7 +131,7 @@ function recordingRun(
   extras?: (cmd: string, args: string[]) => FabricRunResult | null,
 ): FabricRunFn {
   const routeTable = fakeRouteTable();
-  return async (cmd, args) => {
+  return stripXtablesWait(async (cmd, args) => {
     await Promise.resolve();
     invocations.push(invocationKey(cmd, args));
     const extra = extras?.(cmd, args);
@@ -178,7 +179,7 @@ function recordingRun(
       return fail("inactive");
     }
     return ok();
-  };
+  });
 }
 
 async function withFabricDir(

@@ -9,9 +9,16 @@
  * Mirrors the TurboFabric `TP-FORWARD` pattern in
  * `../commands/fabric.ts`: a dedicated chain hung off `DOCKER-USER`,
  * `iptables -C` before insert, `-D` on teardown (destroy, and apply when the
- * listener is cleared or no longer public), and every failure logged and
- * swallowed — firewall scoping must never block apply or destroy. A leftover
- * DROP must not block a later cluster that reuses the same address/port.
+ * listener is cleared or no longer public). Teardown is best effort (a failure
+ * is logged and never blocks destroy). Installing is not: a failure throws so
+ * the apply reports it, and a rebuild that fails after the flush puts the DROP
+ * back first (fail closed). A leftover DROP must not block a later cluster
+ * that reuses the same address/port.
+ *
+ * Every `iptables` call carries `-w <seconds>` (the fold's value) so another
+ * holder of the xtables lock delays a call instead of failing it, and the
+ * installer and teardown run under the daemon's firewall lock
+ * (`../firewall/lock.ts`) together with the ruleset apply / confirm path.
  *
  * Published container ports traverse `DOCKER-USER` **post-DNAT**, so the
  * original host address/port is matched via `conntrack --ctorigdst` /
@@ -29,6 +36,8 @@ import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { isManagedListenerCovered } from "../firewall/fold.ts";
+import { withFirewallLock } from "../firewall/lock.ts";
+import { XTABLES_LOCK_WAIT_SECONDS } from "../firewall/run.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
 export const MANAGED_PUBLIC_CHAIN = "TP-MANAGED-PUB";
@@ -90,6 +99,7 @@ function isPermissionDenied(result: ManagedFirewallRunResult): boolean {
 async function runIptables(
   args: string[],
 ): Promise<ManagedFirewallRunResult> {
+  args = ["-w", String(XTABLES_LOCK_WAIT_SECONDS), ...args];
   if (runOverride) return await runOverride("iptables", args);
   const direct = await spawnHost("iptables", args);
   if (direct.success || !isPermissionDenied(direct)) return direct;
@@ -177,12 +187,16 @@ async function ensureRule(
  * known — an overly-broad fallback is worse than leaving the port as the
  * operator's firewall found it.
  */
-export async function reconcileManagedPublicFirewall(
+export function reconcileManagedPublicFirewall(
   payload: ManagedApplyPayload,
 ): Promise<void> {
+  return withFirewallLock(() => reconcileLocked(payload));
+}
+
+async function reconcileLocked(payload: ManagedApplyPayload): Promise<void> {
   const listener = payload.privateListener;
   if (listener?.transport !== "public") {
-    await removeManagedPublicFirewall(payload.managedId);
+    await removeUnlocked(payload.managedId);
     return;
   }
   if (!isValidIpv4Literal(listener.address)) return;
@@ -200,7 +214,7 @@ export async function reconcileManagedPublicFirewall(
     sources,
   }, { run: (_cmd, args) => runIptables(args) });
   if (covered) {
-    await removeManagedPublicFirewall(payload.managedId);
+    await removeUnlocked(payload.managedId);
     return;
   }
 
@@ -214,28 +228,57 @@ export async function reconcileManagedPublicFirewall(
   );
   await ensureChain(chain);
 
-  // Rebuild this cluster's rules so a removed peer loses its ACCEPT and the
-  // trailing DROP always sorts last within the chain.
+  // Rebuild this cluster's rules so a removed peer loses its ACCEPT. The DROP
+  // goes in first and each ACCEPT is inserted ahead of it, so the chain never
+  // holds peer rules without the DROP, and a failure part way leaves it closed.
   const flushed = await runIptables(["-F", chain]);
   if (!flushed.success) {
     throw new Error(flushed.stderr || `failed to flush chain ${chain}`);
   }
-  await forEachSequential(sources, async (source) => {
-    const rule = [chain, "-s", source, ...match, "-j", "ACCEPT"];
-    const added = await runIptables(["-A", ...rule]);
-    if (!added.success) {
-      throw new Error(added.stderr || "failed to allow managed peer");
+  try {
+    const dropped = await runIptables(["-A", chain, ...match, "-j", "DROP"]);
+    if (!dropped.success) {
+      throw new Error(dropped.stderr || "failed to install managed drop rule");
     }
-  });
-  const dropped = await runIptables(["-A", chain, ...match, "-j", "DROP"]);
-  if (!dropped.success) {
-    throw new Error(dropped.stderr || "failed to install managed drop rule");
+    await forEachSequential(sources, async (source) => {
+      const rule = [chain, "1", "-s", source, ...match, "-j", "ACCEPT"];
+      const added = await runIptables(["-I", ...rule]);
+      if (!added.success) {
+        throw new Error(added.stderr || "failed to allow managed peer");
+      }
+    });
+  } catch (err) {
+    await restoreDropAfterFailure(chain, match);
+    throw err;
   }
 
   await ensureRule(
     [MANAGED_PUBLIC_CHAIN, "-j", chain],
     ["-A", MANAGED_PUBLIC_CHAIN, "-j", chain],
   );
+}
+
+/**
+ * A rebuild failed after the flush: make sure the chain still ends in the DROP
+ * for this listener (an empty chain returns to `DOCKER-USER` and leaves the
+ * port open). Peers may be refused until the next apply; that is the safe side.
+ */
+async function restoreDropAfterFailure(
+  chain: string,
+  match: string[],
+): Promise<void> {
+  const rule = [chain, ...match, "-j", "DROP"];
+  const present = await runIptables(["-C", ...rule]);
+  if (present.success) return;
+  const added = await runIptables(["-A", ...rule]);
+  if (!added.success) {
+    logWarn(
+      "managed",
+      `managed firewall could not restore the DROP in ${chain}; the listener may be open: ${
+        sanitizeForLog(added.stderr || added.stdout || `exit ${added.code}`)
+      }`,
+    );
+  }
 }
 
 async function removeBestEffort(args: string[]): Promise<void> {
@@ -257,32 +300,17 @@ async function removeBestEffort(args: string[]): Promise<void> {
 }
 
 /** Best-effort removal of a cluster's scoping chain. Never throws. */
-export async function removeManagedPublicFirewall(
+export function removeManagedPublicFirewall(
   managedId: string,
 ): Promise<void> {
+  return withFirewallLock(() => removeUnlocked(managedId));
+}
+
+async function removeUnlocked(managedId: string): Promise<void> {
   const chain = managedFirewallChain(managedId);
   await removeBestEffort(["-D", MANAGED_PUBLIC_CHAIN, "-j", chain]);
   await removeBestEffort(["-F", chain]);
   await removeBestEffort(["-X", chain]);
-}
-
-/**
- * Wrap {@link reconcileManagedPublicFirewall} so apply never fails on host
- * firewall problems (mirrors `reinstallFabricForwardingIfEnabled`).
- */
-export async function reconcileManagedPublicFirewallBestEffort(
-  payload: ManagedApplyPayload,
-): Promise<void> {
-  try {
-    await reconcileManagedPublicFirewall(payload);
-  } catch (err) {
-    logWarn(
-      "managed",
-      `managed public listener firewall scoping failed managed=${
-        sanitizeForLog(payload.managedId)
-      }: ${sanitizeForLog(err)}`,
-    );
-  }
 }
 
 /** Best-effort teardown wrapper for `managed.destroy`. */

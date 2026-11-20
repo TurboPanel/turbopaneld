@@ -16,6 +16,7 @@ import {
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
+import { stripXtablesWait } from "../testing/xtables-wait.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -53,7 +54,7 @@ class FakeHost {
   readonly rules = new Set<string>();
   tp0 = false;
 
-  readonly run: FabricRunFn = async (cmd, args) => {
+  readonly run: FabricRunFn = stripXtablesWait(async (cmd, args) => {
     await Promise.resolve();
     this.calls.push(`${cmd} ${args.join(" ")}`);
     if (cmd === "ip") return this.ip(args);
@@ -66,7 +67,7 @@ class FakeHost {
       return ok(String(FABRIC_DEFAULT_MTU));
     }
     return ok();
-  };
+  });
 
   private ip(args: string[]): FabricRunResult {
     const words = args.join(" ");

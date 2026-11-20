@@ -121,3 +121,15 @@ records the same failure itself.
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Command handlers** | `src/commands/AGENTS.md` | Daemon command implementations (`command-router.ts`); injected into `InstanceClient` from `src/entry/run.ts` so transport never imports handlers |
+
+## TurboFabric iptables calls wait for the lock
+
+`fabric.ts` `runHost` prepends `-w <XTABLES_LOCK_WAIT_SECONDS>` (the firewall
+fold's value, `src/firewall/run.ts`) to every `iptables` call except the
+`--version` probe, so a call that meets Docker's or the firewall apply's xtables
+lock waits instead of failing. `tp-host` already accepts `-w` and its argv
+checks are unchanged. Fabric rule changes touch only `TP-FORWARD` (and its jump
+off `DOCKER-USER` / `FORWARD`), which the firewall fold and the managed
+installer do not read, so they stay outside the daemon firewall lock
+(`src/firewall/lock.ts`). Test fakes see argv without the prefix through
+`src/testing/xtables-wait.ts`, which asserts it is there.
