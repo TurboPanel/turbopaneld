@@ -42,6 +42,9 @@ function fakeClone(
   };
 }
 
+/** The clone's scratch folder: a sibling of the deployment, never inside it. */
+const scratchFor = (dir: string) => `${dir}-scratch`;
+
 async function inTempDeployment(
   fn: (dir: string) => Promise<void>,
 ): Promise<void> {
@@ -50,12 +53,14 @@ async function inTempDeployment(
     await fn(dir);
   } finally {
     await Deno.remove(dir, { recursive: true });
+    await Deno.remove(scratchFor(dir), { recursive: true }).catch(() => {});
   }
 }
 
-test("the repository lands in repo/, without .git, and the commit is recorded", () =>
+test("the repository lands in repo/<commit>, without .git, and the commit is recorded", () =>
   inTempDeployment(async (dir) => {
     const outcome = await applyComposeCheckout(dir, CHECKOUT, {
+      scratchDir: scratchFor(dir),
       decryptSecrets: undefined,
       checkoutFn: fakeClone({
         "deploy/compose.yaml": "services: {}\n",
@@ -63,22 +68,23 @@ test("the repository lands in repo/, without .git, and the commit is recorded", 
       }),
     });
     assertEquals(outcome.fetched, true);
-    assertEquals(outcome.projectDir, join(dir, "repo", "deploy"));
+    assertEquals(outcome.projectDir, join(dir, "repo", SHA_A, "deploy"));
     assertEquals(
-      await Deno.readTextFile(join(dir, "repo", "vpn", "Dockerfile")),
+      await Deno.readTextFile(join(dir, "repo", SHA_A, "vpn", "Dockerfile")),
       "FROM scratch\n",
     );
-    await assertRejects(() => Deno.stat(join(dir, "repo", ".git")));
-    await assertRejects(() => Deno.stat(join(dir, ".checkout-scratch")));
+    await assertRejects(() => Deno.stat(join(dir, "repo", SHA_A, ".git")));
+    await assertRejects(() => Deno.stat(scratchFor(dir)));
     assertEquals((await readComposeCheckoutMarker(dir))?.commitSha, SHA_A);
     // A repo file named compose.yaml never collides with the compiled file.
     await assertRejects(() => Deno.stat(join(dir, "compose.yaml")));
   }));
 
-test("the same commit is not fetched twice, a new one replaces the tree", () =>
+test("the same commit is not fetched twice, a new one gets its own folder", () =>
   inTempDeployment(async (dir) => {
     const seen: CheckoutParams[] = [];
     const deps = {
+      scratchDir: scratchFor(dir),
       decryptSecrets: undefined,
       checkoutFn: fakeClone({ "deploy/compose.yaml": "a\n" }, seen),
     };
@@ -87,7 +93,7 @@ test("the same commit is not fetched twice, a new one replaces the tree", () =>
     assertEquals(again.fetched, false);
     assertEquals(seen.length, 1);
 
-    await Deno.writeTextFile(join(dir, "repo", "stale.txt"), "old");
+    await Deno.writeTextFile(join(dir, "repo", SHA_A, "kept.txt"), "old");
     const next = await applyComposeCheckout(
       dir,
       { ...CHECKOUT, commitSha: SHA_B },
@@ -95,20 +101,32 @@ test("the same commit is not fetched twice, a new one replaces the tree", () =>
     );
     assertEquals(next.fetched, true);
     assertEquals(seen.length, 2);
-    await assertRejects(() => Deno.stat(join(dir, "repo", "stale.txt")));
+    // The earlier generation is untouched: its containers may still run from it.
+    assertEquals(
+      await Deno.readTextFile(join(dir, "repo", SHA_A, "kept.txt")),
+      "old",
+    );
+    assertEquals(next.root, join(dir, "repo", SHA_B));
     assertEquals((await readComposeCheckoutMarker(dir))?.commitSha, SHA_B);
-    await assertRejects(() => Deno.stat(join(dir, ".repo-previous")));
+
+    // A rollback to the older commit reuses its folder without a fetch.
+    const back = await applyComposeCheckout(dir, CHECKOUT, deps);
+    assertEquals(back.fetched, false);
+    assertEquals(seen.length, 2);
+    assertEquals((await readComposeCheckoutMarker(dir))?.commitSha, SHA_A);
   }));
 
 test("a repository without the compose file is refused and the old tree stays", () =>
   inTempDeployment(async (dir) => {
     await applyComposeCheckout(dir, CHECKOUT, {
+      scratchDir: scratchFor(dir),
       decryptSecrets: undefined,
       checkoutFn: fakeClone({ "deploy/compose.yaml": "a\n" }),
     });
     const err = await assertRejects(
       () =>
         applyComposeCheckout(dir, { ...CHECKOUT, commitSha: SHA_B }, {
+          scratchDir: scratchFor(dir),
           decryptSecrets: undefined,
           checkoutFn: fakeClone({ "other.txt": "x" }),
         }),
@@ -119,10 +137,12 @@ test("a repository without the compose file is refused and the old tree stays", 
     );
     assertEquals((await readComposeCheckoutMarker(dir))?.commitSha, SHA_A);
     assertEquals(
-      await Deno.readTextFile(join(dir, "repo", "deploy", "compose.yaml")),
+      await Deno.readTextFile(
+        join(dir, "repo", SHA_A, "deploy", "compose.yaml"),
+      ),
       "a\n",
     );
-    await assertRejects(() => Deno.stat(join(dir, ".checkout-scratch")));
+    await assertRejects(() => Deno.stat(scratchFor(dir)));
   }));
 
 test("the sealed credential is decrypted and handed to the clone", () =>
@@ -137,6 +157,7 @@ test("the sealed credential is decrypted and handed to the clone", () =>
         credentialUsername: "oauth2",
       },
       {
+        scratchDir: scratchFor(dir),
         decryptSecrets: (envelopes) =>
           Promise.resolve(envelopes.map((e) => `plain-of-${e}`)),
         checkoutFn: fakeClone({ "deploy/compose.yaml": "a\n" }, seen),
@@ -157,6 +178,7 @@ test("a credential with no way to decrypt it fails before any clone", () =>
           dir,
           { ...CHECKOUT, credential: "sealed", credentialKind: "token" },
           {
+            scratchDir: scratchFor(dir),
             decryptSecrets: undefined,
             checkoutFn: fakeClone({}, seen),
           },
@@ -181,6 +203,7 @@ test("build contexts next to the compose file exist at the project directory", (
         dir,
         { ...CHECKOUT, composePath, commitSha },
         {
+          scratchDir: scratchFor(dir),
           decryptSecrets: undefined,
           checkoutFn: fakeClone({
             [composePath]: "services: {}\n",

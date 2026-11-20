@@ -7,11 +7,18 @@
  * ```
  * compose.yaml        the compiled file the daemon writes (never a repo file)
  * deployment.json     the deployment record
- * repo.json           this marker: which commit `repo/` holds
- * repo/               the repository tree at that commit, no `.git`
+ * repo.json           this marker: which commit is the current one
+ * repo/<commit>/      the repository tree at that commit, no `.git`
  *   deploy/compose.yaml   the repo's own file, untouched
  *   vpn/Dockerfile        what `build: ./vpn` reads
  * ```
+ *
+ * Each commit has its own folder and an older one stays until the new one is
+ * up (`pruneComposeCheckout`). Running containers bind into the folder they
+ * were started from, so replacing one tree in place would empty or stale
+ * their mounts and leave a failed deploy's old containers without files. A
+ * new commit also changes every bind source into the tree, so Compose
+ * recreates the services that mount it.
  *
  * Compose resolves a relative `build`, bind source or `env_file` against its
  * project directory, which defaults to the folder of the first `-f` file. The
@@ -19,7 +26,7 @@
  * rehydrate pass and the rollback copy find it there), and it must not
  * overwrite a repository file of the same name, so the repository does not go
  * into the folder of `compose.yaml`. Instead Compose is started with
- * `--project-directory repo/<folder of the repo's compose file>`, so a path
+ * `--project-directory repo/<commit>/<folder of the repo's compose file>`, so a path
  * written for the repository resolves exactly as it does in a clone, including
  * for a compose file kept in a repository subfolder. Because the project
  * directory is a flag on every call (see `docker-cli.ts`), nothing in the
@@ -40,14 +47,14 @@ export type ComposeCheckoutMarker = {
   version: 1;
   /** Clone URL (credential-free) the tree came from. */
   cloneUrl: string;
-  /** The commit `repo/` holds. */
+  /** The current commit: its tree is `repo/<commit>`. */
   commitSha: string;
   /** Repo-relative path of the compose file the project directory comes from. */
   composePath: string;
 };
 
 export type ComposeCheckoutDirs = {
-  /** `<deploymentDir>/repo`: the whole checkout, the build tool's working folder. */
+  /** `<deploymentDir>/repo/<commit>`: the whole checkout, the build tool's working folder. */
   root: string;
   /** Compose's project directory: the folder of the repo's compose file. */
   projectDir: string;
@@ -59,11 +66,22 @@ function folderOf(path: string): string {
   return slash === -1 ? "." : path.slice(0, slash);
 }
 
+/** A full commit id; the folder name of a generation, so nothing else is accepted. */
+const COMMIT_SHA = /^[0-9a-f]{40}$|^[0-9a-f]{64}$/;
+
+export function isCommitSha(value: string): boolean {
+  return COMMIT_SHA.test(value);
+}
+
 export function composeCheckoutDirs(
   deploymentDir: string,
   composePath: string,
+  commitSha: string,
 ): ComposeCheckoutDirs {
-  const root = join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME);
+  if (!isCommitSha(commitSha)) {
+    throw new Error(`not a commit id: ${commitSha}`);
+  }
+  const root = join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME, commitSha);
   return { root, projectDir: normalize(join(root, folderOf(composePath))) };
 }
 
@@ -80,7 +98,8 @@ export function parseComposeCheckoutMarker(
   const v = value as Record<string, unknown>;
   if (
     v.version !== 1 || typeof v.cloneUrl !== "string" ||
-    typeof v.commitSha !== "string" || typeof v.composePath !== "string"
+    typeof v.commitSha !== "string" || !isCommitSha(v.commitSha) ||
+    typeof v.composePath !== "string"
   ) {
     return null;
   }
@@ -134,6 +153,31 @@ export async function removeComposeCheckout(
 }
 
 /**
+ * Remove every checkout tree but the current commit's. Called once a deploy
+ * has brought the current one up: until then the previous generation's
+ * containers still run from their own tree.
+ */
+export async function pruneComposeCheckout(
+  deploymentDir: string,
+): Promise<void> {
+  const marker = await readComposeCheckoutMarker(deploymentDir);
+  if (!marker) return;
+  const parent = join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME);
+  let names: string[];
+  try {
+    names = await Array.fromAsync(Deno.readDir(parent), (e) => e.name);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  await Promise.all(
+    names.filter((name) => name !== marker.commitSha).map((name) =>
+      Deno.remove(join(parent, name), { recursive: true })
+    ),
+  );
+}
+
+/**
  * The checkout directories for a compose call whose first file is
  * `composeFile`, or `null` when the deployment has none. A file under the
  * staging directory belongs to its parent deployment.
@@ -148,7 +192,9 @@ export async function composeCheckoutDirsForFile(
   }
   if (dir === "") return null;
   const marker = await readComposeCheckoutMarker(dir);
-  return marker ? composeCheckoutDirs(dir, marker.composePath) : null;
+  return marker
+    ? composeCheckoutDirs(dir, marker.composePath, marker.commitSha)
+    : null;
 }
 
 /** {@link composeCheckoutDirs} for a deployment directory, `null` without a checkout. */
@@ -156,5 +202,7 @@ export async function readComposeCheckoutDirs(
   deploymentDir: string,
 ): Promise<ComposeCheckoutDirs | null> {
   const marker = await readComposeCheckoutMarker(deploymentDir);
-  return marker ? composeCheckoutDirs(deploymentDir, marker.composePath) : null;
+  return marker
+    ? composeCheckoutDirs(deploymentDir, marker.composePath, marker.commitSha)
+    : null;
 }

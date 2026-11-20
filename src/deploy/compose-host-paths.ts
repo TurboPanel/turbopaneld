@@ -513,8 +513,8 @@ export type ConfinementOptions = {
    * The repository checkout of a Git Compose project (`compose-checkout.ts`).
    * Relative paths resolve against its project directory, and everything under
    * its root counts as inside the deployment directory at its own place (it is
-   * not staged). A writable bind into it is refused: the tree is replaced on
-   * every deploy, so anything a container wrote there would be lost.
+   * not staged). A writable bind into it is refused: its folder goes away with
+   * the next commit, so anything a container wrote there would be lost.
    */
   checkout?: { root: string; projectDir: string };
   /**
@@ -646,6 +646,12 @@ function resolvedPathRefusal(
     return `${label} resolves through a symlink to ${real}, outside the deployment directory`;
   }
   if (entry.kind !== "mount") return null;
+  // A symlink in the repository may point at `..`: the checkout is the
+  // author's, and the deployment directory around it holds the compiled
+  // compose file, the env file and the daemon's records.
+  if (ctx.opts.checkout !== undefined && real === ctx.realDir) {
+    return `${label} resolves to the deployment directory itself, which holds the daemon's records, not the repository`;
+  }
   if (isWithin(real, ctx.realStage)) {
     return `${label} is the daemon's staging directory`;
   }
@@ -684,7 +690,7 @@ async function confineEntry(
   if (hostLevel) return hostLevel;
   if (inCheckout && entry.kind === "mount" && !entry.readOnly) {
     return finding(
-      `${label} is a writable bind inside the repository checkout, which is replaced on every deploy and would lose what the container writes — use a named volume`,
+      `${label} is a writable bind inside the repository checkout, which is replaced by a new folder on every new commit and would lose what the container writes — use a named volume`,
     );
   }
   const live = inCheckout

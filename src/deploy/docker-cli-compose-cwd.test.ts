@@ -207,8 +207,16 @@ test("a deployment with a checkout runs compose from the repository", async () =
     restore();
     await Deno.remove(dir, { recursive: true });
   }
-  const projectDir = join(dir, "repo", "deploy");
-  assertEquals(seen[0].cwd, join(dir, "repo"));
+  const projectDir = join(
+    dir,
+    "repo",
+    "0123456789abcdef0123456789abcdef01234567",
+    "deploy",
+  );
+  assertEquals(
+    seen[0].cwd,
+    join(dir, "repo", "0123456789abcdef0123456789abcdef01234567"),
+  );
   assertEquals(seen[0].args.slice(0, 6), [
     "compose",
     "--project-directory",

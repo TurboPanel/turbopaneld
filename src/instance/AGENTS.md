@@ -76,7 +76,7 @@ fields. Detail: `src/deploy/site/AGENTS.md`.
 
 **Project caches and helper ports (`project-cache-v1`).** `environment.deploy` may carry `caches` and `helperReach`, and the command `cache.apply` brings a host's caches for one environment in line between deploys. Each field is absent (leave the host), empty (clear it) or a list (set it). Detail: `src/deploy/cache/AGENTS.md`.
 
-**Repository checkout for Git Compose projects (`compose-checkout-v1`).** `environment.deploy` may carry `composeCheckout` (clone URL, ref, the commit the compose file was read from, the repo-relative compose path, and the sealed credential on the same lanes as `sourceMaterial[]`). The daemon checks that commit out into `deployments/<project>/<env>/repo` before anything builds. The control plane sends it only to a daemon that lists the feature. Detail: `src/deploy/AGENTS.md`.
+**Repository checkout for Git Compose projects (`compose-checkout-v1`).** `environment.deploy` may carry `composeCheckout` (clone URL, ref, the commit the compose file was read from, the repo-relative compose path, and the sealed credential on the same lanes as `sourceMaterial[]`). The daemon checks that commit out into `deployments/<project>/<env>/repo/<commit>` before anything builds. The control plane sends it only to a daemon that lists the feature. Detail: `src/deploy/AGENTS.md`.
 
 **Topology reports carry no generation numbers.** `topology-report` is `{ snapshot, at }`; the control plane tells topologies apart by their content. `TopologyReporter` sends on connect and then only when the snapshot's identity key (`../metrics/topology/identity-key.ts`) changes. No feature string gates this: a control plane that reads the numbers is no longer supported.
 

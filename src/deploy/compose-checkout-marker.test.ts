@@ -4,6 +4,7 @@ import {
   composeCheckoutDirs,
   composeCheckoutDirsForFile,
   parseComposeCheckoutMarker,
+  pruneComposeCheckout,
   readComposeCheckoutDirs,
   removeComposeCheckout,
   writeComposeCheckoutMarker,
@@ -25,20 +26,34 @@ const MARKER = {
 };
 
 test("the project directory is the folder of the repo's compose file", () => {
-  assertEquals(composeCheckoutDirs("/d/p/e", "compose.yaml"), {
-    root: "/d/p/e/repo",
-    projectDir: "/d/p/e/repo",
-  });
-  assertEquals(composeCheckoutDirs("/d/p/e", "deploy/prod/compose.yaml"), {
-    root: "/d/p/e/repo",
-    projectDir: "/d/p/e/repo/deploy/prod",
-  });
+  assertEquals(
+    composeCheckoutDirs("/d/p/e", "compose.yaml", MARKER.commitSha),
+    {
+      root: "/d/p/e/repo/0123456789abcdef0123456789abcdef01234567",
+      projectDir: "/d/p/e/repo/0123456789abcdef0123456789abcdef01234567",
+    },
+  );
+  assertEquals(
+    composeCheckoutDirs("/d/p/e", "deploy/prod/compose.yaml", MARKER.commitSha),
+    {
+      root: "/d/p/e/repo/0123456789abcdef0123456789abcdef01234567",
+      projectDir:
+        "/d/p/e/repo/0123456789abcdef0123456789abcdef01234567/deploy/prod",
+    },
+  );
 });
 
 test("a marker that is not ours reads as none", () => {
   assertEquals(parseComposeCheckoutMarker("not json"), null);
   assertEquals(parseComposeCheckoutMarker('{"version":2}'), null);
   assertEquals(parseComposeCheckoutMarker(JSON.stringify(MARKER)), MARKER);
+  // The commit names a folder, so a path-shaped one is not a marker.
+  assertEquals(
+    parseComposeCheckoutMarker(
+      JSON.stringify({ ...MARKER, commitSha: "../x" }),
+    ),
+    null,
+  );
 });
 
 test("dirs are found from the live file and from the staged one", async () => {
@@ -46,7 +61,7 @@ test("dirs are found from the live file and from the staged one", async () => {
   try {
     assertEquals(await readComposeCheckoutDirs(dir), null);
     await writeComposeCheckoutMarker(dir, MARKER);
-    const want = composeCheckoutDirs(dir, MARKER.composePath);
+    const want = composeCheckoutDirs(dir, MARKER.composePath, MARKER.commitSha);
     assertEquals(await readComposeCheckoutDirs(dir), want);
     assertEquals(
       await composeCheckoutDirsForFile(join(dir, "compose.yaml"), ".staging"),
@@ -64,6 +79,22 @@ test("dirs are found from the live file and from the staged one", async () => {
       await composeCheckoutDirsForFile(join(dir, "compose.yaml"), ".staging"),
       null,
     );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("pruning keeps only the current commit's folder", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-checkout-prune-" });
+  try {
+    await writeComposeCheckoutMarker(dir, MARKER);
+    const parent = join(dir, "repo");
+    for (const name of [MARKER.commitSha, "b".repeat(40), ".partial"]) {
+      await Deno.mkdir(join(parent, name), { recursive: true });
+    }
+    await pruneComposeCheckout(dir);
+    const left = await Array.fromAsync(Deno.readDir(parent), (e) => e.name);
+    assertEquals(left, [MARKER.commitSha]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

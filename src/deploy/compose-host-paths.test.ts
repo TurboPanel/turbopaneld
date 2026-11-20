@@ -1446,3 +1446,29 @@ test("a symlink in the checkout that leaves the deployment is refused", () =>
     );
     assert(err.message.includes("resolves through a symlink"));
   }));
+
+test("a symlink in the checkout to the deployment directory is refused, even read-only", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo", "c0ffee");
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.symlink("../..", join(root, "up"));
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({
+            type: "bind",
+            source: join(root, "up"),
+            target: "/o",
+            read_only: true,
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            checkout: { root, projectDir: root },
+            hostLevelApproved: false,
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(err.message.includes("deployment directory itself"));
+  }));

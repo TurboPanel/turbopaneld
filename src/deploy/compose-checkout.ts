@@ -2,15 +2,18 @@
  * Check a Git Compose project's repository out into its deployment directory.
  *
  * The layout and why it is this one are in `compose-checkout-marker.ts`. This
- * module does the work: clone the pinned commit into a scratch folder beside
- * the deployment (the clone credential never touches `repo/`), drop `.git`,
- * check that the compose file the Base came from is in the tree, then swap the
- * tree into `repo/` and record the commit in `repo.json`.
+ * module does the work: clone the pinned commit into a scratch folder outside
+ * the deployment directory (the clone credential never lands where a bind
+ * mount could reach it), drop `.git`, check that the compose file the Base
+ * came from is in the tree, then move the tree to `repo/<commit>` and record
+ * the commit in `repo.json`.
  *
- * `repo/` is replaced, never updated in place, so it always equals the commit
- * the deploy names. A container that writes into it would lose the writes at
- * the next deploy; `compose-host-paths.ts` refuses a writable bind that points
- * into the checkout and tells the author to use a named volume.
+ * Every commit has its own folder and a folder is never rewritten once in
+ * place, so containers started from an earlier commit keep their files until a
+ * deploy has brought the new generation up. A container that writes into the
+ * tree would see its writes disappear with the folder; `compose-host-paths.ts`
+ * refuses a writable bind that points into the checkout and tells the author
+ * to use a named volume.
  *
  * Reuses the release engine's `checkoutRelease` (clone-url guard, pinned
  * commit, askpass / identity file removed afterwards) and the same credential
@@ -28,15 +31,19 @@ import {
   COMPOSE_CHECKOUT_DIRNAME,
   type ComposeCheckoutDirs,
   composeCheckoutDirs,
+  isCommitSha,
   readComposeCheckoutMarker,
   removeComposeCheckout,
   writeComposeCheckoutMarker,
 } from "./compose-checkout-marker.ts";
 
-const SCRATCH_DIRNAME = ".checkout-scratch";
-const PREVIOUS_DIRNAME = ".repo-previous";
-
 export type ApplyComposeCheckoutDeps = {
+  /**
+   * Where the clone is made: an empty or absent folder on the same file system
+   * as the deployment directory, outside it (a bind mount of the deployment
+   * directory must never reach the clone credential).
+   */
+  scratchDir: string;
   decryptSecrets: DecryptSecretsFn | undefined;
   onOutput?: ReleaseOutputHandler;
   redactSummary?: (text: string) => string;
@@ -47,7 +54,7 @@ export type ApplyComposeCheckoutDeps = {
 
 export type ComposeCheckoutOutcome = ComposeCheckoutDirs & {
   commitSha: string;
-  /** False when `repo/` already held this commit and was left alone. */
+  /** False when `repo/<commit>` was already in place and was left alone. */
   fetched: boolean;
 };
 
@@ -83,51 +90,56 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-/** Put `fresh` in place of `<deploymentDir>/repo`, keeping the old tree until the swap is done. */
-async function swapIntoPlace(
+/** Move the finished tree to `repo/<commit>` (same file system, so one rename). */
+async function placeGeneration(
   deploymentDir: string,
   fresh: string,
+  commitSha: string,
 ): Promise<void> {
-  const live = join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME);
-  const previous = join(deploymentDir, PREVIOUS_DIRNAME);
-  await removeIfPresent(previous);
-  let hadLive = true;
-  try {
-    await Deno.rename(live, previous);
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-    hadLive = false;
-  }
-  try {
-    await Deno.rename(fresh, live);
-  } catch (err) {
-    if (hadLive) await Deno.rename(previous, live);
-    throw err;
-  }
-  await removeIfPresent(previous);
+  const parent = join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME);
+  const target = join(parent, commitSha);
+  const partial = join(parent, `.${commitSha}.partial`);
+  await Deno.mkdir(parent, { recursive: true });
+  await removeIfPresent(partial);
+  await Deno.rename(fresh, partial);
+  // A leftover folder without the compose file is a half-made one.
+  await removeIfPresent(target);
+  await Deno.rename(partial, target);
 }
 
 /**
- * Bring `<deploymentDir>/repo` to the commit `checkout` names. A deployment
- * that already holds that exact commit of that repository is left as it is.
+ * Make `repo/<commit>` the current checkout. A commit whose folder is already
+ * in place (an unchanged deploy, or a rollback to a commit not yet pruned) is
+ * reused as it is, never refetched or rewritten under running containers.
  */
 export async function applyComposeCheckout(
   deploymentDir: string,
   checkout: EnvironmentDeployComposeCheckout,
   deps: ApplyComposeCheckoutDeps,
 ): Promise<ComposeCheckoutOutcome> {
-  const dirs = composeCheckoutDirs(deploymentDir, checkout.composePath);
-  const marker = await readComposeCheckoutMarker(deploymentDir);
-  if (
-    marker?.commitSha === checkout.commitSha &&
-    marker.cloneUrl === checkout.cloneUrl &&
-    marker.composePath === checkout.composePath &&
-    await isFile(join(dirs.root, checkout.composePath))
-  ) {
-    return { ...dirs, commitSha: marker.commitSha, fetched: false };
+  if (!isCommitSha(checkout.commitSha)) {
+    throw new Error(`composeCheckout commitSha is not a commit id`);
+  }
+  const marker = {
+    version: 1 as const,
+    cloneUrl: checkout.cloneUrl,
+    commitSha: checkout.commitSha,
+    composePath: checkout.composePath,
+  };
+  const dirs = composeCheckoutDirs(
+    deploymentDir,
+    checkout.composePath,
+    checkout.commitSha,
+  );
+  if (await isFile(join(dirs.root, checkout.composePath))) {
+    const current = await readComposeCheckoutMarker(deploymentDir);
+    if (JSON.stringify(current) !== JSON.stringify(marker)) {
+      await writeComposeCheckoutMarker(deploymentDir, marker);
+    }
+    return { ...dirs, commitSha: checkout.commitSha, fetched: false };
   }
 
-  const scratch = join(deploymentDir, SCRATCH_DIRNAME);
+  const scratch = deps.scratchDir;
   await removeIfPresent(scratch);
   await Deno.mkdir(scratch, { recursive: true, mode: 0o700 });
   try {
@@ -153,19 +165,19 @@ export async function applyComposeCheckout(
           : {}),
       }),
     });
+    if (result.commitSha !== checkout.commitSha) {
+      throw new Error(
+        `the clone is at ${result.commitSha}, not the commit ${checkout.commitSha} the deploy names`,
+      );
+    }
     if (!await isFile(join(result.workingDir, checkout.composePath))) {
       throw new Error(
         `the compose file ${checkout.composePath} is not in the repository at commit ${result.commitSha}`,
       );
     }
     await removeIfPresent(join(result.workingDir, ".git"));
-    await swapIntoPlace(deploymentDir, result.workingDir);
-    await writeComposeCheckoutMarker(deploymentDir, {
-      version: 1,
-      cloneUrl: checkout.cloneUrl,
-      commitSha: result.commitSha,
-      composePath: checkout.composePath,
-    });
+    await placeGeneration(deploymentDir, result.workingDir, result.commitSha);
+    await writeComposeCheckoutMarker(deploymentDir, marker);
     return { ...dirs, commitSha: result.commitSha, fetched: true };
   } finally {
     await removeIfPresent(scratch);

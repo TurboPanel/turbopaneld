@@ -51,11 +51,13 @@ async function inTempDeployment(
     await fn(dir);
   } finally {
     await Deno.remove(dir, { recursive: true });
+    await Deno.remove(`${dir}-scratch`, { recursive: true }).catch(() => {});
   }
 }
 
-const deps = () => ({
+const deps = (dir: string) => ({
   logSink: createNoopCommandOutputSink(),
+  scratchDir: `${dir}-scratch`,
   decryptSecrets: undefined,
   checkoutFn: fakeClone,
 });
@@ -65,14 +67,15 @@ test("a deploy with composeCheckout puts the repository on the host", () =>
     await applyDeployComposeCheckout(
       parseEnvironmentDeployPayload({ ...BASE, composeCheckout: CHECKOUT }),
       dir,
-      deps(),
+      deps(dir),
     );
     assertEquals(
       (await readComposeCheckoutMarker(dir))?.commitSha,
       CHECKOUT.commitSha,
     );
     assertEquals(
-      (await Deno.stat(join(dir, "repo", "compose.yaml"))).isFile,
+      (await Deno.stat(join(dir, "repo", CHECKOUT.commitSha, "compose.yaml")))
+        .isFile,
       true,
     );
   }));
@@ -82,12 +85,12 @@ test("a deploy without composeCheckout drops an earlier checkout", () =>
     await applyDeployComposeCheckout(
       parseEnvironmentDeployPayload({ ...BASE, composeCheckout: CHECKOUT }),
       dir,
-      deps(),
+      deps(dir),
     );
     await applyDeployComposeCheckout(
       parseEnvironmentDeployPayload(BASE),
       dir,
-      deps(),
+      deps(dir),
     );
     assertEquals(await readComposeCheckoutMarker(dir), null);
     assertEquals(
@@ -101,12 +104,12 @@ test("a hostings-only run neither fetches nor drops the checkout", () =>
     await applyDeployComposeCheckout(
       parseEnvironmentDeployPayload({ ...BASE, composeCheckout: CHECKOUT }),
       dir,
-      deps(),
+      deps(dir),
     );
     await applyDeployComposeCheckout(
       parseEnvironmentDeployPayload({ ...BASE, hostingsOnly: true }),
       dir,
-      deps(),
+      deps(dir),
     );
     assertEquals(
       (await readComposeCheckoutMarker(dir))?.commitSha,

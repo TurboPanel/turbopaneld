@@ -25,6 +25,7 @@ import {
 } from "../deploy/compose-build-contexts.ts";
 import {
   type ComposeCheckoutDirs,
+  pruneComposeCheckout,
   readComposeCheckoutDirs,
 } from "../deploy/compose-checkout-marker.ts";
 import {
@@ -236,7 +237,10 @@ import {
   syncAccountWallOrThrow,
   syncAccountWallQuietly,
 } from "../deploy/account-wall.ts";
-import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
+import {
+  RELEASE_SCRATCH_DIRNAME,
+  runPrivileged as defaultRunPrivileged,
+} from "../deploy/release/release-layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import {
   ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks,
@@ -437,6 +441,8 @@ function assertSafeDeploymentIdentifiers(
 
 export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /** Test seam: the clone behind `composeCheckout` (see `compose-checkout.ts`). */
+  composeCheckoutFn?: ApplyComposeCheckoutDeps["checkoutFn"];
   /**
    * Execution-log transcript sink (`src/logs/`). Optional everywhere — the
    * default no-op sink keeps existing callers and tests unchanged.
@@ -2008,6 +2014,27 @@ async function runComposeBuild(
   }
 }
 
+/** `compose build` with the layer cache: only services that have a `build:` are built. */
+async function runPlainComposeBuild(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+): Promise<void> {
+  const { parsedPayload, runStreamed, logSink } = input;
+  logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+  noteComposeBuildLimits(parsedPayload, onLine);
+  const build = await runStreamed([
+    ...composeFileArgs(parsedPayload.projectName, chain),
+    "build",
+  ], { onLine });
+  input.cancel?.throwIfCancelled("while the images were building");
+  if (!build.success) {
+    throw new Error(
+      logSink.redactSummary(build.stderr) || "Docker Compose build failed",
+    );
+  }
+}
+
 type SequentialDeployContext = {
   chain: string[];
   serviceHooks: EnvironmentDeployServiceHook[];
@@ -2219,22 +2246,12 @@ async function prepareSequentialDeploy(
   chain: string[],
   onLine: LineHandler,
 ): Promise<void> {
-  const { parsedPayload, runStreamed, logSink } = input;
+  const { parsedPayload, runStreamed } = input;
   await ensureDeployNetworks(input);
   if (parsedPayload.noCache === true) {
     await runComposeBuild(input, chain, onLine);
   } else {
-    noteComposeBuildLimits(parsedPayload, onLine);
-    const build = await runStreamed([
-      ...composeFileArgs(parsedPayload.projectName, chain),
-      "build",
-    ], { onLine });
-    input.cancel?.throwIfCancelled("while the images were building");
-    if (!build.success) {
-      throw new Error(
-        logSink.redactSummary(build.stderr) || "Docker Compose build failed",
-      );
-    }
+    await runPlainComposeBuild(input, chain, onLine);
   }
   // Best effort: `up` pulls anything still missing.
   await runStreamed([
@@ -2289,6 +2306,8 @@ export async function applyDeployComposeCheckout(
   deps: {
     logSink: CommandOutputSink;
     decryptSecrets: DecryptSecretsFn | undefined;
+    /** Where the clone is made, outside the deployment directory. */
+    scratchDir: string;
     signal?: AbortSignal;
     /** Test seam — see {@link applyComposeCheckout}. */
     checkoutFn?: ApplyComposeCheckoutDeps["checkoutFn"];
@@ -2304,6 +2323,7 @@ export async function applyDeployComposeCheckout(
     deploymentDir,
     payload.composeCheckout,
     {
+      scratchDir: deps.scratchDir,
       decryptSecrets: deps.decryptSecrets,
       ...(deps.checkoutFn ? { checkoutFn: deps.checkoutFn } : {}),
       onOutput: (stream, line) => deps.logSink.onLine(stream, line),
@@ -2317,6 +2337,56 @@ export async function applyDeployComposeCheckout(
       ? `repository checked out at ${outcome.commitSha}`
       : `repository already at ${outcome.commitSha}`,
   );
+}
+
+/**
+ * The clone's scratch folder: under the state directory (so the tree can be
+ * renamed into the deployment) but outside the deployment directory, which a
+ * bind mount may reach.
+ */
+export function composeCheckoutScratchDir(
+  layout: Pick<LayoutPaths, "stateDir">,
+  environmentId: string,
+): string {
+  return join(
+    layout.stateDir,
+    RELEASE_SCRATCH_DIRNAME,
+    "compose-checkout",
+    environmentId,
+  );
+}
+
+/**
+ * The build that runs before an in-place `up -d`. `up -d` never rebuilds an
+ * image that exists, so a project whose services build from the repository
+ * checkout builds first: a new commit (or a rollback to an older one) would
+ * otherwise keep serving the image of the previous commit. An unchanged tree
+ * is a layer-cache hit.
+ */
+async function buildBeforeInPlaceUp(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+  hasCheckout: boolean,
+): Promise<void> {
+  if (input.parsedPayload.noCache === true) {
+    await runComposeBuild(input, chain, onLine);
+  } else if (hasCheckout) {
+    await runPlainComposeBuild(input, chain, onLine);
+  }
+}
+
+/**
+ * What a successful deploy lets go of: the secret and config files the plan no
+ * longer lists, and the checkout trees of earlier commits (their containers are
+ * gone now).
+ */
+async function pruneAfterDeploy(
+  input: DeployContainerServicesInput,
+): Promise<void> {
+  await pruneDeploySecrets(input.layout, input.parsedPayload);
+  await pruneDeployConfigFiles(input.layout, input.parsedPayload);
+  await pruneComposeCheckout(input.deploymentDir);
 }
 
 /**
@@ -2637,8 +2707,7 @@ async function deployContainerServices(
         deploymentDir,
         onLine,
       });
-      await pruneDeploySecrets(layout, parsedPayload);
-      await pruneDeployConfigFiles(layout, parsedPayload);
+      await pruneAfterDeploy(input);
       return sequential;
     }
     if (serviceHooks.length > 0) {
@@ -2660,9 +2729,12 @@ async function deployContainerServices(
 
     await ensureDeployNetworks(input);
 
-    if (parsedPayload.noCache === true) {
-      await runComposeBuild(input, chain, onLine);
-    }
+    await buildBeforeInPlaceUp(
+      input,
+      chain,
+      onLine,
+      checkout.dirs.checkout !== undefined,
+    );
 
     cancel?.commit("before the new version was started");
     logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);
@@ -2693,8 +2765,7 @@ async function deployContainerServices(
 
     // The new release is up and its hooks passed: only now may the files the
     // previous one needed (and this plan no longer lists) be removed.
-    await pruneDeploySecrets(layout, parsedPayload);
-    await pruneDeployConfigFiles(layout, parsedPayload);
+    await pruneAfterDeploy(input);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
@@ -3505,6 +3576,8 @@ async function deployEnvironmentHolding(
   await applyDeployComposeCheckout(parsedPayload, deploymentDir, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    scratchDir: composeCheckoutScratchDir(layout, parsedPayload.environmentId),
+    ...(deps?.composeCheckoutFn ? { checkoutFn: deps.composeCheckoutFn } : {}),
     ...(cancel === undefined ? {} : { signal: cancel.signal }),
   });
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {

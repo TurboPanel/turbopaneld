@@ -1439,30 +1439,44 @@ Layout of `deployments/<project>/<env>/`:
 
 - `compose.yaml`, `deployment.json`, `.env`, `previous/`, `.staging/`: the
   daemon's files, where every lifecycle path already looks for them.
-- `repo/`: the repository at the commit, without `.git`. Replaced as a whole
-  (a scratch clone, then a swap), never updated in place.
-- `repo.json`: the marker (commit, clone URL, compose path). It also tells
-  `docker-cli.ts` what to do for every Compose call.
+- `repo/<commit>/`: the repository at that commit, without `.git`. One folder
+  per commit, never rewritten once in place: running containers bind into the
+  folder they started from, so an in-place swap would empty or stale their
+  mounts, and a failed deploy would leave the old containers without files. A
+  new commit changes every bind source into the tree, so Compose recreates the
+  services that mount it. The clone is made in a scratch folder under the state
+  directory (`release-build/compose-checkout/<env>`, `0700`), outside the
+  deployment directory, so a bind that reaches the deployment directory never
+  reaches the clone credential.
+- `repo.json`: the marker (current commit, clone URL, compose path). It also
+  tells `docker-cli.ts` what to do for every Compose call.
 
 The repository does **not** go into the folder of `compose.yaml`: the compiled
 file must keep its name and place, and it must not overwrite a repository file
 of the same name. Instead every Compose call for such a deployment gets
-`--project-directory repo/<folder of the repo's compose file>`, starts in
-`repo/`, and reads the daemon's `.env` through `--env-file` (Compose would look
+`--project-directory repo/<commit>/<folder of the repo's compose file>`, starts in
+`repo/<commit>/`, and reads the daemon's `.env` through `--env-file` (Compose would look
 in the project directory otherwise). Paths written for the repository resolve
 as in a clone, including a compose file kept in a subfolder. `composeCall` in
 `docker-cli.ts` is the one place that adds this, so lifecycle, rehydrate, hooks,
 health and the staged `config` calls all agree; a caller that passes its own
 `--project-directory` keeps it.
 
-Confinement counts `repo/` as inside the deployment, at its own place (it is
-not staged). Relative authored paths resolve against the project directory.
-Symlinks that leave the deployment are still refused. A writable bind into
-`repo/` is refused: the tree is replaced on every deploy, so what a container
-wrote there would be lost; use a named volume. The build policy's secret-file
+Confinement counts the checkout as inside the deployment, at its own place (it
+is not staged). Relative authored paths resolve against the project directory.
+Symlinks that leave the deployment are still refused, and so is a bind that
+resolves to the deployment directory itself (a repository symlink to `..`). A
+writable bind into the checkout is refused: its folder goes away with the next
+commit, so what a container wrote there would be lost; use a named volume. The build policy's secret-file
 rule and `assertBuildContextsPresent` take the checkout root too.
 
-An unchanged commit is not fetched again. A deploy without `composeCheckout`
+A commit whose folder is already in place is not fetched again. An in-place
+`up -d` never rebuilds an existing image, so a deploy with a checkout runs
+`compose build` first (a cache hit when nothing changed; the sequential
+strategy always builds), and a rollback to an older commit rebuilds from that
+commit's tree. Folders of earlier commits are removed only after the deploy has
+brought the new generation up (`pruneComposeCheckout`); a failed deploy keeps
+them. A deploy without `composeCheckout`
 removes `repo/` and `repo.json` (not a hostings-only run). A stop that keeps the
 directory removes them with the other daemon files. A failed sequential deploy
 that restores `previous/` keeps the newer checkout; the project directory is
