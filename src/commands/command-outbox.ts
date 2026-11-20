@@ -517,25 +517,27 @@ export async function primeCommandJournal(): Promise<void> {
     const dir = journalDir();
     const names = await Array.fromAsync(Deno.readDir(dir), (e) => e.name);
     const cutoff = timers.now() - UNACKED_RETENTION_MS;
-    for (const name of names) {
+    // Each file is handled on its own: nothing here depends on another file's
+    // result, and the sets are only added to, so the order does not matter.
+    await Promise.all(names.map(async (name) => {
       if (name.endsWith(".tmp")) {
         // A write the previous process did not finish.
         await Deno.remove(join(dir, name)).catch(() => undefined);
-        continue;
+        return;
       }
-      if (!name.endsWith(".json")) continue;
+      if (!name.endsWith(".json")) return;
       const id = name.slice(0, -".json".length);
       const entry = await readJournalEntry(id);
       if (entry?.tombstone === true) {
         const at = Date.parse(entry.journaledAt ?? "");
         if (Number.isFinite(at) && at < cutoff) {
           await removeJournal(id);
-          continue;
+          return;
         }
         tombstones.add(id);
       }
       diskIds.add(id);
-    }
+    }));
     journalRead = true;
   } catch (err) {
     if (err instanceof Deno.errors.NotFound) {
