@@ -2396,9 +2396,18 @@ async function deployContainerServices(
 
     // The deploy copies no repository files to the host: say so up front when
     // a local build context has nothing behind it.
+    // `up -d` only builds when an image is missing, so a service that sets
+    // `image` is checked only where `compose build` always runs.
+    const resolvedServices = resolved.document?.services;
     await assertBuildContextsPresent([resolvedHostPaths], {
       stageDir,
       deploymentDir,
+      services: typeof resolvedServices === "object" &&
+          resolvedServices !== null
+        ? resolvedServices as Record<string, unknown>
+        : undefined,
+      alwaysBuilds: parsedPayload.deployStrategy === "sequential" ||
+        parsedPayload.noCache === true,
     });
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(

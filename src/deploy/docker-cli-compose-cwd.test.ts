@@ -94,6 +94,42 @@ test("runDocker keeps the folder when it retries through sudo", async () => {
   assertEquals(sudo?.cwd, DEPLOYMENT_DIR);
 });
 
+test("runDocker keeps the folder on the root sudo retry", async () => {
+  const seen: Array<{ command: string; args: string[]; cwd?: string }> = [];
+  const denied = {
+    success: false,
+    code: 1,
+    stdout: "",
+    stderr: "permission denied while trying to connect to the docker.sock",
+  };
+  const restore = setDockerCliIoForTest({
+    runRaw: (command, args, options) => {
+      seen.push({ command, args, cwd: options?.cwd });
+      if (command === "/usr/bin/id") return Promise.resolve(ok("tp"));
+      // Direct docker and the sudo-as-self rung are denied; root succeeds.
+      if (command === "/usr/bin/docker") return Promise.resolve(denied);
+      if (command === "/usr/bin/sudo" && args.includes("-u")) {
+        return Promise.resolve(denied);
+      }
+      return Promise.resolve(ok());
+    },
+  });
+  try {
+    const result = await runDocker([
+      ...composeFileArgs("demo", CHAIN),
+      "build",
+    ]);
+    assertEquals(result.success, true);
+  } finally {
+    restore();
+  }
+  const asRoot = seen.filter((entry) =>
+    entry.command === "/usr/bin/sudo" && !entry.args.includes("-u")
+  );
+  assertEquals(asRoot.length > 0, true);
+  for (const entry of asRoot) assertEquals(entry.cwd, DEPLOYMENT_DIR);
+});
+
 test("runDockerStreamed starts a compose build in the deployment directory", async () => {
   const seen: Array<{ cwd?: string; args: string[] }> = [];
   const restore = setDockerCliIoForTest({
