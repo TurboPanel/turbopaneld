@@ -516,7 +516,7 @@ export type ConfinementOptions = {
    * not staged). A writable bind into it is refused: the tree is replaced on
    * every deploy, so anything a container wrote there would be lost.
    */
-  checkout?: { root: string; projectDir: string };
+  checkout?: { root: string; projectDir: string } | undefined;
   /**
    * Writable bind sources (live paths) of the generation still running. Its
    * containers keep running until `compose up` replaces them, so a new source

@@ -120,15 +120,17 @@ export async function writeComposeCheckoutMarker(
 export async function removeComposeCheckout(
   deploymentDir: string,
 ): Promise<void> {
-  for (
-    const name of [COMPOSE_CHECKOUT_MARKER_FILENAME, COMPOSE_CHECKOUT_DIRNAME]
-  ) {
-    try {
-      await Deno.remove(join(deploymentDir, name), { recursive: true });
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
-    }
-  }
+  await Promise.all(
+    [COMPOSE_CHECKOUT_MARKER_FILENAME, COMPOSE_CHECKOUT_DIRNAME].map(
+      async (name) => {
+        try {
+          await Deno.remove(join(deploymentDir, name), { recursive: true });
+        } catch (err) {
+          if (!(err instanceof Deno.errors.NotFound)) throw err;
+        }
+      },
+    ),
+  );
 }
 
 /**
