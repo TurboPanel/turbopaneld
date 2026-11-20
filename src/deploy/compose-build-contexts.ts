@@ -80,6 +80,21 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** The resolved model's `services` map, when it has one. */
+export function composeServices(
+  document: unknown,
+): Record<string, unknown> | undefined {
+  const services = isRecord(document) ? document.services : undefined;
+  return isRecord(services) ? services : undefined;
+}
+
+/** True when the deploy always runs `compose build` (sequential or no-cache). */
+export function deployAlwaysBuilds(
+  payload: { deployStrategy?: unknown; noCache?: unknown },
+): boolean {
+  return payload.deployStrategy === "sequential" || payload.noCache === true;
+}
+
 /**
  * Whether the deploy may never read this service's build context: plain
  * `up -d` pulls or reuses a set `image` and builds only when that fails, unless
