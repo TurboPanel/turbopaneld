@@ -1,3 +1,4 @@
+import { FakeTime } from "@std/testing/time";
 import { assert, assertEquals, assertExists } from "@std/assert";
 import { DAEMON_VERSION } from "../version.ts";
 import type { HostHelloIdentity } from "../host/os-release.ts";
@@ -1364,4 +1365,81 @@ test("IdlePresence hello carries the attach proof of a signed session, and only 
 test("IdlePresence heartbeat carries the command report", async () => {
   const heartbeat = await heartbeatAfterBuildChange();
   assertEquals(heartbeat.commands, REPORT);
+});
+
+test({
+  name:
+    "IdlePresence waits for a quiet moment past the age limit, within a bound",
+  fn: async () => {
+    const restore = installIdlePresenceProviders({
+      getBuildInfo: () => makeDaemonBuild("abc1234"),
+      resolveUpdateChannelConfig: () => ({
+        app: "daemon" as const,
+        channel: "trunk" as const,
+      }),
+      getHostHelloIdentity: () => EMPTY_HOST,
+      collectPresenceSnapshot: () => ({
+        timeSync: makeTimeSync("UTC"),
+        ips: makeIps("203.0.113.10"),
+      }),
+    });
+    const time = new FakeTime();
+    const interval = 1_000;
+    try {
+      const socket = openMockSocket();
+      let quiet = false;
+      let recycled = 0;
+      const presence = new IdlePresence({
+        serverId: "srv-quiet",
+        idleCheckIntervalMs: interval,
+        idleThresholdMs: interval,
+        staleConnectionMs: 600_000,
+        maxConnectionAgeMs: 5_000,
+        maxQuietWaitMs: 60_000,
+        commandsQuiet: () => quiet,
+        commandState: () => ({
+          processStartId: "p1",
+          known: ["a"],
+          complete: true,
+        }),
+        onMaxAge: () => {
+          recycled += 1;
+        },
+      });
+      presence.attach(socket as unknown as WebSocket);
+      const hello = JSON.parse(socket.sentFrames[0] as string);
+      assertEquals(hello.commandState.processStartId, "p1");
+      await time.tickAsync(30_000);
+      assertEquals(recycled, 0, "busy: no recycle yet");
+      quiet = true;
+      await time.tickAsync(interval);
+      assertEquals(recycled, 1, "recycles at the next quiet tick");
+      presence.detach();
+
+      // Never quiet: recycled once the bounded wait has passed.
+      const busySocket = openMockSocket();
+      let busyRecycled = 0;
+      const busy = new IdlePresence({
+        serverId: "srv-busy",
+        idleCheckIntervalMs: interval,
+        idleThresholdMs: interval,
+        staleConnectionMs: 600_000,
+        maxConnectionAgeMs: 5_000,
+        maxQuietWaitMs: 60_000,
+        commandsQuiet: () => false,
+        onMaxAge: () => {
+          busyRecycled += 1;
+        },
+      });
+      busy.attach(busySocket as unknown as WebSocket);
+      await time.tickAsync(64_000);
+      assertEquals(busyRecycled, 0, "inside the bound");
+      await time.tickAsync(3_000);
+      assertEquals(busyRecycled, 1, "bound reached");
+      busy.detach();
+    } finally {
+      time.restore();
+      restore();
+    }
+  },
 });

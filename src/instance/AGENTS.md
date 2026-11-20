@@ -398,6 +398,7 @@ Command handlers (`server.timezone.set`, `server.ntp.set`,
 `src/commands/` and are injected at the `src/entry/run.ts` composition root
 — see `src/commands/AGENTS.md`. This client never imports that directory.
 
+- **Quiet recycle:** past the age limit the recycle waits for no running command and no unconfirmed outcome, at most `MAX_CONNECTION_QUIET_WAIT_MS` (10 min) more.
 - **Max-connection-age self-recycle:** once per idle tick,
   `#checkMaxConnectionAge` enforces `MAX_CONNECTION_AGE_MS` (2 h, mirrors the
   instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it

@@ -11,8 +11,11 @@ import {
   acknowledgeCommandOutcome,
   answerRepeatedDispatch,
   commandRecoveryReport,
+  commandsQuiet,
+  commandStateReport,
   flushCommandOutcomes,
   noteSessionOpen,
+  primeCommandJournal,
 } from "./command-outbox.ts";
 import { handleDrivetempEnable } from "./drivetemp.ts";
 import {
@@ -31,6 +34,9 @@ export function wireCommandPorts(): () => void {
     handleCommandOutcomeAck: acknowledgeCommandOutcome,
     handleRepeatedDispatch: answerRepeatedDispatch,
     commandReport: commandRecoveryReport,
+    commandState: commandStateReport,
+    commandsQuiet,
+    prepareSession: primeCommandJournal,
     subscribeFabricPeers: subscribeFabricPeerReadings,
   });
 }

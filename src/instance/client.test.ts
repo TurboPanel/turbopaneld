@@ -1,5 +1,6 @@
 import { type DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { it } from "@std/testing/bdd";
+import { useTempCommandJournal } from "../testing/command-journal.ts";
 import { join } from "@std/path";
 import { sealedDecryptResponse } from "../testing/sealed-decrypt-response.ts";
 import {
@@ -81,6 +82,9 @@ import {
 } from "../metrics/collector/sensors/drivetemp.ts";
 
 wireCommandPorts();
+// The connected-client tests dispatch real commands, which are journaled under
+// the daemon state dir; keep that in a temp folder.
+useTempCommandJournal();
 
 type EnrollIdentity = { serverId: string; keyId: string };
 

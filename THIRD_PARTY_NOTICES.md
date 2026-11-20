@@ -5,7 +5,7 @@ This file is generated from the resolved dependency graph. Do not edit it by han
 Third-party components remain under their own copyright and license terms and are not relicensed by TurboPanel Daemon's repository license (AGPL-3.0-only).
 
 <!-- lockfiles
-deno.lock sha256:bea90932721d7bb9b1c3f28ff7c2f27c8ab87b4e4d0e780563dd2937f2c94b13
+deno.lock sha256:6144f6826c6b72c5c92f09765b5c44f4395f8a5d57016965f7ad7865da4da58f
 orchestration/requirements.lock.txt sha256:de1763b7773fd0d8686e715a7750d707b7cfcf341d79fab7dd01aa2358c3b69d
 orchestration/requirements.txt sha256:bcd5495ade36b7203ef5411fe77be58d740df3437810a00332203a1bbc162162
 orchestration/requirements.yml sha256:23a8d5078fc5e56246e822a0e30e88a10d58c0f252d708b034651274bee039f0
@@ -52,7 +52,17 @@ These packages are used for development, test, or build tooling and are not bund
 - License: MIT
 - Source: deno.lock (jsr)
 
+### @std/async@1.5.1
+
+- License: MIT
+- Source: deno.lock (jsr)
+
 ### @std/crypto@1.1.0
+
+- License: MIT
+- Source: deno.lock (jsr)
+
+### @std/data-structures@1.1.3
 
 - License: MIT
 - Source: deno.lock (jsr)

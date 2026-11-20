@@ -254,6 +254,7 @@ import { deployCancels } from "../deploy/deploy-cancel.ts";
 import type { CollectedTopology } from "../metrics/topology/topology.ts";
 import type {
   CommandRecoveryReport,
+  CommandStateReport,
   DaemonMessage,
   DevHostActionMessage,
   InstanceHostnameWireEntry,
@@ -327,6 +328,12 @@ export type CommandPorts = {
   ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** What this process remembers about commands, for `hello` (`command-recovery-v2`). */
+  commandState?: () => CommandStateReport | undefined;
+  /** True when no command runs and no outcome waits for its ack (connection recycle). */
+  commandsQuiet?: () => boolean;
+  /** Runs before a socket opens: read the command journal so the first hello is complete. */
+  prepareSession?: () => Promise<void>;
   /** Hear every 60 s `tp0` peer reading (`fabric-peers-report`). */
   subscribeFabricPeers?: FabricPeerSubscribe;
 };
@@ -2135,6 +2142,7 @@ export class InstanceClient {
 
     const jwt = await this.#tokenManager!.getToken();
     await this.#sealingRegistration?.atConnect();
+    await commandPorts.prepareSession?.().catch(() => undefined);
     await this.#openDaemonWebSocket(jwt, identity.serverId);
   }
 
@@ -2678,6 +2686,8 @@ export class InstanceClient {
       onMaxAge: () => this.#closeActiveSocket(),
       // Running and unconfirmed commands ride on hello / heartbeat.
       commandReport: () => commandPorts.commandReport?.(),
+      commandState: () => commandPorts.commandState?.(),
+      commandsQuiet: () => commandPorts.commandsQuiet?.() ?? true,
     });
   }
 
