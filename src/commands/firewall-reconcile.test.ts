@@ -1,3 +1,4 @@
+import { useTempCommandJournal } from "../testing/command-journal.ts";
 import {
   assert,
   assertEquals,
@@ -32,6 +33,7 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+useTempCommandJournal();
 
 const ok = (stdout = ""): FirewallRunResult => ({
   success: true,
@@ -437,7 +439,7 @@ function dispatchMessage(
 test({
   name:
     "handleCommandDispatch routes server.firewall.reconcile through the handler override and rejects a malformed payload",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
@@ -503,7 +505,7 @@ test({
 test({
   name:
     "handleCommandDispatch routes server.firewall.confirm through the handler override and refuses a malformed digest",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");

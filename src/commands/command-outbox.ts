@@ -15,6 +15,7 @@
  * (last step, whether the new release had been made live).
  */
 import { join } from "@std/path";
+import { writeAll } from "../util/write-all.ts";
 import type {
   CommandProgress,
   CommandRecoveryReport,
@@ -77,6 +78,12 @@ type JournalEntry = {
   progress?: CommandProgress;
   outcome?: OutcomeMessage;
   journaledAt?: string;
+  /**
+   * An id-only marker left when an unconfirmed outcome was dropped past the
+   * entry cap: the command ran, so `hello.commandState.known` keeps listing it
+   * until {@link UNACKED_RETENTION_MS} after `journaledAt`.
+   */
+  tombstone?: true;
 };
 
 type OutboxTimers = {
@@ -117,6 +124,8 @@ let burstWindow = { start: 0, used: 0 };
 const processStartId = crypto.randomUUID();
 /** Journal ids a previous process left on disk, read before the first hello. */
 const diskIds = new Set<string>();
+/** Ids in {@link diskIds} that are tombstones: never answered, never resent. */
+const tombstones = new Set<string>();
 /** True once the journal directory was read without error. */
 let journalRead = false;
 /** When an outcome answered from a dead daemon's journal was first recorded. */
@@ -157,6 +166,7 @@ function journalFile(id: string): string | undefined {
 
 async function removeJournal(id: string): Promise<void> {
   diskIds.delete(id);
+  tombstones.delete(id);
   const file = journalFile(id);
   if (!file) return;
   try {
@@ -169,19 +179,45 @@ async function removeJournal(id: string): Promise<void> {
   }
 }
 
-/** Write a journal entry atomically: temp file in the same directory, then rename. */
+/**
+ * Write a journal entry atomically and durably: temp file in the same
+ * directory, flushed, renamed, then the directory flushed, so an accepted
+ * command is on disk before it runs.
+ */
 async function writeJournalAtomic(entry: JournalEntry): Promise<void> {
   const file = journalFile(entry.id);
-  if (!file) return;
+  if (!file) throw new Error("command id cannot be journaled");
   assertTestRunMayWrite(file);
   const temp = `${file}.${crypto.randomUUID()}.tmp`;
-  await Deno.mkdir(journalDir(), { recursive: true, mode: 0o750 });
+  const dir = journalDir();
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
   try {
-    await Deno.writeTextFile(temp, JSON.stringify(entry), { mode: 0o640 });
+    const handle = await Deno.open(temp, {
+      write: true,
+      create: true,
+      truncate: true,
+      mode: 0o640,
+    });
+    try {
+      await writeAll(handle, new TextEncoder().encode(JSON.stringify(entry)));
+      await handle.sync();
+    } finally {
+      handle.close();
+    }
     await Deno.rename(temp, file);
   } catch (err) {
     await Deno.remove(temp).catch(() => undefined);
     throw err;
+  }
+  try {
+    const dirHandle = await Deno.open(dir, { read: true });
+    try {
+      await dirHandle.sync();
+    } finally {
+      dirHandle.close();
+    }
+  } catch (err) {
+    logWarn("commands", `in-flight journal directory sync failed: ${err}`);
   }
 }
 
@@ -195,6 +231,22 @@ function queueWrite(id: string, write: () => Promise<void>): Promise<void> {
   return next;
 }
 
+/** Like {@link queueWrite}, but says whether this write landed. */
+function queueWriteChecked(
+  id: string,
+  write: () => Promise<void>,
+): Promise<boolean> {
+  let ok = true;
+  return queueWrite(id, async () => {
+    try {
+      await write();
+    } catch (err) {
+      ok = false;
+      throw err;
+    }
+  }).then(() => ok);
+}
+
 function entryFor(id: string, extra: Partial<JournalEntry>): JournalEntry {
   return {
     v: 1,
@@ -204,11 +256,22 @@ function entryFor(id: string, extra: Partial<JournalEntry>): JournalEntry {
   };
 }
 
-/** Record that `id` is running; never throws (the journal is best effort). */
-export async function markCommandInFlight(id: string): Promise<void> {
+/**
+ * Record that `id` is running. Resolves `false` when the entry could not be
+ * written (or the id cannot be journaled): the command must then not run, since
+ * a command that ran without a journal entry would be missing from
+ * `hello.commandState.known`. Never throws.
+ */
+export async function markCommandInFlight(id: string): Promise<boolean> {
   running.add(id);
   acceptedAt.set(id, new Date(timers.now()).toISOString());
-  await queueWrite(id, () => writeJournalAtomic(entryFor(id, {})));
+  const ok = journalFile(id) !== undefined &&
+    await queueWriteChecked(id, () => writeJournalAtomic(entryFor(id, {})));
+  if (!ok) {
+    running.delete(id);
+    acceptedAt.delete(id);
+  }
+  return ok;
 }
 
 /**
@@ -431,7 +494,9 @@ async function orphanedIds(): Promise<string[]> {
     return names
       .filter((name) => name.endsWith(".json"))
       .map((name) => name.slice(0, -".json".length))
-      .filter((id) => !running.has(id) && !unacked.has(id));
+      .filter((id) =>
+        !running.has(id) && !unacked.has(id) && !tombstones.has(id)
+      );
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
       logWarn("commands", `in-flight journal unreadable: ${err}`);
@@ -449,12 +514,27 @@ async function orphanedIds(): Promise<string[]> {
 export async function primeCommandJournal(): Promise<void> {
   if (journalRead) return;
   try {
-    const names = await Array.fromAsync(
-      Deno.readDir(journalDir()),
-      (e) => e.name,
-    );
+    const dir = journalDir();
+    const names = await Array.fromAsync(Deno.readDir(dir), (e) => e.name);
+    const cutoff = timers.now() - UNACKED_RETENTION_MS;
     for (const name of names) {
-      if (name.endsWith(".json")) diskIds.add(name.slice(0, -".json".length));
+      if (name.endsWith(".tmp")) {
+        // A write the previous process did not finish.
+        await Deno.remove(join(dir, name)).catch(() => undefined);
+        continue;
+      }
+      if (!name.endsWith(".json")) continue;
+      const id = name.slice(0, -".json".length);
+      const entry = await readJournalEntry(id);
+      if (entry?.tombstone === true) {
+        const at = Date.parse(entry.journaledAt ?? "");
+        if (Number.isFinite(at) && at < cutoff) {
+          await removeJournal(id);
+          continue;
+        }
+        tombstones.add(id);
+      }
+      diskIds.add(id);
     }
     journalRead = true;
   } catch (err) {
@@ -632,13 +712,37 @@ async function pruneUnacked(): Promise<void> {
   const overflow = ids.filter((id) => !stale.includes(id))
     .sort((a, b) => recordedMs(a) - recordedMs(b))
     .slice(0, Math.max(0, ids.length - stale.length - UNACKED_MAX_ENTRIES));
-  const drop = [...stale, ...overflow];
-  if (drop.length === 0) return;
+  if (stale.length + overflow.length === 0) return;
   logWarn(
     "commands",
-    `dropping ${drop.length} unconfirmed command outcome(s) past the retention bound`,
+    `dropping ${
+      stale.length + overflow.length
+    } unconfirmed command outcome(s) past the retention bound`,
   );
-  await Promise.all(drop.map((id) => acknowledgeCommandOutcome(id)));
+  // Past retention the control plane no longer resends the command, so the
+  // entry goes. An outcome dropped for the cap is young: its id stays on disk
+  // as a tombstone so the next hello still lists a command that ran.
+  await Promise.all([
+    ...stale.map((id) => acknowledgeCommandOutcome(id)),
+    ...overflow.map((id) => tombstoneOutcome(id, recordedMs(id))),
+  ]);
+}
+
+/** Drop the outcome of `id` but keep its id on disk (see {@link JournalEntry.tombstone}). */
+async function tombstoneOutcome(id: string, recordedMs: number): Promise<void> {
+  unacked.delete(id);
+  keptSince.delete(id);
+  tombstones.add(id);
+  diskIds.add(id);
+  const recordedAt = Number.isFinite(recordedMs) ? recordedMs : timers.now();
+  await queueWrite(id, () =>
+    writeJournalAtomic({
+      v: 1,
+      id,
+      acceptedAt: new Date(recordedAt).toISOString(),
+      journaledAt: new Date(recordedAt).toISOString(),
+      tombstone: true,
+    }));
 }
 
 /**
@@ -731,6 +835,7 @@ export function resetCommandOutboxForTests(
   sentOnSocket.clear();
   keptSince.clear();
   diskIds.clear();
+  tombstones.clear();
   journalRead = false;
   burstWindow = { start: 0, used: 0 };
   currentSocket = undefined;

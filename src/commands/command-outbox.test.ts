@@ -52,6 +52,17 @@ async function withState(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** Journal files holding a real outcome, not an id-only tombstone. */
+async function liveJournalNames(): Promise<string[]> {
+  const dir = `${Deno.env.get("TURBOPANEL_STATE_DIR")}/commands/inflight`;
+  const live: string[] = [];
+  for (const name of await journalNames()) {
+    const entry = JSON.parse(await Deno.readTextFile(`${dir}/${name}`));
+    if (!entry.tombstone) live.push(name);
+  }
+  return live;
+}
+
 async function journalNames(): Promise<string[]> {
   const dir = `${Deno.env.get("TURBOPANEL_STATE_DIR")}/commands/inflight`;
   try {
@@ -528,7 +539,7 @@ test("unconfirmed outcomes beyond the entry cap are dropped oldest first with a 
       });
     }
     await flushCommandOutcomes(open.ws);
-    const names = await journalNames();
+    const names = await liveJournalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("cap-0.json"), false);
   });
@@ -554,7 +565,7 @@ test("an unconfirmed outcome past the retention is dropped, one without a readab
     }
     time.advance(UNACKED_RETENTION_MS + 1);
     await flushCommandOutcomes(open.ws);
-    assertEquals(await journalNames(), ["no-time.json"]);
+    assertEquals(await liveJournalNames(), ["no-time.json"]);
   });
 });
 
@@ -577,7 +588,7 @@ test("past the entry cap the outcomes recorded first are dropped, whatever order
       });
     }
     await flushCommandOutcomes(open.ws);
-    const names = await journalNames();
+    const names = await liveJournalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("order-0.json"), true);
     assertEquals(names.includes(`order-${count - 1}.json`), false);
@@ -673,7 +684,7 @@ test("a result answered after a restart ages from when it was journaled, oldest 
     fakeTime(); // restarted
     const fresh = socket(WebSocket.OPEN);
     await flushCommandOutcomes(fresh.ws);
-    let names = await journalNames();
+    let names = await liveJournalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("aged-0.json"), false);
     assertEquals(names.includes(`aged-${count - 1}.json`), true);
@@ -727,5 +738,66 @@ test("commandState lists running and unconfirmed ids and is incomplete past the 
     const report = commandStateReport();
     assertEquals(report.known.length, STATE_MAX_IDS);
     assertEquals(report.complete, false);
+  });
+});
+
+test("an outcome dropped for the entry cap keeps its id in commandState across a restart", async () => {
+  await withState(async () => {
+    await primeCommandJournal();
+    const closed = socket(WebSocket.CLOSED);
+    const total = UNACKED_MAX_ENTRIES + 3;
+    for (let i = 0; i < total; i++) {
+      await markCommandInFlight(`o-${i}`);
+      await deliverCommandOutcome(closed.ws, {
+        type: "command-outcome",
+        id: `o-${i}`,
+        ok: true,
+      });
+    }
+    await flushCommandOutcomes(socket(WebSocket.OPEN).ws);
+    await settleCommandJournalWrites();
+    const ids = Array.from({ length: total }, (_, i) => `o-${i}`);
+    const held = commandStateReport();
+    assertEquals(held.complete, true);
+    for (const id of ids) assertEquals(held.known.includes(id), true, id);
+    // After a restart the ids are still listed and no outcome is answered
+    // again for the dropped ones.
+    resetCommandOutboxForTests();
+    await primeCommandJournal();
+    const after = commandStateReport();
+    for (const id of ids) assertEquals(after.known.includes(id), true, id);
+    await flushCommandOutcomes(socket(WebSocket.OPEN).ws);
+    assertEquals(
+      (commandRecoveryReport()?.unacked.length ?? 0) <= UNACKED_MAX_ENTRIES,
+      true,
+    );
+    // A real acknowledgement still forgets one.
+    await acknowledgeCommandOutcome("o-0");
+    assertEquals(commandStateReport().known.includes("o-0"), false);
+  });
+});
+
+test("a command whose journal entry cannot be written is refused", async () => {
+  await withState(async () => {
+    assertEquals(await markCommandInFlight("bad/id"), false);
+    assertEquals(commandRecoveryReport(), undefined);
+    // The commands folder is a file, so the journal directory cannot be made.
+    const dir = Deno.env.get("TURBOPANEL_STATE_DIR")!;
+    await Deno.writeTextFile(`${dir}/commands`, "x");
+    assertEquals(await markCommandInFlight("cmd-nowrite"), false);
+    assertEquals(commandRecoveryReport(), undefined);
+    assertEquals(commandsQuiet(), true);
+  });
+});
+
+test("crash-left temp files are removed at startup", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-t");
+    const dir = `${Deno.env.get("TURBOPANEL_STATE_DIR")}/commands/inflight`;
+    await Deno.writeTextFile(`${dir}/cmd-x.json.abc.tmp`, "{");
+    resetCommandOutboxForTests();
+    await primeCommandJournal();
+    assertEquals(await journalNames(), ["cmd-t.json"]);
+    assertEquals(commandStateReport().known, ["cmd-t"]);
   });
 });

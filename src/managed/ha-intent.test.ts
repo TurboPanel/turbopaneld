@@ -1,3 +1,4 @@
+import { useTempCommandJournal } from "../testing/command-journal.ts";
 import { assert, assertEquals } from "@std/assert";
 import {
   COMMAND_TYPES,
@@ -46,6 +47,7 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+useTempCommandJournal();
 
 const MANAGED_ID = "00000000-0000-4000-8000-000000000001";
 const MEMBER_ID = "00000000-0000-4000-8000-0000000000a1";
@@ -531,7 +533,7 @@ test("every intent verb's handler runs with the marker already active", async ()
         });
         const message: CommandDispatchMessage = {
           type: "command-dispatch",
-          id: `req-${dispatch.commandType}`,
+          id: `req-${dispatch.commandType.replaceAll(".", "-")}`,
           commandId: `cmd-${dispatch.commandType}`,
           commandType: dispatch.commandType as CommandDispatchMessage[
             "commandType"
@@ -582,7 +584,7 @@ test("apply records the member; promote flips it; destroy removes it", async () 
       handleCommandDispatch(
         {
           type: "command-dispatch",
-          id: `req-${commandType}`,
+          id: `req-${commandType.replaceAll(".", "-")}`,
           commandId: `cmd-${commandType}`,
           commandType: commandType as CommandDispatchMessage["commandType"],
           payload,
@@ -638,7 +640,7 @@ test("a managed.destroy through the router keeps the marker held when the member
       await handleCommandDispatch(
         {
           type: "command-dispatch",
-          id: "req-managed.destroy",
+          id: "req-managed-destroy",
           commandId: "cmd-managed.destroy",
           commandType: "managed.destroy",
           payload: { managedId: MANAGED_ID, removeVolumes: false },
@@ -688,7 +690,7 @@ test("a managed.destroy through the router clears the marker once the member rec
       await handleCommandDispatch(
         {
           type: "command-dispatch",
-          id: "req-managed.destroy",
+          id: "req-managed-destroy",
           commandId: "cmd-managed.destroy",
           commandType: "managed.destroy",
           payload: { managedId: MANAGED_ID, removeVolumes: false },

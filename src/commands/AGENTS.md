@@ -122,8 +122,13 @@ present even when `known` is empty):
 
 Reading it: with `complete: true`, a `command-dispatch` the control plane sent
 and never saw acked, whose id is not in `known`, was never started by this
-daemon (a frame is journaled the moment it is accepted), so sending it again
-cannot run it twice, whatever its type. An id in `known` is held; its outcome
+daemon, so sending it again
+cannot run it twice, whatever its type. This holds because a command is journaled (file and directory flushed) before
+it runs, and a command that cannot be journaled (write failure, an id that is
+not safe as a file name) is refused with a failed outcome and never runs. An
+unconfirmed outcome dropped for the 64-entry cap leaves an id-only tombstone
+on disk, listed in `known` until 7 days after it was recorded; one past 7 days
+is removed. `*.tmp` files a crash left are deleted at startup. An id in `known` is held; its outcome
 arrives on its own, so it is never sent again. Limits the control plane must
 keep: only resend a command that is still non-terminal in its own records
 (an acknowledged outcome removes the id from `known`), only one younger than
