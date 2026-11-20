@@ -1,8 +1,8 @@
 /**
  * Kind allowlists applied while topology is enumerated, so entities that can
  * never be monitored (pseudo filesystems, container plumbing) take no slot
- * and never enter topology identity — a Docker restart cannot bump the
- * topology generation.
+ * and never enter topology identity — a Docker restart cannot change the
+ * topology identity key.
  */
 
 const ALLOWED_FS_TYPES = new Set([

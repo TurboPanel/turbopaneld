@@ -18,9 +18,11 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import { grantHostingCaddyRead } from "./ensure-hosting-caddy.ts";
+import { HOSTING_FALLBACK_SITE } from "./instance-acme-http01.ts";
 import {
   activateHostingSites,
   enableHostingCaddy,
+  plannedFallbackForSites,
   validateHostingCaddyCandidate,
   withHostingSitesLock,
 } from "./ingress.ts";
@@ -222,7 +224,7 @@ async function judgeTunnelSet(
   relocks: readonly OwnSiteFile[],
   grantRead: (hostingDir: string) => Promise<void>,
 ): Promise<void> {
-  const judge = (sites: readonly OwnSiteFile[]) =>
+  const judge = async (sites: readonly OwnSiteFile[]) =>
     validateHostingCaddyCandidate(
       layout,
       paths.hostingDir,
@@ -230,7 +232,7 @@ async function judgeTunnelSet(
       TUNNEL_SITE_FILE,
       contents,
       grantRead,
-      { sites },
+      { sites, fallback: await relockedFallback(paths.sitesDir, sites) },
     );
   try {
     await judge(relocks);
@@ -245,6 +247,25 @@ async function judgeTunnelSet(
       }: ${errorText(err)}`,
     );
   }
+}
+
+/**
+ * The catch-all file when the relocked sites change an address (a bound
+ * site gains this server's addresses), so no bound address is left without
+ * one; `undefined` when it stays as it is.
+ */
+async function relockedFallback(
+  sitesDir: string,
+  relocks: readonly OwnSiteFile[],
+): Promise<string | undefined> {
+  if (relocks.length === 0) return undefined;
+  const planned = await plannedFallbackForSites(
+    sitesDir,
+    new Map(relocks.map((site) => [site.file, site.contents])),
+  );
+  if (planned === undefined) return undefined;
+  const live = await readTextIfPresent(join(sitesDir, HOSTING_FALLBACK_SITE));
+  return planned === live ? undefined : planned;
 }
 
 /**
@@ -266,12 +287,17 @@ async function swapTunnelFile(
   if (tunnelSame && relocks.length === 0) return;
   await judgeTunnelSet(layout, paths, contents, relocks, grantRead);
   if (contents !== "") await enableHostingCaddy();
+  const fallback = await relockedFallback(paths.sitesDir, relocks);
   await activateHostingSites([
     ...(tunnelSame ? [] : [{ live: paths.livePath, contents }]),
     ...relocks.map((site) => ({
       live: join(paths.sitesDir, site.file),
       contents: site.contents,
     })),
+    ...(fallback === undefined ? [] : [{
+      live: join(paths.sitesDir, HOSTING_FALLBACK_SITE),
+      contents: fallback,
+    }]),
   ]);
   // Caddy no longer loads anything from it (the empty file loaded).
   if (!tunnelSame && contents === "") {

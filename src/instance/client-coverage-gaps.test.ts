@@ -16,7 +16,7 @@ import {
   writeCapabilityPlan,
 } from "../metrics/collector/capability-plan-store.ts";
 import { setDrivetempExecutorForTests } from "../metrics/collector/sensors/drivetemp.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
 import {
   challengeResponse,
   createFakeInstanceApi,
@@ -91,9 +91,8 @@ function scriptStandardAuth(
   );
 }
 
-function fakeTopologySnapshot(): TopologySnapshot {
+function fakeTopologySnapshot(): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 0,
     networks: [],
     filesystems: [],
@@ -711,7 +710,10 @@ it({
             "topology-report",
             () => lastFrameOfType(socket, "topology-report"),
           );
-          assertEquals((report as { generation?: number }).generation, 1);
+          const frame = report as Record<string, unknown>;
+          assertEquals("generation" in frame, false);
+          assertEquals("bootGeneration" in frame, false);
+          assertEquals("bootGeneration" in (frame.snapshot as object), false);
         } finally {
           client.stop();
         }

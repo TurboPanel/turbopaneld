@@ -16,7 +16,7 @@ import type {
 } from "./commands-contracts.ts";
 import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
-import type { TopologyReportSnapshot } from "./topology-types.ts";
+import type { TopologySnapshot } from "./topology-types.ts";
 import type { ManagedPermissionsObserved } from "./managed-permissions-observed.ts";
 export {
   OBSERVED_LEVELS,
@@ -985,18 +985,13 @@ export type DaemonMessage =
     /**
      * Daemon-initiated, fire-and-forget (no correlated request/result) —
      * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
-     * and generation, reported over the socket by `TopologyReporter`
-     * (`./topology-reporter.ts`) so the control plane can persist per-server
-     * topology-generation history (`turbopanel/src/client/servers/
-     * server-topology-records.ts`).
-     *
-     * `generation` and `bootGeneration` (here and inside the snapshot) are
-     * left out once the control plane lists `topology-generation-optional-v1`.
+     * reported over the socket by `TopologyReporter`
+     * (`./topology-reporter.ts`). The control plane tells topologies apart by
+     * their content (`topologyIdentityKey`); the report carries no generation
+     * number.
      */
     type: "topology-report";
-    generation?: number;
-    bootGeneration?: number;
-    snapshot: TopologyReportSnapshot;
+    snapshot: TopologySnapshot;
     at: string;
   }
   | {

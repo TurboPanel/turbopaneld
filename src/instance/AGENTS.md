@@ -76,14 +76,7 @@ fields. Detail: `src/deploy/site/AGENTS.md`.
 
 **Project caches and helper ports (`project-cache-v1`).** `environment.deploy` may carry `caches` and `helperReach`, and the command `cache.apply` brings a host's caches for one environment in line between deploys. Each field is absent (leave the host), empty (clear it) or a list (set it). Detail: `src/deploy/cache/AGENTS.md`.
 
-**Topology generation off the wire (`topology-generation-optional-v1`).** A
-control plane that lists it no longer needs the topology generation numbers.
-Metrics samples never carry a topology generation. The daemon then leaves
-`generation` and `bootGeneration` off `topology-report` (and its snapshot),
-and stops sending the `topology_generation_changed` event; it keeps tracking
-the generation itself. The flag is set on attach and cleared on close
-(`setTopologyGenerationOptional`); details in `../metrics/AGENTS.md`. No
-version floor moved: older control planes still get the numbers.
+**Topology reports carry no generation numbers.** `topology-report` is `{ snapshot, at }`; the control plane tells topologies apart by their content. `TopologyReporter` sends on connect and then only when the snapshot's identity key (`../metrics/topology/identity-key.ts`) changes. No feature string gates this: a control plane that reads the numbers is no longer supported.
 
 **DNS orders and per-name certificates (`acme-issue-dns-v1`, `hosting-name-tls-v1`).** Both are advertised in `hello.features` (`DAEMON_WIRE_FEATURES`, appended; no wire-version floor moved). `acme-issue-request` may carry `challenge` (`http-01` or `dns-01`; absent means HTTP, any other value is refused). For `dns-01` the daemon asks the control plane for TXT records over three messages and never touches DNS itself: `acme-dns-publish` (daemon to control plane: `requestId`, `records: [{ name, value }]`, `at`), `acme-dns-published` (control plane to daemon: `requestId`, `ok`, plain `error` when not ok, `at`) and `acme-dns-remove` (daemon to control plane: `requestId`, `at`). `AcmeDnsRelay` (`acme-dns-relay.ts`) is the daemon end; `AcmeIssueHandler.handleDnsPublished` feeds it from `#handleCentralCertificateMessage`, and `sweepRestartedDnsOrders` runs at attach. All three validators refuse certificate and key material. The control plane must never send `dns-01` to a daemon without `acme-issue-dns-v1` (an older daemon drops the field and would run HTTP) and must send `hostings[].nameTls` only to one with `hosting-name-tls-v1`. Details: `../deploy/AGENTS.md`.
 

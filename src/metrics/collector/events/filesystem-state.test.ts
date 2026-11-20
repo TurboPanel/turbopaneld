@@ -3,10 +3,9 @@ import { CounterBaselineTracker } from "../baseline.ts";
 import { FilesystemStateEventCollector } from "./filesystem-state.ts";
 import type { EventDetectContext } from "./types.ts";
 import type { MountEntry } from "../mounts.ts";
-import type {
-  FilesystemTopology,
-  TopologySnapshot,
-} from "../../../contracts/topology-types.ts";
+import type { FilesystemTopology } from "../../../contracts/topology-types.ts";
+
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -20,9 +19,8 @@ const ROOT_FS: FilesystemTopology = {
   roles: ["root"],
 };
 
-function snapshot(filesystems: FilesystemTopology[]): TopologySnapshot {
+function snapshot(filesystems: FilesystemTopology[]): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 1,
     networks: [],
     filesystems,

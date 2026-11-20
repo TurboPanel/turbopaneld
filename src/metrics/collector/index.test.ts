@@ -5,7 +5,7 @@ import {
   DOCKER_DATA_ROOT_RETRY_MS,
 } from "./index.ts";
 import type { CollectorDeps } from "./types.ts";
-import type { TopologySnapshot } from "../../contracts/topology-types.ts";
+import type { CollectedTopology } from "../topology/topology.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -15,9 +15,8 @@ import type { TopologySnapshot } from "../../contracts/topology-types.ts";
  */
 const test = Deno.test.bind(Deno);
 
-function emptyTopologySnapshot(): TopologySnapshot {
+function emptyTopologySnapshot(): CollectedTopology {
   return {
-    generation: 0,
     bootGeneration: 0,
     networks: [],
     filesystems: [],

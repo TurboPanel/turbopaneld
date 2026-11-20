@@ -12,7 +12,7 @@ const test = Deno.test.bind(Deno);
 test("writeTextFileAtomic: concurrent writers of one file all succeed and leave no temp files", async () => {
   const dir = await Deno.makeTempDir();
   try {
-    const path = join(dir, "metrics", "topology-generation.json");
+    const path = join(dir, "metrics", "boot-generation.json");
     await Promise.all(
       Array.from(
         { length: 16 },
@@ -25,7 +25,7 @@ test("writeTextFileAtomic: concurrent writers of one file all succeed and leave 
     for await (const e of Deno.readDir(join(dir, "metrics"))) {
       names.push(e.name);
     }
-    assertEquals(names, ["topology-generation.json"]);
+    assertEquals(names, ["boot-generation.json"]);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

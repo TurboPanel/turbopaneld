@@ -2,13 +2,13 @@ import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { EventCollectorSet, MAX_EVENTS_PER_DETECT_TICK } from "./index.ts";
 import type { EventDetectContext } from "./types.ts";
-import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
+
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
-function snapshot(): TopologySnapshot {
+function snapshot(): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 1,
     networks: [],
     filesystems: [],
