@@ -5,7 +5,8 @@ import type { LayoutPaths } from "../paths/layout.ts";
 import {
   isPubliclyRoutableIpv4,
   listBootPublicListeners,
-  recordManagedListenerScope,
+  reconcileManagedFirewallBefore,
+  recordManagedListenerCleared,
   scopeManagedPublicListenersAtBoot,
 } from "./firewall-boot.ts";
 
@@ -79,8 +80,8 @@ test("only public listeners are collected: the record wins, compose is the fallb
       'services:\n  db:\n    ports:\n      - "10.0.0.5:45004:5432"\n',
     );
     assertEquals(await listBootPublicListeners(layout), [
-      { managedId: ID_A, address: "203.0.113.50", port: 45001 },
-      { managedId: ID_C, address: "203.0.113.70", port: 45003 },
+      { managedId: ID_A, address: "203.0.113.50", port: 45001, peers: [] },
+      { managedId: ID_C, address: "203.0.113.70", port: 45003, peers: [] },
     ]);
   });
 });
@@ -103,29 +104,117 @@ test("a boot with public listeners hands each to the firewall once", async () =>
   });
 });
 
-test("an apply records its listener and a cleared one flips the record", async () => {
+const noFirewall = () => Promise.resolve();
+
+function publicPayload(peerAddresses: string[]): ManagedApplyPayload {
+  return {
+    managedId: ID_A,
+    privateListener: {
+      address: "203.0.113.50",
+      port: 45001,
+      transport: "public",
+    },
+    peers: peerAddresses.map((address) => ({ address, transport: "public" })),
+  } as unknown as ManagedApplyPayload;
+}
+
+async function scopeFile(dir: string): Promise<Record<string, unknown>> {
+  return JSON.parse(
+    await Deno.readTextFile(join(dir, "managed", ID_A, "listener-scope.json")),
+  );
+}
+
+test("an apply records the listener with its peers, mode 0600, and a cleared one flips the record", async () => {
   await withState(async (layout, dir) => {
     await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
-    const payload = {
-      managedId: ID_A,
-      privateListener: {
-        address: "203.0.113.50",
-        port: 45001,
-        transport: "public",
-      },
-    } as ManagedApplyPayload;
-    await recordManagedListenerScope(layout, payload, "before");
+    const payload = publicPayload(["198.51.100.7"]);
+    await reconcileManagedFirewallBefore(layout, payload, noFirewall);
+    const record = await scopeFile(dir);
+    assertEquals(record.public, true);
+    assertEquals(record.peers, ["198.51.100.7"]);
+    const mode = (await Deno.stat(
+      join(dir, "managed", ID_A, "listener-scope.json"),
+    )).mode! & 0o777;
+    assertEquals(mode, 0o600);
     assertEquals((await listBootPublicListeners(layout)).length, 1);
-    await recordManagedListenerScope(layout, payload, "after");
-    assertEquals((await listBootPublicListeners(layout)).length, 1);
-    await recordManagedListenerScope(layout, {
-      managedId: ID_A,
-    } as ManagedApplyPayload, "before");
-    assertEquals((await listBootPublicListeners(layout)).length, 1);
-    await recordManagedListenerScope(layout, {
-      managedId: ID_A,
-    } as ManagedApplyPayload, "after");
+    const cleared = { managedId: ID_A } as ManagedApplyPayload;
+    await recordManagedListenerCleared(layout, cleared);
     assertEquals(await listBootPublicListeners(layout), []);
+  });
+});
+
+test("boot hands the saved peers to the firewall", async () => {
+  await withState(async (layout) => {
+    await Deno.mkdir(join(layout.stateDir, "managed", ID_A), {
+      recursive: true,
+    });
+    await reconcileManagedFirewallBefore(
+      layout,
+      publicPayload(["198.51.100.7", "198.51.100.9"]),
+      noFirewall,
+    );
+    const listeners = await listBootPublicListeners(layout);
+    assertEquals(listeners[0].peers, ["198.51.100.7", "198.51.100.9"]);
+  });
+});
+
+test("a malformed peers field falls back to DROP-only and still scopes the listener", async () => {
+  const bad: unknown[] = [
+    ["198.51.100.7; reboot"],
+    ["0.0.0.0/0"],
+    ["198.51.100.7/33"],
+    [7],
+    "198.51.100.7",
+    Array.from({ length: 257 }, () => "198.51.100.7"),
+  ];
+  for (const peers of bad) {
+    await withState(async (layout, dir) => {
+      await putFile(
+        dir,
+        ID_A,
+        "listener-scope.json",
+        JSON.stringify({
+          public: true,
+          address: "203.0.113.50",
+          port: 45001,
+          peers,
+        }),
+      );
+      assertEquals(await listBootPublicListeners(layout), [
+        { managedId: ID_A, address: "203.0.113.50", port: 45001, peers: [] },
+      ]);
+    });
+  }
+});
+
+test("a crash between phases never leaves the record wider than the kernel", async () => {
+  await withState(async (layout, dir) => {
+    await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
+    await reconcileManagedFirewallBefore(
+      layout,
+      publicPayload(["198.51.100.7", "198.51.100.8"]),
+      noFirewall,
+    );
+    // The next apply swaps a peer; the restore fails mid-way (the crash).
+    const seen: unknown[] = [];
+    let failed = false;
+    try {
+      await reconcileManagedFirewallBefore(
+        layout,
+        publicPayload(["198.51.100.8", "198.51.100.9"]),
+        async () => {
+          seen.push((await scopeFile(dir)).peers);
+          throw new Error("crash");
+        },
+      );
+    } catch {
+      failed = true;
+    }
+    assertEquals(failed, true);
+    // The kernel still holds the old peers, so the record held at most their
+    // intersection with the new ones when the restore began and stays so.
+    assertEquals(seen, [["198.51.100.8"]]);
+    assertEquals((await scopeFile(dir)).peers, ["198.51.100.8"]);
   });
 });
 

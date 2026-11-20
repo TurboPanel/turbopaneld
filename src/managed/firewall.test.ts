@@ -663,6 +663,7 @@ const BOOT_LISTENER = {
   managedId: MANAGED_ID,
   address: "203.0.113.50",
   port: 45001,
+  peers: [] as string[],
 };
 
 test("boot scoping installs a DROP-only chain and the jumps when the chain is new", async () => {
@@ -703,6 +704,32 @@ test("boot scoping after a daemon restart keeps the chain's existing ACCEPTs", a
   );
 });
 
+test("boot scoping restores the saved peer ACCEPTs ahead of the DROP in one restore", async () => {
+  const kernel = fakeKernel(() => false);
+  setManagedFirewallRunForTests(kernel.run);
+  try {
+    assertEquals(
+      await scopePublicListenersClosedAtBoot([
+        { ...BOOT_LISTENER, peers: ["203.0.113.51", "203.0.113.0/24"] },
+      ]),
+      1,
+    );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
+  assertEquals(kernel.state.rules, [
+    `-A ${CHAIN} -s 203.0.113.51 ${matchFor(45001)} -j ACCEPT`,
+    `-A ${CHAIN} -s 203.0.113.0/24 ${matchFor(45001)} -j ACCEPT`,
+    `-A ${CHAIN} ${matchFor(45001)} -j DROP`,
+  ]);
+  assertEquals(
+    kernel.state.invocations.filter((line) =>
+      line.startsWith("iptables-restore")
+    ).length,
+    1,
+  );
+});
+
 test("boot DROP chain is widened to the peer ACCEPTs by the next apply", async () => {
   const kernel = fakeKernel(() => false);
   setManagedFirewallRunForTests(kernel.run);
@@ -726,7 +753,7 @@ test("boot scoping carries another listener's rules and continues past a failure
   try {
     assertEquals(
       await scopePublicListenersClosedAtBoot([
-        { managedId: "bad", address: "not-an-ip", port: 1 },
+        { managedId: "bad", address: "not-an-ip", port: 1, peers: [] },
         BOOT_LISTENER,
       ]),
       1,

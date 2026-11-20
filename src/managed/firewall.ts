@@ -456,6 +456,8 @@ export type BootPublicListener = {
   managedId: string;
   address: string;
   port: number;
+  /** Sources the last apply allowed; empty means DROP only. */
+  peers: string[];
 };
 
 /** The chain already ends this listener in a DROP, so it is scoped. */
@@ -500,7 +502,7 @@ async function scopeClosedLocked(
         chain,
         listener.address,
         listener.port,
-        [],
+        listener.peers,
         otherListenerRules(
           listed.stdout,
           chain,
@@ -523,10 +525,10 @@ async function scopeClosedLocked(
 
 /**
  * Daemon start (and Docker coming back): give every published public listener
- * a chain that drops everyone, unless its chain already scopes it. The rules
+ * a chain that accepts the peers the last apply allowed (none: drops everyone), unless its chain already scopes it. The rules
  * are gone after a host reboot while Docker republishes the port at once, so
- * the port must not wait for the next managed apply. Peer ACCEPTs are not
- * known here; the next apply for the cluster widens the chain. One failure
+ * the port must not wait for the next managed apply. The peers come from the
+ * record the apply left (exactly what was installed before the reboot). One failure
  * never stops the others. Returns how many listeners are now scoped.
  */
 export async function scopePublicListenersClosedAtBoot(
