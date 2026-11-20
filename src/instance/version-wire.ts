@@ -102,6 +102,8 @@ export const DAEMON_WIRE_FEATURES = [
   "signin-v2",
   "hosting-via-header-v1",
   "dev-host-v1",
+  // Inert name: listed only until the control plane drops it. No behaviour.
+  "topology-generation-optional-v1",
   "signed-reports-v1",
   "panel-bound-session-v1",
   "panel-keyset-statements-v1",

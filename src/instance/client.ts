@@ -4152,11 +4152,6 @@ export class InstanceClient {
       await writeHardwareProfile(message.overrides ?? {});
       ok = true;
 
-      // A pushed nicSlot*/hostingFilesystemId override can reassign a slot
-      // without changing any identity set. Force a recompute now rather
-      // than waiting for the next scheduled tick.
-      void this.#topologyReporter?.reportNow();
-
       // A flip from false/unset to true is the only edge that should load
       // the module — every later push with drivetempEnabled already true is
       // a no-op here. Awaited (not fire-and-forget) so this result reports
