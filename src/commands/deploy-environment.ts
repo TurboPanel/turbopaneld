@@ -19,6 +19,12 @@ import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
 import { assertBuildContextsPresent } from "../deploy/compose-build-contexts.ts";
+import { readComposeCheckoutDirs } from "../deploy/compose-checkout-marker.ts";
+import {
+  applyComposeCheckout,
+  type ApplyComposeCheckoutDeps,
+  clearComposeCheckout,
+} from "../deploy/compose-checkout.ts";
 import {
   DeployCancelledError,
   type DeployCancelToken,
@@ -2265,6 +2271,48 @@ async function revertPublishedCompose(
 }
 
 /**
+ * Put the repository of a Git Compose project on the host before anything is
+ * built or started, or drop the one an earlier deploy left when this deploy
+ * names none. A hostings-only run touches neither: it builds and restarts
+ * nothing, and its payload carries no repository.
+ */
+export async function applyDeployComposeCheckout(
+  payload: EnvironmentDeployPayload,
+  deploymentDir: string,
+  deps: {
+    logSink: CommandOutputSink;
+    decryptSecrets: DecryptSecretsFn | undefined;
+    signal?: AbortSignal;
+    /** Test seam — see {@link applyComposeCheckout}. */
+    checkoutFn?: ApplyComposeCheckoutDeps["checkoutFn"];
+  },
+): Promise<void> {
+  if (payload.hostingsOnly === true) return;
+  if (!payload.composeCheckout) {
+    await clearComposeCheckout(deploymentDir);
+    return;
+  }
+  deps.logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
+  const outcome = await applyComposeCheckout(
+    deploymentDir,
+    payload.composeCheckout,
+    {
+      decryptSecrets: deps.decryptSecrets,
+      ...(deps.checkoutFn ? { checkoutFn: deps.checkoutFn } : {}),
+      onOutput: (stream, line) => deps.logSink.onLine(stream, line),
+      redactSummary: (text) => deps.logSink.redactSummary(text),
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    },
+  );
+  deps.logSink.onLine(
+    "stdout",
+    outcome.fetched
+      ? `repository checked out at ${outcome.commitSha}`
+      : `repository already at ${outcome.commitSha}`,
+  );
+}
+
+/**
  * Writes one compiled `compose.yaml` (daemon overlay merged in), validates
  * Docker config, publishes `compose.yaml` + `deployment.json` + `.env`, then
  * runs deploy hooks / external networks / compose up. Secret files under
@@ -2295,6 +2343,10 @@ async function deployContainerServices(
   let published = false;
   let hadPrevious = false;
   const stageDir = await resetComposeStageDir(deploymentDir);
+  // The repository checkout of a Git Compose project, when this deploy has one
+  // (`deploy/compose-checkout-marker.ts`): Compose resolves relative paths
+  // against it, and the checks below treat it as inside the deployment.
+  const checkoutDirs = await readComposeCheckoutDirs(deploymentDir);
   // Read before publish replaces the live files.
   const previousProjects = await readPreviousProjects(deploymentDir);
   let retiredEarlier: string[] = [];
@@ -2363,6 +2415,7 @@ async function deployContainerServices(
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
+      ...(checkoutDirs ? { checkoutRoot: checkoutDirs.root } : {}),
       exemptSecretNames: daemonSecretNames,
       remoteBuildSourcesApproved:
         parsedPayload.remoteBuildSourcesApproved === true,
@@ -2381,6 +2434,7 @@ async function deployContainerServices(
       {
         deploymentDir,
         stageDir,
+        ...(checkoutDirs ? { checkout: checkoutDirs } : {}),
         hostLevelApproved: parsedPayload.hostLevelApproved === true,
         ownerTree: {
           homeRoot: layout.principalHomeRoot,
@@ -2399,6 +2453,7 @@ async function deployContainerServices(
     await assertBuildContextsPresent([resolvedHostPaths], {
       stageDir,
       deploymentDir,
+      ...(checkoutDirs ? { checkoutRoot: checkoutDirs.root } : {}),
     });
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(
@@ -3421,6 +3476,11 @@ async function deployEnvironmentHolding(
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
   // the site apply below points a document root at it.
   cancel?.throwIfCancelled("while the host was being prepared");
+  await applyDeployComposeCheckout(parsedPayload, deploymentDir, {
+    logSink: runtime.logSink,
+    decryptSecrets: runtime.decryptSecrets,
+    ...(cancel === undefined ? {} : { signal: cancel.signal }),
+  });
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,

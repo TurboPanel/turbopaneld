@@ -6,6 +6,7 @@ import {
   BUILD_LIMITS_FEATURE,
   COMMAND_RECOVERY_FEATURE,
   COMMAND_RECOVERY_V2_FEATURE,
+  COMPOSE_CHECKOUT_FEATURE,
   CUSTOM_NODE_APP_MODE_FEATURE,
   DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
   DAEMON_SEALED_SECRETS_FEATURE,
@@ -616,6 +617,15 @@ test("hosting-name-tls-v1 and acme-issue-dns-v1 are advertised, in that order, a
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(ACME_ISSUE_DNS_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(HOSTING_NAME_TLS_FEATURE) + 1,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("compose-checkout-v1 is advertised and raised no floor", () => {
+  assertEquals(COMPOSE_CHECKOUT_FEATURE, "compose-checkout-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(COMPOSE_CHECKOUT_FEATURE),
+    true,
   );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

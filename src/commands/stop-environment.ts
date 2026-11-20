@@ -1,5 +1,9 @@
 import { dirname, join } from "node:path";
 import {
+  COMPOSE_CHECKOUT_DIRNAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
+} from "../deploy/compose-checkout-marker.ts";
+import {
   COMPOSE_ENV_FILENAME,
   COMPOSE_PREVIOUS_DIRNAME,
   COMPOSE_STAGE_DIRNAME,
@@ -337,6 +341,10 @@ const DAEMON_DEPLOYMENT_ENTRIES = [
   DEPLOYMENT_MANIFEST_FILENAME,
   COMPOSE_PREVIOUS_DIRNAME,
   COMPOSE_STAGE_DIRNAME,
+  // A Git Compose project's checkout is the daemon's, not the service's: the
+  // next deploy fetches it again (`deploy/compose-checkout.ts`).
+  COMPOSE_CHECKOUT_DIRNAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
 ] as const;
 
 /**

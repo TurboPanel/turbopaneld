@@ -122,6 +122,7 @@ export const DAEMON_WIRE_FEATURES = [
   "hosting-name-tls-v1",
   "acme-issue-dns-v1",
   "command-recovery-v2",
+  "compose-checkout-v1",
 ] as const;
 
 /**
@@ -846,3 +847,14 @@ export const BUILD_LIMITS_FEATURE: DaemonWireFeature = "build-limits-v1";
  */
 export const TUNNEL_PEER_MTLS_FEATURE: DaemonWireFeature =
   "tunnel-peer-mtls-v1";
+
+/**
+ * `compose-checkout-v1`: `environment.deploy` may carry `composeCheckout`, the
+ * repository a Git Compose project's compose file was read from. The daemon
+ * checks the pinned commit out into the deployment directory before building,
+ * so the compose file's relative paths resolve. The control plane sends it only
+ * to a daemon that lists this feature; an older daemon would ignore the field
+ * and deploy without the repository files.
+ */
+export const COMPOSE_CHECKOUT_FEATURE: DaemonWireFeature =
+  "compose-checkout-v1";

@@ -1,3 +1,7 @@
+import {
+  COMPOSE_CHECKOUT_DIRNAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
+} from "../deploy/compose-checkout-marker.ts";
 import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
@@ -336,6 +340,11 @@ test({
       );
       await Deno.mkdir(join(deploymentDir, COMPOSE_PREVIOUS_DIRNAME));
       await Deno.mkdir(join(deploymentDir, COMPOSE_STAGE_DIRNAME));
+      await Deno.mkdir(join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME));
+      await Deno.writeTextFile(
+        join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
+        "{}",
+      );
       await Deno.writeTextFile(dataFile, "kept");
 
       await handleEnvironmentStop(payload, new Date().toISOString(), deps);
@@ -349,6 +358,8 @@ test({
           COMPOSE_ENV_FILENAME,
           COMPOSE_PREVIOUS_DIRNAME,
           COMPOSE_STAGE_DIRNAME,
+          COMPOSE_CHECKOUT_DIRNAME,
+          COMPOSE_CHECKOUT_MARKER_FILENAME,
         ]
       ) {
         await assertRejects(

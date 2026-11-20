@@ -19,11 +19,15 @@ import { join, relative } from "@std/path";
 import type { ComposeHostPathScan } from "./compose-host-paths.ts";
 
 export class ComposeBuildContextMissingError extends Error {
-  constructor(readonly missing: readonly string[]) {
+  constructor(readonly missing: readonly string[], fromRepository = false) {
     super(
-      `compose deploy refused — build context not found in the deployment directory: ${
-        missing.join("; ")
-      }. The deploy does not copy repository files to the host, so a local build context has nothing to build from; use a remote context or build the service from its repository source`,
+      fromRepository
+        ? `compose deploy refused — build context not found in the repository checkout: ${
+          missing.join("; ")
+        }. The folder is not in the repository at the commit the compose file was read from`
+        : `compose deploy refused — build context not found in the deployment directory: ${
+          missing.join("; ")
+        }. The deploy does not copy repository files to the host, so a local build context has nothing to build from; use a remote context or build the service from its repository source`,
     );
     this.name = "ComposeBuildContextMissingError";
   }
@@ -34,6 +38,11 @@ export type BuildContextDirs = {
   stageDir: string;
   /** Where the published compose file runs the build. */
   deploymentDir: string;
+  /**
+   * The repository checkout of a Git Compose project (`compose-checkout.ts`).
+   * Contexts under it resolve where they are; they are not staged.
+   */
+  checkoutRoot?: string;
 };
 
 export type IsDirectoryFn = (path: string) => Promise<boolean>;
@@ -57,18 +66,28 @@ function escapesDir(rel: string): boolean {
   return rel === ".." || rel.startsWith("../") || rel.startsWith("/");
 }
 
-/** Service build contexts under the staging directory, as relative paths. */
+/**
+ * Service build contexts under the staging directory (looked up at the same
+ * place under the live deployment directory) or under the checkout (looked up
+ * where they are), as the path to look at.
+ */
 function stagedContexts(
   scans: readonly ComposeHostPathScan[],
-  stageDir: string,
-): Array<{ label: string; rel: string }> {
-  const out: Array<{ label: string; rel: string }> = [];
+  dirs: BuildContextDirs,
+): Array<{ label: string; path: string }> {
+  const out: Array<{ label: string; path: string }> = [];
   for (const entry of scans.flatMap((scan) => scan.entries)) {
     if (!entry.build || !isServiceBuildContext(entry.what)) continue;
-    const rel = relative(stageDir, entry.path);
+    const inCheckout = dirs.checkoutRoot !== undefined &&
+      !escapesDir(relative(dirs.checkoutRoot, entry.path));
+    const base = inCheckout ? dirs.checkoutRoot! : dirs.stageDir;
+    const rel = relative(base, entry.path);
     if (escapesDir(rel)) continue;
     const shown = rel === "" ? "." : `./${rel}`;
-    out.push({ label: `${entry.what} ${shown}`, rel });
+    out.push({
+      label: `${entry.what} ${shown}`,
+      path: inCheckout ? entry.path : join(dirs.deploymentDir, rel),
+    });
   }
   return out;
 }
@@ -82,10 +101,15 @@ export async function assertBuildContextsPresent(
   dirs: BuildContextDirs,
   exists: IsDirectoryFn = isDirectory,
 ): Promise<void> {
-  const contexts = stagedContexts(scans, dirs.stageDir);
+  const contexts = stagedContexts(scans, dirs);
   const present = await Promise.all(
-    contexts.map(({ rel }) => exists(join(dirs.deploymentDir, rel))),
+    contexts.map(({ path }) => exists(path)),
   );
   const missing = contexts.filter((_, i) => !present[i]).map((c) => c.label);
-  if (missing.length > 0) throw new ComposeBuildContextMissingError(missing);
+  if (missing.length > 0) {
+    throw new ComposeBuildContextMissingError(
+      missing,
+      dirs.checkoutRoot !== undefined,
+    );
+  }
 }

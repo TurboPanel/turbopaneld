@@ -1575,3 +1575,50 @@ test("parsePrincipalsReconcilePayload carries a sealed password hash", () => {
     "tpdaemon.v1.k.iv.ct",
   );
 });
+
+const COMPOSE_CHECKOUT = {
+  sourceId: "00000000-0000-4000-8000-000000000002",
+  provider: "github" as const,
+  cloneUrl: "https://git.example.net/acme/stack.git",
+  ref: "main",
+  commitSha: "0123456789abcdef0123456789abcdef01234567",
+  composePath: "deploy/compose.yaml",
+  credential: TP_ENVELOPE,
+  credentialKind: "token" as const,
+};
+
+test("parseEnvironmentDeployPayload round-trips composeCheckout", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    composeCheckout: COMPOSE_CHECKOUT,
+  });
+  assertEquals(payload.composeCheckout, COMPOSE_CHECKOUT);
+  assertEquals(
+    parseEnvironmentDeployPayload(DEPLOY_BASE).composeCheckout,
+    undefined,
+  );
+});
+
+test("parseEnvironmentDeployPayload refuses an unsafe composeCheckout", () => {
+  for (
+    const bad of [
+      { composePath: "../compose.yaml" },
+      { composePath: "/etc/compose.yaml" },
+      { composePath: "a//compose.yaml" },
+      { composePath: "" },
+      { cloneUrl: "https://user:token@git.example.net/acme/stack.git" },
+      { credential: TP_ENVELOPE, credentialKind: undefined },
+      { provider: "other" },
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          composeCheckout: { ...COMPOSE_CHECKOUT, ...bad },
+        }),
+      TypeError,
+      "composeCheckout",
+    );
+  }
+});

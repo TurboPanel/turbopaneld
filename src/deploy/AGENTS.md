@@ -1422,3 +1422,45 @@ table's generation always follows the table last accepted.
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH), `src/deploy/acme/AGENTS.md` (the daemon's own ACME client) |
 
 **Docker client config folder.** Every call through `docker-cli.ts` runs `docker --config <run dir>/docker-config` (`dockerConfigDir`, created `0700` by the daemon, tmpfs). Without it the CLI and its compose and buildx plugins mkdir `$HOME/.docker`, and the daemon's home is the state root, which a hardened host keeps `root:tp 0750`. It is an argument, not `DOCKER_CONFIG`, because the `sudo` rungs reset the environment. Nothing on disk survives a reboot, so `scripts/purge.sh` needs no entry (`/run/turbopanel` is already in `TP_OWNED_TREES`). The folder is vetted before use (a real directory, not a link, owned by the daemon's uid, mode `0700`; anything else is refused, logged once, and a fresh `mkdtemp` folder is used), because Docker runs plugins and credential helpers named there as `tp` and other accounts share the run directory's group. If a registry login is ever added, it must not write credentials into this shared config folder.
+
+## Repository checkout for Git Compose projects (`compose-checkout-v1`)
+
+A project whose compose file comes from a repository needs the repository on the
+host: `build: ./vpn`, `./conf:/etc/x:ro` and `env_file: ./app.env` name files in
+it. `environment.deploy` carries `composeCheckout`; `compose-checkout.ts` runs
+before `applySourceReleases` (it reuses `release/checkout.ts`, so the clone-URL
+guard, the pinned commit and the credential lanes are the same as
+`sourceMaterial[]`).
+
+Layout of `deployments/<project>/<env>/`:
+
+- `compose.yaml`, `deployment.json`, `.env`, `previous/`, `.staging/`: the
+  daemon's files, where every lifecycle path already looks for them.
+- `repo/`: the repository at the commit, without `.git`. Replaced as a whole
+  (a scratch clone, then a swap), never updated in place.
+- `repo.json`: the marker (commit, clone URL, compose path). It also tells
+  `docker-cli.ts` what to do for every Compose call.
+
+The repository does **not** go into the folder of `compose.yaml`: the compiled
+file must keep its name and place, and it must not overwrite a repository file
+of the same name. Instead every Compose call for such a deployment gets
+`--project-directory repo/<folder of the repo's compose file>`, starts in
+`repo/`, and reads the daemon's `.env` through `--env-file` (Compose would look
+in the project directory otherwise). Paths written for the repository resolve
+as in a clone, including a compose file kept in a subfolder. `composeCall` in
+`docker-cli.ts` is the one place that adds this, so lifecycle, rehydrate, hooks,
+health and the staged `config` calls all agree; a caller that passes its own
+`--project-directory` keeps it.
+
+Confinement counts `repo/` as inside the deployment, at its own place (it is
+not staged). Relative authored paths resolve against the project directory.
+Symlinks that leave the deployment are still refused. A writable bind into
+`repo/` is refused: the tree is replaced on every deploy, so what a container
+wrote there would be lost; use a named volume. The build policy's secret-file
+rule and `assertBuildContextsPresent` take the checkout root too.
+
+An unchanged commit is not fetched again. A deploy without `composeCheckout`
+removes `repo/` and `repo.json` (not a hostings-only run). A stop that keeps the
+directory removes them with the other daemon files. A failed sequential deploy
+that restores `previous/` keeps the newer checkout; the project directory is
+read from the marker, not from the restored manifest.

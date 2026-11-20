@@ -510,6 +510,14 @@ export type ConfinementOptions = {
   /** `environment.deploy` `hostLevelApproved`; absent on the wire is false. */
   hostLevelApproved: boolean;
   /**
+   * The repository checkout of a Git Compose project (`compose-checkout.ts`).
+   * Relative paths resolve against its project directory, and everything under
+   * its root counts as inside the deployment directory at its own place (it is
+   * not staged). A writable bind into it is refused: the tree is replaced on
+   * every deploy, so anything a container wrote there would be lost.
+   */
+  checkout?: { root: string; projectDir: string };
+  /**
    * Writable bind sources (live paths) of the generation still running. Its
    * containers keep running until `compose up` replaces them, so a new source
    * under one of them could be swapped for a symlink in the meantime.
@@ -660,14 +668,28 @@ async function confineEntry(
       `${label} is interpolated, so where it points cannot be checked`,
     );
   }
+  const checkout = ctx.opts.checkout;
   const staged = normalize(
-    isAbsolute(entry.path) ? entry.path : resolve(ctx.stageDir, entry.path),
+    isAbsolute(entry.path)
+      ? entry.path
+      : resolve(checkout?.projectDir ?? ctx.stageDir, entry.path),
   );
+  const inCheckout = checkout !== undefined &&
+    isWithin(staged, normalize(checkout.root));
   const inOwnerTree = await ownerTreeOutcome(entry, label, staged, ctx);
   if (inOwnerTree) return inOwnerTree;
-  const hostLevel = hostLevelOutcome(entry, label, staged, ctx);
+  const hostLevel = inCheckout
+    ? undefined
+    : hostLevelOutcome(entry, label, staged, ctx);
   if (hostLevel) return hostLevel;
-  const live = join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
+  if (inCheckout && entry.kind === "mount" && !entry.readOnly) {
+    return finding(
+      `${label} is a writable bind inside the repository checkout, which is replaced on every deploy and would lose what the container writes — use a named volume`,
+    );
+  }
+  const live = inCheckout
+    ? staged
+    : join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
   let real: string;
   try {
     real = await resolveExistingPrefix(live, ctx.realPath);

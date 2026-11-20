@@ -1508,6 +1508,33 @@ export type EnvironmentDeployNativeAppVariable = {
  */
 export type EnvironmentDeploySourceCredentialKind = "token" | "ssh_key";
 
+/**
+ * The repository a Git Compose project's Base was read from, checked out on the
+ * server so the compose file's relative paths (`build: ./vpn`, `./conf:/etc/x`,
+ * `env_file: ./app.env`) resolve against real files.
+ *
+ * Distinct from {@link EnvironmentDeploySource}: that row builds one service's
+ * release from `x-turbopanel.source`; this one carries the whole project tree
+ * the compose file came from. The daemon checks `commitSha` out into
+ * `<deploymentDir>/repo` before anything builds or starts and runs Compose with
+ * the folder of `composePath` as its project directory. Gated by the
+ * `compose-checkout-v1` wire feature.
+ */
+export type EnvironmentDeployComposeCheckout = {
+  sourceId: string;
+  /** Informational, as on {@link EnvironmentDeploySource}. */
+  provider: "github" | "gitlab" | "git";
+  cloneUrl: string;
+  ref: string;
+  /** The resolved commit the compose file was read from. */
+  commitSha: string;
+  /** Repo-relative path of the compose file (`deploy/compose.yaml`). */
+  composePath: string;
+  credential?: string;
+  credentialKind?: EnvironmentDeploySourceCredentialKind;
+  credentialUsername?: string;
+};
+
 export type EnvironmentDeploySource = {
   sourceId: string;
   composeServiceName: string;
@@ -1751,6 +1778,12 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * carrying `x-turbopanel.source`.
    */
   sourceMaterial?: EnvironmentDeploySource[];
+  /**
+   * The repository a Git Compose project's compose file came from, to check out
+   * before the build and start (see {@link EnvironmentDeployComposeCheckout}).
+   * Absent for a project whose compose is not read from a repository.
+   */
+  composeCheckout?: EnvironmentDeployComposeCheckout;
   /**
    * The most CPU cores and memory the project-wide Compose build may use: the
    * smallest of the organization, server and every service's limits
@@ -6854,6 +6887,77 @@ function parseRollbackToReleaseId(value: unknown): string | undefined {
   return value;
 }
 
+/** Repo-relative path of the compose file: safe, no `..`, not absolute. */
+function parseComposeCheckoutPath(value: unknown): string {
+  if (
+    typeof value !== "string" || value.length === 0 || value.length > 512 ||
+    value.startsWith("/") || /[\\\0\s]/.test(value) ||
+    value.split("/").some((part) =>
+      part === ".." || part === "" || part === "."
+    )
+  ) {
+    throw new TypeError("Invalid composeCheckout composePath");
+  }
+  return value;
+}
+
+/**
+ * `composeCheckout`. Shares the credential rules with `sourceMaterial[]`, so a
+ * refusal from those helpers is renamed to say which field it was in.
+ */
+function parseComposeCheckout(
+  value: unknown,
+): EnvironmentDeployComposeCheckout | undefined {
+  try {
+    return parseComposeCheckoutFields(value);
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new TypeError(
+        err.message.replace("sourceMaterial", "composeCheckout"),
+      );
+    }
+    throw err;
+  }
+}
+
+function parseComposeCheckoutFields(
+  value: unknown,
+): EnvironmentDeployComposeCheckout | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new TypeError("Invalid composeCheckout");
+  if (
+    typeof value.provider !== "string" || !SOURCE_PROVIDERS.has(value.provider)
+  ) {
+    throw new TypeError("Invalid composeCheckout provider");
+  }
+  const cloneUrl = parseNonEmptyString(value, "cloneUrl");
+  if (
+    cloneUrl.length > MAX_SOURCE_CLONE_URL_CHARS ||
+    /\s/.test(cloneUrl) ||
+    !isCredentialFreeCloneUrl(cloneUrl)
+  ) {
+    throw new TypeError("Invalid composeCheckout cloneUrl");
+  }
+  if (!isValidSourceRef(value.ref) || !isValidSourceRef(value.commitSha)) {
+    throw new TypeError("Invalid composeCheckout ref/commitSha");
+  }
+  const credential = parseSourceCredential(value.credential);
+  return definedFields({
+    sourceId: parseNonEmptyString(value, "sourceId"),
+    provider: value.provider as EnvironmentDeployComposeCheckout["provider"],
+    cloneUrl,
+    ref: value.ref,
+    commitSha: value.commitSha,
+    composePath: parseComposeCheckoutPath(value.composePath),
+    credential,
+    credentialKind: parseSourceCredentialKind(
+      value.credentialKind,
+      credential !== undefined,
+    ),
+    credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
+  });
+}
+
 function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
   if (!isRecord(value)) {
     throw new TypeError("Invalid sourceMaterial entry");
@@ -7523,6 +7627,7 @@ export function parseEnvironmentDeployPayload(
       ),
       nativeAppServices: parseNativeAppServices(value.nativeAppServices),
       sourceMaterial,
+      composeCheckout: parseComposeCheckout(value.composeCheckout),
       ingressServices: parseOptionalMaterialArray(
         value.ingressServices,
         "ingressServices",
