@@ -16,7 +16,10 @@ import {
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
-import { stripXtablesWait } from "../testing/xtables-wait.ts";
+import {
+  assertXtablesWaitHonoured,
+  stripXtablesWait,
+} from "../testing/xtables-wait.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -401,4 +404,8 @@ test("a tunnel-less payload on a paused state applies and stays paused", async (
       true,
     );
   });
+});
+
+test("every fabric iptables call waited on the xtables lock", () => {
+  assertXtablesWaitHonoured();
 });

@@ -2454,6 +2454,12 @@ const SITES: CallSite[] = [
       stdin: "*filter\nCOMMIT\n",
     },
   ),
+  tpHost('src/managed/firewall.ts|["-n","iptables-restore",...args]', {
+    argv: ["iptables-restore", "-w", "5", "--noflush"],
+    stdin: `*filter\n:${MGD_CHAIN} - [0:0]\n-A ${MGD_CHAIN} ${
+      MGD_MATCH.join(" ")
+    } -j DROP\nCOMMIT\n`,
+  }),
   tpHost('src/managed/firewall.ts|["-n","iptables",...args]', {
     argv: [
       "iptables",
@@ -2857,47 +2863,8 @@ const SITES: CallSite[] = [
   tpHost('src/managed/firewall.ts|removeBestEffort(["-X",chain])', {
     argv: ["iptables", "-w", "5", "-X", MGD_CHAIN],
   }),
-  tpHost('src/managed/firewall.ts|runIptables(["-I",...rule])', {
-    argv: [
-      "iptables",
-      "-w",
-      "5",
-      "-I",
-      MGD_CHAIN,
-      "1",
-      "-s",
-      "203.0.113.7",
-      ...MGD_MATCH,
-      "-j",
-      "ACCEPT",
-    ],
-  }),
-  tpHost(
-    'src/managed/firewall.ts|runIptables(["-A",chain,...match,"-j","DROP"])',
-    {
-      argv: [
-        "iptables",
-        "-w",
-        "5",
-        "-A",
-        MGD_CHAIN,
-        ...MGD_MATCH,
-        "-j",
-        "DROP",
-      ],
-    },
-  ),
   tpHost('src/managed/firewall.ts|runIptables(["-C",...checkArgs])', {
     argv: ["iptables", "-w", "5", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
-  }),
-  tpHost('src/managed/firewall.ts|runIptables(["-C",...rule])', {
-    argv: ["iptables", "-w", "5", "-C", MGD_CHAIN, ...MGD_MATCH, "-j", "DROP"],
-  }),
-  tpHost('src/managed/firewall.ts|runIptables(["-A",...rule])', {
-    argv: ["iptables", "-w", "5", "-A", MGD_CHAIN, ...MGD_MATCH, "-j", "DROP"],
-  }),
-  tpHost('src/managed/firewall.ts|runIptables(["-F",chain])', {
-    argv: ["iptables", "-w", "5", "-F", MGD_CHAIN],
   }),
   tpHost('src/managed/firewall.ts|runIptables(["-N",name])', {
     argv: ["iptables", "-w", "5", "-N", "TP-MANAGED-PUB"],

@@ -3,6 +3,7 @@ import { withFirewallLock } from "../firewall/lock.ts";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   MANAGED_PUBLIC_CHAIN,
+  managedChainDocument,
   managedFirewallChain,
   type ManagedFirewallRunResult,
   reconcileManagedPublicFirewall,
@@ -39,8 +40,17 @@ function recordingRun(
   invocations: string[],
   extras?: (args: string[]) => ManagedFirewallRunResult | null,
 ) {
-  return async (_cmd: string, waited: string[]) => {
+  return async (
+    cmd: string,
+    waited: string[],
+    options?: { stdin?: string },
+  ) => {
     await Promise.resolve();
+    if (cmd === "iptables-restore") {
+      assertEquals(waited, ["-w", "5", "--noflush"]);
+      invocations.push(`restore\n${options?.stdin}`);
+      return extras?.(["restore"]) ?? ok();
+    }
     // Every call must wait on the xtables lock; the rest of the file reads the
     // argv without that prefix.
     assertEquals(waited.slice(0, 2), ["-w", "5"]);
@@ -148,6 +158,17 @@ test("allowed sources include ingressSourceAddresses consumer IPs", () => {
   assertEquals(sources, ["203.0.113.51", "203.0.113.80"]);
 });
 
+const MATCH =
+  "-p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001";
+const EXPECTED_DOCUMENT = [
+  "*filter",
+  `:${CHAIN} - [0:0]`,
+  `-A ${CHAIN} -s 203.0.113.51 ${MATCH} -j ACCEPT`,
+  `-A ${CHAIN} ${MATCH} -j DROP`,
+  "COMMIT",
+  "",
+].join("\n");
+
 test("reconcile scopes the public listener to known peers and drops the rest", async () => {
   await withRunner(async (invocations) => {
     await reconcileManagedPublicFirewall(publicPayload());
@@ -157,23 +178,43 @@ test("reconcile scopes the public listener to known peers and drops the rest", a
       invocations.includes(`-I DOCKER-USER 1 -j ${MANAGED_PUBLIC_CHAIN}`),
       true,
     );
-    assertEquals(invocations.includes(`-F ${CHAIN}`), true);
-
-    const match =
-      "-p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001";
-    const accept = invocations.indexOf(
-      `-I ${CHAIN} 1 -s 203.0.113.51 ${match} -j ACCEPT`,
+    // The chain is rebuilt in one transaction: no separate flush or rule calls.
+    assertEquals(invocations.some((line) => line.startsWith("-F")), false);
+    assertEquals(
+      invocations.some((line) =>
+        !line.startsWith("restore\n") && line.includes(" -j DROP")
+      ),
+      false,
     );
-    const drop = invocations.indexOf(`-A ${CHAIN} ${match} -j DROP`);
-    assertEquals(accept >= 0, true);
-    // The DROP goes in first and each ACCEPT is inserted ahead of it, so the
-    // chain never holds peer rules without the DROP (fail closed).
-    assertEquals(drop >= 0 && drop < accept, true);
+    assertEquals(
+      invocations.filter((line) => line.startsWith("restore\n")),
+      [`restore\n${EXPECTED_DOCUMENT}`],
+    );
     assertEquals(
       invocations.includes(`-A ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`),
       true,
     );
   });
+});
+
+test("the restore document resets the chain, lists ACCEPTs and ends with the DROP", () => {
+  const document = managedChainDocument(
+    CHAIN,
+    "203.0.113.50",
+    45001,
+    ["203.0.113.51", "203.0.113.52"],
+  );
+  const lines = document.split("\n");
+  assertEquals(lines.slice(0, 2), ["*filter", `:${CHAIN} - [0:0]`]);
+  assertEquals(lines.at(-2), "COMMIT");
+  assertEquals(lines.at(-3), `-A ${CHAIN} ${MATCH} -j DROP`);
+  assertEquals(
+    lines.slice(2, -3),
+    [
+      `-A ${CHAIN} -s 203.0.113.51 ${MATCH} -j ACCEPT`,
+      `-A ${CHAIN} -s 203.0.113.52 ${MATCH} -j ACCEPT`,
+    ],
+  );
 });
 
 test("reconcile is idempotent when the jumps already exist", async () => {
@@ -189,7 +230,10 @@ test("reconcile is idempotent when the jumps already exist", async () => {
       false,
     );
     // Per-cluster rules are still rebuilt so a removed peer loses its ACCEPT.
-    assertEquals(invocations.includes(`-F ${CHAIN}`), true);
+    assertEquals(
+      invocations.includes(`restore\n${EXPECTED_DOCUMENT}`),
+      true,
+    );
   }, (args) => (args[0] === "-C" ? ok() : null));
 });
 
@@ -264,21 +308,6 @@ test("reconcile throws when chain creation fails", async () => {
   });
 });
 
-test("reconcile throws when flush fails", async () => {
-  await withRunner(async () => {
-    let threw = false;
-    try {
-      await reconcileManagedPublicFirewall(publicPayload());
-    } catch {
-      threw = true;
-    }
-    assertEquals(threw, true);
-  }, (args) => {
-    if (args[0] === "-F") return fail("flush denied");
-    return null;
-  });
-});
-
 test("removal logs unexpected iptables failures without throwing", async () => {
   await withRunner(async (invocations) => {
     await removeManagedPublicFirewall(MANAGED_ID);
@@ -296,38 +325,6 @@ test("best-effort removal swallows teardown failures", async () => {
   } finally {
     setManagedFirewallRunForTests(null);
   }
-});
-
-test("reconcile throws when a peer ACCEPT or trailing DROP cannot be installed", async () => {
-  await withRunner(async () => {
-    let threw = false;
-    try {
-      await reconcileManagedPublicFirewall(publicPayload());
-    } catch {
-      threw = true;
-    }
-    assertEquals(threw, true);
-  }, (args) => {
-    if (args[0] === "-I" && args.includes("ACCEPT")) {
-      return fail("failed to allow managed peer");
-    }
-    return null;
-  });
-
-  await withRunner(async () => {
-    let threw = false;
-    try {
-      await reconcileManagedPublicFirewall(publicPayload());
-    } catch {
-      threw = true;
-    }
-    assertEquals(threw, true);
-  }, (args) => {
-    if (args[0] === "-A" && args.includes("DROP")) {
-      return fail("failed to install managed drop rule");
-    }
-    return null;
-  });
 });
 
 test("reconcile throws when a missing jump cannot be inserted", async () => {
@@ -357,9 +354,7 @@ test("stage 6: a listener TP-FWD already narrows drops its legacy chain and buil
     await reconcileManagedPublicFirewall(publicPayload());
     assertEquals(invocations.includes(`-N ${CHAIN}`), false);
     assertEquals(
-      invocations.includes(
-        `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`,
-      ),
+      invocations.some((line) => line.startsWith("restore\n")),
       false,
     );
     assertEquals(
@@ -374,50 +369,25 @@ test("stage 6: a listener TP-FWD already narrows drops its legacy chain and buil
   });
 });
 
-const DROP_RULE =
-  `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`;
-
-test("lock contention after the flush leaves the chain closed and fails the command", async () => {
-  // The call after the flush loses the xtables lock race (as a bare iptables
-  // would, without -w): the chain must still end in the DROP and the reconcile
-  // must report failure rather than only log it.
-  let afterFlush = false;
-  const chain: string[] = [];
-  await withRunner(async (invocations) => {
-    let threw = false;
-    try {
-      await reconcileManagedPublicFirewall(publicPayload());
-    } catch {
-      threw = true;
-    }
-    assertEquals(threw, true);
-    assertEquals(chain.includes(DROP_RULE), true);
-    // The DROP was installed before the lock-losing call, and no peer rule was.
-    assertEquals(invocations.includes(DROP_RULE), true);
-  }, (args) => {
-    const line = args.join(" ");
-    if (line === `-F ${CHAIN}`) {
-      afterFlush = true;
-      chain.length = 0;
-      return ok();
-    }
-    if (line.startsWith(`-C ${CHAIN} `)) {
-      return chain.includes(`-A ${line.slice(3)}`)
-        ? ok()
-        : fail("Bad rule (does a matching rule exist in that chain?)");
-    }
-    if (afterFlush && line.startsWith(`-I ${CHAIN} 1 -s`)) {
+test("a failed restore throws and leaves the old chain rules in place", async () => {
+  // Model the kernel: the chain only changes when a restore succeeds.
+  const kernelChain = ["old-accept", "old-drop"];
+  const attempts: string[] = [];
+  const invocations: string[] = [];
+  setManagedFirewallRunForTests(async (cmd, waited, options) => {
+    await Promise.resolve();
+    const args = waited.slice(2);
+    invocations.push(`${cmd} ${args.join(" ")}`);
+    if (cmd === "iptables-restore") {
+      attempts.push(options?.stdin ?? "");
+      // Lock contention outlasting -w: the transaction is rejected whole.
       return fail("Another app is currently holding the xtables lock");
     }
-    if (line.startsWith(`-A ${CHAIN} `)) chain.push(line);
-    return null;
+    if (args[0] === "-C") return fail("Bad rule");
+    if (args[0] === "-N") return fail("Chain already exists.");
+    return ok();
   });
-});
-
-test("a failed first DROP after the flush is retried so the chain is not left open", async () => {
-  let drops = 0;
-  const chain: string[] = [];
-  await withRunner(async () => {
+  try {
     let threw = false;
     try {
       await reconcileManagedPublicFirewall(publicPayload());
@@ -425,16 +395,18 @@ test("a failed first DROP after the flush is retried so the chain is not left op
       threw = true;
     }
     assertEquals(threw, true);
-    assertEquals(chain.includes(DROP_RULE), true);
-  }, (args) => {
-    const line = args.join(" ");
-    if (line.startsWith(`-A ${CHAIN} `) && line.endsWith("-j DROP")) {
-      drops += 1;
-      if (drops === 1) return fail("Another app is currently holding the lock");
-      chain.push(line);
-    }
-    return null;
-  });
+    assertEquals(attempts, [EXPECTED_DOCUMENT]);
+    assertEquals(kernelChain, ["old-accept", "old-drop"]);
+    // Never flushes, so nothing can empty the chain, and the child jump is
+    // not added after a failed rebuild.
+    assertEquals(invocations.some((line) => line.includes(" -F ")), false);
+    assertEquals(
+      invocations.includes(`iptables -A ${MANAGED_PUBLIC_CHAIN} -j ${CHAIN}`),
+      false,
+    );
+  } finally {
+    setManagedFirewallRunForTests(null);
+  }
 });
 
 test("a pending ruleset keeps the legacy chain even when TP-FWD looks like cover", async () => {
@@ -459,9 +431,7 @@ test("a pending ruleset keeps the legacy chain even when TP-FWD looks like cover
       await reconcileManagedPublicFirewall(publicPayload());
       // TP-MGD is rebuilt, never dropped, while the cover is unconfirmed.
       assertEquals(
-        invocations.includes(
-          `-A ${CHAIN} -p tcp -m conntrack --ctorigdst 203.0.113.50 --ctorigdstport 45001 -j DROP`,
-        ),
+        invocations.includes(`restore\n${EXPECTED_DOCUMENT}`),
         true,
       );
       assertEquals(
@@ -494,6 +464,7 @@ test("the firewall lock serialises the ruleset apply and the managed reconcile",
   setManagedFirewallRunForTests(async (_cmd, waited) => {
     await Promise.resolve();
     events.push(`reconcile:${waited.slice(2).join(" ")}`);
+    if (_cmd === "iptables-restore") return ok();
     if (waited[2] === "-C") return fail("Bad rule");
     if (waited[2] === "-N") return fail("Chain already exists.");
     return ok();

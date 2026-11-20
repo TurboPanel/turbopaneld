@@ -11,9 +11,11 @@
  * `iptables -C` before insert, `-D` on teardown (destroy, and apply when the
  * listener is cleared or no longer public). Teardown is best effort (a failure
  * is logged and never blocks destroy). Installing is not: a failure throws so
- * the apply reports it, and a rebuild that fails after the flush puts the DROP
- * back first (fail closed). A leftover DROP must not block a later cluster
- * that reuses the same address/port.
+ * the apply reports it. The per-cluster chain is rebuilt in ONE
+ * `iptables-restore --noflush` transaction (chain reset, ACCEPTs, DROP last),
+ * which the kernel swaps in atomically: a failure or crash leaves the old
+ * rules in place, and the chain is never empty (open) in between. A leftover
+ * DROP must not block a later cluster that reuses the same address/port.
  *
  * Every `iptables` call carries `-w <seconds>` (the fold's value) so another
  * holder of the xtables lock delays a call instead of failing it, and the
@@ -34,10 +36,12 @@ import {
 } from "../contracts/commands-contracts.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logWarn, sanitizeForLog } from "../util/logger.ts";
-import { forEachSequential } from "../util/sequential.ts";
 import { isManagedListenerCovered } from "../firewall/fold.ts";
 import { withFirewallLock } from "../firewall/lock.ts";
-import { XTABLES_LOCK_WAIT_SECONDS } from "../firewall/run.ts";
+import {
+  FIREWALL_COMMAND_TIMEOUT_MS,
+  XTABLES_LOCK_WAIT_SECONDS,
+} from "../firewall/run.ts";
 
 /** Parent chain hung off `DOCKER-USER`; holds one jump per managed cluster. */
 export const MANAGED_PUBLIC_CHAIN = "TP-MANAGED-PUB";
@@ -53,9 +57,12 @@ export type ManagedFirewallRunResult = {
   stderr: string;
 };
 
+export type ManagedFirewallRunOptions = { stdin?: string };
+
 export type ManagedFirewallRunFn = (
   cmd: string,
   args: string[],
+  options?: ManagedFirewallRunOptions,
 ) => Promise<ManagedFirewallRunResult>;
 
 let runOverride: ManagedFirewallRunFn | null = null;
@@ -70,14 +77,27 @@ export function setManagedFirewallRunForTests(
 async function spawnHost(
   cmd: string,
   args: string[],
+  options?: ManagedFirewallRunOptions,
 ): Promise<ManagedFirewallRunResult> {
   try {
-    const output = await new Deno.Command(cmd, {
+    const hasStdin = options?.stdin !== undefined;
+    const child = new Deno.Command(cmd, {
       args,
-      stdin: "null",
+      stdin: hasStdin ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
-    }).output();
+      // Runs inside the global firewall lock: never hang it.
+      signal: AbortSignal.timeout(FIREWALL_COMMAND_TIMEOUT_MS),
+    }).spawn();
+    if (hasStdin) {
+      const writer = child.stdin.getWriter();
+      try {
+        await writer.write(new TextEncoder().encode(options.stdin));
+      } finally {
+        await writer.close();
+      }
+    }
+    const output = await child.output();
     return {
       success: output.success,
       code: output.code,
@@ -104,6 +124,25 @@ async function runIptables(
   const direct = await spawnHost("iptables", args);
   if (direct.success || !isPermissionDenied(direct)) return direct;
   return await spawnHost("sudo", hostSudoArgs(["-n", "iptables", ...args]));
+}
+
+/**
+ * Load a `*filter` document with `iptables-restore --noflush` (the other
+ * chains are untouched). The kernel applies it as one replace or not at all.
+ */
+async function runIptablesRestore(
+  stdin: string,
+): Promise<ManagedFirewallRunResult> {
+  const args = ["-w", String(XTABLES_LOCK_WAIT_SECONDS), "--noflush"];
+  const options = { stdin };
+  if (runOverride) return await runOverride("iptables-restore", args, options);
+  const direct = await spawnHost("iptables-restore", args, options);
+  if (direct.success || !isPermissionDenied(direct)) return direct;
+  return await spawnHost(
+    "sudo",
+    hostSudoArgs(["-n", "iptables-restore", ...args]),
+    options,
+  );
 }
 
 function alreadyExists(result: ManagedFirewallRunResult): boolean {
@@ -143,17 +182,29 @@ export function resolveManagedPublicAllowedSources(
   return [...sources].sort((a, b) => a.localeCompare(b));
 }
 
-function originMatch(address: string, port: number): string[] {
+function originMatch(address: string, port: number): string {
+  return `-p tcp -m conntrack --ctorigdst ${address} --ctorigdstport ${port}`;
+}
+
+/**
+ * The `iptables-restore --noflush` document for one cluster chain: declaring
+ * `:<chain> - [0:0]` resets it, then each peer ACCEPT, then the DROP last.
+ */
+export function managedChainDocument(
+  chain: string,
+  address: string,
+  port: number,
+  sources: string[],
+): string {
+  const match = originMatch(address, port);
   return [
-    "-p",
-    "tcp",
-    "-m",
-    "conntrack",
-    "--ctorigdst",
-    address,
-    "--ctorigdstport",
-    String(port),
-  ];
+    "*filter",
+    `:${chain} - [0:0]`,
+    ...sources.map((source) => `-A ${chain} -s ${source} ${match} -j ACCEPT`),
+    `-A ${chain} ${match} -j DROP`,
+    "COMMIT",
+    "",
+  ].join("\n");
 }
 
 async function ensureChain(name: string): Promise<void> {
@@ -219,7 +270,6 @@ async function reconcileLocked(payload: ManagedApplyPayload): Promise<void> {
   }
 
   const chain = managedFirewallChain(payload.managedId);
-  const match = originMatch(listener.address, listener.port);
 
   await ensureChain(MANAGED_PUBLIC_CHAIN);
   await ensureRule(
@@ -228,57 +278,22 @@ async function reconcileLocked(payload: ManagedApplyPayload): Promise<void> {
   );
   await ensureChain(chain);
 
-  // Rebuild this cluster's rules so a removed peer loses its ACCEPT. The DROP
-  // goes in first and each ACCEPT is inserted ahead of it, so the chain never
-  // holds peer rules without the DROP, and a failure part way leaves it closed.
-  const flushed = await runIptables(["-F", chain]);
-  if (!flushed.success) {
-    throw new Error(flushed.stderr || `failed to flush chain ${chain}`);
-  }
-  try {
-    const dropped = await runIptables(["-A", chain, ...match, "-j", "DROP"]);
-    if (!dropped.success) {
-      throw new Error(dropped.stderr || "failed to install managed drop rule");
-    }
-    await forEachSequential(sources, async (source) => {
-      const rule = [chain, "1", "-s", source, ...match, "-j", "ACCEPT"];
-      const added = await runIptables(["-I", ...rule]);
-      if (!added.success) {
-        throw new Error(added.stderr || "failed to allow managed peer");
-      }
-    });
-  } catch (err) {
-    await restoreDropAfterFailure(chain, match);
-    throw err;
+  // Rebuild this cluster's rules in one transaction. `:chain - [0:0]` resets
+  // the chain inside the same atomic replace, so a removed peer loses its
+  // ACCEPT, the DROP stays last, and a failure keeps the old rules.
+  const restored = await runIptablesRestore(
+    managedChainDocument(chain, listener.address, listener.port, sources),
+  );
+  if (!restored.success) {
+    throw new Error(
+      restored.stderr || `failed to rebuild managed chain ${chain}`,
+    );
   }
 
   await ensureRule(
     [MANAGED_PUBLIC_CHAIN, "-j", chain],
     ["-A", MANAGED_PUBLIC_CHAIN, "-j", chain],
   );
-}
-
-/**
- * A rebuild failed after the flush: make sure the chain still ends in the DROP
- * for this listener (an empty chain returns to `DOCKER-USER` and leaves the
- * port open). Peers may be refused until the next apply; that is the safe side.
- */
-async function restoreDropAfterFailure(
-  chain: string,
-  match: string[],
-): Promise<void> {
-  const rule = [chain, ...match, "-j", "DROP"];
-  const present = await runIptables(["-C", ...rule]);
-  if (present.success) return;
-  const added = await runIptables(["-A", ...rule]);
-  if (!added.success) {
-    logWarn(
-      "managed",
-      `managed firewall could not restore the DROP in ${chain}; the listener may be open: ${
-        sanitizeForLog(added.stderr || added.stdout || `exit ${added.code}`)
-      }`,
-    );
-  }
 }
 
 async function removeBestEffort(args: string[]): Promise<void> {

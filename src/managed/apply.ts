@@ -985,6 +985,12 @@ async function applyManagedEngine(
     managedComposePath(layout, payload.managedId),
     payload,
   );
+  // Scope a public listener BEFORE compose publishes it, so the port is never
+  // reachable unscoped (the rules match the original address/port and do not
+  // need the container). Drops the legacy chain when the listener is gone. A
+  // failure to scope a public listener fails the apply before anything is
+  // published, so it is reported and retried, never only logged.
+  await reconcileManagedPublicFirewall(payload);
   const project = await composeUpManagedEngine({
     layout,
     payload,
@@ -998,11 +1004,6 @@ async function applyManagedEngine(
     engineUser: engine.containerUser,
     engineGroup: engine.containerGroup,
   });
-
-  // Scope a public listener once the publish exists; drop the legacy chain
-  // when the listener is gone. A failure to scope a public listener fails the
-  // apply so it is reported and retried, never only logged.
-  await reconcileManagedPublicFirewall(payload);
 
   const engineContainers = await collectManagedContainers(project, redact, run);
   const containerId = resolveEngineContainerId(

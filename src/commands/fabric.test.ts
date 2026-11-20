@@ -36,7 +36,10 @@ import {
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
-import { stripXtablesWait } from "../testing/xtables-wait.ts";
+import {
+  assertXtablesWaitHonoured,
+  stripXtablesWait,
+} from "../testing/xtables-wait.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -2324,4 +2327,8 @@ test("a dial-in peer (no endpoint) is configured without an Endpoint line", asyn
     assertEquals(conf.includes(`PublicKey = ${WG_PUBKEY_B}`), true);
     assertEquals(conf.includes("Endpoint ="), false);
   });
+});
+
+test("every fabric iptables call waited on the xtables lock", () => {
+  assertXtablesWaitHonoured();
 });
