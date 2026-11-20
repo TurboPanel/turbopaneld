@@ -52,6 +52,29 @@ function isServiceBuildContext(what: string): boolean {
   return /^service \S+ build context$/.test(what);
 }
 
+/** True when `rel` (from `relative`) leaves the directory it is relative to. */
+function escapesDir(rel: string): boolean {
+  return rel === ".." || rel.startsWith("../") || rel.startsWith("/");
+}
+
+/** Service build contexts under the staging directory, as relative paths. */
+function stagedContexts(
+  scans: readonly ComposeHostPathScan[],
+  stageDir: string,
+): Array<{ label: string; rel: string }> {
+  const out: Array<{ label: string; rel: string }> = [];
+  for (const entry of scans.flatMap((scan) => scan.entries)) {
+    if (!entry.build || !isServiceBuildContext(entry.what)) continue;
+    const rel = relative(stageDir, entry.path);
+    if (escapesDir(rel)) continue;
+    out.push({
+      label: `${entry.what} ${rel === "" ? "." : `./${rel}`}`,
+      rel,
+    });
+  }
+  return out;
+}
+
 /**
  * Throws {@link ComposeBuildContextMissingError} when a service's local build
  * context is not a folder in the deployment directory.
@@ -61,21 +84,10 @@ export async function assertBuildContextsPresent(
   dirs: BuildContextDirs,
   exists: IsDirectoryFn = isDirectory,
 ): Promise<void> {
-  const missing: string[] = [];
-  for (const scan of scans) {
-    for (const entry of scan.entries) {
-      if (!entry.build || !isServiceBuildContext(entry.what)) continue;
-      const rel = relative(dirs.stageDir, entry.path);
-      if (rel === ".." || rel.startsWith("../") || rel.startsWith("/")) {
-        continue;
-      }
-      if (await exists(join(dirs.deploymentDir, rel))) continue;
-      missing.push(
-        `${entry.what.replace(" build context", "")} build context ${
-          rel === "" ? "." : `./${rel}`
-        }`,
-      );
-    }
-  }
+  const contexts = stagedContexts(scans, dirs.stageDir);
+  const present = await Promise.all(
+    contexts.map(({ rel }) => exists(join(dirs.deploymentDir, rel))),
+  );
+  const missing = contexts.filter((_, i) => !present[i]).map((c) => c.label);
   if (missing.length > 0) throw new ComposeBuildContextMissingError(missing);
 }
