@@ -313,15 +313,7 @@ class ShellSession {
         late = true;
         reject(new DockerExecError("helper_unavailable", "open timed out"));
       }, OPEN_TIMEOUT_MS);
-      let opening: Promise<ShellTransport>;
-      try {
-        opening = this.#startTransport();
-      } catch (err) {
-        this.#timers.clearTimeout(timer);
-        reject(err);
-        return;
-      }
-      opening.then((transport) => {
+      this.#startTransport().then((transport) => {
         this.#timers.clearTimeout(timer);
         if (late) transport.close();
         else resolve(transport);
@@ -332,7 +324,7 @@ class ShellSession {
     });
   }
 
-  #startTransport(): Promise<ShellTransport> {
+  async #startTransport(): Promise<ShellTransport> {
     const request = this.#request;
     const asked = {
       containerId: request.containerId,

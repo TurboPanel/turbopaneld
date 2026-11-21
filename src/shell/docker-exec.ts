@@ -558,19 +558,19 @@ class DockerExecTransport implements ShellTransport {
     }
   }
 
-  async #waitGone(): Promise<boolean> {
-    for (let i = 0; i < KILL_WAIT_POLLS; i++) {
-      const reply = await call(
-        this.#socketPath,
-        "GET",
-        `/exec/${this.#execId}/json`,
-      );
-      if (reply.status !== 200 || asRecord(reply.json).Running === false) {
-        return true;
-      }
-      await new Promise((resolve) => setTimeout(resolve, KILL_WAIT_MS));
+  /** Polls the exec until it stops running; false when it still runs after the wait. */
+  async #waitGone(attempt = 0): Promise<boolean> {
+    if (attempt >= KILL_WAIT_POLLS) return false;
+    const reply = await call(
+      this.#socketPath,
+      "GET",
+      `/exec/${this.#execId}/json`,
+    );
+    if (reply.status !== 200 || asRecord(reply.json).Running === false) {
+      return true;
     }
-    return false;
+    await new Promise((resolve) => setTimeout(resolve, KILL_WAIT_MS));
+    return await this.#waitGone(attempt + 1);
   }
 
   /**
