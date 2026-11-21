@@ -194,17 +194,17 @@
     "instance": "src/contracts/commands/schemas.ts",
     "daemon": "src/contracts/commands-contracts.ts",
     "fields": [
+      { "name": "allowNetworkShares", "required": false, "type": "boolean" },
       { "name": "hostLevelApproved", "required": false, "type": "boolean" },
+      {
+        "name": "networkShareCredentials",
+        "required": false,
+        "type": "Array<{ composeServiceName?: null | string; domain?: string; passwordKey: string; username?: string; usernameKey?: string; volume: string }>"
+      },
       {
         "name": "remoteBuildSourcesApproved",
         "required": false,
         "type": "boolean"
-      },
-      { "name": "allowNetworkShares", "required": false, "type": "boolean" },
-      {
-        "name": "networkShareCredentials",
-        "required": false,
-        "type": "EnvironmentDeployNetworkShareCredential[]"
       }
     ]
   },
