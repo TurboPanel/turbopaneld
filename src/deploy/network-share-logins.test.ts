@@ -257,17 +257,25 @@ test("the unsuffixed data volume and look-alikes survive a prune", async () => {
   assertEquals(removedNames, ["proj_media_abcdef012345"]);
 });
 
-test("a delete removes only share-shaped volumes of the project", async () => {
+test("a delete removes only cifs volumes of the share shape in the project", async () => {
   const removedNames: string[] = [];
+  const types: Record<string, string> = {
+    proj_media_abcdef012345: "cifs",
+    proj_notes_abcdef012345: "none",
+  };
   const run = (args: string[]) => {
     if (args[1] === "rm") removedNames.push(args[2]);
-    return Promise.resolve({
-      success: true,
-      stdout: args[1] === "ls"
-        ? "proj_media_abcdef012345\tmedia\nproj_media\tmedia\nproj_db_abcdef012345\tother\n"
-        : "",
-      stderr: "",
-    });
+    const stdout = args[1] === "ls"
+      ? [
+        "proj_media_abcdef012345\tmedia",
+        "proj_notes_abcdef012345\tnotes",
+        "proj_media\tmedia",
+        "proj_db_abcdef012345\tother",
+      ].join("\n")
+      : args[1] === "inspect"
+      ? `${types[args[4]] ?? ""}\n`
+      : "";
+    return Promise.resolve({ success: true, stdout, stderr: "" });
   };
   assertEquals(await removeProjectShareVolumes("proj", run), [
     "proj_media_abcdef012345",

@@ -23,9 +23,11 @@ export function decideSmbTools(
   osRelease: Record<string, string>,
 ): SmbToolsDecision {
   if (helperPresent) return "present";
-  const families = `${osRelease.ID ?? ""} ${osRelease.ID_LIKE ?? ""}`
-    .toLowerCase().split(/\s+/);
-  return families.includes("debian") || families.includes("ubuntu")
+  const families = new Set(
+    `${osRelease.ID ?? ""} ${osRelease.ID_LIKE ?? ""}`
+      .toLowerCase().split(/\s+/),
+  );
+  return families.has("debian") || families.has("ubuntu")
     ? "install"
     : "unsupported";
 }

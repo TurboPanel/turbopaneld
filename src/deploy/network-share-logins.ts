@@ -13,11 +13,12 @@
  *
  * Docker and Compose cache a volume's options, and a non-interactive
  * `compose up` declines to recreate a volume whose options changed. The
- * daemon therefore appends a keyed fingerprint (HMAC under the daemon-only site-key secret) of the final options to the Docker
- * volume name (`<project>_<volume>_<fingerprint>`): a changed login is a new
- * volume that mounts with the new login, and the volumes of earlier
- * fingerprints are removed after a successful deploy (the share's data lives on
- * the server, not in the Docker volume).
+ * daemon therefore appends a keyed fingerprint (an HMAC under a daemon-only
+ * secret) of the final options to the Docker volume name
+ * (`<project>_<volume>_<fingerprint>`): a changed login is a new volume that
+ * mounts with the new login, and the volumes of earlier fingerprints are
+ * removed after a successful deploy (the share's data lives on the server,
+ * not in the Docker volume).
  *
  * Values must be one line with no comma (Docker and the kernel both split `o`
  * on commas); a `$` is escaped for Compose and arrives intact.
@@ -102,23 +103,7 @@ export async function resolveShareLogins(
   const logins = new Map<string, ShareLogin>();
   if (entries.length === 0) return logins;
 
-  const volumes = new Set<string>();
-  const wanted = new Set<string>();
-  for (const entry of entries) {
-    if (!VOLUME_NAME.test(entry.volume)) {
-      throw new Error("a networkShareCredentials volume name is not valid");
-    }
-    if (volumes.has(entry.volume)) {
-      throw new Error(
-        `networkShareCredentials names volume ${entry.volume} twice`,
-      );
-    }
-    volumes.add(entry.volume);
-    wanted.add(materialKey(entry, entry.passwordKey));
-    if (entry.usernameKey !== undefined) {
-      wanted.add(materialKey(entry, entry.usernameKey));
-    }
-  }
+  const wanted = wantedMaterial(entries);
   const needed: EnvironmentDeployVariableMaterial[] = [];
   const seen = new Set<string>();
   for (const item of material) {
@@ -138,25 +123,55 @@ export async function resolveShareLogins(
     needed.map((item) => item.valueEnvelope),
   );
   const values = indexDecryptedMaterial(needed, plaintexts, true);
-
   for (const entry of entries) {
-    const password = values.get(materialKey(entry, entry.passwordKey));
-    const username = entry.usernameKey !== undefined
-      ? values.get(materialKey(entry, entry.usernameKey))
-      : entry.username;
-    if (password === undefined || username === undefined) {
-      throw new Error(`no sealed login for the share volume ${entry.volume}`);
-    }
-    assertLoginValue(username, "username");
-    assertLoginValue(password, "password");
-    if (entry.domain !== undefined) assertLoginValue(entry.domain, "domain");
-    logins.set(entry.volume, {
-      username,
-      password,
-      ...(entry.domain === undefined ? {} : { domain: entry.domain }),
-    });
+    logins.set(entry.volume, loginOf(entry, values));
   }
   return logins;
+}
+
+/** The material keys the entries name; refuses a bad or repeated volume. */
+function wantedMaterial(
+  entries: readonly EnvironmentDeployNetworkShareCredential[],
+): Set<string> {
+  const volumes = new Set<string>();
+  const wanted = new Set<string>();
+  for (const entry of entries) {
+    if (!VOLUME_NAME.test(entry.volume)) {
+      throw new Error("a networkShareCredentials volume name is not valid");
+    }
+    if (volumes.has(entry.volume)) {
+      throw new Error(
+        `networkShareCredentials names volume ${entry.volume} twice`,
+      );
+    }
+    volumes.add(entry.volume);
+    wanted.add(materialKey(entry, entry.passwordKey));
+    if (entry.usernameKey !== undefined) {
+      wanted.add(materialKey(entry, entry.usernameKey));
+    }
+  }
+  return wanted;
+}
+
+function loginOf(
+  entry: EnvironmentDeployNetworkShareCredential,
+  values: ReadonlyMap<string, string>,
+): ShareLogin {
+  const password = values.get(materialKey(entry, entry.passwordKey));
+  const username = entry.usernameKey !== undefined
+    ? values.get(materialKey(entry, entry.usernameKey))
+    : entry.username;
+  if (password === undefined || username === undefined) {
+    throw new Error(`no sealed login for the share volume ${entry.volume}`);
+  }
+  assertLoginValue(username, "username");
+  assertLoginValue(password, "password");
+  if (entry.domain !== undefined) assertLoginValue(entry.domain, "domain");
+  return {
+    username,
+    password,
+    ...(entry.domain === undefined ? {} : { domain: entry.domain }),
+  };
 }
 
 /** The `o` tokens the daemon injects for a login. */
@@ -194,6 +209,8 @@ export async function fingerprint(
     (b) => b.toString(16).padStart(2, "0"),
   ).join("").slice(0, FINGERPRINT_LENGTH);
 }
+
+const SHARE_TYPES: ReadonlySet<string> = new Set(["cifs", "smb3"]);
 
 export type AppliedShareLogins = {
   yaml: string;
@@ -268,8 +285,16 @@ type RunDocker = (
   args: string[],
 ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
 
+/** The exact name of a share volume of `volume`: `<project>_<volume>_<12 hex>`. */
+function shareVolumeShape(projectName: string, volume: string): RegExp {
+  const suffix = `_[0-9a-f]{${FINGERPRINT_LENGTH}}$`;
+  return new RegExp(
+    "^" + escapeRegExp(projectName) + "_" + escapeRegExp(volume) + suffix,
+  );
+}
+
 function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 
 /**
@@ -287,11 +312,7 @@ export async function pruneStaleShareVolumes(
 ): Promise<string[]> {
   const removed: string[] = [];
   for (const [volume, keep] of current) {
-    const shape = new RegExp(
-      `^${escapeRegExp(projectName)}_${
-        escapeRegExp(volume)
-      }_[0-9a-f]{${FINGERPRINT_LENGTH}}$`,
-    );
+    const shape = shareVolumeShape(projectName, volume);
     const listed = await run([
       "volume",
       "ls",
@@ -302,10 +323,14 @@ export async function pruneStaleShareVolumes(
       `label=com.docker.compose.volume=${volume}`,
     ]);
     if (!listed.success) continue;
-    for (const name of listed.stdout.split("\n").map((l) => l.trim())) {
-      if (name === keep || !shape.test(name)) continue;
-      if ((await run(["volume", "rm", name])).success) removed.push(name);
-    }
+    const stale = listed.stdout.split("\n").map((l) => l.trim())
+      .filter((name) => name !== keep && shape.test(name));
+    const results = await Promise.all(
+      stale.map(async (name) =>
+        (await run(["volume", "rm", name])).success ? name : null
+      ),
+    );
+    removed.push(...results.filter((name): name is string => name !== null));
   }
   return removed;
 }
@@ -319,7 +344,6 @@ export async function removeProjectShareVolumes(
   projectName: string,
   run: RunDocker,
 ): Promise<string[]> {
-  const removed: string[] = [];
   try {
     const listed = await run([
       "volume",
@@ -329,20 +353,30 @@ export async function removeProjectShareVolumes(
       "--format",
       '{{.Name}}\t{{.Label "com.docker.compose.volume"}}',
     ]);
-    if (!listed.success) return removed;
+    if (!listed.success) return [];
+    const candidates: string[] = [];
     for (const line of listed.stdout.split("\n")) {
       const [name, volume] = line.split("\t").map((part) => part.trim());
-      if (!name || !volume) continue;
-      const shape = new RegExp(
-        `^${escapeRegExp(projectName)}_${
-          escapeRegExp(volume)
-        }_[0-9a-f]{${FINGERPRINT_LENGTH}}$`,
-      );
-      if (!shape.test(name)) continue;
-      if ((await run(["volume", "rm", name])).success) removed.push(name);
+      if (name && volume && shareVolumeShape(projectName, volume).test(name)) {
+        candidates.push(name);
+      }
     }
+    const results = await Promise.all(
+      candidates.map(async (name) => {
+        const type = await run([
+          "volume",
+          "inspect",
+          "--format",
+          '{{index .Options "type"}}',
+          name,
+        ]);
+        if (!type.success || !SHARE_TYPES.has(type.stdout.trim())) return null;
+        return (await run(["volume", "rm", name])).success ? name : null;
+      }),
+    );
+    return results.filter((name): name is string => name !== null);
   } catch {
     // Best effort: a leftover volume holds only a mount, not data.
+    return [];
   }
-  return removed;
 }

@@ -135,7 +135,7 @@ const HOSTNAME =
   /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$/;
 const DOTTED_QUAD = /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/;
 /** The default bridge's gateway: containers reach the host's own services there. */
-const DOCKER_BRIDGE_GATEWAY = "172.17.0.1";
+const DOCKER_BRIDGE_GATEWAY = "172.17.0.1"; // NOSONAR typescript:S1313 - Docker default bridge gateway, refused as a share host
 const LOCAL_NAMES = new Set([
   "localhost",
   "localhost.localdomain",
@@ -271,7 +271,7 @@ export const SAFE_OPTIONS: readonly string[] = [
   ...Object.keys(VALUE_OPTIONS),
   "addr",
   ...FLAG_OPTIONS,
-].sort();
+].sort((a, b) => a.localeCompare(b));
 
 function optionKey(token: string): { key: string; value?: string } {
   const trimmed = token.trim();
@@ -295,9 +295,7 @@ const NEVER_OPTIONS: ReadonlySet<string> = new Set([
   "remount",
 ]);
 
-function optionRefusal(token: string): string | null {
-  const { key, value } = optionKey(token);
-  if (key === "") return "an empty option";
+function forbiddenOptionRefusal(key: string): string | null {
   if (SECRET_OPTION_KEYS.has(key)) {
     return `option "${key}" is not allowed in compose text (the control plane supplies share logins as sealed material)`;
   }
@@ -307,6 +305,14 @@ function optionRefusal(token: string): string | null {
   if (NEVER_OPTIONS.has(key)) {
     return `option "${key}" is never allowed on a network share`;
   }
+  return null;
+}
+
+function optionRefusal(token: string): string | null {
+  const { key, value } = optionKey(token);
+  if (key === "") return "an empty option";
+  const forbidden = forbiddenOptionRefusal(key);
+  if (forbidden !== null) return forbidden;
   if (key === "addr") {
     const why = value === undefined ? "needs a value" : shareHostRefusal(value);
     return why === null ? null : `option "addr" ${why}`;
@@ -318,9 +324,8 @@ function optionRefusal(token: string): string | null {
     ? VALUE_OPTIONS[key]
     : undefined;
   if (shape === undefined) {
-    return `option "${key}" is not allowed (setuid, device, exec and other mount options are refused; allowed: ${
-      SAFE_OPTIONS.join(", ")
-    })`;
+    const allowed = SAFE_OPTIONS.join(", ");
+    return `option "${key}" is not allowed (setuid, device, exec and other mount options are refused; allowed: ${allowed})`;
   }
   return value !== undefined && shape.test(value)
     ? null
@@ -338,6 +343,42 @@ export type NetworkShareContext = {
   injectedTokens?: readonly string[];
 };
 
+function deviceFindings(prefix: string, device: unknown): string[] {
+  if (typeof device !== "string") {
+    return [`${prefix} a network share needs a device like //host/share`];
+  }
+  const parsed = parseShareDevice(device);
+  if (parsed.refusal !== undefined) return [`${prefix} ${parsed.refusal}`];
+  const why = shareHostRefusal(parsed.host);
+  return why === null ? [] : [`${prefix} share host "${parsed.host}" ${why}`];
+}
+
+function optionFindings(
+  prefix: string,
+  o: unknown,
+  injectedTokens: readonly string[],
+): string[] {
+  if (o === undefined) return [];
+  if (typeof o !== "string") {
+    return [`${prefix} o must be a string of mount options`];
+  }
+  const found: string[] = [];
+  const pending = [...injectedTokens];
+  for (const token of splitMountOptions(o)) {
+    const at = pending.indexOf(token);
+    if (at >= 0) {
+      pending.splice(at, 1);
+      continue;
+    }
+    const why = optionRefusal(token);
+    if (why !== null) found.push(`${prefix} ${why}`);
+  }
+  if (pending.length > 0) {
+    found.push(`${prefix} the share login is missing from its options`);
+  }
+  return found;
+}
+
 /** Findings for one SMB volume; empty when it may be mounted. */
 export function networkShareFindings(
   name: string,
@@ -353,44 +394,15 @@ export function networkShareFindings(
     k !== "type" && k !== "device" && k !== "o"
   );
   if (extra.length > 0) {
+    const named = extra.map((k) => JSON.stringify(k)).join(", ");
     return [
-      `${prefix} driver option ${
-        extra.map((k) => `"${k}"`).join(", ")
-      } is not allowed for a network share (only type, device and o)`,
+      `${prefix} driver option ${named} is not allowed for a network share (only type, device and o)`,
     ];
   }
-  const found: string[] = [];
-  if (typeof opts.device !== "string") {
-    found.push(`${prefix} a network share needs a device like //host/share`);
-  } else {
-    const parsed = parseShareDevice(opts.device);
-    if (parsed.refusal !== undefined) {
-      found.push(`${prefix} ${parsed.refusal}`);
-    } else {
-      const why = shareHostRefusal(parsed.host);
-      if (why !== null) {
-        found.push(`${prefix} share host "${parsed.host}" ${why}`);
-      }
-    }
-  }
-  if (opts.o !== undefined && typeof opts.o !== "string") {
-    found.push(`${prefix} o must be a string of mount options`);
-  } else if (typeof opts.o === "string") {
-    const pending = [...(ctx.injectedTokens ?? [])];
-    for (const token of splitMountOptions(opts.o)) {
-      const at = pending.indexOf(token);
-      if (at >= 0) {
-        pending.splice(at, 1);
-        continue;
-      }
-      const why = optionRefusal(token);
-      if (why !== null) found.push(`${prefix} ${why}`);
-    }
-    if (pending.length > 0) {
-      found.push(`${prefix} the share login is missing from its options`);
-    }
-  }
-  return found;
+  return [
+    ...deviceFindings(prefix, opts.device),
+    ...optionFindings(prefix, opts.o, ctx.injectedTokens ?? []),
+  ];
 }
 
 /**

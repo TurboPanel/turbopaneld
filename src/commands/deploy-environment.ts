@@ -118,6 +118,7 @@ import {
   applyShareLoginsToCompose,
   pruneStaleShareVolumes,
   resolveShareLogins,
+  type ShareLogin,
 } from "../deploy/network-share-logins.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
@@ -2466,6 +2467,63 @@ function composeCheckoutOptions(dirs: ComposeCheckoutDirs | null): {
 }
 
 /**
+ * The SMB logins of a deploy, decrypted before anything is written. Logins
+ * without the server's permission refuse the deploy; they are added to the
+ * compose only after every policy check has judged the author's text.
+ */
+async function resolveDeployShareLogins(
+  payload: EnvironmentDeployPayload,
+  decryptSecrets: DeployContainerServicesInput["decryptSecrets"],
+): Promise<Map<string, ShareLogin>> {
+  const entries = payload.networkShareCredentials ?? [];
+  if (entries.length > 0 && payload.allowNetworkShares !== true) {
+    throw new Error(
+      `networkShareCredentials were sent, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+    );
+  }
+  return await resolveShareLogins(
+    entries,
+    payload.variableMaterial ?? [],
+    decryptSecrets,
+  );
+}
+
+/**
+ * SMB share volumes the policy accepted: the share password never reaches the
+ * transcript, then the mount helper is made ready before compose up needs it.
+ */
+async function prepareNetworkShares(
+  document: Record<string, unknown>,
+  logins: ReadonlyMap<string, ShareLogin>,
+  logSink: CommandOutputSink,
+  ensureSmbTools: DeployContainerServicesInput["ensureSmbToolsFn"],
+): Promise<void> {
+  if (!hasNetworkShares(document)) return;
+  const passwords = [...logins.values()].map((l) => l.password);
+  logSink.addSecrets(passwords);
+  rememberSecretPlaintexts(passwords);
+  for (const [name, spec] of networkShareVolumes(document)) {
+    logSink.onLine("stdout", describeNetworkShare(name, spec));
+  }
+  await ensureSmbTools((line) => logSink.onLine("stdout", line));
+}
+
+/** The logins into the staged compose; the key is read only when there are some. */
+async function applyDeployShareLogins(
+  yaml: string,
+  projectName: string,
+  logins: ReadonlyMap<string, ShareLogin>,
+  layout: LayoutPaths,
+) {
+  return await applyShareLoginsToCompose(
+    yaml,
+    projectName,
+    logins,
+    logins.size === 0 ? new Uint8Array() : await cachedPhpSiteKeySecret(layout),
+  );
+}
+
+/**
  * Writes one compiled `compose.yaml` (daemon overlay merged in), validates
  * Docker config, publishes `compose.yaml` + `deployment.json` + `.env`, then
  * runs deploy hooks / external networks / compose up. Secret files under
@@ -2533,17 +2591,8 @@ async function deployContainerServices(
     // SMB logins are decrypted here but added to the compose only after every
     // policy check below has judged the author's text (a login is never
     // compose text from the control plane).
-    if (
-      (parsedPayload.networkShareCredentials?.length ?? 0) > 0 &&
-      parsedPayload.allowNetworkShares !== true
-    ) {
-      throw new Error(
-        `networkShareCredentials were sent, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
-      );
-    }
-    const shareLogins = await resolveShareLogins(
-      parsedPayload.networkShareCredentials ?? [],
-      parsedPayload.variableMaterial ?? [],
+    const shareLogins = await resolveDeployShareLogins(
+      parsedPayload,
       decryptSecrets,
     );
 
@@ -2637,15 +2686,12 @@ async function deployContainerServices(
     // password never reaches the transcript, then the mount helper is made
     // ready before compose up needs it.
     const shareDocument = resolved.document ?? {};
-    if (hasNetworkShares(shareDocument)) {
-      const sharePasswords = [...shareLogins.values()].map((l) => l.password);
-      logSink.addSecrets(sharePasswords);
-      rememberSecretPlaintexts(sharePasswords);
-      for (const [name, spec] of networkShareVolumes(shareDocument)) {
-        logSink.onLine("stdout", describeNetworkShare(name, spec));
-      }
-      await input.ensureSmbToolsFn((line) => logSink.onLine("stdout", line));
-    }
+    await prepareNetworkShares(
+      shareDocument,
+      shareLogins,
+      logSink,
+      input.ensureSmbToolsFn,
+    );
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],
@@ -2675,13 +2721,11 @@ async function deployContainerServices(
     );
     // The judged compose gets its share logins last, in the staged file that
     // is published (0640) and read by every later `compose up`.
-    const shareApplied = await applyShareLoginsToCompose(
+    const shareApplied = await applyDeployShareLogins(
       yaml,
       parsedPayload.projectName,
       shareLogins,
-      shareLogins.size === 0
-        ? new Uint8Array()
-        : await cachedPhpSiteKeySecret(layout),
+      layout,
     );
     yaml = shareApplied.yaml;
     await writeComposeFileSecure(stagedPath, yaml);
