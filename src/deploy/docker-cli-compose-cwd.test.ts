@@ -1,4 +1,6 @@
 import { assertEquals } from "@std/assert";
+import { join } from "@std/path";
+import { writeComposeCheckoutMarker } from "./compose-checkout-marker.ts";
 import {
   composeWorkingDirectory,
   type DockerCliResult,
@@ -166,4 +168,108 @@ test("runDockerStreamed starts a compose build in the deployment directory", asy
     DEPLOYMENT_DIR,
   ]);
   assertEquals(seen[3].cwd, undefined);
+});
+
+test("a deployment with a checkout runs compose from the repository", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-compose-cwd-" });
+  const seen: Array<{ cwd?: string; args: string[] }> = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (_command, args, options) => {
+      seen.push({ cwd: options?.cwd, args });
+      return Promise.resolve(ok());
+    },
+  });
+  try {
+    await writeComposeCheckoutMarker(dir, {
+      version: 1,
+      cloneUrl: "https://git.example.net/acme/stack.git",
+      commitSha: "0123456789abcdef0123456789abcdef01234567",
+      composePath: "deploy/compose.yaml",
+    });
+    await Deno.writeTextFile(join(dir, ".env"), "A=1\n");
+    const chain = [join(dir, "compose.yaml")];
+    await runDocker([...composeFileArgs("demo", chain), "build"]);
+    // The staged copy of the same deployment gets the same project directory.
+    await runDocker([
+      ...composeFileArgs("demo", [join(dir, ".staging", "compose.yaml")]),
+      "config",
+    ]);
+    // A caller that names its own project directory keeps it.
+    await runDocker([
+      "compose",
+      "--project-directory",
+      "/own",
+      "-f",
+      chain[0],
+      "config",
+    ]);
+  } finally {
+    restore();
+    await Deno.remove(dir, { recursive: true });
+  }
+  const projectDir = join(
+    dir,
+    "repo",
+    "0123456789abcdef0123456789abcdef01234567",
+    "deploy",
+  );
+  assertEquals(
+    seen[0].cwd,
+    join(dir, "repo", "0123456789abcdef0123456789abcdef01234567"),
+  );
+  assertEquals(seen[0].args.slice(0, 6), [
+    "compose",
+    "--project-directory",
+    projectDir,
+    "--env-file",
+    join(dir, ".env"),
+    "-p",
+  ]);
+  assertEquals(seen[1].args.slice(1, 3), ["--project-directory", projectDir]);
+  assertEquals(seen[2].args.slice(1, 3), ["--project-directory", "/own"]);
+  assertEquals(
+    seen[2].args.filter((a) => a === "--project-directory").length,
+    1,
+  );
+});
+
+test("the retained previous compose file runs from its own commit's tree", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-compose-cwd-" });
+  const seen: Array<{ cwd?: string; args: string[] }> = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (_command, args, options) => {
+      seen.push({ cwd: options?.cwd, args });
+      return Promise.resolve(ok());
+    },
+  });
+  const older = "89abcdef0123456789abcdef0123456789abcdef";
+  const newer = "0123456789abcdef0123456789abcdef01234567";
+  try {
+    const marker = (commitSha: string) => ({
+      version: 1 as const,
+      cloneUrl: "https://git.example.net/acme/stack.git",
+      commitSha,
+      composePath: "deploy/compose.yaml",
+    });
+    await writeComposeCheckoutMarker(dir, marker(newer));
+    await Deno.mkdir(join(dir, "previous"));
+    await writeComposeCheckoutMarker(join(dir, "previous"), marker(older));
+    await Deno.writeTextFile(join(dir, "previous", ".env"), "A=1\n");
+    await runDocker([
+      ...composeFileArgs("demo", [join(dir, "previous", "compose.yaml")]),
+      "stop",
+    ]);
+  } finally {
+    restore();
+    await Deno.remove(dir, { recursive: true });
+  }
+  assertEquals(seen[0].cwd, join(dir, "repo", older));
+  assertEquals(seen[0].args.slice(0, 6), [
+    "compose",
+    "--project-directory",
+    join(dir, "repo", older, "deploy"),
+    "--env-file",
+    join(dir, "previous", ".env"),
+    "-p",
+  ]);
 });

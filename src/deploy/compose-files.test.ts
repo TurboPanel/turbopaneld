@@ -999,6 +999,66 @@ describe("compose-files", () => {
       });
     });
 
+    it("the checkout marker follows the compose file through a publish and a restore", async () => {
+      await withDir(async (dir, stage) => {
+        const marker = (sha: string) =>
+          `${
+            JSON.stringify({
+              version: 1,
+              cloneUrl: "https://git.example.net/acme/stack.git",
+              commitSha: sha.repeat(40),
+              composePath: "compose.yaml",
+            })
+          }\n`;
+        const publish = async (n: number, sha: string | null) => {
+          // A deploy moves repo.json to its commit before it publishes.
+          if (sha === null) {
+            await Deno.remove(join(dir, "repo.json")).catch(() => undefined);
+          } else {
+            await Deno.writeTextFile(join(dir, "repo.json"), marker(sha));
+          }
+          await writeComposeFileSecure(
+            join(stage, RUNTIME_COMPOSE_FILENAME),
+            `v${n}\n`,
+          );
+          await publishStagedRuntimeCompose(dir, stage, {
+            ...base,
+            version: 3,
+            generation: n,
+            composeSha256: String(n).repeat(64),
+          });
+        };
+        await publish(1, "a");
+        await publish(2, "b");
+        assertEquals(
+          await Deno.readTextFile(join(dir, "previous", "repo.json")),
+          marker("a"),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(dir, "repo.live.json")),
+          marker("b"),
+        );
+        // A deploy that fetched "c" and then failed before publishing leaves
+        // repo.json at "c"; the restore puts the kept marker back.
+        await Deno.writeTextFile(join(dir, "repo.json"), marker("c"));
+        await restorePreviousDeployment(dir);
+        assertEquals(
+          await Deno.readTextFile(join(dir, "repo.json")),
+          marker("a"),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(dir, "repo.live.json")),
+          marker("a"),
+        );
+        // An earlier version without a checkout leaves no marker behind.
+        await publish(3, null);
+        await publish(4, "d");
+        await restorePreviousDeployment(dir);
+        await assertRejects(() => Deno.stat(join(dir, "repo.json")));
+        await assertRejects(() => Deno.stat(join(dir, "repo.live.json")));
+      });
+    });
+
     it("restorePreviousDeployment is null when nothing was kept", async () => {
       await withDir(async (dir) => {
         assertEquals(await restorePreviousDeployment(dir), null);

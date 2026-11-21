@@ -349,3 +349,23 @@ test("ipScope classifies literals and rejects non-literals", () => {
   assertEquals(ipScope("1:2:3:4:5:6:7:8"), "public");
   assertEquals(ipScope("1:2:3:4:5:6:7"), null);
 });
+
+test("a build secret file in the repository checkout counts as inside", () => {
+  const document = model({ secrets: ["k"] }, {
+    secrets: { k: { file: "/state/deployments/p/e/repo/deploy/k.txt" } },
+  });
+  const findings = (checkoutRoot?: string) =>
+    collectBuildPolicyFindings(document, {
+      stageDir: STAGE,
+      ...(checkoutRoot ? { checkoutRoot } : {}),
+    }).map((f) => f.code);
+  assertEquals(findings(), ["build_secret_outside_project"]);
+  assertEquals(findings("/state/deployments/p/e/repo"), []);
+  assertEquals(
+    collectBuildPolicyFindings(
+      model({ secrets: ["k"] }, { secrets: { k: { file: "/state/other/k" } } }),
+      { stageDir: STAGE, checkoutRoot: "/state/deployments/p/e/repo" },
+    ).map((f) => f.code),
+    ["build_secret_outside_project"],
+  );
+});

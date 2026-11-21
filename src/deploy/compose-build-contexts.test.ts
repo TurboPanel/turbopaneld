@@ -94,6 +94,35 @@ test("a service without a build needs nothing", async () => {
   );
 });
 
+test("a context under the checkout is looked up where it is", async () => {
+  const root = `${DIRS.deploymentDir}/repo`;
+  const looked: string[] = [];
+  await assertBuildContextsPresent(
+    [scanOf({ vpn: { build: { context: `${root}/vpn` } } })],
+    { ...DIRS, checkoutRoot: root },
+    (path) => {
+      looked.push(path);
+      return Promise.resolve(true);
+    },
+  );
+  assertEquals(looked, [`${root}/vpn`]);
+});
+
+test("a missing checkout context says the repository lacks it", async () => {
+  const root = `${DIRS.deploymentDir}/repo`;
+  const error = await assertRejects(
+    () =>
+      assertBuildContextsPresent(
+        [scanOf({ vpn: { build: { context: `${root}/vpn` } } })],
+        { ...DIRS, checkoutRoot: root },
+        () => Promise.resolve(false),
+      ),
+    Error,
+  );
+  assertEquals(error.message.includes("repository checkout"), true);
+  assertEquals(error.message.includes("service vpn build context ./vpn"), true);
+});
+
 const IMAGE_AND_BUILD = {
   app: {
     image: "registry.example.net/app:1",
@@ -107,6 +136,23 @@ test("up -d skips a service that sets image", async () => {
     [scanOf(IMAGE_AND_BUILD)],
     { ...DIRS, services: IMAGE_AND_BUILD },
     NOTHING_ON_DISK,
+  );
+});
+
+test("an image service is checked when a checkout is built first", async () => {
+  await assertRejects(
+    () =>
+      assertBuildContextsPresent(
+        [scanOf(IMAGE_AND_BUILD)],
+        {
+          ...DIRS,
+          services: IMAGE_AND_BUILD,
+          checkoutRoot: "/state/deployments/p/e/repo/abc",
+        },
+        NOTHING_ON_DISK,
+      ),
+    Error,
+    "service app build context ./app",
   );
 });
 

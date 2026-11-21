@@ -19,6 +19,12 @@
 import { dirname, isAbsolute, join } from "@std/path";
 import { emitBufferedLines, pumpLines } from "../logs/line-stream.ts";
 import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
+import { composeCheckoutDirsForFile } from "./compose-checkout-marker.ts";
+import {
+  COMPOSE_ENV_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
+} from "./compose-files.ts";
 
 const decoder = new TextDecoder();
 const SUDO_BIN = "/usr/bin/sudo";
@@ -211,9 +217,47 @@ export function composeWorkingDirectory(
   return dirname(file);
 }
 
-function cwdOption(args: readonly string[]): { cwd?: string } {
-  const cwd = composeWorkingDirectory(args);
-  return cwd === undefined ? {} : { cwd };
+/**
+ * What a call runs with: the argv and the folder it starts in.
+ *
+ * A deployment that has a repository checkout (`compose-checkout-marker.ts`)
+ * gets `--project-directory <folder of the repo's compose file>` right after
+ * `compose`, and starts in the checkout root, so a path written for the
+ * repository resolves as in a clone and every build context stays inside the
+ * builder's working folder. Any other call is untouched apart from the plain
+ * {@link composeWorkingDirectory}. A caller that already passes
+ * `--project-directory` keeps its own.
+ */
+async function composeCall(
+  args: readonly string[],
+): Promise<{ args: string[]; cwd?: string }> {
+  const plain = composeWorkingDirectory(args);
+  if (plain === undefined || args.includes("--project-directory")) {
+    return { args: [...args], ...(plain === undefined ? {} : { cwd: plain }) };
+  }
+  const file = args[args.indexOf("-f") + 1];
+  const dirs = await composeCheckoutDirsForFile(
+    file,
+    COMPOSE_STAGE_DIRNAME,
+    COMPOSE_PREVIOUS_DIRNAME,
+  );
+  if (dirs === null) return { args: [...args], cwd: plain };
+  // Compose reads `.env` from the project directory, which is now inside the
+  // checkout: name the one the daemon wrote beside the compiled file.
+  const envFile = join(plain, COMPOSE_ENV_FILENAME);
+  const hasEnv = await Deno.stat(envFile).then((s) => s.isFile, () => false);
+  return {
+    args: [
+      "compose",
+      "--project-directory",
+      dirs.projectDir,
+      ...(hasEnv && !args.includes("--env-file")
+        ? ["--env-file", envFile]
+        : []),
+      ...args.slice(1),
+    ],
+    cwd: dirs.root,
+  };
 }
 
 export type DockerCliRunRawFn = (
@@ -521,8 +565,9 @@ export async function runDocker(
   userArgs: string[],
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
-  const args = withDockerConfig(userArgs);
-  const cwd = cwdOption(userArgs);
+  const call = await composeCall(userArgs);
+  const args = withDockerConfig(call.args);
+  const cwd = call.cwd === undefined ? {} : { cwd: call.cwd };
   const direct = await runRaw(resolvedDockerBin(), args, {
     ...options,
     ...cwd,
@@ -725,10 +770,11 @@ export async function runDockerStreamed(
 ): Promise<DockerCliResult> {
   try {
     const hasInput = options?.input !== undefined;
-    const child = await spawnDockerStreaming(args, {
+    const call = await composeCall(args);
+    const child = await spawnDockerStreaming(call.args, {
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
-      ...cwdOption(args),
+      ...(call.cwd === undefined ? {} : { cwd: call.cwd }),
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
 

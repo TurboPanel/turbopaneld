@@ -1425,3 +1425,84 @@ table's generation always follows the table last accepted.
 | **Tenant deploy & hosting ingress** | `src/deploy/AGENTS.md` | `environment.deploy` / `.lifecycle` / `.stop`, Docker Compose + Traefik, hosting Caddy, TLS materialization. Nested per-area docs: `src/deploy/release/AGENTS.md` (git-backed releases), `src/deploy/native/AGENTS.md` (host-run Node/Next), `src/deploy/site/AGENTS.md` (nginx/Apache/OLS sites), `src/deploy/cron/AGENTS.md` (scheduled jobs), `src/deploy/ssh/AGENTS.md` (tenant SSH), `src/deploy/acme/AGENTS.md` (the daemon's own ACME client) |
 
 **Docker client config folder.** Every call through `docker-cli.ts` runs `docker --config <run dir>/docker-config` (`dockerConfigDir`, created `0700` by the daemon, tmpfs). Without it the CLI and its compose and buildx plugins mkdir `$HOME/.docker`, and the daemon's home is the state root, which a hardened host keeps `root:tp 0750`. It is an argument, not `DOCKER_CONFIG`, because the `sudo` rungs reset the environment. Nothing on disk survives a reboot, so `scripts/purge.sh` needs no entry (`/run/turbopanel` is already in `TP_OWNED_TREES`). The folder is vetted before use (a real directory, not a link, owned by the daemon's uid, mode `0700`; anything else is refused, logged once, and a fresh `mkdtemp` folder is used), because Docker runs plugins and credential helpers named there as `tp` and other accounts share the run directory's group. If a registry login is ever added, it must not write credentials into this shared config folder.
+
+## Repository checkout for Git Compose projects (`compose-checkout-v1`)
+
+A project whose compose file comes from a repository needs the repository on the
+host: `build: ./vpn`, `./conf:/etc/x:ro` and `env_file: ./app.env` name files in
+it. `environment.deploy` carries `composeCheckout`; `compose-checkout.ts` runs
+before `applySourceReleases` (it reuses `release/checkout.ts`, so the clone-URL
+guard, the pinned commit and the credential lanes are the same as
+`sourceMaterial[]`).
+
+Layout of `deployments/<project>/<env>/`:
+
+- `compose.yaml`, `deployment.json`, `.env`, `previous/`, `.staging/`: the
+  daemon's files, where every lifecycle path already looks for them.
+- `repo/<commit>/`: the repository at that commit, without `.git`. One folder
+  per commit, never rewritten once in place: running containers bind into the
+  folder they started from, so an in-place swap would empty or stale their
+  mounts, and a failed deploy would leave the old containers without files. A
+  new commit changes every bind source into the tree, so Compose recreates the
+  services that mount it. The clone is made in a scratch folder under the
+  daemon state directory (`compose-checkout-scratch/<env>`, `0700`), outside
+  the deployment directory and apart from the per-service release scratch, so a
+  bind that reaches the deployment directory never reaches the clone
+  credential. The finished tree is renamed into place, so the scratch folder
+  and the deployments must share a file system (an `EXDEV` says so).
+- `repo.json`: the marker (current commit, clone URL, compose path). It also
+  tells `docker-cli.ts` what to do for every Compose call.
+- `repo.live.json`: the marker of the compose file that is live. A deploy
+  moves `repo.json` to its commit before it publishes, so the publish keeps
+  this copy for `previous/repo.json` and then refreshes it from `repo.json`.
+- `previous/repo.json`: the commit the kept `previous/compose.yaml` was
+  published with. `composeCheckoutDirsForFile` maps `previous/` to the parent
+  deployment but to that marker's tree, so the sequential `stopPrevious` runs
+  the old compose file with its own `--project-directory` (a relative
+  `env_file` resolves) and not the newer commit's.
+
+The repository does **not** go into the folder of `compose.yaml`: the compiled
+file must keep its name and place, and it must not overwrite a repository file
+of the same name. Instead every Compose call for such a deployment gets
+`--project-directory repo/<commit>/<folder of the repo's compose file>`, starts in
+`repo/<commit>/`, and reads the daemon's `.env` through `--env-file` (Compose would look
+in the project directory otherwise). Paths written for the repository resolve
+as in a clone, including a compose file kept in a subfolder. `composeCall` in
+`docker-cli.ts` is the one place that adds this, so lifecycle, rehydrate, hooks,
+health and the staged `config` calls all agree; a caller that passes its own
+`--project-directory` keeps it.
+
+Confinement counts the checkout as inside the deployment, at its own place (it
+is not staged). Relative authored paths resolve against the project directory.
+Symlinks that leave the deployment are still refused, and so is a bind that
+resolves to the deployment directory itself or to a file directly in it (a
+repository symlink to `..` or to `.env`, `deployment.json`, `repo.json`), even
+read-only. A
+writable bind into the checkout is refused: its folder goes away with the next
+commit, so what a container wrote there would be lost; use a named volume. The build policy's secret-file
+rule and `assertBuildContextsPresent` take the checkout root too.
+
+A commit whose folder is already in place is not fetched again. An in-place
+`up -d` never rebuilds an existing image, so a deploy with a checkout runs
+`compose build` first (a cache hit when nothing changed; the sequential
+strategy always builds; it builds every service with a `build` section, so the
+build-context check does not skip image-plus-build services here), and a rollback to an older commit rebuilds from that
+commit's tree. Folders of earlier commits are removed only after the deploy has
+brought the new generation up (`pruneComposeCheckout`); a failed deploy keeps
+them. A deploy without `composeCheckout` (a project that stopped following
+its repository, not a hostings-only run) removes only `repo.json` up front
+(`unfollowComposeCheckout`), so the new compose file runs without a project
+directory; `repo/` and the live marker stay for the old containers and for a
+restore, the publish keeps the live marker as `previous/repo.json`, and
+`pruneComposeCheckout` removes `repo/` once the new version is up. A deploy
+that fails at any point before it publishes (`keepLiveCheckoutOnFailure`
+wraps the whole run, since the marker changes early) puts `repo.live.json` back
+as `repo.json`, or removes `repo.json` when the live compose file had no
+checkout. A stop that keeps the
+directory removes them with the other daemon files. A failed sequential deploy
+that restores `previous/` (`restorePreviousDeployment`, and
+`revertPublishedCompose` for a cancel) puts `previous/repo.json` back as the
+marker, so the restored compose file runs against its own commit's tree, which
+is still there because pruning follows a successful up; the newer commit's tree
+stays until the next prune. The project directory is read from the marker, not
+from the restored manifest.
