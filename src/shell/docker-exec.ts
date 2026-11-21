@@ -12,6 +12,7 @@
  */
 import type { ShellErrorCode as ShellErrorWire } from "../contracts/cell-messages.ts";
 import { resolveDockerSocket } from "../docker/client.ts";
+import { writeAll } from "../util/write-all.ts";
 import {
   LABEL_PROJECT,
   LABEL_ROLE,
@@ -30,7 +31,7 @@ export const SHELL_EXEC_ENV: readonly string[] = ["TERM=xterm-256color"];
 const USER_RE = /^[a-z_][a-z0-9_-]{0,31}$|^\d+(:\d+)?$/;
 const CONTAINER_REF_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MANAGED_ENGINE_LABEL = "tp.managed.engine";
-const PLATFORM_ROLES = ["turbopanel", "ingress"];
+const PLATFORM_ROLES = new Set(["turbopanel", "ingress"]);
 const MAX_HEAD_BYTES = 32 * 1024;
 const MAX_BODY_BYTES = 1024 * 1024;
 const EXIT_POLLS = 10;
@@ -83,7 +84,7 @@ function labelValue(labels: Record<string, string>, key: string): string {
 export function isPlatformLabelled(labels: Record<string, string>): boolean {
   return labelValue(labels, MANAGED_ENGINE_LABEL) !== "" ||
     labelValue(labels, LABEL_SYSTEM_COMPONENT) !== "" ||
-    PLATFORM_ROLES.includes(labelValue(labels, LABEL_ROLE));
+    PLATFORM_ROLES.has(labelValue(labels, LABEL_ROLE));
 }
 
 /** True when the daemon's tenant labels (project or service id) are present. */
@@ -183,7 +184,7 @@ function decodeChunked(raw: Uint8Array): Uint8Array {
     parts.push(raw.subarray(eol + 2, eol + 2 + size));
     at = eol + 2 + size + 2;
   }
-  return parts.reduce(concat, new Uint8Array(0));
+  return parts.reduce((all, part) => concat(all, part), new Uint8Array(0));
 }
 
 type Reply = { status: number; body: Uint8Array };
@@ -201,7 +202,7 @@ function requestBytes(
   body: string | undefined,
   extraHeaders: string[],
 ): Uint8Array {
-  const payload = body === undefined ? "" : body;
+  const payload = body ?? "";
   const lines = [
     `${method} ${path} HTTP/1.1`,
     "Host: docker",
@@ -214,11 +215,6 @@ function requestBytes(
     );
   }
   return textEncoder.encode(`${lines.join("\r\n")}\r\n\r\n${payload}`);
-}
-
-async function writeAll(conn: Deno.Conn, data: Uint8Array): Promise<void> {
-  let sent = 0;
-  while (sent < data.length) sent += await conn.write(data.subarray(sent));
 }
 
 /** One short request on its own connection (`Connection: close`). */
@@ -441,20 +437,24 @@ class DockerExecTransport implements ShellTransport {
     if (reply.status >= 300) throw failFor(reply.status, reply.text);
   }
 
-  async exitCode(): Promise<number | undefined> {
-    for (let i = 0; i < EXIT_POLLS; i++) {
-      const reply = await call(
-        this.#socketPath,
-        "GET",
-        `/exec/${this.#execId}/json`,
-      ).catch(() => null);
-      const doc = asRecord(reply?.json);
-      if (reply?.status === 200 && doc.Running === false) {
-        return typeof doc.ExitCode === "number" ? doc.ExitCode : undefined;
-      }
-      await new Promise((resolve) => setTimeout(resolve, EXIT_POLL_MS));
+  exitCode(): Promise<number | undefined> {
+    return this.#pollExit(0);
+  }
+
+  /** One poll, then the next after a pause; recursion keeps each wait after the one before. */
+  async #pollExit(attempt: number): Promise<number | undefined> {
+    if (attempt >= EXIT_POLLS) return undefined;
+    const reply = await call(
+      this.#socketPath,
+      "GET",
+      `/exec/${this.#execId}/json`,
+    ).catch(() => null);
+    const doc = asRecord(reply?.json);
+    if (reply?.status === 200 && doc.Running === false) {
+      return typeof doc.ExitCode === "number" ? doc.ExitCode : undefined;
     }
-    return undefined;
+    await new Promise((resolve) => setTimeout(resolve, EXIT_POLL_MS));
+    return await this.#pollExit(attempt + 1);
   }
 
   close(): void {

@@ -414,11 +414,11 @@ class ShellSession {
   }
 
   async #waitForWindow(): Promise<void> {
-    while (!this.#ended && this.#unacked >= this.#request.windowBytes) {
-      await new Promise<void>((resolve) => {
-        this.#windowWaiter = resolve;
-      });
-    }
+    if (this.#ended || this.#unacked < this.#request.windowBytes) return;
+    await new Promise<void>((resolve) => {
+      this.#windowWaiter = resolve;
+    });
+    return await this.#waitForWindow();
   }
 
   #wakeWindow(): void {

@@ -2187,16 +2187,29 @@ export class InstanceClient {
     );
   }
 
+  /** `shell-open` and `shell-kill`; true when the message was one of them. */
+  #handleShellMessage(message: DaemonMessage): boolean {
+    if (message.type === "shell-open") {
+      this.#openShell(message);
+      return true;
+    }
+    if (message.type === "shell-kill") {
+      this.#shell().kill(message);
+      return true;
+    }
+    return false;
+  }
+
   #sendShellBinary(frame: Uint8Array): boolean {
     const ws = this.#ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
     ws.send(frame as BufferSource);
     return true;
   }
 
   #sendShellReport(report: ShellReport): boolean {
     const ws = this.#ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
     ws.send(JSON.stringify(report));
     return true;
   }
@@ -2858,6 +2871,7 @@ export class InstanceClient {
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
+    if (this.#handleShellMessage(message)) return;
     if (message.type === "dev-host-action") {
       void this.#answerDevHostActionAsync(message, ws);
       return;
@@ -2882,12 +2896,6 @@ export class InstanceClient {
         break;
       case "echo":
         this.#echoMessage(message, ws);
-        break;
-      case "shell-open":
-        this.#openShell(message);
-        break;
-      case "shell-kill":
-        this.#shell().kill(message);
         break;
       case "command-dispatch": {
         const dispatch = this.#resolveCommandDispatch();

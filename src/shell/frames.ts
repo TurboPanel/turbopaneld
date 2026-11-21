@@ -200,10 +200,6 @@ export class FrameOpener {
     this.#dir = dir;
   }
 
-  get expectedCounter(): bigint {
-    return this.#expected;
-  }
-
   /** The plaintext, or a {@link FrameError}. The counter advances only after the tag verified. */
   async open(frame: Uint8Array): Promise<Uint8Array> {
     if (frame.length < HEADER_BYTES + TAG_BYTES + 1) {
