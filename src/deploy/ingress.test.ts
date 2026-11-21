@@ -500,7 +500,8 @@ test("caddyTraefikUpstream http hop uses h2c and PROXY v2", () => {
 test("caddyTraefikUpstream https hop preserves the original Host header", () => {
   // Without this Caddy sends Host: 127.0.0.1:7443 and Traefik answers 404.
   assertStringIncludes(caddyTraefikUpstream("https"), "header_up Host {host}");
-  assertEquals(caddyTraefikUpstream("http").includes("header_up"), false);
+  // The plain hop sends the bare name too, never the name with a port.
+  assertStringIncludes(caddyTraefikUpstream("http"), "header_up Host {host}");
 });
 
 test("caddyTraefikUpstream https hop uses TLS skip-verify and PROXY v2", () => {
@@ -518,6 +519,21 @@ test("caddyfile disables auto_https redirects and advertises h1 h2 h3", () => {
   assertStringIncludes(config, "auto_https disable_redirects");
   assertStringIncludes(config, "skip_install_trust");
   assertStringIncludes(config, "protocols h1 h2 h3");
+});
+
+test("caddyfile takes the visitor address from the local tunnel connector only", () => {
+  const config = caddyfile(CONFIG_DIR);
+  // Loopback is the only trusted peer, so a visitor cannot choose the address
+  // the upstream sees; the connector's CF-Connecting-IP wins over XFF.
+  assertStringIncludes(
+    config,
+    "    trusted_proxies static 127.0.0.0/8 ::1\n",
+  );
+  assertStringIncludes(
+    config,
+    "    client_ip_headers CF-Connecting-IP X-Forwarded-For\n",
+  );
+  assertEquals(config.includes("trusted_proxies static 0.0.0.0"), false);
 });
 
 test("caddyfile serves the admin API on a private unix socket only", () => {

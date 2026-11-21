@@ -1290,6 +1290,8 @@ slot frees.
 
 ## Tunnel forwarding (`server.tunnel.routes`)
 
+**Headers an upstream app sees.** Every hop to Traefik sends `Host {host}`: the public name with no port. Caddy sets `X-Forwarded-Proto` / `X-Forwarded-Host` from the visitor's own request, and the PROXY v2 header carries the visitor's address, which Traefik turns into `X-Forwarded-For` and `X-Real-Ip`. The global `servers` block trusts loopback only (`trusted_proxies static`) and reads `client_ip_headers CF-Connecting-IP X-Forwarded-For`, so a request that really came through the local connector keeps the visitor's address (without it every tunnel visitor appeared as `127.0.0.1`), while a request from any other peer has those headers ignored.
+
 A tunnel connector reaches hosting Caddy on `https://localhost`; Caddy decides.
 Names that run here are locked (`hostings[].tunnel`, `siteSnippet`): only
 loopback and the listed peer addresses are answered, everyone else is dropped.
