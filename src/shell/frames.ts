@@ -192,12 +192,13 @@ export class FrameOpener {
   readonly #key: CryptoKey;
   readonly #sid: Uint8Array;
   readonly #dir: Direction;
-  #expected = 0n;
+  #expected: bigint;
 
   constructor(key: CryptoKey, sid: string, dir: Direction) {
     this.#key = key;
     this.#sid = sidToBytes(sid);
     this.#dir = dir;
+    this.#expected = 0n;
   }
 
   /** The plaintext, or a {@link FrameError}. The counter advances only after the tag verified. */

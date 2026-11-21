@@ -589,10 +589,15 @@ export class ShellSessionMux {
     });
   }
 
+  /** A copy, because ending a session removes it from the map. */
+  #liveSessions(): ShellSession[] {
+    return Array.from(this.#sessions.values());
+  }
+
   /** Handle a signed `shell-kill`. */
   kill(message: ShellKillMessage): void {
     if (message.all === true) {
-      for (const session of [...this.#sessions.values()]) session.end("kill");
+      for (const session of this.#liveSessions()) session.end("kill");
       return;
     }
     if (isSid(message.sid)) {
@@ -617,7 +622,7 @@ export class ShellSessionMux {
 
   /** The control socket is gone: every session dies with it. */
   onSocketLost(): void {
-    for (const session of [...this.#sessions.values()]) {
+    for (const session of this.#liveSessions()) {
       session.end("daemon-restart");
     }
   }
