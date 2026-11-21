@@ -8,8 +8,10 @@ import { parse } from "yaml";
 import type { EnvironmentDeployVariableMaterial } from "../contracts/commands-contracts.ts";
 import {
   applyShareLoginsToCompose,
+  fingerprint,
   loginTokens,
   pruneStaleShareVolumes,
+  removeProjectShareVolumes,
   resolveShareLogins,
 } from "./network-share-logins.ts";
 
@@ -118,6 +120,7 @@ test("the secret never reaches an error message", async () => {
   assertEquals(String(err).includes("hunter2"), false);
 });
 
+const SECRET = new Uint8Array(32).fill(7);
 const COMPOSE = `services:
   web:
     image: alpine
@@ -138,6 +141,7 @@ test("logins land in o, replace authored ones, and rename the Docker volume", as
     COMPOSE,
     "proj",
     new Map([["media", login]]),
+    SECRET,
   );
   const doc = parse(out.yaml) as {
     volumes: Record<string, { name?: string; driver_opts?: { o: string } }>;
@@ -162,6 +166,7 @@ test("a changed login or device gives a new volume name, the same login the same
       COMPOSE,
       "proj",
       new Map([["media", login]]),
+      SECRET,
     ))
       .volumeNames.get("media");
   const a = await name({ username: "svc", password: "one" });
@@ -171,8 +176,25 @@ test("a changed login or device gives a new volume name, the same login the same
     COMPOSE.replace("files.example.net", "other.example.net"),
     "proj",
     new Map([["media", { username: "svc", password: "one" }]]),
+    SECRET,
   );
   assertNotEquals(a, moved.volumeNames.get("media"));
+});
+
+test("the fingerprint is a keyed HMAC, not the plain hash, and depends on the key", async () => {
+  const parts = ["proj", "media", "//files.example.net/media", "password=x"];
+  const plain = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(JSON.stringify(["tp-smb-login-v1", ...parts])),
+  );
+  const plainHex = Array.from(
+    new Uint8Array(plain),
+    (b) => b.toString(16).padStart(2, "0"),
+  ).join("").slice(0, 12);
+  const keyed = await fingerprint(SECRET, parts);
+  assertNotEquals(keyed, plainHex);
+  assertEquals(keyed, await fingerprint(SECRET, parts));
+  assertNotEquals(keyed, await fingerprint(new Uint8Array(32).fill(8), parts));
 });
 
 test("a login for a volume that is not a share volume is an error", async () => {
@@ -182,6 +204,7 @@ test("a login for a volume that is not a share volume is an error", async () => 
         COMPOSE,
         "proj",
         new Map([["plain", { username: "u", password: "p" }]]),
+        SECRET,
       ),
     Error,
     "not a share volume",
@@ -192,12 +215,71 @@ test("a login for a volume that is not a share volume is an error", async () => 
         "services: {}\n",
         "proj",
         new Map([["media", { username: "u", password: "p" }]]),
+        SECRET,
       ),
     Error,
     "lacks",
   );
-  const none = await applyShareLoginsToCompose(COMPOSE, "proj", new Map());
+  const none = await applyShareLoginsToCompose(
+    COMPOSE,
+    "proj",
+    new Map(),
+    SECRET,
+  );
   assertEquals(none.yaml, COMPOSE);
+});
+
+test("the unsuffixed data volume and look-alikes survive a prune", async () => {
+  const removedNames: string[] = [];
+  const run = (args: string[]) => {
+    if (args[1] === "rm") removedNames.push(args[2]);
+    return Promise.resolve({
+      success: true,
+      stdout: args[1] === "ls"
+        ? [
+          "proj_media",
+          "proj_media_abcdef012345",
+          "proj_media_abcdef0123456",
+          "proj_media_ABCDEF012345",
+          "xproj_media_abcdef012345",
+          "proj_media_1b1b1b1b1b1b000000000",
+        ].join("\n")
+        : "",
+      stderr: "",
+    });
+  };
+  const removed = await pruneStaleShareVolumes(
+    "proj",
+    new Map([["media", "proj_media_0123456789ab"]]),
+    run,
+  );
+  assertEquals(removed, ["proj_media_abcdef012345"]);
+  assertEquals(removedNames, ["proj_media_abcdef012345"]);
+});
+
+test("a delete removes only share-shaped volumes of the project", async () => {
+  const removedNames: string[] = [];
+  const run = (args: string[]) => {
+    if (args[1] === "rm") removedNames.push(args[2]);
+    return Promise.resolve({
+      success: true,
+      stdout: args[1] === "ls"
+        ? "proj_media_abcdef012345\tmedia\nproj_media\tmedia\nproj_db_abcdef012345\tother\n"
+        : "",
+      stderr: "",
+    });
+  };
+  assertEquals(await removeProjectShareVolumes("proj", run), [
+    "proj_media_abcdef012345",
+  ]);
+  assertEquals(removedNames, ["proj_media_abcdef012345"]);
+  assertEquals(
+    await removeProjectShareVolumes(
+      "proj",
+      () => Promise.reject(new Error("x")),
+    ),
+    [],
+  );
 });
 
 test("volumes of an earlier login are removed, the current one kept", async () => {
@@ -206,29 +288,31 @@ test("volumes of an earlier login are removed, the current one kept", async () =
     calls.push(args);
     return Promise.resolve({
       success: true,
-      stdout: args[1] === "ls" ? "proj_media_old\nproj_media_new\n\n" : "",
+      stdout: args[1] === "ls"
+        ? "proj_media_0a0a0a0a0a0a\nproj_media_1b1b1b1b1b1b\n\n"
+        : "",
       stderr: "",
     });
   };
   const removed = await pruneStaleShareVolumes(
     "proj",
-    new Map([["media", "proj_media_new"]]),
+    new Map([["media", "proj_media_1b1b1b1b1b1b"]]),
     run,
   );
-  assertEquals(removed, ["proj_media_old"]);
+  assertEquals(removed, ["proj_media_0a0a0a0a0a0a"]);
   assertStringIncludes(
     calls[0].join(" "),
     "label=com.docker.compose.project=proj",
   );
-  assertEquals(calls.at(-1), ["volume", "rm", "proj_media_old"]);
+  assertEquals(calls.at(-1), ["volume", "rm", "proj_media_0a0a0a0a0a0a"]);
   // A volume still in use stays; nothing throws.
   const kept = await pruneStaleShareVolumes(
     "proj",
-    new Map([["media", "proj_media_new"]]),
+    new Map([["media", "proj_media_1b1b1b1b1b1b"]]),
     (args) =>
       Promise.resolve({
         success: args[1] === "ls",
-        stdout: "proj_media_old\n",
+        stdout: "proj_media_0a0a0a0a0a0a\n",
         stderr: "in use",
       }),
   );

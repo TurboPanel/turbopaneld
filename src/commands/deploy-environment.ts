@@ -113,6 +113,7 @@ import {
   type CommandOutputSink,
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
+import { cachedPhpSiteKeySecret } from "../deploy/site/php-site-key.ts";
 import {
   applyShareLoginsToCompose,
   pruneStaleShareVolumes,
@@ -2673,11 +2674,14 @@ async function deployContainerServices(
       parsedPayload,
     );
     // The judged compose gets its share logins last, in the staged file that
-    // is published (0600) and read by every later `compose up`.
+    // is published (0640) and read by every later `compose up`.
     const shareApplied = await applyShareLoginsToCompose(
       yaml,
       parsedPayload.projectName,
       shareLogins,
+      shareLogins.size === 0
+        ? new Uint8Array()
+        : await cachedPhpSiteKeySecret(layout),
     );
     yaml = shareApplied.yaml;
     await writeComposeFileSecure(stagedPath, yaml);

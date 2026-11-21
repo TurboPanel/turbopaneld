@@ -13,7 +13,7 @@
  *
  * Docker and Compose cache a volume's options, and a non-interactive
  * `compose up` declines to recreate a volume whose options changed. The
- * daemon therefore appends a fingerprint of the final options to the Docker
+ * daemon therefore appends a keyed fingerprint (HMAC under the daemon-only site-key secret) of the final options to the Docker
  * volume name (`<project>_<volume>_<fingerprint>`): a changed login is a new
  * volume that mounts with the new login, and the volumes of earlier
  * fingerprints are removed after a successful deploy (the share's data lives on
@@ -168,13 +168,29 @@ export function loginTokens(login: ShareLogin): string[] {
   ];
 }
 
-async function fingerprint(parts: readonly string[]): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
+/**
+ * The volume-name fingerprint: an HMAC-SHA-256 under a daemon-only secret, so
+ * a volume name that reaches a log or `docker volume ls` does not let anyone
+ * test password guesses offline.
+ */
+export async function fingerprint(
+  secret: Uint8Array,
+  parts: readonly string[],
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    secret as BufferSource,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
     new TextEncoder().encode(JSON.stringify(["tp-smb-login-v1", ...parts])),
   );
   return Array.from(
-    new Uint8Array(digest),
+    new Uint8Array(mac),
     (b) => b.toString(16).padStart(2, "0"),
   ).join("").slice(0, FINGERPRINT_LENGTH);
 }
@@ -203,6 +219,7 @@ export async function applyShareLoginsToCompose(
   yaml: string,
   projectName: string,
   logins: ReadonlyMap<string, ShareLogin>,
+  secret: Uint8Array,
 ): Promise<AppliedShareLogins> {
   const injected = new Map<string, string[]>();
   const volumeNames = new Map<string, string>();
@@ -229,7 +246,7 @@ export async function applyShareLoginsToCompose(
     const tokens = loginTokens(login);
     const final = [...kept, ...tokens];
     opts.o = final.map(escapeForCompose).join(",");
-    const fp = await fingerprint([
+    const fp = await fingerprint(secret, [
       projectName,
       name,
       typeof opts.device === "string" ? opts.device : "",
@@ -251,10 +268,17 @@ type RunDocker = (
   args: string[],
 ) => Promise<{ success: boolean; stdout: string; stderr: string }>;
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * Remove the Docker volumes this project made for a share under an earlier
- * login (same compose volume, other fingerprint). Best effort: one still in
- * use stays and is retried by the next deploy. Returns the names removed.
+ * login (same compose volume, other fingerprint). Only a name of exactly
+ * `<project>_<volume>_<12 hex>` goes: the unsuffixed `<project>_<volume>` of
+ * a volume that used to be local holds real data and is never removed. Best
+ * effort: one still in use stays and is retried by the next deploy. Returns
+ * the names removed.
  */
 export async function pruneStaleShareVolumes(
   projectName: string,
@@ -263,6 +287,11 @@ export async function pruneStaleShareVolumes(
 ): Promise<string[]> {
   const removed: string[] = [];
   for (const [volume, keep] of current) {
+    const shape = new RegExp(
+      `^${escapeRegExp(projectName)}_${
+        escapeRegExp(volume)
+      }_[0-9a-f]{${FINGERPRINT_LENGTH}}$`,
+    );
     const listed = await run([
       "volume",
       "ls",
@@ -274,9 +303,46 @@ export async function pruneStaleShareVolumes(
     ]);
     if (!listed.success) continue;
     for (const name of listed.stdout.split("\n").map((l) => l.trim())) {
-      if (name === "" || name === keep) continue;
+      if (name === keep || !shape.test(name)) continue;
       if ((await run(["volume", "rm", name])).success) removed.push(name);
     }
+  }
+  return removed;
+}
+
+/**
+ * On an environment delete: remove every share volume of the project, by the
+ * same name shape (`<project>_<compose volume>_<12 hex>`, the compose volume
+ * read from Docker's label). Best effort, never throws.
+ */
+export async function removeProjectShareVolumes(
+  projectName: string,
+  run: RunDocker,
+): Promise<string[]> {
+  const removed: string[] = [];
+  try {
+    const listed = await run([
+      "volume",
+      "ls",
+      "--filter",
+      `label=com.docker.compose.project=${projectName}`,
+      "--format",
+      '{{.Name}}\t{{.Label "com.docker.compose.volume"}}',
+    ]);
+    if (!listed.success) return removed;
+    for (const line of listed.stdout.split("\n")) {
+      const [name, volume] = line.split("\t").map((part) => part.trim());
+      if (!name || !volume) continue;
+      const shape = new RegExp(
+        `^${escapeRegExp(projectName)}_${
+          escapeRegExp(volume)
+        }_[0-9a-f]{${FINGERPRINT_LENGTH}}$`,
+      );
+      if (!shape.test(name)) continue;
+      if ((await run(["volume", "rm", name])).success) removed.push(name);
+    }
+  } catch {
+    // Best effort: a leftover volume holds only a mount, not data.
   }
   return removed;
 }
