@@ -7,6 +7,7 @@ import {
   readComposeCheckoutMarker,
 } from "../deploy/compose-checkout-marker.ts";
 import type { CheckoutParams } from "../deploy/release/checkout.ts";
+import { DeployCancelledError } from "../deploy/deploy-cancel.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import "../testing/stub-hosting-caddy-host.ts";
@@ -362,5 +363,91 @@ test({
         await Deno.stat(repo).then(() => true, () => false),
         false,
       );
+    }),
+});
+
+/** A cancel token that lets the host preparation pass and trips at the first source build. */
+const cancelAtSourceBuild = {
+  signal: new AbortController().signal,
+  committed: false,
+  throwIfCancelled(where: string) {
+    if (where.includes("was built")) throw new DeployCancelledError(where);
+  },
+  commit() {},
+  cancel: () => "cancelling" as const,
+};
+
+const withSource = (body: EnvironmentDeployPayload) =>
+  ({
+    ...body,
+    sourceMaterial: [{
+      sourceId: "src-1",
+      composeServiceName: "web",
+      releaseServiceId: "svc-web",
+      provider: "github",
+      cloneUrl: "https://git.example.net/acme/app.git",
+      ref: "main",
+      commitSha: SHA_A,
+      releaseId: "rel-1",
+      build: { kind: "image" },
+    }],
+  }) as unknown as EnvironmentDeployPayload;
+
+test({
+  name:
+    "a deploy that fails after the checkout marker changed but before publish puts the live marker back",
+  permissions: perm,
+  fn: () =>
+    withState(async (repo) => {
+      const deployments = join(repo, "..");
+      await deploy(withEnvFile(SHA_A), composeLikeDocker([]));
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            withSource(withEnvFile(SHA_B)),
+            new Date().toISOString(),
+            {
+              runDocker: composeLikeDocker([]),
+              composeCheckoutFn: fakeClone,
+              decryptSecrets: (items) =>
+                Promise.resolve(items.map(() => "secret")),
+              cancel: cancelAtSourceBuild,
+              ...hermeticDeployDeps,
+            },
+          ),
+        DeployCancelledError,
+      );
+      assertEquals(
+        (await readComposeCheckoutMarker(deployments))?.commitSha,
+        SHA_A,
+      );
+    }),
+});
+
+test({
+  name:
+    "the same failure on a first tracking deploy leaves no marker for the compose file that was live",
+  permissions: perm,
+  fn: () =>
+    withState(async (repo) => {
+      const deployments = join(repo, "..");
+      await deploy(untracked(), composeLikeDocker([]));
+      await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            withSource(withEnvFile(SHA_B)),
+            new Date().toISOString(),
+            {
+              runDocker: composeLikeDocker([]),
+              composeCheckoutFn: fakeClone,
+              decryptSecrets: (items) =>
+                Promise.resolve(items.map(() => "secret")),
+              cancel: cancelAtSourceBuild,
+              ...hermeticDeployDeps,
+            },
+          ),
+        DeployCancelledError,
+      );
+      assertEquals(await readComposeCheckoutMarker(deployments), null);
     }),
 });

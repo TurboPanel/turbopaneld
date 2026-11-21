@@ -181,20 +181,24 @@ export async function unfollowComposeCheckout(
 /**
  * A deploy that failed before it published leaves the live compose file in
  * place: make the live marker the current one again, so Compose calls for it
- * still use the tree its containers run from.
+ * still use the tree its containers run from. A live compose file with no
+ * valid marker never had a checkout, so the current marker goes: it would
+ * point that compose file's relative paths into a tree it never ran from.
  */
 export async function restoreLiveComposeCheckoutMarker(
   deploymentDir: string,
 ): Promise<void> {
   const live = join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME);
-  let text: string;
+  let text: string | null = null;
   try {
     text = await Deno.readTextFile(live);
   } catch (err) {
-    if (err instanceof Deno.errors.NotFound) return;
-    throw err;
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
-  if (parseComposeCheckoutMarker(text) === null) return;
+  if (text === null || parseComposeCheckoutMarker(text) === null) {
+    await unfollowComposeCheckout(deploymentDir);
+    return;
+  }
   await Deno.writeTextFile(
     join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
     text,

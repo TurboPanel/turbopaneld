@@ -148,9 +148,13 @@ test("unfollowing keeps the trees and the live marker; a failed deploy restores 
     await unfollowComposeCheckout(dir);
     await pruneComposeCheckout(dir);
     await assertRejects(() => Deno.stat(join(dir, "repo")));
-    // Nothing live to restore, and a garbled live marker is ignored.
+    // A live compose file with no marker (or a garbled one) never had a
+    // checkout: a current marker left by the failed deploy goes.
     await Deno.remove(join(dir, "repo.live.json"));
+    await writeComposeCheckoutMarker(dir, MARKER);
     await restoreLiveComposeCheckoutMarker(dir);
+    assertEquals(await readComposeCheckoutDirs(dir), null);
+    await writeComposeCheckoutMarker(dir, MARKER);
     await Deno.writeTextFile(join(dir, "repo.live.json"), "nope");
     await restoreLiveComposeCheckoutMarker(dir);
     assertEquals(await readComposeCheckoutDirs(dir), null);

@@ -3167,6 +3167,41 @@ export async function handleEnvironmentDeploy(
   );
 }
 
+/**
+ * Runs one deploy and, when it throws, makes the live compose file's checkout
+ * marker the current one again. The marker changes early in the deploy (the
+ * fetch, or the unfollow), long before the compose file is published, so any
+ * later failure (source builds, mount paths, the stage directory) would
+ * otherwise leave Compose calls for the still-live file pointed at the wrong
+ * tree. After a publish the live marker equals the current one, so this is a
+ * no-op for a failure that comes later.
+ */
+async function keepLiveCheckoutOnFailure<T>(
+  payload: Pick<EnvironmentDeployPayload, "projectId" | "environmentId">,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    const deploymentDir = environmentDeploymentDir(
+      resolveLayout(Deno.env.toObject()),
+      payload.projectId,
+      payload.environmentId,
+    );
+    try {
+      await restoreLiveComposeCheckoutMarker(deploymentDir);
+    } catch (restoreErr) {
+      logWarn(
+        "deploy",
+        `could not restore the live checkout marker: ${
+          restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
+        }`,
+      );
+    }
+    throw err;
+  }
+}
+
 async function handleEnvironmentDeployLocked(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -3192,7 +3227,12 @@ async function handleEnvironmentDeployLocked(
           waiting: () => progress?.running(false),
           acquired: () => progress?.running(true),
         },
-        () => deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
+        () =>
+          keepLiveCheckoutOnFailure(
+            parsedPayload,
+            () =>
+              deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
+          ),
       );
     deps?.progress?.finish("succeeded");
     return result;

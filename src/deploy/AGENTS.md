@@ -1495,7 +1495,10 @@ its repository, not a hostings-only run) removes only `repo.json` up front
 directory; `repo/` and the live marker stay for the old containers and for a
 restore, the publish keeps the live marker as `previous/repo.json`, and
 `pruneComposeCheckout` removes `repo/` once the new version is up. A deploy
-that fails before it publishes puts `repo.live.json` back as `repo.json`. A stop that keeps the
+that fails at any point before it publishes (`keepLiveCheckoutOnFailure`
+wraps the whole run, since the marker changes early) puts `repo.live.json` back
+as `repo.json`, or removes `repo.json` when the live compose file had no
+checkout. A stop that keeps the
 directory removes them with the other daemon files. A failed sequential deploy
 that restores `previous/` (`restorePreviousDeployment`, and
 `revertPublishedCompose` for a cancel) puts `previous/repo.json` back as the
