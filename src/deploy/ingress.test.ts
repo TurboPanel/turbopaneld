@@ -521,21 +521,6 @@ test("caddyfile disables auto_https redirects and advertises h1 h2 h3", () => {
   assertStringIncludes(config, "protocols h1 h2 h3");
 });
 
-test("caddyfile takes the visitor address from the local tunnel connector only", () => {
-  const config = caddyfile(CONFIG_DIR);
-  // Loopback is the only trusted peer, so a visitor cannot choose the address
-  // the upstream sees; the connector's CF-Connecting-IP wins over XFF.
-  assertStringIncludes(
-    config,
-    "    trusted_proxies static 127.0.0.0/8 ::1\n",
-  );
-  assertStringIncludes(
-    config,
-    "    client_ip_headers CF-Connecting-IP X-Forwarded-For\n",
-  );
-  assertEquals(config.includes("trusted_proxies static 0.0.0.0"), false);
-});
-
 test("caddyfile serves the admin API on a private unix socket only", () => {
   // Audit P0-1: a loopback TCP admin is reachable by every tenant process and
   // loads config as tpedge, which reads every uploaded TLS key.

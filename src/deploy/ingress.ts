@@ -207,14 +207,6 @@ export const HOSTING_CADDY_RUNTIME_DIRECTORY = "turbopanel-hosting-caddy";
 export const HOSTING_CADDY_ADMIN_SOCKET =
   `/run/${HOSTING_CADDY_RUNTIME_DIRECTORY}/admin.sock`;
 /** Caddy's spelling of {@link HOSTING_CADDY_ADMIN_SOCKET} as an address. */
-/**
- * Peers whose forwarded client address hosting Caddy believes: loopback only,
- * which is where the local tunnel connector dials in. The connector passes the
- * visitor's address in `CF-Connecting-IP` (and `X-Forwarded-For`); a request
- * from any other peer has those headers ignored and its own address used.
- */
-const HOSTING_CADDY_TRUSTED_LOOPBACK = "127.0.0.0/8 ::1";
-
 const HOSTING_CADDY_ADMIN_ADDR = `unix/${HOSTING_CADDY_ADMIN_SOCKET}`;
 /**
  * Loopback port of the hosting Caddy's metrics-only listener: Prometheus text
@@ -959,8 +951,6 @@ export function caddyfile(
   servers {
     protocols h1 h2 h3
     metrics
-    trusted_proxies static ${HOSTING_CADDY_TRUSTED_LOOPBACK}
-    client_ip_headers CF-Connecting-IP X-Forwarded-For
   }
 }
 # Metrics only, with no per-host option: totals across every site, no site

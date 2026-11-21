@@ -297,7 +297,7 @@ test("a tunnel name on a single bind address also listens on loopback and the pe
   assertEquals(unbound.includes("bind"), false);
 });
 
-test("a name without a tunnel is written exactly as before, and the Caddyfile trusts loopback only", () => {
+test("a name without a tunnel is written exactly as before, and the Caddyfile has no trusted proxies", () => {
   const plain = siteSnippet({
     hostname: "app.example.com",
     tlsDir: "/etc/turbopanel/tls",
@@ -318,11 +318,7 @@ app.example.com {
 }
 `,
   );
-  // Only the local connector (loopback) is believed; no peer range is global.
-  const trusted = caddyfile("/etc/turbopanel").split("\n").filter((line) =>
-    line.includes("trusted_proxies")
-  );
-  assertEquals(trusted, ["    trusted_proxies static 127.0.0.0/8 ::1"]);
+  assertEquals(caddyfile("/etc/turbopanel").includes("trusted_proxies"), false);
 });
 
 test("a peer upstream is a closed upstream kind that renders the forwarding proxy", () => {
