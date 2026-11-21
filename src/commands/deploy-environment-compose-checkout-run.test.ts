@@ -2,6 +2,10 @@ import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import { RUNTIME_COMPOSE_FILENAME } from "../deploy/compose-files.ts";
+import {
+  composeCheckoutDirsForFile,
+  readComposeCheckoutMarker,
+} from "../deploy/compose-checkout-marker.ts";
 import type { CheckoutParams } from "../deploy/release/checkout.ts";
 import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
@@ -65,6 +69,7 @@ async function fakeClone(params: CheckoutParams) {
   const workingDir = join(params.scratchDir, "source");
   await Deno.mkdir(workingDir, { recursive: true });
   await Deno.writeTextFile(join(workingDir, "compose.yaml"), "services: {}\n");
+  await Deno.writeTextFile(join(workingDir, "app.env"), "A=1\n");
   return { workingDir, commitSha: params.commitSha };
 }
 
@@ -169,5 +174,133 @@ test({
       assert(
         (await Deno.stat(join(repo, SHA_A, "compose.yaml"))).isFile,
       );
+    }),
+});
+
+/**
+ * A runner that behaves like Compose where it matters here: a call is made from
+ * the project directory the daemon's docker layer picks for its compose file
+ * (`composeCheckoutDirsForFile`), and `config` fails when a relative `env_file`
+ * is not there. Each call is recorded with the project directory it got.
+ */
+function composeLikeDocker(
+  calls: Array<{ args: string[]; projectDir: string | null }>,
+  failFirst?: string,
+) {
+  const base = fakeDocker([]);
+  let failed = false;
+  return async (args: string[]): Promise<DockerCliResult> => {
+    const file = args[args.indexOf("-f") + 1];
+    const dirs = await composeCheckoutDirsForFile(
+      file,
+      ".staging",
+      "previous",
+    );
+    calls.push({ args, projectDir: dirs?.projectDir ?? null });
+    const isConfig = args.includes("config") && !args.includes("-q");
+    if (
+      isConfig && dirs !== null &&
+      !(await Deno.stat(join(dirs.projectDir, "app.env")).then(
+        () => true,
+        () => false,
+      ))
+    ) {
+      return {
+        success: false,
+        stdout: "",
+        stderr: "env file app.env not found",
+        code: 1,
+      };
+    }
+    if (isConfig && dirs === null && file.includes("/previous/")) {
+      return {
+        success: false,
+        stdout: "",
+        stderr: "env file ./app.env not found",
+        code: 1,
+      };
+    }
+    if (failFirst !== undefined && args.includes(failFirst) && !failed) {
+      failed = true;
+      return { success: false, stdout: "", stderr: "up failed", code: 1 };
+    }
+    return base(args);
+  };
+}
+
+const withEnvFile = (commitSha: string): EnvironmentDeployPayload => ({
+  ...payload(commitSha),
+  deployStrategy: "sequential",
+  composeFiles: [{
+    filename: RUNTIME_COMPOSE_FILENAME,
+    role: "runtime",
+    source: "inline",
+    content: "services:\n  web:\n    image: nginx:1\n    env_file: ./app.env\n",
+  }],
+});
+
+test({
+  name:
+    "a sequential second deploy and a restore run the earlier compose file against its own tree",
+  permissions: perm,
+  fn: () =>
+    withState(async (repo) => {
+      const deployments = join(repo, "..");
+      const first: Array<{ args: string[]; projectDir: string | null }> = [];
+      await deploy(withEnvFile(SHA_A), composeLikeDocker(first));
+      // The first deploy has no earlier version to stop; its build is exactly
+      // `compose build` of the live file.
+      const build = first.find((c) => c.args.includes("build"))!;
+      assertEquals(build.args.slice(0, 5), [
+        "compose",
+        "-p",
+        "tp-demo-checkout",
+        "-f",
+        join(deployments, RUNTIME_COMPOSE_FILENAME),
+      ]);
+      assertEquals(build.args.slice(5), ["build"]);
+
+      const second: Array<{ args: string[]; projectDir: string | null }> = [];
+      await deploy(withEnvFile(SHA_B), composeLikeDocker(second));
+      const stop = second.find((c) => c.args.includes("stop"))!;
+      assert(stop.args.at(-3)!.endsWith("/previous/compose.yaml"));
+      assert(
+        stop.projectDir!.includes(SHA_A),
+        "previous runs from the old tree",
+      );
+      assertEquals(await listing(repo), [SHA_B]);
+
+      // A third deploy whose up fails restores the second version: the live
+      // marker and the project directory are the second commit's again.
+      const third: Array<{ args: string[]; projectDir: string | null }> = [];
+      await assertRejects(
+        () => deploy(withEnvFile(SHA_A), composeLikeDocker(third, "up")),
+        Error,
+      );
+      const marker = await readComposeCheckoutMarker(deployments);
+      assertEquals(marker?.commitSha, SHA_B);
+      const ups = third.filter((c) => c.args.includes("up"));
+      assert(ups.at(-1)!.projectDir!.includes(SHA_B));
+      assertEquals(
+        await Deno.stat(join(deployments, "previous")).catch(() => null),
+        null,
+      );
+    }),
+});
+
+test({
+  name: "a sequential deploy drops the old commit's tree only after it is up",
+  permissions: perm,
+  fn: () =>
+    withState(async (repo) => {
+      await deploy(withEnvFile(SHA_A), composeLikeDocker([]));
+      assertEquals(await listing(repo), [SHA_A]);
+      await deploy(withEnvFile(SHA_B), composeLikeDocker([]));
+      assertEquals(await listing(repo), [SHA_B]);
+      await assertRejects(
+        () => deploy(withEnvFile(SHA_A), composeLikeDocker([], "up")),
+        Error,
+      );
+      assertEquals(await listing(repo), [SHA_A, SHA_B]);
     }),
 });

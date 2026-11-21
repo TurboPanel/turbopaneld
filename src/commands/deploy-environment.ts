@@ -24,6 +24,7 @@ import {
   deployAlwaysBuilds,
 } from "../deploy/compose-build-contexts.ts";
 import {
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
   type ComposeCheckoutDirs,
   pruneComposeCheckout,
   readComposeCheckoutDirs,
@@ -238,7 +239,6 @@ import {
   syncAccountWallQuietly,
 } from "../deploy/account-wall.ts";
 import {
-  RELEASE_SCRATCH_DIRNAME,
   runPrivileged as defaultRunPrivileged,
 } from "../deploy/release/release-layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
@@ -2284,6 +2284,9 @@ async function revertPublishedCompose(
       () => undefined,
     );
     await removeComposeEnvFile(deploymentDir);
+    await Deno.remove(
+      join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME),
+    ).catch(() => undefined);
   } catch (err) {
     logWarn(
       "deploy",
@@ -2342,7 +2345,7 @@ export async function applyDeployComposeCheckout(
 /** What `applyDeployComposeCheckout` needs from this deploy's runtime. */
 function composeCheckoutDeps(
   payload: { environmentId: string },
-  layout: Pick<LayoutPaths, "stateDir">,
+  layout: Pick<LayoutPaths, "daemonStateDir">,
   runtime: Pick<
     ReturnType<typeof resolveEnvironmentDeployRuntime>,
     "logSink" | "decryptSecrets"
@@ -2360,20 +2363,15 @@ function composeCheckoutDeps(
 }
 
 /**
- * The clone's scratch folder: under the state directory (so the tree can be
- * renamed into the deployment) but outside the deployment directory, which a
- * bind mount may reach.
+ * The clone's scratch folder: under the daemon state directory, outside the
+ * deployment directory (which a bind mount may reach) and outside the release
+ * scratch folders, which are keyed by service.
  */
 export function composeCheckoutScratchDir(
-  layout: Pick<LayoutPaths, "stateDir">,
+  layout: Pick<LayoutPaths, "daemonStateDir">,
   environmentId: string,
 ): string {
-  return join(
-    layout.stateDir,
-    RELEASE_SCRATCH_DIRNAME,
-    "compose-checkout",
-    environmentId,
-  );
+  return join(layout.daemonStateDir, "compose-checkout-scratch", environmentId);
 }
 
 /**

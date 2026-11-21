@@ -139,6 +139,23 @@ test("up -d skips a service that sets image", async () => {
   );
 });
 
+test("an image service is checked when a checkout is built first", async () => {
+  await assertRejects(
+    () =>
+      assertBuildContextsPresent(
+        [scanOf(IMAGE_AND_BUILD)],
+        {
+          ...DIRS,
+          services: IMAGE_AND_BUILD,
+          checkoutRoot: "/state/deployments/p/e/repo/abc",
+        },
+        NOTHING_ON_DISK,
+      ),
+    Error,
+    "service app build context ./app",
+  );
+});
+
 test("an image service is checked when a build always runs", async () => {
   await assertRejects(
     () =>

@@ -5,6 +5,10 @@
  * `<stateDir>/deployments/<projectId>/<environmentId>/`.
  */
 
+import {
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
+} from "./compose-checkout-marker.ts";
 import { isResolvedCommitSha } from "./commit-sha.ts";
 import { basename, join } from "@std/path";
 import {
@@ -604,6 +608,10 @@ export async function removeComposeEnvFile(dir: string): Promise<void> {
   }
 }
 
+function ignoreNotFound(err: unknown): void {
+  if (!(err instanceof Deno.errors.NotFound)) throw err;
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     const stat = await Deno.stat(path);
@@ -689,11 +697,31 @@ export async function retainPreviousDeployment(
     join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
     join(previousDir, DEPLOYMENT_MANIFEST_FILENAME),
   );
+  // The commit the kept compose file was published with, so it runs against
+  // its own repository tree (`composeCheckoutDirsForFile`).
+  await copyIfPresent(
+    join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME),
+    join(previousDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
+  );
   return {
     generation: live.generation,
     projectName: live.projectName,
     composeSha256: live.composeSha256,
   };
+}
+
+/**
+ * Make the live checkout marker (`repo.live.json`) the copy of `from`, or
+ * remove it when `from` is absent: it records which commit the live compose
+ * file was published with.
+ */
+export async function setLiveCheckoutMarker(
+  deploymentDir: string,
+  from: string,
+): Promise<void> {
+  const live = join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME);
+  if (await copyIfPresent(from, live)) return;
+  await Deno.remove(live).catch(ignoreNotFound);
 }
 
 /**
@@ -715,6 +743,10 @@ export async function publishStagedRuntimeCompose(
   await writeDeploymentManifest(
     deploymentDir,
     previous ? { ...rest, previous } : rest,
+  );
+  await setLiveCheckoutMarker(
+    deploymentDir,
+    join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
   );
   await pruneStaleComposeLayerFiles(
     deploymentDir,
@@ -761,6 +793,19 @@ export async function restorePreviousDeployment(
   if (!hadEnv) await removeComposeEnvFile(deploymentDir);
   const { previous: _index, ...restored } = manifest;
   await writeDeploymentManifest(deploymentDir, restored);
+  // The commit the restored compose file was published with becomes current
+  // again; a deploy that had no checkout leaves no marker behind.
+  const kept = join(previousDir, COMPOSE_CHECKOUT_MARKER_FILENAME);
+  if (
+    !(await copyIfPresent(
+      kept,
+      join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
+    ))
+  ) {
+    await Deno.remove(join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME))
+      .catch(ignoreNotFound);
+  }
+  await setLiveCheckoutMarker(deploymentDir, kept);
   await removePreviousDir(deploymentDir);
   return [live];
 }

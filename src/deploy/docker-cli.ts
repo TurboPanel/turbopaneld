@@ -22,6 +22,7 @@ import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
 import { composeCheckoutDirsForFile } from "./compose-checkout-marker.ts";
 import {
   COMPOSE_ENV_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
   COMPOSE_STAGE_DIRNAME,
 } from "./compose-files.ts";
 
@@ -235,7 +236,11 @@ async function composeCall(
     return { args: [...args], ...(plain === undefined ? {} : { cwd: plain }) };
   }
   const file = args[args.indexOf("-f") + 1];
-  const dirs = await composeCheckoutDirsForFile(file, COMPOSE_STAGE_DIRNAME);
+  const dirs = await composeCheckoutDirsForFile(
+    file,
+    COMPOSE_STAGE_DIRNAME,
+    COMPOSE_PREVIOUS_DIRNAME,
+  );
   if (dirs === null) return { args: [...args], cwd: plain };
   // Compose reads `.env` from the project directory, which is now inside the
   // checkout: name the one the daemon wrote beside the compiled file.

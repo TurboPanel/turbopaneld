@@ -1,6 +1,7 @@
 import { dirname, join } from "node:path";
 import {
   COMPOSE_CHECKOUT_DIRNAME,
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
   COMPOSE_CHECKOUT_MARKER_FILENAME,
 } from "../deploy/compose-checkout-marker.ts";
 import {
@@ -345,6 +346,7 @@ const DAEMON_DEPLOYMENT_ENTRIES = [
   // next deploy fetches it again (`deploy/compose-checkout.ts`).
   COMPOSE_CHECKOUT_DIRNAME,
   COMPOSE_CHECKOUT_MARKER_FILENAME,
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
 ] as const;
 
 /**

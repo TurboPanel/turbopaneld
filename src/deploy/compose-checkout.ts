@@ -90,7 +90,37 @@ async function isFile(path: string): Promise<boolean> {
   }
 }
 
-/** Move the finished tree to `repo/<commit>` (same file system, so one rename). */
+/**
+ * Move `from` to `to`: one rename, or (the scratch folder sits on another file
+ * system than the deployments, `EXDEV`) a copy that keeps modes and links.
+ */
+async function moveTree(from: string, to: string): Promise<void> {
+  try {
+    await Deno.rename(from, to);
+    return;
+  } catch (err) {
+    if (
+      !(err instanceof Error) || (err as { code?: string }).code !== "EXDEV"
+    ) {
+      throw err;
+    }
+  }
+  await Deno.mkdir(to, { recursive: true });
+  const { success, stderr } = await new Deno.Command("/usr/bin/cp", {
+    args: ["-a", "--", `${from}/.`, to],
+    stdout: "null",
+    stderr: "piped",
+  }).output();
+  if (!success) {
+    throw new Error(
+      `could not copy the checkout into place: ${
+        new TextDecoder().decode(stderr).trim()
+      }`,
+    );
+  }
+}
+
+/** Move the finished tree to `repo/<commit>`. */
 async function placeGeneration(
   deploymentDir: string,
   fresh: string,
@@ -101,7 +131,7 @@ async function placeGeneration(
   const partial = join(parent, `.${commitSha}.partial`);
   await Deno.mkdir(parent, { recursive: true });
   await removeIfPresent(partial);
-  await Deno.rename(fresh, partial);
+  await moveTree(fresh, partial);
   // A leftover folder without the compose file is a half-made one.
   await removeIfPresent(target);
   await Deno.rename(partial, target);

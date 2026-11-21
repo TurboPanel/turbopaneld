@@ -649,8 +649,13 @@ function resolvedPathRefusal(
   // A symlink in the repository may point at `..`: the checkout is the
   // author's, and the deployment directory around it holds the compiled
   // compose file, the env file and the daemon's records.
-  if (ctx.opts.checkout !== undefined && real === ctx.realDir) {
-    return `${label} resolves to the deployment directory itself, which holds the daemon's records, not the repository`;
+  if (
+    ctx.opts.checkout !== undefined &&
+    (real === ctx.realDir || dirname(real) === ctx.realDir)
+  ) {
+    return `${label} resolves to ${
+      real === ctx.realDir ? "the deployment directory itself" : "a file in it"
+    }, which holds the daemon's records, not the repository`;
   }
   if (isWithin(real, ctx.realStage)) {
     return `${label} is the daemon's staging directory`;

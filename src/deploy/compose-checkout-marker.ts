@@ -42,6 +42,13 @@ import { join, normalize } from "@std/path";
 
 export const COMPOSE_CHECKOUT_DIRNAME = "repo";
 export const COMPOSE_CHECKOUT_MARKER_FILENAME = "repo.json";
+/**
+ * The marker of the compose file that is live, i.e. the one the last publish
+ * wrote. `repo.json` moves to the new commit when a deploy fetches it, which
+ * is before that deploy publishes, so a publish keeps this copy for
+ * `previous/` and refreshes it from `repo.json` afterwards.
+ */
+export const COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME = "repo.live.json";
 
 export type ComposeCheckoutMarker = {
   version: 1;
@@ -140,7 +147,11 @@ export async function removeComposeCheckout(
   deploymentDir: string,
 ): Promise<void> {
   await Promise.all(
-    [COMPOSE_CHECKOUT_MARKER_FILENAME, COMPOSE_CHECKOUT_DIRNAME].map(
+    [
+      COMPOSE_CHECKOUT_MARKER_FILENAME,
+      COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
+      COMPOSE_CHECKOUT_DIRNAME,
+    ].map(
       async (name) => {
         try {
           await Deno.remove(join(deploymentDir, name), { recursive: true });
@@ -180,21 +191,30 @@ export async function pruneComposeCheckout(
 /**
  * The checkout directories for a compose call whose first file is
  * `composeFile`, or `null` when the deployment has none. A file under the
- * staging directory belongs to its parent deployment.
+ * staging directory belongs to its parent deployment and its marker. A file
+ * under `previous/` belongs to the parent deployment too, but to the commit
+ * recorded in the marker kept beside it, so the earlier compose file runs
+ * against its own tree.
  */
 export async function composeCheckoutDirsForFile(
   composeFile: string,
   stageDirname: string,
+  previousDirname: string,
 ): Promise<ComposeCheckoutDirs | null> {
-  let dir = composeFile.slice(0, Math.max(0, composeFile.lastIndexOf("/")));
-  if (dir.endsWith(`/${stageDirname}`)) {
-    dir = dir.slice(0, -(stageDirname.length + 1));
+  const dir = composeFile.slice(0, Math.max(0, composeFile.lastIndexOf("/")));
+  if (dir.endsWith(`/${previousDirname}`)) {
+    const deploymentDir = dir.slice(0, -(previousDirname.length + 1));
+    const marker = await readComposeCheckoutMarker(dir);
+    return marker && deploymentDir !== ""
+      ? composeCheckoutDirs(deploymentDir, marker.composePath, marker.commitSha)
+      : null;
   }
-  if (dir === "") return null;
-  const marker = await readComposeCheckoutMarker(dir);
-  return marker
-    ? composeCheckoutDirs(dir, marker.composePath, marker.commitSha)
-    : null;
+  const deploymentDir = dir.endsWith(`/${stageDirname}`)
+    ? dir.slice(0, -(stageDirname.length + 1))
+    : dir;
+  return deploymentDir === ""
+    ? null
+    : await readComposeCheckoutDirs(deploymentDir);
 }
 
 /** {@link composeCheckoutDirs} for a deployment directory, `null` without a checkout. */

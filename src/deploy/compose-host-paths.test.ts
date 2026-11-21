@@ -1472,3 +1472,30 @@ test("a symlink in the checkout to the deployment directory is refused, even rea
     );
     assert(err.message.includes("deployment directory itself"));
   }));
+
+test("a symlink in the checkout to a daemon file in the deployment directory is refused, even read-only", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo", "c0ffee");
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(join(f.dir, "deployment.json"), "{}\n");
+    await Deno.symlink("../../deployment.json", join(root, "record"));
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({
+            type: "bind",
+            source: join(root, "record"),
+            target: "/o",
+            read_only: true,
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            checkout: { root, projectDir: root },
+            hostLevelApproved: false,
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(err.message.includes("a file in it"));
+  }));

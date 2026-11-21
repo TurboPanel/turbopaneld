@@ -1444,12 +1444,22 @@ Layout of `deployments/<project>/<env>/`:
   folder they started from, so an in-place swap would empty or stale their
   mounts, and a failed deploy would leave the old containers without files. A
   new commit changes every bind source into the tree, so Compose recreates the
-  services that mount it. The clone is made in a scratch folder under the state
-  directory (`release-build/compose-checkout/<env>`, `0700`), outside the
-  deployment directory, so a bind that reaches the deployment directory never
-  reaches the clone credential.
+  services that mount it. The clone is made in a scratch folder under the
+  daemon state directory (`compose-checkout-scratch/<env>`, `0700`), outside
+  the deployment directory and apart from the per-service release scratch, so a
+  bind that reaches the deployment directory never reaches the clone
+  credential. The finished tree is renamed into place (copied when the
+  scratch folder is on another file system).
 - `repo.json`: the marker (current commit, clone URL, compose path). It also
   tells `docker-cli.ts` what to do for every Compose call.
+- `repo.live.json`: the marker of the compose file that is live. A deploy
+  moves `repo.json` to its commit before it publishes, so the publish keeps
+  this copy for `previous/repo.json` and then refreshes it from `repo.json`.
+- `previous/repo.json`: the commit the kept `previous/compose.yaml` was
+  published with. `composeCheckoutDirsForFile` maps `previous/` to the parent
+  deployment but to that marker's tree, so the sequential `stopPrevious` runs
+  the old compose file with its own `--project-directory` (a relative
+  `env_file` resolves) and not the newer commit's.
 
 The repository does **not** go into the folder of `compose.yaml`: the compiled
 file must keep its name and place, and it must not overwrite a repository file
@@ -1465,7 +1475,9 @@ health and the staged `config` calls all agree; a caller that passes its own
 Confinement counts the checkout as inside the deployment, at its own place (it
 is not staged). Relative authored paths resolve against the project directory.
 Symlinks that leave the deployment are still refused, and so is a bind that
-resolves to the deployment directory itself (a repository symlink to `..`). A
+resolves to the deployment directory itself or to a file directly in it (a
+repository symlink to `..` or to `.env`, `deployment.json`, `repo.json`), even
+read-only. A
 writable bind into the checkout is refused: its folder goes away with the next
 commit, so what a container wrote there would be lost; use a named volume. The build policy's secret-file
 rule and `assertBuildContextsPresent` take the checkout root too.
@@ -1473,11 +1485,16 @@ rule and `assertBuildContextsPresent` take the checkout root too.
 A commit whose folder is already in place is not fetched again. An in-place
 `up -d` never rebuilds an existing image, so a deploy with a checkout runs
 `compose build` first (a cache hit when nothing changed; the sequential
-strategy always builds), and a rollback to an older commit rebuilds from that
+strategy always builds; it builds every service with a `build` section, so the
+build-context check does not skip image-plus-build services here), and a rollback to an older commit rebuilds from that
 commit's tree. Folders of earlier commits are removed only after the deploy has
 brought the new generation up (`pruneComposeCheckout`); a failed deploy keeps
 them. A deploy without `composeCheckout`
-removes `repo/` and `repo.json` (not a hostings-only run). A stop that keeps the
+removes `repo/`, `repo.json` and `repo.live.json` (not a hostings-only run). A stop that keeps the
 directory removes them with the other daemon files. A failed sequential deploy
-that restores `previous/` keeps the newer checkout; the project directory is
-read from the marker, not from the restored manifest.
+that restores `previous/` (`restorePreviousDeployment`, and
+`revertPublishedCompose` for a cancel) puts `previous/repo.json` back as the
+marker, so the restored compose file runs against its own commit's tree, which
+is still there because pruning follows a successful up; the newer commit's tree
+stays until the next prune. The project directory is read from the marker, not
+from the restored manifest.

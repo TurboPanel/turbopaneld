@@ -98,10 +98,14 @@ export function deployAlwaysBuilds(
 /**
  * Whether the deploy may never read this service's build context: plain
  * `up -d` pulls or reuses a set `image` and builds only when that fails, unless
- * `pull_policy: build` forces the build.
+ * `pull_policy: build` forces the build. A deployment with a repository
+ * checkout runs `compose build` first, which builds every service that has a
+ * `build` section whatever its `image`, so nothing is skipped there.
  */
 function skippedByUp(what: string, dirs: BuildContextDirs): boolean {
-  if (dirs.alwaysBuilds || !dirs.services) return false;
+  if (dirs.alwaysBuilds || dirs.checkoutRoot !== undefined || !dirs.services) {
+    return false;
+  }
   const name = /^service (\S+) build context$/.exec(what)?.[1];
   const service = name === undefined ? undefined : dirs.services[name];
   if (!isRecord(service)) return false;

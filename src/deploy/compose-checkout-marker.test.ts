@@ -64,19 +64,48 @@ test("dirs are found from the live file and from the staged one", async () => {
     const want = composeCheckoutDirs(dir, MARKER.composePath, MARKER.commitSha);
     assertEquals(await readComposeCheckoutDirs(dir), want);
     assertEquals(
-      await composeCheckoutDirsForFile(join(dir, "compose.yaml"), ".staging"),
+      await composeCheckoutDirsForFile(
+        join(dir, "compose.yaml"),
+        ".staging",
+        "previous",
+      ),
       want,
     );
     assertEquals(
       await composeCheckoutDirsForFile(
         join(dir, ".staging", "compose.yaml"),
         ".staging",
+        "previous",
       ),
       want,
     );
+    // `previous/` takes the commit of the marker kept beside its own file.
+    const earlier = { ...MARKER, commitSha: "b".repeat(40) };
+    assertEquals(
+      await composeCheckoutDirsForFile(
+        join(dir, "previous", "compose.yaml"),
+        ".staging",
+        "previous",
+      ),
+      null,
+    );
+    await Deno.mkdir(join(dir, "previous"));
+    await writeComposeCheckoutMarker(join(dir, "previous"), earlier);
+    assertEquals(
+      await composeCheckoutDirsForFile(
+        join(dir, "previous", "compose.yaml"),
+        ".staging",
+        "previous",
+      ),
+      composeCheckoutDirs(dir, earlier.composePath, earlier.commitSha),
+    );
     await removeComposeCheckout(dir);
     assertEquals(
-      await composeCheckoutDirsForFile(join(dir, "compose.yaml"), ".staging"),
+      await composeCheckoutDirsForFile(
+        join(dir, "compose.yaml"),
+        ".staging",
+        "previous",
+      ),
       null,
     );
   } finally {
