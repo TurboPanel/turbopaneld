@@ -313,8 +313,8 @@ class ShellSession {
         late = true;
         reject(new DockerExecError("helper_unavailable", "open timed out"));
       }, OPEN_TIMEOUT_MS);
-      // The executor turns a synchronous throw into a rejection.
-      new Promise<ShellTransport>((open) => open(this.#startTransport())).then(
+      // `then` turns a synchronous throw into a rejection.
+      Promise.resolve().then(() => this.#startTransport()).then(
         (transport) => {
           this.#timers.clearTimeout(timer);
           if (late) transport.close();
