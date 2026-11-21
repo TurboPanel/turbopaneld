@@ -2339,6 +2339,26 @@ export async function applyDeployComposeCheckout(
   );
 }
 
+/** What `applyDeployComposeCheckout` needs from this deploy's runtime. */
+function composeCheckoutDeps(
+  payload: { environmentId: string },
+  layout: Pick<LayoutPaths, "stateDir">,
+  runtime: Pick<
+    ReturnType<typeof resolveEnvironmentDeployRuntime>,
+    "logSink" | "decryptSecrets"
+  >,
+  deps: EnvironmentDeployDeps | undefined,
+  cancel: { signal: AbortSignal } | undefined,
+): Parameters<typeof applyDeployComposeCheckout>[2] {
+  return {
+    logSink: runtime.logSink,
+    decryptSecrets: runtime.decryptSecrets,
+    scratchDir: composeCheckoutScratchDir(layout, payload.environmentId),
+    ...(deps?.composeCheckoutFn ? { checkoutFn: deps.composeCheckoutFn } : {}),
+    ...(cancel === undefined ? {} : { signal: cancel.signal }),
+  };
+}
+
 /**
  * The clone's scratch folder: under the state directory (so the tree can be
  * renamed into the deployment) but outside the deployment directory, which a
@@ -3573,13 +3593,11 @@ async function deployEnvironmentHolding(
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
   // the site apply below points a document root at it.
   cancel?.throwIfCancelled("while the host was being prepared");
-  await applyDeployComposeCheckout(parsedPayload, deploymentDir, {
-    logSink: runtime.logSink,
-    decryptSecrets: runtime.decryptSecrets,
-    scratchDir: composeCheckoutScratchDir(layout, parsedPayload.environmentId),
-    ...(deps?.composeCheckoutFn ? { checkoutFn: deps.composeCheckoutFn } : {}),
-    ...(cancel === undefined ? {} : { signal: cancel.signal }),
-  });
+  await applyDeployComposeCheckout(
+    parsedPayload,
+    deploymentDir,
+    composeCheckoutDeps(parsedPayload, layout, runtime, deps, cancel),
+  );
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
