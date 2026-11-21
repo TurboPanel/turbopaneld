@@ -1756,6 +1756,29 @@ export type EnvironmentDeployHostAccess = {
    * Requires the `network-shares-v1` wire feature.
    */
   allowNetworkShares?: boolean;
+  /**
+   * One entry per SMB share volume that needs a login. Each key names an entry
+   * of `variableMaterial` (sealed, looked up as
+   * `${composeServiceName ?? ""}::${key}`); the daemon writes a root-only
+   * cifs credentials file from them and points the volume at it, so no secret
+   * ever sits in compose text. Requires the `network-shares-v1` wire feature.
+   */
+  networkShareCredentials?: EnvironmentDeployNetworkShareCredential[];
+};
+
+export type EnvironmentDeployNetworkShareCredential = {
+  /** Top-level Compose volume name the credentials belong to. */
+  volume: string;
+  /** `variableMaterial` key holding the share password. */
+  passwordKey: string;
+  /** `variableMaterial` key holding the user name, when it is sealed too. */
+  usernameKey?: string;
+  /** Plain (not secret) user name, when no `usernameKey` is given. */
+  username?: string;
+  /** Plain (not secret) domain or workgroup. */
+  domain?: string;
+  /** Service of the material entries; absent or null for project-level ones. */
+  composeServiceName?: string | null;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -7034,6 +7057,51 @@ function parseOptionalMaterialArray<T>(
   return value.map(parseEntry);
 }
 
+function parseNetworkShareCredential(
+  value: unknown,
+): EnvironmentDeployNetworkShareCredential {
+  if (!isRecord(value)) {
+    throw new TypeError(
+      "Invalid environment deploy networkShareCredentials entry",
+    );
+  }
+  const text = (field: string): string | undefined => {
+    const raw = value[field];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 256) {
+      throw new TypeError(
+        `networkShareCredentials ${field} must be a short string`,
+      );
+    }
+    return raw;
+  };
+  const service = value.composeServiceName;
+  if (
+    service !== undefined && service !== null && typeof service !== "string"
+  ) {
+    throw new TypeError(
+      "networkShareCredentials composeServiceName must be a string or null",
+    );
+  }
+  const entry: EnvironmentDeployNetworkShareCredential = {
+    volume: parseNonEmptyString(value, "volume"),
+    passwordKey: parseNonEmptyString(value, "passwordKey"),
+  };
+  const usernameKey = text("usernameKey");
+  const username = text("username");
+  const domain = text("domain");
+  if (usernameKey !== undefined && username !== undefined) {
+    throw new TypeError(
+      "networkShareCredentials takes usernameKey or username, not both",
+    );
+  }
+  if (usernameKey !== undefined) entry.usernameKey = usernameKey;
+  if (username !== undefined) entry.username = username;
+  if (domain !== undefined) entry.domain = domain;
+  if (service !== undefined) entry.composeServiceName = service;
+  return entry;
+}
+
 function parseOptionalBoolean(
   value: unknown,
   fieldName: string,
@@ -7685,6 +7753,11 @@ export function parseEnvironmentDeployPayload(
       allowNetworkShares: parseOptionalBoolean(
         value.allowNetworkShares,
         "allowNetworkShares",
+      ),
+      networkShareCredentials: parseOptionalMaterialArray(
+        value.networkShareCredentials,
+        "networkShareCredentials",
+        parseNetworkShareCredential,
       ),
       tlsMaterial,
       variableMaterial: parseOptionalMaterialArray(

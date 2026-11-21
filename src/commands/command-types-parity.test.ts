@@ -1140,6 +1140,46 @@ test("environment.deploy rejects non-boolean allowNetworkShares", () => {
   );
 });
 
+test("environment.deploy round-trips networkShareCredentials", () => {
+  const entry = {
+    volume: "media",
+    passwordKey: "SMB_PW",
+    usernameKey: "SMB_USER",
+    domain: "CORP",
+    composeServiceName: null,
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...MINIMAL_DEPLOY,
+    networkShareCredentials: [entry],
+  });
+  assertEquals(payload.networkShareCredentials, [entry]);
+  assertEquals(
+    parseEnvironmentDeployPayload(MINIMAL_DEPLOY).networkShareCredentials,
+    undefined,
+  );
+});
+
+test("environment.deploy rejects a malformed networkShareCredentials entry", () => {
+  for (
+    const bad of [
+      "x",
+      [{ volume: "m" }],
+      [{ volume: "m", passwordKey: "" }],
+      [{ volume: "m", passwordKey: "k", usernameKey: "u", username: "n" }],
+      [{ volume: "m", passwordKey: "k", domain: 5 }],
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...MINIMAL_DEPLOY,
+          networkShareCredentials: bad,
+        }),
+      TypeError,
+    );
+  }
+});
+
 test("environment.deploy round-trips noCache", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",

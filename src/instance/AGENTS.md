@@ -78,7 +78,7 @@ fields. Detail: `src/deploy/site/AGENTS.md`.
 
 **Repository checkout for Git Compose projects (`compose-checkout-v1`).** `environment.deploy` may carry `composeCheckout` (clone URL, ref, the commit the compose file was read from, the repo-relative compose path, and the sealed credential on the same lanes as `sourceMaterial[]`). The daemon checks that commit out into `deployments/<project>/<env>/repo/<commit>` before anything builds. The control plane sends it only to a daemon that lists the feature. Detail: `src/deploy/AGENTS.md`.
 
-**SMB network shares (`network-shares-v1`).** `environment.deploy` may carry `allowNetworkShares: true`; the daemon then accepts `cifs`/`smb3` volumes that pass its allowlist and installs `cifs-utils` if missing. The control plane sends the flag only to a daemon that lists the feature. Detail: `src/deploy/AGENTS.md`.
+**SMB network shares (`network-shares-v1`).** `environment.deploy` may carry `allowNetworkShares: true`; the daemon then accepts `cifs`/`smb3` volumes that pass its allowlist and installs `cifs-utils` if missing. A share's login travels as sealed `variableMaterial` named by `networkShareCredentials[]`; the daemon writes a 0600 cifs credentials file and never accepts `password=` in compose text. The control plane sends the flag and the field only to a daemon that lists the feature. Detail: `src/deploy/AGENTS.md`.
 
 **Topology reports carry no generation numbers.** `topology-report` is `{ snapshot, at }`; the control plane tells topologies apart by their content. `TopologyReporter` sends on connect and then only when the snapshot's identity key (`../metrics/topology/identity-key.ts`) changes. No feature string gates this: a control plane that reads the numbers is no longer supported.
 

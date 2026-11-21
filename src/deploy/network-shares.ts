@@ -283,7 +283,6 @@ const VALUE_OPTIONS: Readonly<Record<string, Pattern>> = {
 /** The options an `o` string may hold, for the refusal text. */
 export const SAFE_OPTIONS: readonly string[] = [
   ...Object.keys(VALUE_OPTIONS),
-  "password",
   "credentials",
   "addr",
   ...FLAG_OPTIONS,
@@ -298,39 +297,55 @@ function optionKey(token: string): { key: string; value?: string } {
   };
 }
 
-/** `credentials=` may only name a file inside the deployment directory. */
+/**
+ * `credentials=` may only name the file the daemon wrote for this volume
+ * (an exact path, never a pattern), and never one holding a comma.
+ */
 function credentialsRefusal(
   value: string,
-  deploymentDir: string | undefined,
+  expected: string | undefined,
 ): string | null {
-  if (deploymentDir === undefined) {
-    return "needs a deployment directory to check it against";
+  if (expected === undefined) {
+    return "is not allowed here: the control plane supplies share credentials";
   }
-  if (!isAbsolute(value) || value.split("/").includes("..")) {
-    return "must be an absolute path without `..`";
+  if (value.includes(",") || expected.includes(",")) {
+    return "must not contain a comma";
   }
-  const dir = normalize(deploymentDir).replace(/\/$/, "");
-  const path = normalize(value);
-  return path.startsWith(`${dir}/`) && path.length > dir.length + 1
+  return normalize(value) === normalize(expected) && isAbsolute(value) &&
+      !value.split("/").includes("..")
     ? null
-    : "must point inside this deployment's directory";
+    : "must be the credentials file the daemon wrote for this volume";
 }
+
+const SECRET_OPTION_KEYS: ReadonlySet<string> = new Set([
+  "password",
+  "pass",
+  "pwd",
+  "password2",
+]);
+
+const NEVER_OPTIONS: ReadonlySet<string> = new Set([
+  "bind",
+  "rbind",
+  "remount",
+]);
 
 function optionRefusal(
   token: string,
-  deploymentDir: string | undefined,
+  credentialsPath: string | undefined,
 ): string | null {
   const { key, value } = optionKey(token);
   if (key === "") return "an empty option";
-  if (key === "password") {
-    return value === undefined || value === ""
-      ? `option "password" needs a value`
-      : null;
+  if (SECRET_OPTION_KEYS.has(key)) {
+    return `option "${key}" is not allowed in compose text (the control plane supplies share credentials as a sealed file)`;
+  }
+  if (NEVER_OPTIONS.has(key)) {
+    return `option "${key}" is never allowed on a network share`;
   }
   if (key === "credentials") {
     const why = value === undefined
       ? "needs a value"
-      : credentialsRefusal(value, deploymentDir);
+      : credentialsRefusal(value, credentialsPath);
     return why === null ? null : `option "credentials" ${why}`;
   }
   if (key === "addr") {
@@ -356,8 +371,8 @@ function optionRefusal(
 // --- one volume -------------------------------------------------------------
 
 export type NetworkShareContext = {
-  /** Live deployment directory, the only place `credentials=` may point. */
-  deploymentDir?: string;
+  /** The one credentials file the daemon wrote for this volume, if any. */
+  credentialsPath?: string;
 };
 
 /** Findings for one SMB volume; empty when it may be mounted. */
@@ -399,9 +414,40 @@ export function networkShareFindings(
     found.push(`${prefix} o must be a string of mount options`);
   } else if (typeof opts.o === "string") {
     for (const token of splitMountOptions(opts.o)) {
-      const why = optionRefusal(token, ctx.deploymentDir);
+      const why = optionRefusal(token, ctx.credentialsPath);
       if (why !== null) found.push(`${prefix} ${why}`);
     }
   }
   return found;
+}
+
+/**
+ * The last check before compose starts, on the final resolved model: every
+ * share volume must pass {@link networkShareFindings} (with only the
+ * credentials file the daemon wrote for it) and the server must allow shares.
+ */
+export function assertNetworkSharesFinal(
+  document: Record<string, unknown>,
+  opts: {
+    allowNetworkShares: boolean;
+    shareCredentialsPaths?: ReadonlyMap<string, string>;
+  },
+): void {
+  const found: string[] = [];
+  for (const [name, spec] of networkShareVolumes(document)) {
+    if (!opts.allowNetworkShares) {
+      found.push(`volume ${name}: ${NETWORK_SHARES_REFUSAL_NOTE}`);
+      continue;
+    }
+    found.push(
+      ...networkShareFindings(name, spec, {
+        credentialsPath: opts.shareCredentialsPaths?.get(name),
+      }),
+    );
+  }
+  if (found.length > 0) {
+    throw new Error(
+      `network share volumes refused before start: ${found.join("; ")}`,
+    );
+  }
 }

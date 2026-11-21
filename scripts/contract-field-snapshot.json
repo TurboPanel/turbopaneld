@@ -200,7 +200,12 @@
         "required": false,
         "type": "boolean"
       },
-      { "name": "allowNetworkShares", "required": false, "type": "boolean" }
+      { "name": "allowNetworkShares", "required": false, "type": "boolean" },
+      {
+        "name": "networkShareCredentials",
+        "required": false,
+        "type": "EnvironmentDeployNetworkShareCredential[]"
+      }
     ]
   },
   "ManagedLifecyclePayload": {

@@ -19,6 +19,7 @@ import {
 import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { removeConfigTree } from "../deploy/config-files.ts";
+import { removeShareCredentialsTree } from "../deploy/network-share-credentials.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
   createStreamedRunner,
@@ -686,6 +687,11 @@ async function stopEnvironmentLocked(
     parsedPayload.environmentId,
   );
   await removeConfigTree(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  await removeShareCredentialsTree(
     layout,
     parsedPayload.projectId,
     parsedPayload.environmentId,

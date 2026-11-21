@@ -1,6 +1,7 @@
 import { assertEquals, assertStringIncludes, assertThrows } from "@std/assert";
 import { assertComposePolicy } from "./compose-final-policy.ts";
 import {
+  assertNetworkSharesFinal,
   describeNetworkShare,
   hasNetworkShares,
   mountOptionPasswords,
@@ -13,8 +14,11 @@ import { collectComposePolicyFindings } from "./compose-final-policy.ts";
 
 const test = Deno.test.bind(Deno);
 
-const DIR = "/srv/tp/deploy/env-1";
-const ALLOW = { allowNetworkShares: true, deploymentDir: DIR };
+const CRED = "/run/tp/deployments/p1/e1/smb/media.cred";
+const ALLOW = {
+  allowNetworkShares: true,
+  shareCredentialsPaths: new Map([["media", CRED]]),
+};
 
 function doc(
   opts: Record<string, unknown>,
@@ -36,7 +40,7 @@ function findings(
 
 const GOOD = {
   device: "//files.example.net/media/photos",
-  o: "username=svc,password=pw1,domain=CORP,uid=1000,gid=1000,file_mode=0644,dir_mode=0755,vers=3.1.1,sec=ntlmssp,iocharset=utf8,ro,noperm,serverino,cache=strict,actimeo=30",
+  o: "username=svc,domain=CORP,uid=1000,gid=1000,file_mode=0644,dir_mode=0755,vers=3.1.1,sec=ntlmssp,iocharset=utf8,ro,noperm,serverino,cache=strict,actimeo=30",
 };
 
 test("a share with safe options is allowed when the control plane allows shares", () => {
@@ -149,8 +153,14 @@ test("each unsafe option is refused by name and never echoes its value", () => {
       "addr=127.0.0.1",
       "credentials=/etc/shadow",
       "credentials=relative/path",
-      `credentials=${DIR}/../../etc/shadow`,
+      `credentials=${CRED}/../../../../../etc/shadow`,
+      "credentials=/run/tp/deployments/p1/e1/smb/other.cred",
       "password=",
+      "pass=x",
+      "pwd=x",
+      "bind",
+      "rbind",
+      "remount",
       "unc=//evil/x",
       "sloppy",
     ]
@@ -161,18 +171,57 @@ test("each unsafe option is refused by name and never echoes its value", () => {
   }
   const secret = findings({ ...GOOD, o: "password=hunter2,bogus=hunter2" });
   assertEquals(secret.join(" ").includes("hunter2"), false);
+  assertEquals(secret.length, 2);
 });
 
-test("credentials is allowed only inside the deployment directory", () => {
+test("credentials is allowed only as the exact file the daemon wrote", () => {
+  assertEquals(findings({ ...GOOD, o: `credentials=${CRED},ro` }), []);
+  // No file was written for this volume: any credentials= is refused.
   assertEquals(
-    findings({ ...GOOD, o: `credentials=${DIR}/secrets/smb.cred,ro` }),
-    [],
-  );
-  assertEquals(
-    findings({ ...GOOD, o: `credentials=${DIR}/secrets/smb.cred` }, {
+    findings({ ...GOOD, o: `credentials=${CRED}` }, {
       allowNetworkShares: true,
     }).length,
     1,
+  );
+});
+
+test("a comma in an option value never survives the checks", () => {
+  // `,,` is an empty option, and a comma in the credentials path is refused.
+  assertEquals(findings({ ...GOOD, o: "username=a,,ro" }).length, 1);
+  assertEquals(
+    findings({ ...GOOD, o: "credentials=/run/a,b/x.cred" }, {
+      allowNetworkShares: true,
+      shareCredentialsPaths: new Map([["media", "/run/a,b/x.cred"]]),
+    }).length > 0,
+    true,
+  );
+  assertEquals(
+    findings({ ...GOOD, device: "//files.example.net/a,b" }).length,
+    1,
+  );
+});
+
+test("the final check refuses what the first judge would", () => {
+  const ok = { volumes: { media: { driver_opts: { type: "cifs", ...GOOD } } } };
+  assertEquals(assertNetworkSharesFinal(ok, ALLOW), undefined);
+  assertThrows(
+    () => assertNetworkSharesFinal(ok, { allowNetworkShares: false }),
+    Error,
+    "network shares must be allowed",
+  );
+  const bad = {
+    volumes: {
+      media: { driver_opts: { type: "cifs", device: GOOD.device, o: "bind" } },
+    },
+  };
+  assertThrows(() => assertNetworkSharesFinal(bad, ALLOW), Error, "bind");
+  const nfsLike = {
+    volumes: { m: { driver_opts: { type: "smb3", device: "//localhost/x" } } },
+  };
+  assertThrows(
+    () => assertNetworkSharesFinal(nfsLike, ALLOW),
+    Error,
+    "localhost",
   );
 });
 

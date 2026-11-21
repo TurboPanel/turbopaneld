@@ -113,10 +113,16 @@ import {
   type CommandOutputSink,
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
+import {
+  applyShareCredentialsToCompose,
+  materializeShareCredentials,
+} from "../deploy/network-share-credentials.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
+  assertNetworkSharesFinal,
   describeNetworkShare,
   hasNetworkShares,
+  NETWORK_SHARES_REFUSAL_NOTE,
   networkSharePasswords,
   networkShareVolumes,
 } from "../deploy/network-shares.ts";
@@ -2517,6 +2523,28 @@ async function deployContainerServices(
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
+    // SMB logins go to a root-only credentials file and `credentials=` is
+    // added to each share volume before the compose is judged.
+    if (
+      (parsedPayload.networkShareCredentials?.length ?? 0) > 0 &&
+      parsedPayload.allowNetworkShares !== true
+    ) {
+      throw new Error(
+        `networkShareCredentials were sent, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+      );
+    }
+    const shareCredentials = await materializeShareCredentials(
+      layout,
+      parsedPayload.projectId,
+      parsedPayload.environmentId,
+      parsedPayload.networkShareCredentials ?? [],
+      parsedPayload.variableMaterial ?? [],
+      decryptSecrets,
+    );
+    if (shareCredentials.size > 0) {
+      yaml = applyShareCredentialsToCompose(yaml, shareCredentials);
+      await writeComposeFileSecure(stagedPath, yaml);
+    }
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
@@ -2532,7 +2560,7 @@ async function deployContainerServices(
     assertComposePolicy(resolved.document ?? {}, {
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
       allowNetworkShares: parsedPayload.allowNetworkShares === true,
-      deploymentDir,
+      shareCredentialsPaths: shareCredentials,
       platformNetworks: [
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
@@ -2685,6 +2713,21 @@ async function deployContainerServices(
     }
 
     await validateComposeConfig(parsedPayload.projectName, [stagedPath], run);
+    // Last look before anything starts: the compose that will run, read back
+    // as Compose resolves it, must still hold only shares the daemon accepts.
+    if (hasNetworkShares(shareDocument)) {
+      assertNetworkSharesFinal(
+        (await resolveComposeModel(
+          parsedPayload.projectName,
+          [stagedPath],
+          run,
+        )).document ?? {},
+        {
+          allowNetworkShares: parsedPayload.allowNetworkShares === true,
+          shareCredentialsPaths: shareCredentials,
+        },
+      );
+    }
 
     cancel?.throwIfCancelled("before the new version was published");
     const chain = await publishStagedRuntimeCompose(
