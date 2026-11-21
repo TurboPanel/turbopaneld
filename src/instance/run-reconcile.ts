@@ -1,4 +1,5 @@
 import { encodeBase64Url } from "@std/encoding/base64url";
+import { dockerConfigEnv, withDockerConfig } from "../deploy/docker-cli.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { dirname } from "@std/path";
 import { forEachSequential } from "../util/sequential.ts";
@@ -1048,8 +1049,11 @@ async function defaultInstanceUpdateRun(
   args: string[],
   onStage?: (stage: UpdateProgressStage) => void,
 ): Promise<InstanceUpdateCommandResult> {
+  // The docker client always gets the daemon's private config folder.
+  const isDocker = bin === "docker";
   const child = new Deno.Command(bin, {
-    args,
+    args: isDocker ? withDockerConfig(args) : args,
+    ...(isDocker ? { env: dockerConfigEnv() } : {}),
     stdin: "null",
     stdout: "piped",
     stderr: "piped",

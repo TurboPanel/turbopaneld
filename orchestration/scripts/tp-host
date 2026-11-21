@@ -391,7 +391,7 @@ tp_is_root_path() {
 tp_daemon_leaf_name() {
   case "$1" in
     "$R_CONFIG"/docker|"$R_CONFIG"/proxysql|"$R_CONFIG"/orchestrator|"$R_CONFIG"/node-apps|"$R_CONFIG"/hosting) return 0 ;;
-    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/folders|"$R_STATE"/ansible|"$R_STATE"/reach|"$R_STATE"/caches) return 0 ;;
+    "$R_STATE"/update|"$R_STATE"/system|"$R_STATE"/deployments|"$R_STATE"/ingress|"$R_STATE"/sites|"$R_STATE"/storage|"$R_STATE"/managed|"$R_STATE"/managed-intent|"$R_STATE"/backup|"$R_STATE"/spool|"$R_STATE"/network|"$R_STATE"/tenant-acme|"$R_STATE"/orchestrator|"$R_STATE"/commands|"$R_STATE"/release-records|"$R_STATE"/release-build|"$R_STATE"/compose-checkout-scratch|"$R_STATE"/folders|"$R_STATE"/ansible|"$R_STATE"/reach|"$R_STATE"/caches) return 0 ;;
   esac
   return 1
 }
@@ -399,7 +399,7 @@ tp_daemon_leaf_name() {
 tp_daemon_loose_file_name() {
   case "$1" in
     "$R_CONFIG"/instance-ca.pem|"$R_CONFIG"/firewall.v4|"$R_CONFIG"/firewall.v6|"$R_CONFIG"/firewall.pending.v4|"$R_CONFIG"/firewall.pending.v6) return 0 ;;
-    "$R_STATE"/server.id|"$R_STATE"/server-key.json|"$R_STATE"/server-key-id|"$R_STATE"/update-guard-disarm.json|"$R_STATE"/release-link-scan.json) return 0 ;;
+    "$R_STATE"/server.id|"$R_STATE"/server-key.json|"$R_STATE"/server-key-id|"$R_STATE"/update-guard-disarm.json|"$R_STATE"/update-skip-target.json|"$R_STATE"/release-link-scan.json) return 0 ;;
     "$R_STATE"/sealing-key.json|"$R_STATE"/trust-level) return 0 ;;
   esac
   return 1
@@ -1560,13 +1560,12 @@ tp_site_lifecycle_ok() {
     [ "$_sl_dev" -eq 1 ]
 }
 
-# A Cloudflare tunnel connector's id: a lower-case UUID, or one of the two
-# names the daemon has always used for the instance's own tunnel (`instance`,
-# and `default` from the installer's --tunnel-token). Kept equal to
-# isTunnelId in src/tunnels/connector-unit.ts.
+# A Cloudflare tunnel connector's id: a lower-case UUID, or `instance` (the
+# control plane's own tunnel). Kept equal to isTunnelId in
+# src/tunnels/connector-unit.ts.
 tp_tunnel_id_ok() {
   case "$1" in
-    instance|default) return 0 ;;
+    instance) return 0 ;;
   esac
   tp_uuid_ok "$1"
 }
@@ -2874,7 +2873,11 @@ tp_verb_test() {
 
 tp_verb_cat() {
   [ "$#" -eq 2 ] && [ "$1" = "--" ] || tp_die "cat: only cat -- PATH"
-  tp_require_class "$2" tree
+  # A per-site PHP config file too (php.ini, php-fpm.conf, the guard): the
+  # daemon reads them to add the Apache walls to a runtime an update left as it
+  # was. Only those three names reach this class; they hold no secret the
+  # daemon cannot derive (the site key is an HMAC under its own secret).
+  tp_require_class "$2" tree phpconf
   tp_open_verified "$2" || tp_die "no such file $2"
   cat <&3
 }
@@ -4042,8 +4045,7 @@ tp_reserved_name() {
 }
 
 tp_new_name_ok() {
-  # Never <name>-grp: that is an older site owner's group name (groupmod
-  # renames it). Never all digits: getent would read it as an id.
+  # Never all digits: getent would read it as an id.
   case "$1" in *[!0-9]*) ;; *) return 1 ;; esac
   tp_owner_shape_ok "$1" || return 1
   ! tp_reserved_new_name "$1" || return 1
@@ -4159,24 +4161,6 @@ tp_verb_usermod() {
     *) tp_die "usermod: unsupported form" ;;
   esac
   tp_exec usermod "$@"
-}
-
-# groupmod -n NAME NAME-grp: a site owner's group from before the group took
-# the owner's own name is renamed in place, so everything keyed on its gid
-# (files, memberships) keeps working. Only for a principal NAME whose primary
-# group is NAME-grp in the principal band, with no group NAME yet, and only to
-# a name a new site owner could take.
-tp_verb_groupmod() {
-  [ "$#" -eq 3 ] && [ "$1" = "-n" ] && [ "$3" = "$2-grp" ] ||
-    tp_die "groupmod: only -n NAME NAME-grp"
-  tp_retire_name_ok "$2" || tp_die "groupmod: refusing name $2"
-  ! tp_reserved_name "$2" || tp_die "groupmod: refusing name $2"
-  tp_is_principal "$2" || tp_die "groupmod: $2 is not a principal"
-  ! tp_getent group "$2" >/dev/null 2>&1 || tp_die "groupmod: group $2 exists"
-  _gm_gid="$(tp_band_group_gid "$3")" || tp_die "groupmod: no group $3 in the principal band"
-  [ "$(tp_getent passwd "$2" | cut -d: -f4)" = "$_gm_gid" ] ||
-    tp_die "groupmod: $3 is not $2's primary group"
-  tp_exec groupmod -n "$2" "$3"
 }
 
 tp_verb_gpasswd() {
@@ -4455,9 +4439,17 @@ BUILD_LOCK="$P/run/tpbuild.lock"
 # which /bin/sh then runs: the build's user never reaches /opt/turbopanel.
 BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
 BUILD_LOCK_WAIT_SEC=2100
-# Owner decision: the same limits for every plan.
-BUILD_MEMORY_MAX=4G
-BUILD_CPU_QUOTA=200%
+# The CPU and memory limits are the smallest limits set for the build
+# (organization, server, service), which the daemon passes as build-run's
+# optional fourth (cores) and fifth (memory bytes) arguments; with none set,
+# half the host's cores and its RAM less BUILD_SYSTEM_RESERVED_KB (see
+# tp_build_cpu_quota and tp_build_memory_max). Swap stays off (MemorySwapMax=0)
+# unless the sixth argument says `on` (the control plane resolves it: on only
+# when a level opts in and none says off), which caps the unit's swap at its
+# memory limit (MemorySwapMax equal to MemoryMax), never unlimited. The host's RAM is read
+# afresh at every build start: a ballooned virtual machine's total changes.
+BUILD_SYSTEM_RESERVED_KB=1048576
+BUILD_MEMORY_MIN_KB=1048576
 BUILD_RUNTIME_MAX_SEC=1800
 # Disk: the work tree (which also holds the runner's TMPDIR), the project cache
 # and systemd's private /tmp and /var/tmp are watched while the build runs
@@ -4476,6 +4468,15 @@ BUILD_CACHE_MAX_KB=6291456
 BUILD_TREE_MAX_INODES=2000000
 BUILD_CACHE_MAX_AGE_DAYS=30
 BUILD_WATCH_SEC=10
+# Where a container image build's slice lives (the Docker lane: `buildx build
+# --cgroup-parent`, run by the daemon). One parent slice under turbopanel.slice
+# capped at the host's cores, and one child slice per build with that build's
+# own quota (the dash in a unit name is a hierarchy level, so the build id's
+# dashes become underscores). image-build-slice makes them,
+# image-build-slice-remove stops them, purge.sh removes what is left.
+IMAGE_BUILD_SLICE="turbopanel-imagebuild.slice"
+IMAGE_BUILD_CGROUP="/turbopanel.slice/$IMAGE_BUILD_SLICE"
+IMAGE_BUILD_CONTROL_DIR="$P/run/systemd/system.control"
 if [ -n "$TP_TEST" ]; then
   BUILD_WORK_MAX_KB="${TP_TEST_WORK_MAX_KB:-$BUILD_WORK_MAX_KB}"
   BUILD_TREE_MAX_INODES="${TP_TEST_TREE_MAX_INODES:-$BUILD_TREE_MAX_INODES}"
@@ -4757,8 +4758,172 @@ tp_build_lock() {
     tp_die "build-run: fs.protected_hardlinks must be 1 before handing a tree over"
 }
 
+# The host's core count; tests name theirs (never read from the environment
+# outside test mode).
+tp_build_host_cores() {
+  if [ -n "$TP_TEST" ] && [ -n "${TP_TEST_CORES:-}" ]; then
+    _hc="$TP_TEST_CORES"
+  else
+    _hc="$(nproc 2>/dev/null || true)"
+  fi
+  case "$_hc" in ''|*[!0-9]*|0) _hc=1 ;; esac
+  printf '%s\n' "$_hc"
+}
+
+# The host's RAM in KiB (MemTotal); tests name theirs.
+tp_build_host_mem_kb() {
+  if [ -n "$TP_TEST" ] && [ -n "${TP_TEST_MEM_KB:-}" ]; then
+    _hm="$TP_TEST_MEM_KB"
+  else
+    _hm="$(LC_ALL=C awk '/^MemTotal:/ { print $2; exit }' /proc/meminfo 2>/dev/null || true)"
+  fi
+  case "$_hm" in ''|*[!0-9]*|0) _hm="$BUILD_MEMORY_MIN_KB" ;; esac
+  printf '%s\n' "$_hm"
+}
+
+# A requested memory limit in bytes: 1 to 13 plain digits, no leading zero.
+tp_build_memory_ok() {
+  case "$1" in
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 13 ]
+}
+
+# The MemoryMax= value in bytes for a build: the requested bytes, at least 1 GiB
+# and at most the host's RAM; with no request the RAM less 1 GiB (at least
+# 1 GiB, at most the RAM). $1 is a validated request or empty.
+tp_build_memory_max() {
+  _bm_kb="$(tp_build_host_mem_kb)"
+  LC_ALL=C awk -v req="$1" -v kb="$_bm_kb" -v rsv="$BUILD_SYSTEM_RESERVED_KB" -v min="$BUILD_MEMORY_MIN_KB" 'BEGIN {
+    total = kb * 1024
+    if (req == "") { n = total - rsv * 1024 } else { n = req + 0 }
+    if (n < min * 1024) n = min * 1024
+    if (n > total) n = total
+    printf "%.0f\n", n
+  }'
+}
+
+# A requested core limit: 1 to 999, no leading zero (so no 0, 000 or 0.5), then
+# optionally a dot and 1 or 2 digits ("2", "1.5", "1.25"). Anything else is
+# refused, never trimmed.
+tp_build_cores_ok() {
+  case "$1" in
+    ''|*[!0-9.]*|.*|*.|*.*.*) return 1 ;;
+  esac
+  case "$1" in
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) return 0 ;;
+    [1-9].[0-9]|[1-9].[0-9][0-9]) return 0 ;;
+    [1-9][0-9].[0-9]|[1-9][0-9].[0-9][0-9]) return 0 ;;
+    [1-9][0-9][0-9].[0-9]|[1-9][0-9][0-9].[0-9][0-9]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The CPUQuota= value (whole percent) for a build: the requested cores clamped
+# to 1..the host's cores; with no request, half the host's cores rounded down
+# (at least 1). $1 is a validated request or empty.
+tp_build_cpu_quota() {
+  _bq_host="$(tp_build_host_cores)"
+  LC_ALL=C awk -v req="$1" -v host="$_bq_host" 'BEGIN {
+    if (req == "") { n = int(host / 2); if (n < 1) n = 1 }
+    else { n = req + 0 }
+    if (n > host) n = host
+    if (n < 1) n = 1
+    printf "%d%%\n", int(n * 100 + 0.5)
+  }'
+}
+
+tp_image_build_unit() {
+  printf 'turbopanel-imagebuild-%s.slice\n' "$(printf '%s' "$1" | tr - _)"
+}
+
+# Make the build's own slice, `turbopanel-imagebuild-<id>.slice`, below the
+# parent slice, with the CPU quota for [CORES] (the same 1..999 rule and clamp
+# as build-run's fourth argument; `-` or none means half the host's cores). The
+# parent's quota is the host's cores, so a build's own limit is what counts.
+# Print the child's cgroup path (the value the daemon passes as `buildx build
+# --cgroup-parent`) and the cores its quota allows. Idempotent: the properties
+# are set with --runtime (they live in /run and never outlive a reboot) and
+# setting them again changes nothing. Fails closed: when the kernel's cpu.max
+# does not show the quota afterwards the verb fails (the daemon then builds without the slice).
+tp_verb_image_build_slice() {
+  { [ $# -ge 1 ] && [ $# -le 2 ]; } ||
+    tp_die "image-build-slice: only image-build-slice BUILD-ID [CORES]"
+  tp_build_id_ok "$1" || tp_die "image-build-slice: refusing build id $1"
+  _ib_cores=""
+  if [ $# -eq 2 ] && [ "$2" != "-" ]; then
+    tp_build_cores_ok "$2" || tp_die "image-build-slice: refusing core limit $2"
+    _ib_cores="$2"
+  fi
+  _ib_unit="$(tp_image_build_unit "$1")"
+  _ib_parent="$(tp_build_cpu_quota "$(tp_build_host_cores)")"
+  _ib_quota="$(tp_build_cpu_quota "$_ib_cores")"
+  case "$_ib_parent$_ib_quota" in
+    [1-9]*%[1-9]*%) ;;
+    *) tp_die "image-build-slice: cannot work out the CPU limit" ;;
+  esac
+  tp_run systemctl set-property --runtime "$IMAGE_BUILD_SLICE" \
+    CPUAccounting=yes CPUQuota="$_ib_parent" ||
+    tp_die "image-build-slice: cannot set the CPU limit on $IMAGE_BUILD_SLICE"
+  tp_run systemctl set-property --runtime "$_ib_unit" \
+    CPUAccounting=yes CPUQuota="$_ib_quota" ||
+    tp_die "image-build-slice: cannot set the CPU limit on $_ib_unit"
+  tp_run systemctl start "$_ib_unit" ||
+    tp_die "image-build-slice: cannot start $_ib_unit"
+  _ib_cgroup="$IMAGE_BUILD_CGROUP/$_ib_unit"
+  if [ -z "$TP_TEST" ]; then
+    _ib_want="$(printf '%s\n' "${_ib_quota%\%}" | awk '{ printf "%d 100000\n", $1 * 1000 }')"
+    _ib_got="$(cat "/sys/fs/cgroup$_ib_cgroup/cpu.max" 2>/dev/null || true)"
+    [ "$_ib_got" = "$_ib_want" ] ||
+      tp_die "image-build-slice: $_ib_unit has cpu.max '$_ib_got', expected '$_ib_want' (is cgroup v2 mounted with the cpu controller?)"
+  fi
+  printf '%s\n' "$_ib_cgroup"
+  printf '%s\n' "${_ib_quota%\%}" | awk '{ printf "%g\n", $1 / 100 }'
+}
+
+# Stop a build's image-build slice and drop its runtime properties (the
+# /run/systemd/system.control drop-in `set-property --runtime` wrote), or with
+# no id every build's: the daemon's startup sweep. Idempotent; a slice that is
+# already gone is not an error.
+tp_verb_image_build_slice_remove() {
+  [ $# -le 1 ] || tp_die "image-build-slice-remove: only image-build-slice-remove [BUILD-ID]"
+  if [ $# -eq 1 ]; then
+    tp_build_id_ok "$1" || tp_die "image-build-slice-remove: refusing build id $1"
+    _ir_unit="$(tp_image_build_unit "$1")"
+    tp_run systemctl stop "$_ir_unit" || true
+    rm -rf "$IMAGE_BUILD_CONTROL_DIR/$_ir_unit.d"
+    tp_run systemctl daemon-reload || true
+    return 0
+  fi
+  tp_run systemctl stop 'turbopanel-imagebuild-*.slice' || true
+  for _ir_dir in "$IMAGE_BUILD_CONTROL_DIR"/turbopanel-imagebuild-*.slice.d; do
+    [ -d "$_ir_dir" ] && rm -rf "$_ir_dir"
+  done
+  tp_run systemctl daemon-reload || true
+  return 0
+}
+
 tp_verb_build_run() {
-  [ $# -eq 3 ] || tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER"
+  { [ $# -ge 3 ] && [ $# -le 6 ]; } ||
+    tp_die "build-run: only build-run BUILD-ID PROJECT-ID OWNER [CORES [MEMORY-BYTES [SWAP]]]"
+  _br_cores=""
+  _br_mem=""
+  if [ $# -ge 4 ] && [ "$4" != "-" ]; then
+    tp_build_cores_ok "$4" || tp_die "build-run: refusing core limit $4"
+    _br_cores="$4"
+  fi
+  _br_swap=off
+  if [ $# -eq 6 ]; then
+    case "$6" in
+      on|off) _br_swap="$6" ;;
+      -) ;;
+      *) tp_die "build-run: refusing swap setting $6" ;;
+    esac
+  fi
+  if [ $# -ge 5 ] && [ "$5" != "-" ]; then
+    tp_build_memory_ok "$5" || tp_die "build-run: refusing memory limit $5"
+    _br_mem="$5"
+  fi
   tp_build_id_ok "$1" || tp_die "build-run: refusing build id $1"
   tp_build_id_ok "$2" || tp_die "build-run: refusing project id $2"
   tp_build_owner_ok "$3" || tp_die "build-run: refusing site owner $3 (not a site owner's Linux user)"
@@ -4770,6 +4935,18 @@ tp_verb_build_run() {
   case "$_br_v" in ''|*[!0-9]*) tp_die "build-run: cannot read the systemd version" ;; esac
   [ "$_br_v" -ge "$BUILD_SYSTEMD_MIN" ] ||
     tp_die "build-run: systemd $_br_v cannot sandbox a build; the supported floor is Debian 13 / Ubuntu 24.04"
+  # Fail closed: an empty or odd value would mean no limit at all.
+  _br_cpuquota="$(tp_build_cpu_quota "$_br_cores")"
+  case "$_br_cpuquota" in
+    [1-9]*%) ;;
+    *) tp_die "build-run: cannot work out the CPU limit" ;;
+  esac
+  _br_memmax="$(tp_build_memory_max "$_br_mem")"
+  case "$_br_memmax" in
+    ''|0*|*[!0-9]*) tp_die "build-run: cannot work out the memory limit" ;;
+  esac
+  _br_swap_prop=MemorySwapMax=0
+  [ "$_br_swap" != on ] || _br_swap_prop="MemorySwapMax=$_br_memmax"
   tp_build_lock
   # Checked again under the lock: with nss-systemd a running build's own
   # throwaway user resolves too, and the lock is what guarantees none is left.
@@ -4856,8 +5033,8 @@ tp_verb_build_run() {
     -p ExecStartPre="+$BUILD_LOOPBACK sync $_br_id $_br_owner" \
     -p ExecStartPre="+/usr/bin/env SUDO_UID=$CALLER_UID SUDO_GID=$CALLER_GID $_self_dir/tp-host build-handover $_br_id $_br_project $_br_owner"
   _br_slice="$(tp_build_slice "$_br_owner")" || tp_die "build-run: no build slice for $_br_owner"
-  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$BUILD_MEMORY_MAX" -p MemorySwapMax=0 \
-    -p CPUQuota="$BUILD_CPU_QUOTA" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
+  set -- "$@" -p Slice="$_br_slice" -p MemoryMax="$_br_memmax" ${_br_swap_prop:+-p "$_br_swap_prop"} \
+    -p CPUQuota="$_br_cpuquota" -p TasksMax=1024 -p IOWeight=50 -p LimitFSIZE=4G \
     -p LimitNOFILE=65536 -p LimitCORE=0 -p RuntimeMaxSec="$BUILD_RUNTIME_MAX_SEC" \
     -p KillMode=control-group -p OOMPolicy=continue -p UMask=0022 \
     -- /bin/sh '${CREDENTIALS_DIRECTORY}/tp-build-runner' "$_br_work"
@@ -5954,6 +6131,18 @@ tp_verb_tunnel_env_remove() {
   rm -f -- "./$1.env"
 }
 
+# Says `present` or `absent` for a tunnel's token copy (the folder is closed to
+# every generic verb, and the daemon cannot read it).
+tp_verb_tunnel_env_present() {
+  [ $# -eq 1 ] || tp_die "tunnel-env-present: takes one tunnel id"
+  tp_tunnel_id_ok "$1" || tp_die "tunnel-env-present: refusing tunnel id $1"
+  if tp_pin_dir "$R_TUNNELENV" && [ -f "./$1.env" ] && [ ! -L "./$1.env" ]; then
+    echo present
+  else
+    echo absent
+  fi
+}
+
 # --- helper container ports (lib/tp-php-loopback) --------------------------
 # A helper container publishes one port on 127.0.0.1 for the Hosting Account of
 # its project, and lib/tp-php-loopback opens that port to that account only. The
@@ -6962,7 +7151,6 @@ case "$_verb" in
   ip) tp_verb_ip "$@" ;;
   wg) tp_verb_wg "$@" ;;
   groupadd) tp_verb_groupadd "$@" ;;
-  groupmod) tp_verb_groupmod "$@" ;;
   useradd) tp_verb_useradd "$@" ;;
   usermod) tp_verb_usermod "$@" ;;
   gpasswd) tp_verb_gpasswd "$@" ;;
@@ -6971,6 +7159,8 @@ case "$_verb" in
   principal-remove) tp_verb_principal_remove "$@" ;;
   modprobe) tp_verb_modprobe "$@" ;;
   build-run) tp_verb_build_run "$@" ;;
+  image-build-slice) tp_verb_image_build_slice "$@" ;;
+  image-build-slice-remove) tp_verb_image_build_slice_remove "$@" ;;
   build-return) tp_verb_build_return "$@" ;;
   build-watch) tp_verb_build_watch "$@" ;;
   build-handover) tp_verb_build_handover "$@" ;;
@@ -6992,6 +7182,7 @@ case "$_verb" in
   site-env-remove) tp_verb_site_env_remove "$@" ;;
   tunnel-env-install) tp_verb_tunnel_env_install "$@" ;;
   tunnel-env-remove) tp_verb_tunnel_env_remove "$@" ;;
+  tunnel-env-present) tp_verb_tunnel_env_present "$@" ;;
   reach-ports-install) tp_verb_reach_ports_install "$@" ;;
   reach-ports-remove) tp_verb_reach_ports_remove "$@" ;;
   cache-prepare) tp_verb_cache_prepare "$@" ;;

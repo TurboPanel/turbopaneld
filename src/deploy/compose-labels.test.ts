@@ -83,10 +83,10 @@ test("buildHostingLabelsFragment configures Traefik and ingress network", () => 
     labels["traefik.http.services.hosting_123.loadbalancer.server.port"],
     "3000",
   );
-  assertEquals(labels["com.turbopanel.project"], "project_123");
-  assertEquals(labels["com.turbopanel.raw-port"], undefined);
+  assertEquals(labels["io.turbopanel.project"], "project_123");
+  assertEquals(labels["io.turbopanel.raw-port"], undefined);
   // The shared Traefik's provider constraint reads this label.
-  assertEquals(labels["com.turbopanel.system.routed"], "true");
+  assertEquals(labels["io.turbopanel.system.routed"], "true");
   assertEquals(fragment.services?.app?.networks, [HOSTING_INGRESS_NETWORK]);
   assertEquals(
     (fragment.networks as Record<string, { external: boolean }>)[
@@ -158,9 +158,9 @@ test("buildHostingLabelsFragment configures a tcp router+service per published p
     "5432",
   );
   assertEquals(labels["traefik.http.routers.hosting_db-5432.rule"], undefined);
-  assertEquals(labels["com.turbopanel.raw-port"], "true");
+  assertEquals(labels["io.turbopanel.raw-port"], "true");
   // TCP/UDP is served by the per-service Traefik, never the shared one.
-  assertEquals(labels["com.turbopanel.system.routed"], undefined);
+  assertEquals(labels["io.turbopanel.system.routed"], undefined);
   assertEquals(fragment.services?.db?.networks, [HOSTING_INGRESS_NETWORK]);
 });
 
@@ -257,8 +257,8 @@ test("buildHostingLabelsFragment stamps raw-port on tcp/udp and pins HTTP entryp
   });
   const labels = fragment.services?.app?.labels as Record<string, string>;
 
-  assertEquals(labels["com.turbopanel.raw-port"], "true");
-  assertEquals(labels["com.turbopanel.service"], "service_mixed");
+  assertEquals(labels["io.turbopanel.raw-port"], "true");
+  assertEquals(labels["io.turbopanel.service"], "service_mixed");
   assertEquals(
     labels["traefik.http.routers.hosting_http.entrypoints"],
     "web,websecure",
@@ -284,20 +284,21 @@ test("buildHostingLabelsFragment does not stamp raw-port on HTTP-only services",
     resolved: appResolved,
   });
   const labels = fragment.services?.app?.labels as Record<string, string>;
-  assertEquals(labels["com.turbopanel.raw-port"], undefined);
+  assertEquals(labels["io.turbopanel.raw-port"], undefined);
   assertEquals(
     labels["traefik.http.routers.hosting_123.entrypoints"],
     "web,websecure",
   );
 });
 
-test("buildHostingLabelsFragment without hostings leaves services free of ingress network", () => {
+test("buildHostingLabelsFragment without hostings adds identity labels but no ingress network", () => {
   const fragment = buildHostingLabelsFragment({
     payload,
     hostings: [],
     resolved: appResolved,
   });
-  assertEquals(fragment.services, undefined);
+  assertEquals(Object.keys(fragment.services ?? {}), ["app"]);
+  assertEquals(fragment.services?.app?.networks, undefined);
   assertEquals(fragment.networks, undefined);
 });
 
@@ -592,4 +593,128 @@ test("buildHostingLabelsFragment routes the names a www mode serves", () => {
     ruleFor("both"),
     "Host(`example.test`) || Host(`www.example.test`)",
   );
+});
+
+test("identity labels are stamped over a tenant's own label of the same key", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved: resolvedFromServices({
+      app: {
+        image: "nginx:alpine",
+        labels: { "io.turbopanel.service": "someone-else" },
+      },
+    }),
+  });
+  const labels = fragment.services?.app?.labels as Record<string, string>;
+  assertEquals(labels["io.turbopanel.service"], "service_123");
+  assertEquals(labels["io.turbopanel.project"], "project_123");
+  assertEquals(labels["io.turbopanel.environment"], "env_123");
+});
+
+test("buildHostingLabelsFragment stamps project and environment on every service, overriding the tenant's", () => {
+  const resolved = resolvedFromServices({
+    app: { image: "nginx:alpine" },
+    worker: {
+      image: "busybox",
+      labels: {
+        "io.turbopanel.project": "victim_project",
+        "io.turbopanel.environment": "victim_env",
+      },
+    },
+  });
+  const fragment = buildHostingLabelsFragment({
+    payload,
+    hostings: payload.hostings,
+    resolved,
+  });
+  for (const name of ["app", "worker"]) {
+    const labels = fragment.services?.[name]?.labels as Record<string, string>;
+    assertEquals(labels["io.turbopanel.project"], "project_123", name);
+    assertEquals(labels["io.turbopanel.environment"], "env_123", name);
+  }
+  // A non-hosted service gets identity only: no routing, no service id.
+  const worker = fragment.services?.worker?.labels as Record<string, string>;
+  assertEquals(Object.keys(worker).sort(), [
+    "io.turbopanel.environment",
+    "io.turbopanel.project",
+  ]);
+  // With no hostings at all the identity is still stamped.
+  const bare = buildHostingLabelsFragment({
+    payload,
+    hostings: [],
+    resolved,
+  });
+  assertEquals(
+    (bare.services?.worker?.labels as Record<string, string>)[
+      "io.turbopanel.project"
+    ],
+    "project_123",
+  );
+  assertEquals(bare.networks, undefined);
+});
+
+const sharedNamespaceModes = ["service:vpn", "container:other", "host", "none"];
+
+for (const mode of sharedNamespaceModes) {
+  test(`buildHostingLabelsFragment leaves networks off a service with network_mode ${mode}`, () => {
+    const resolved = resolvedFromServices({
+      vpn: { image: "vpn:latest" },
+      app: { image: "nginx:alpine", network_mode: mode },
+    });
+    const fragment = buildHostingLabelsFragment({
+      payload: {
+        ...payload,
+        managedNetworkServices: ["vpn", "app"],
+        managedNetwork: MANAGED_NETWORK,
+      },
+      hostings: payload.hostings,
+      resolved,
+    });
+    const app = fragment.services?.app as Record<string, unknown>;
+    const labels = app.labels as Record<string, string>;
+    assertEquals("networks" in app, false);
+    assertEquals(labels["io.turbopanel.project"], "project_123");
+    assertEquals(labels["traefik.enable"], undefined);
+    // The service that owns the namespace still joins the managed network.
+    assertEquals(fragment.services?.vpn?.networks, [MANAGED_NETWORK]);
+    // The only hosting was skipped, so the ingress network is not declared.
+    assertEquals(Object.keys(fragment.networks as Record<string, unknown>), [
+      MANAGED_NETWORK,
+    ]);
+  });
+}
+
+test("buildHostingLabelsFragment routes the namespace owner and skips its dependent", () => {
+  const resolved = resolvedFromServices({
+    vpn: { image: "vpn:latest" },
+    app: { image: "nginx:alpine", network_mode: "service:vpn" },
+  });
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      hostings: [{ ...payload.hostings[0], composeServiceName: "vpn" }],
+    },
+    hostings: [{ ...payload.hostings[0], composeServiceName: "vpn" }],
+    resolved,
+  });
+  assertEquals(fragment.services?.vpn?.networks, [HOSTING_INGRESS_NETWORK]);
+  assertEquals("networks" in (fragment.services?.app ?? {}), false);
+});
+
+test("buildHostingLabelsFragment declares no managed network when only shared-namespace services want it", () => {
+  const fragment = buildHostingLabelsFragment({
+    payload: {
+      ...payload,
+      hostings: [],
+      managedNetworkServices: ["app"],
+      managedNetwork: MANAGED_NETWORK,
+    },
+    hostings: [],
+    resolved: resolvedFromServices({
+      app: { image: "nginx:alpine", network_mode: "host" },
+    }),
+  });
+  assertEquals("networks" in (fragment.services?.app ?? {}), false);
+  assertEquals(fragment.networks, undefined);
 });

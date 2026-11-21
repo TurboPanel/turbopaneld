@@ -21,11 +21,11 @@ import {
 } from "../deploy/release/live-release-scan.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
-import {
-  COMMAND_RECOVERY_FEATURE,
-  DAEMON_WIRE_FEATURES,
-} from "./version-wire.ts";
-import type { CommandRecoveryReport } from "../contracts/cell-messages.ts";
+import { DAEMON_WIRE_FEATURES } from "./version-wire.ts";
+import type {
+  CommandRecoveryReport,
+  CommandStateReport,
+} from "../contracts/cell-messages.ts";
 import {
   panelPinReport,
   readPanelIdentityPinSync,
@@ -98,6 +98,12 @@ export const PRESENCE_REFRESH_MS = 5 * 60_000;
  */
 export const MAX_CONNECTION_AGE_MS = 2 * 60 * 60 * 1_000;
 
+/**
+ * How long past its age limit a connection may wait for a quiet moment (no
+ * running command, no unconfirmed outcome) before it is recycled anyway.
+ */
+export const MAX_CONNECTION_QUIET_WAIT_MS = 10 * 60 * 1_000;
+
 /** Default forced-recycle age is spread by +-10% so a fleet that connected together does not recycle together. */
 export const MAX_CONNECTION_AGE_JITTER = 0.1;
 
@@ -147,19 +153,20 @@ export type IdlePresenceOptions = {
    */
   onMaxAge?: () => void;
   /**
-   * True when the control plane lists `host-capacity-v1`. Only then does a
-   * heartbeat carry `resources.{memory,swap,cpus}` after they move; an older
-   * control plane keeps the hello figures. Defaults to never.
-   */
-  hostCapacityFlag?: () => boolean;
-  /**
    * Running and unconfirmed command ids (`command-recovery-v1`). Added to
-   * `hello` whenever not empty (the control plane's feature list is not known
-   * yet at that point; an older one ignores the field) and to `heartbeat` only
-   * once {@link peerSupports} says the control plane advertises the feature.
+   * `hello` and `heartbeat` whenever not empty.
    */
   commandReport?: () => CommandRecoveryReport | undefined;
-  peerSupports?: (feature: string) => boolean;
+  /** What this process remembers about commands (`command-recovery-v2`); `hello` only. */
+  commandState?: () => CommandStateReport | undefined;
+  /**
+   * True when no command is running and no outcome waits for its ack. A
+   * connection past its age limit waits for this, up to
+   * {@link maxQuietWaitMs}, so a recycle does not cut a command's link.
+   */
+  commandsQuiet?: () => boolean;
+  /** Override for tests; defaults to {@link MAX_CONNECTION_QUIET_WAIT_MS}. */
+  maxQuietWaitMs?: number;
 };
 
 /** The part of host resources a heartbeat re-sends when it moves. */
@@ -381,9 +388,11 @@ export class IdlePresence {
   readonly #jitterMaxAge: boolean;
   #maxConnectionAgeMs: number;
   readonly #onMaxAge: (() => void) | undefined;
-  readonly #hostCapacityFlag: (() => boolean) | undefined;
   readonly #commandReport: IdlePresenceOptions["commandReport"];
-  readonly #peerSupports: IdlePresenceOptions["peerSupports"];
+  readonly #commandState: IdlePresenceOptions["commandState"];
+  readonly #commandsQuiet: IdlePresenceOptions["commandsQuiet"];
+  readonly #maxQuietWaitMs: number;
+  #quietWaitLogged = false;
 
   #ws: WebSocket | undefined;
   #idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -418,9 +427,11 @@ export class IdlePresence {
     this.#jitterMaxAge = options.maxConnectionAgeMs === undefined;
     this.#maxConnectionAgeMs = this.#baseMaxConnectionAgeMs;
     this.#onMaxAge = options.onMaxAge;
-    this.#hostCapacityFlag = options.hostCapacityFlag;
     this.#commandReport = options.commandReport;
-    this.#peerSupports = options.peerSupports;
+    this.#commandState = options.commandState;
+    this.#commandsQuiet = options.commandsQuiet;
+    this.#maxQuietWaitMs = options.maxQuietWaitMs ??
+      MAX_CONNECTION_QUIET_WAIT_MS;
   }
 
   get lastActivityAt(): number {
@@ -460,6 +471,7 @@ export class IdlePresence {
       ? jitteredMaxConnectionAgeMs(this.#baseMaxConnectionAgeMs)
       : this.#baseMaxConnectionAgeMs;
     this.#maxAgeReported = false;
+    this.#quietWaitLogged = false;
     this.#lastPresenceFrameAt = 0;
     this.#sendHello();
     this.#armIdleTimer();
@@ -506,6 +518,21 @@ export class IdlePresence {
     if (this.#ws?.readyState !== WebSocket.OPEN) return false;
     const ageMs = Date.now() - this.#connectedAtMs;
     if (ageMs < this.#maxConnectionAgeMs) return false;
+    if (
+      ageMs < this.#maxConnectionAgeMs + this.#maxQuietWaitMs &&
+      this.#commandsQuiet?.() === false
+    ) {
+      // Commands are running or unconfirmed: recycle at the next quiet
+      // moment, never later than the bounded wait.
+      if (!this.#quietWaitLogged) {
+        this.#quietWaitLogged = true;
+        logInfo(
+          "instance",
+          "connection past its age limit; waiting for running commands to finish",
+        );
+      }
+      return false;
+    }
     this.#maxAgeReported = true;
     logInfo(
       "instance",
@@ -539,15 +566,16 @@ export class IdlePresence {
     return JSON.stringify(snapshot);
   }
 
-  /** `{ commands }` when there is something to report (and, for a heartbeat, the peer supports it). */
-  #commandsField(
-    needsPeer: boolean,
-  ): { commands?: CommandRecoveryReport } {
-    if (needsPeer && this.#peerSupports?.(COMMAND_RECOVERY_FEATURE) !== true) {
-      return {};
-    }
+  /** `{ commands }` when there is something to report. */
+  #commandsField(): { commands?: CommandRecoveryReport } {
     const commands = this.#commandReport?.();
     return commands ? { commands } : {};
+  }
+
+  /** `{ commandState }` on every hello (`command-recovery-v2`). */
+  #commandStateField(): { commandState?: CommandStateReport } {
+    const commandState = this.#commandState?.();
+    return commandState ? { commandState } : {};
   }
 
   #sendHello(): void {
@@ -585,7 +613,8 @@ export class IdlePresence {
           ? { panelPin: this.#signedPanelPin }
           : panelPinField()),
         ...(this.#attachProof ? { attach: this.#attachProof } : {}),
-        ...this.#commandsField(false),
+        ...this.#commandsField(),
+        ...this.#commandStateField(),
       }));
       this.#lastActivityAt = Date.now();
       this.#lastPresenceFrameAt = this.#lastActivityAt;
@@ -658,9 +687,8 @@ export class IdlePresence {
     });
   }
 
-  /** Moved capacity to re-send, or `undefined` (also for an older control plane). */
+  /** Moved capacity to re-send, or `undefined`. */
   #capacityToSend(): HostCapacitySnapshot | undefined {
-    if (!this.#hostCapacityFlag?.()) return undefined;
     const next = hostCapacityFromResources(hostResourcesProvider());
     if (!hostCapacityMoved(this.#lastCapacity, next)) return undefined;
     this.#lastCapacity = next;
@@ -753,7 +781,7 @@ export class IdlePresence {
       payload.releaseLinkScan = fields.releaseLinkScan;
     }
 
-    Object.assign(payload, this.#commandsField(true));
+    Object.assign(payload, this.#commandsField());
 
     try {
       ws.send(JSON.stringify(payload));

@@ -11,7 +11,9 @@
  * creates for that one run (`DynamicUser=yes`, never a host account, never in
  * docker or tp), inside the site owner's own resource group
  * (`turbopanel-<owner>-build.slice`), with daemon trees and sockets hidden,
- * private-range and metadata egress denied, 4G memory, 2 CPUs, 30 minutes.
+ * private-range and metadata egress denied, CPU core and memory limits (the
+ * smallest set for the build, else defaults from the host's size;
+ * `./build-limits.ts`), 30 minutes.
  * The unit hands the tree to its user as it starts; `build-return` gives it
  * back only once that unit is gone, and only then does the daemon read it
  * (`./safe-copy.ts`, contained in `work/<id>`). Package caches live in
@@ -31,9 +33,23 @@ import { redactCommandSummary } from "../../logs/redactor.ts";
 import { BUILD_SIBLING_DIR, PROD_LIB_DIR_DEFAULT } from "../../paths/layout.ts";
 import { hostSudoArgs } from "../../permissions/host-sudo.ts";
 import type { RunFn } from "../ensure-principal.ts";
+import {
+  buildCoresArg,
+  type BuildLimits,
+  buildMemoryArg,
+  buildOutOfMemoryMessage,
+  buildSwapArg,
+  describeBuildLimits,
+  type HostCapacity,
+  noteServerMemoryTotal,
+  readHostCapacity,
+  resolveBuildLimits,
+} from "./build-limits.ts";
+import { roundCores } from "../../contracts/build-limits.ts";
 import type { ReleaseOutputHandler } from "./checkout.ts";
 import { runPrivileged } from "./release-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
+import { logWarn } from "../../util/logger.ts";
 import { throwIfAborted } from "../deploy-cancel.ts";
 
 /** The build-user role's tree; tp-host pins the same path. */
@@ -91,6 +107,12 @@ export type BuildWork = {
   checkoutDir: string;
   /** `caches/<owner>/<projectKey>`, bound into the build unit at the same path. */
   cacheDir: string;
+  /**
+   * The core and memory limits the control plane resolved for this build.
+   * Absent (an older control plane): the defaults, half the host's cores and
+   * its RAM less 1 GiB.
+   */
+  buildLimits?: BuildLimits;
 };
 
 /** Root-owned facts that mark a host whose builds must be sandboxed. */
@@ -145,6 +167,7 @@ export async function resolveBuildWork(
     projectId: string;
     /** The site owner's Linux user. */
     owner: string;
+    buildLimits?: BuildLimits;
   },
   root: string = BUILD_SANDBOX_ROOT,
 ): Promise<BuildWork> {
@@ -171,6 +194,9 @@ export async function resolveBuildWork(
     workDir,
     checkoutDir: join(workDir, "source"),
     cacheDir: join(root, "caches", params.owner, params.projectId),
+    ...(params.buildLimits === undefined
+      ? {}
+      : { buildLimits: params.buildLimits }),
   };
 }
 
@@ -396,6 +422,81 @@ export async function removeBuildWork(
   }
 }
 
+/** The parent slice of every container image build's own slice. */
+const IMAGE_BUILD_PARENT_CGROUP =
+  "/turbopanel.slice/turbopanel-imagebuild.slice";
+
+/** The cgroup `tp-host image-build-slice` makes for a build (`-` become `_`). */
+export function imageBuildCgroup(buildId: string): string {
+  return `${IMAGE_BUILD_PARENT_CGROUP}/turbopanel-imagebuild-${
+    buildId.replaceAll("-", "_")
+  }.slice`;
+}
+
+/**
+ * `tp-host image-build-slice <id> [cores]`: make this build's own slice below
+ * the image-build parent slice, with a CPU quota from the build's core limit
+ * (the same number `build-run` takes; none set means half the host's cores,
+ * decided by `tp-host`). Idempotent. Returns the cgroup path for `buildx build
+ * --cgroup-parent` and the cores the quota allows, clamped to the host's; throws
+ * when the slice could not be made (the image build only warns and goes on).
+ * The caller removes it with {@link removeImageBuildSlice} when the build ends.
+ */
+export async function ensureImageBuildSlice(
+  buildId: string,
+  limits: BuildLimits | undefined,
+  runFn: RunFn = runPrivileged,
+): Promise<{ cgroup: string; cores: number }> {
+  const cores = limits?.cores === undefined
+    ? "-"
+    : String(roundCores(limits.cores.cores));
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(["-n", "image-build-slice", buildId, cores], MANAGED),
+  );
+  const lines = result.stdout.trim().split("\n");
+  const cgroup = lines.at(-2) ?? "";
+  const allowed = Number(lines.at(-1));
+  if (
+    !result.success || cgroup !== imageBuildCgroup(buildId) ||
+    !Number.isFinite(allowed) || allowed <= 0
+  ) {
+    throw new Error(
+      `could not set up the image build's CPU slice: ${
+        result.stderr.trim() || "image-build-slice failed"
+      }`,
+    );
+  }
+  return { cgroup, cores: allowed };
+}
+
+/**
+ * `tp-host image-build-slice-remove [id]`: stop a build's slice and drop its
+ * runtime properties, or every build's slice with no id. Best effort: a slice
+ * that is left behind is removed by the next daemon start's sweep.
+ */
+export async function removeImageBuildSlice(
+  buildId?: string,
+  runFn: RunFn = runPrivileged,
+): Promise<void> {
+  try {
+    const result = await runFn(
+      "sudo",
+      buildId === undefined
+        ? hostSudoArgs(["-n", "image-build-slice-remove"], MANAGED)
+        : hostSudoArgs(["-n", "image-build-slice-remove", buildId], MANAGED),
+    );
+    if (!result.success) {
+      logWarn(
+        "build-sandbox",
+        `image-build-slice-remove failed: ${result.stderr.trim()}`,
+      );
+    }
+  } catch {
+    // Left for the next sweep.
+  }
+}
+
 /** `tp-host build-return <id>`: the tree back to the daemon, unit gone. */
 export async function returnBuildWork(
   work: BuildWork,
@@ -464,6 +565,10 @@ export type SandboxedBuildParams = {
   redactSummary?: CommandSummaryRedactor;
   /** Privileged runner for `systemctl stop` and `build-return`. */
   runFn?: RunFn;
+  /** Test seam: asks the helper whether it takes limit arguments. */
+  probeHelper?: HelperProbe;
+  /** Test seam: the host's size the limits are clamped to. */
+  host?: HostCapacity;
   spawn?: SandboxSpawn;
   timeoutMs?: number;
   /** Stop the build once it has printed this many characters. */
@@ -604,17 +709,103 @@ function failureMessage(
     `build failed in the build sandbox (exit ${code})`;
 }
 
+/**
+ * Whether the host helper takes the limit arguments of `build-run`, asked
+ * BEFORE the build starts and never from the build's own output (a tenant
+ * build can print anything). `build-run` is called with a build id it refuses
+ * and the three limit arguments: a helper that predates them answers with its
+ * argument-count message, a current one refuses the id. No unit starts either
+ * way. Only a positive answer is kept, so a helper updated later is noticed.
+ * Anything else (sudo trouble, an unknown answer) counts as current: the
+ * limits are sent and the build fails loudly rather than run unlimited.
+ */
+let helperTakesLimits = false;
+
+export type HelperProbe = (runFn: RunFn) => Promise<boolean>;
+
+const probeHelperTakesLimits: HelperProbe = async (runFn) => {
+  const result = await runFn(
+    "sudo",
+    hostSudoArgs(
+      ["-n", "build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"],
+      MANAGED,
+    ),
+  );
+  const text = result.stderr;
+  return !(text.includes("only build-run BUILD-ID PROJECT-ID OWNER") &&
+    !text.includes("[CORES"));
+};
+
+/** Test seam: forget the cached answer. */
+export function resetBuildHelperProbe(): void {
+  helperTakesLimits = false;
+}
+
+async function helperAcceptsLimits(
+  runFn: RunFn,
+  probe: HelperProbe,
+): Promise<boolean> {
+  if (helperTakesLimits) return true;
+  let accepts: boolean;
+  try {
+    accepts = await probe(runFn);
+  } catch {
+    accepts = true;
+  }
+  if (accepts) helperTakesLimits = true;
+  return accepts;
+}
+
+/**
+ * A build the kernel killed for going over its memory limit: the unit's exit
+ * 137 (SIGKILL), or the runner's own last line saying a step exited 137. Text
+ * the build itself prints ("Killed") is never trusted for this.
+ */
+export function looksOutOfMemory(code: number, stderr: string): boolean {
+  if (code === 137) return true;
+  const lines = stderr.trimEnd().split("\n");
+  const last = lines.at(-1) ?? "";
+  return /^tp-build-runner: step \d+ of \d+ failed \(exit 137\)$/.test(last);
+}
+
 async function runBuildUnit(
   params: SandboxedBuildParams,
   runFn: RunFn,
 ): Promise<void> {
   const { work, onOutput } = params;
+  const withLimits = await helperAcceptsLimits(
+    runFn,
+    params.probeHelper ?? probeHelperTakesLimits,
+  );
+  if (!withLimits) {
+    onOutput?.(
+      "stderr",
+      "the host helper is older than this daemon and cannot set build limits; the build runs with its fixed limit (finish the update on this host)",
+    );
+  }
+  const host = params.host ?? await readHostCapacity();
+  const highestTotal = noteServerMemoryTotal(host.memoryBytes);
+  const resolved = resolveBuildLimits(work.buildLimits, host);
+  if (withLimits) onOutput?.("stdout", describeBuildLimits(resolved, host));
   const redact = params.redactSummary ??
     ((text: string) => redactCommandSummary(text));
   const timeoutMs = params.timeoutMs ?? SANDBOX_BUILD_TIMEOUT_MS;
   const child = (params.spawn ?? spawnSudo)(
     hostSudoArgs(
-      ["-n", "build-run", work.buildId, work.projectKey, work.owner],
+      [
+        "-n",
+        "build-run",
+        work.buildId,
+        work.projectKey,
+        work.owner,
+        ...(withLimits
+          ? [
+            buildCoresArg(resolved),
+            buildMemoryArg(resolved),
+            buildSwapArg(resolved),
+          ]
+          : []),
+      ],
       MANAGED,
     ),
   );
@@ -660,6 +851,15 @@ async function runBuildUnit(
     throw new Error(`${abortReason}; the build unit was stopped`);
   }
   if (!status.success) {
+    if (withLimits && looksOutOfMemory(status.code, stderr)) {
+      throw new Error(
+        buildOutOfMemoryMessage(
+          resolved.memoryBytes,
+          host.memoryBytes,
+          highestTotal,
+        ),
+      );
+    }
     throw new Error(failureMessage(status.code, stdout, stderr, redact));
   }
 }

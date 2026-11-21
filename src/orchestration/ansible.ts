@@ -98,11 +98,28 @@ export async function ansiblePlaybookWorks(): Promise<boolean> {
 
 export async function ansibleLintWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_LINT_BIN))) return false;
-  const result = await run(ANSIBLE_LINT_BIN, ["--version"], {
-    stream: false,
-    env: ansibleProbeEnv(),
-  });
-  return result.success;
+  // ansible-lint keeps a project cache (`.ansible/` with `.lock`,
+  // `collections/`, `roles/`) in its project directory, which it finds from
+  // the working directory (the filesystem root when nothing marks a project),
+  // whatever HOME and ANSIBLE_HOME say. The installer starts from `/`, which
+  // left `/.ansible` on a fresh host. Always use a private throwaway folder
+  // (0700, removed afterwards): this also runs as root, and a root-owned
+  // cache inside the tp-owned state leaf would break the daemon's own probe.
+  const scratch = await Deno.makeTempDir({ prefix: "turbopanel-lint-probe-" });
+  try {
+    const result = await run(
+      ANSIBLE_LINT_BIN,
+      ["--project-dir", scratch, "--version"],
+      { stream: false, cwd: scratch, env: ansibleProbeEnv() },
+    );
+    return result.success;
+  } finally {
+    try {
+      await Deno.remove(scratch, { recursive: true });
+    } catch {
+      // Best effort: never let cleanup mask the probe result.
+    }
+  }
 }
 
 /** Point the stable `current` symlink at the active ansible venv directory. */

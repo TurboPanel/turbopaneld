@@ -1,5 +1,10 @@
 import { dirname, join } from "node:path";
 import {
+  COMPOSE_CHECKOUT_DIRNAME,
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
+} from "../deploy/compose-checkout-marker.ts";
+import {
   COMPOSE_ENV_FILENAME,
   COMPOSE_PREVIOUS_DIRNAME,
   COMPOSE_STAGE_DIRNAME,
@@ -34,6 +39,7 @@ import {
 } from "../deploy/ingress.ts";
 import { removeCronJobs } from "../deploy/cron/apply.ts";
 import { runHostCommand } from "../deploy/systemd-unit-set.ts";
+import { syncPhpSharedSiteRecords } from "../deploy/site/php-patch-restart.ts";
 import { removeEnvironmentSiteLifecycle } from "../deploy/site/lifecycle-deploy.ts";
 import { removeSites } from "../deploy/site.ts";
 import { removeNativeAppServices } from "../deploy/native/apply-native-apps.ts";
@@ -336,6 +342,11 @@ const DAEMON_DEPLOYMENT_ENTRIES = [
   DEPLOYMENT_MANIFEST_FILENAME,
   COMPOSE_PREVIOUS_DIRNAME,
   COMPOSE_STAGE_DIRNAME,
+  // A Git Compose project's checkout is the daemon's, not the service's: the
+  // next deploy fetches it again (`deploy/compose-checkout.ts`).
+  COMPOSE_CHECKOUT_DIRNAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
 ] as const;
 
 /**
@@ -624,6 +635,7 @@ async function stopEnvironmentLocked(
         )),
   );
   await removeSites(layout, parsedPayload.environmentId);
+  await syncPhpSharedSiteRecords(layout, parsedPayload.environmentId, []);
   // Disable + remove the generated app units before the release trees they run
   // out of are reclaimed, so systemd never restarts a unit whose
   // `WorkingDirectory` has just been deleted. The per-principal slice is

@@ -1,9 +1,7 @@
 /**
  * Send the copy reports (`copies/reports/<jobId>.json`) to the control plane
  * as `backup-copy-report` frames and delete each only when the matching
- * `backup-copy-report-result` arrives. Nothing is sent unless the attached
- * control plane lists `backup-s3-copy-v1`: an older one would close the socket
- * on a frame it does not know.
+ * `backup-copy-report-result` arrives.
  */
 
 import type {
@@ -20,7 +18,6 @@ const JOB_ID_RE = /^[0-9a-f]{32}$/;
 
 export type BackupCopyReporterOptions = {
   send: (message: BackupCopyReportMessage) => boolean;
-  peerSupports: () => boolean;
   intervalMs?: number;
   now?: () => string;
   layout?: Pick<LayoutPaths, "daemonStateDir">;
@@ -54,7 +51,7 @@ export class BackupCopyReporter {
   }
 
   async tick(): Promise<void> {
-    if (this.#ticking || !this.#opts.peerSupports()) return;
+    if (this.#ticking) return;
     this.#ticking = true;
     try {
       const reports = await listCopyReports(this.#layout());

@@ -2,8 +2,10 @@ import { assert, assertEquals, assertFalse } from "@std/assert";
 import {
   classifyRoute,
   DEFAULT_POLICY_CONFIG,
+  denoIsRegularFile,
   evaluateDetailed,
   evaluateRequest,
+  type IsRegularFile,
   pathIsCanonical,
   type PolicyConfig,
   type RequestFacts,
@@ -53,6 +55,7 @@ async function verdict(
   facts: Partial<RequestFacts> & { body?: unknown },
   config: PolicyConfig = DEFAULT_POLICY_CONFIG,
   resolve: ResolvePath = identity,
+  isRegularFile: IsRegularFile = () => true,
 ): Promise<Violation[]> {
   return await evaluateRequest(
     {
@@ -63,6 +66,7 @@ async function verdict(
     },
     config,
     resolve,
+    isRegularFile,
   );
 }
 
@@ -725,7 +729,7 @@ test("container create breadth: fields that reach the host are findings, deny by
 test("the orchestrator's numeric group_add is fine for a platform container only", async () => {
   const labels = {
     "turbopanel.role": "turbopanel",
-    "com.turbopanel.system.component": "managed-ha",
+    "io.turbopanel.system.component": "managed-ha",
   };
   const create = async (groups: string[], withLabels: boolean) => {
     const body = baseCreate() as Record<string, unknown>;
@@ -1023,5 +1027,321 @@ test("an unknown path, or a known path under the wrong method, is a finding (den
       (p) => Promise.resolve(p),
     );
     assertEquals(found.map((v) => v.rule), ["unclassified-route"], path);
+  }
+});
+
+const PROJECT = "0b8f6a52-4d1e-4c7a-9a43-6f1d2e8c5b10";
+const ENVIRONMENT = "9c2e7d14-83ab-4f60-b5d9-1a7c3e4f8d26";
+const GENERATED = `/run/turbopanel/deployments/${PROJECT}/${ENVIRONMENT}`;
+
+/** What the daemon stamps on every service of the deploy that owns `GENERATED`. */
+const TENANT_LABELS = {
+  "com.docker.compose.project": "tenant-app",
+  "io.turbopanel.project": PROJECT,
+  "io.turbopanel.environment": ENVIRONMENT,
+};
+
+async function generatedBind(
+  source: string,
+  options: { suffix?: string; labels?: Record<string, string> } = {},
+  resolve: ResolvePath = identity,
+  isRegularFile: IsRegularFile = () => true,
+): Promise<Violation[]> {
+  const body = baseCreate() as {
+    HostConfig: Record<string, unknown>;
+    Labels?: Record<string, string>;
+  };
+  body.Labels = options.labels ?? TENANT_LABELS;
+  body.HostConfig.Binds = [
+    `${source}:/run/secrets/x${options.suffix ?? ":ro"}`,
+  ];
+  return await verdict({ body }, DEFAULT_POLICY_CONFIG, resolve, isRegularFile);
+}
+
+test("a tenant container may bind its generated secret and config files read-only", async () => {
+  for (const kind of ["secrets", "configs"]) {
+    for (const name of ["db_password", "ca.pem", "A-1.conf"]) {
+      assertEquals(await generatedBind(`${GENERATED}/${kind}/${name}`), []);
+    }
+  }
+  // The long form agrees.
+  const body = baseCreate() as Record<string, unknown> & {
+    HostConfig: Record<string, unknown>;
+  };
+  body.Labels = TENANT_LABELS;
+  delete body.HostConfig.Binds;
+  body.HostConfig.Mounts = [{
+    Type: "bind",
+    Source: `${GENERATED}/secrets/db_password`,
+    Target: "/run/secrets/db_password",
+    ReadOnly: true,
+  }];
+  assertEquals(await verdict({ body }), []);
+});
+
+test("generated file binds are refused unless they match exactly", async () => {
+  const refused: Array<[string, string, string]> = [
+    ["read-write", `${GENERATED}/secrets/a`, ":rw"],
+    ["no mode", `${GENERATED}/secrets/a`, ":"],
+    ["the folder", `${GENERATED}/secrets`, ":ro"],
+    ["the folder with a slash", `${GENERATED}/secrets/`, ":ro"],
+    ["a nested name", `${GENERATED}/secrets/sub/a`, ":ro"],
+    ["another kind", `${GENERATED}/other/a`, ":ro"],
+    ["the environment folder", GENERATED, ":ro"],
+    ["the deployments folder", "/run/turbopanel/deployments", ":ro"],
+    [
+      "a non-UUID project",
+      `/run/turbopanel/deployments/x/${ENVIRONMENT}/secrets/a`,
+      ":ro",
+    ],
+    [
+      "a non-UUID environment",
+      `/run/turbopanel/deployments/${PROJECT}/x/secrets/a`,
+      ":ro",
+    ],
+    ["a hidden name", `${GENERATED}/secrets/.a`, ":ro"],
+    ["a temp name", `${GENERATED}/secrets/a.tmp`, ":ro"],
+    ["dotdot", `${GENERATED}/secrets/../../../../../etc/passwd`, ":ro"],
+    ["dotdot inside", `${GENERATED}/secrets/a..b/../c`, ":ro"],
+    [
+      "another run dir",
+      `/run/other/deployments/${PROJECT}/${ENVIRONMENT}/secrets/a`,
+      ":ro",
+    ],
+    ["the daemon's other run files", "/run/turbopanel/state.json", ":ro"],
+  ];
+  for (const [name, source, suffix] of refused) {
+    const found = await generatedBind(source, { suffix });
+    assert(found.length > 0, `${name} is refused`);
+  }
+});
+
+test("a generated file bind must match the container's own project and environment labels", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  const OTHER_PROJECT = "1a2b3c4d-0000-4000-8000-000000000001";
+  const OTHER_ENVIRONMENT = "1a2b3c4d-0000-4000-8000-000000000002";
+  const refuse = async (labels: Record<string, string>, why: string) =>
+    assertEquals(
+      ruleNames(await generatedBind(source, { labels })),
+      ["bind-forbidden-path"],
+      why,
+    );
+  const base = { "com.docker.compose.project": "tenant-app" };
+  await refuse(
+    { ...TENANT_LABELS, "io.turbopanel.project": OTHER_PROJECT },
+    "another tenant's project",
+  );
+  await refuse(
+    { ...TENANT_LABELS, "io.turbopanel.environment": OTHER_ENVIRONMENT },
+    "another environment of the same project",
+  );
+  await refuse(base, "no identity labels");
+  await refuse(
+    { ...base, "io.turbopanel.environment": ENVIRONMENT },
+    "project label missing",
+  );
+  await refuse(
+    { ...base, "io.turbopanel.project": PROJECT },
+    "environment label missing",
+  );
+  await refuse(
+    { ...TENANT_LABELS, "io.turbopanel.project": PROJECT.toUpperCase() },
+    "label case differs",
+  );
+  assertEquals(await generatedBind(source, { labels: TENANT_LABELS }), []);
+  // Labels of another prefix are no identity.
+  await refuse(
+    {
+      ...base,
+      "com.turbopanel.project": PROJECT,
+      "com.turbopanel.environment": ENVIRONMENT,
+    },
+    "other prefix only",
+  );
+});
+
+test("generated file binds are for tenant containers only", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  assertEquals(
+    ruleNames(await generatedBind(source, { labels: {} })),
+    ["bind-forbidden-path"],
+  );
+  assertEquals(
+    ruleNames(
+      await generatedBind(source, {
+        labels: { "tp.managed.engine": "postgres" },
+      }),
+    ),
+    ["bind-forbidden-path"],
+  );
+});
+
+test("a symlink does not qualify as a generated file", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  // The link resolves elsewhere in the same tree.
+  const found = await generatedBind(
+    source,
+    {},
+    (path) =>
+      Promise.resolve(
+        path === source ? `${GENERATED}/secrets/b` : path,
+      ),
+  );
+  assertEquals(ruleNames(found), ["bind-forbidden-path"]);
+  // And one that leaves it.
+  const out = await generatedBind(
+    source,
+    {},
+    () => Promise.resolve("/etc/shadow"),
+  );
+  assertEquals(ruleNames(out), ["bind-forbidden-path"]);
+});
+
+test("the generated file allowance follows the configured run dir", async () => {
+  const config = { ...DEFAULT_POLICY_CONFIG, runDir: "/run/elsewhere" };
+  const body = baseCreate() as {
+    HostConfig: Record<string, unknown>;
+    Labels?: Record<string, string>;
+  };
+  body.Labels = TENANT_LABELS;
+  body.HostConfig.Binds = [
+    `/run/elsewhere/deployments/${PROJECT}/${ENVIRONMENT}/secrets/a:/s:ro`,
+  ];
+  assertEquals(await verdict({ body }, config), []);
+  body.HostConfig.Binds = [`${GENERATED}/secrets/a:/s:ro`];
+  assertEquals(ruleNames(await verdict({ body }, config)), [
+    "bind-forbidden-path",
+  ]);
+});
+
+test("a generated file bind needs an existing regular file (a directory or a missing source is refused)", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  const asked: string[] = [];
+  const probe = (kind: "file" | "dir" | "missing"): IsRegularFile => (path) => {
+    asked.push(path);
+    return kind === "file";
+  };
+  assertEquals(await generatedBind(source, {}, identity, probe("file")), []);
+  assertEquals(asked, [source]);
+  for (const kind of ["dir", "missing"] as const) {
+    assertEquals(
+      ruleNames(await generatedBind(source, {}, identity, probe(kind))),
+      ["bind-forbidden-path"],
+      kind,
+    );
+  }
+});
+
+test("the production probe is lstat: a directory, a link and a missing path are not regular files", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-gate-probe-" });
+  try {
+    await Deno.writeTextFile(`${dir}/file`, "x");
+    await Deno.mkdir(`${dir}/sub`);
+    await Deno.symlink(`${dir}/file`, `${dir}/link`);
+    assertEquals(denoIsRegularFile(`${dir}/file`), true);
+    assertEquals(denoIsRegularFile(`${dir}/sub`), false);
+    assertEquals(denoIsRegularFile(`${dir}/link`), false);
+    assertEquals(denoIsRegularFile(`${dir}/none`), false);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("a resolver that throws fails closed: no generated file allowance", async () => {
+  const body = baseCreate() as {
+    HostConfig: Record<string, unknown>;
+    Labels?: Record<string, string>;
+  };
+  body.Labels = { "com.docker.compose.project": "tenant-app" };
+  body.HostConfig.Binds = [`${GENERATED}/secrets/a:/s:ro`];
+  const throwing: ResolvePath = () => Promise.reject(new Error("EACCES"));
+  const found = await evaluateDetailed(
+    {
+      method: "POST",
+      path: "/containers/create",
+      query: new URLSearchParams(),
+      body,
+    },
+    DEFAULT_POLICY_CONFIG,
+    throwing,
+    () => true,
+  );
+  assertEquals(ruleNames(found.violations), ["bind-forbidden-path"]);
+  assertEquals(found.allowances, []);
+});
+
+test("generated file binds need lowercase ids (the daemon writes lowercase)", async () => {
+  const upper = (id: string) => id.toUpperCase();
+  const root = "/run/turbopanel/deployments";
+  for (
+    const source of [
+      `${root}/${upper(PROJECT)}/${ENVIRONMENT}/secrets/a`,
+      `${root}/${PROJECT}/${upper(ENVIRONMENT)}/secrets/a`,
+    ]
+  ) {
+    assertEquals(ruleNames(await generatedBind(source)), [
+      "bind-forbidden-path",
+    ], source);
+  }
+});
+
+test("generated file binds refuse SELinux relabel options", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  for (const suffix of [":ro,z", ":ro,Z", ":z,ro", ":Z,ro"]) {
+    assertEquals(
+      ruleNames(await generatedBind(source, { suffix })),
+      ["bind-forbidden-path"],
+      suffix,
+    );
+  }
+});
+
+test("a rshared or rslave propagation on a generated file bind is refused", async () => {
+  const source = `${GENERATED}/secrets/a`;
+  for (const suffix of [":ro,rshared", ":ro,shared", ":ro,rslave"]) {
+    assert(
+      ruleNames(await generatedBind(source, { suffix })).includes(
+        "bind-propagation",
+      ),
+      suffix,
+    );
+  }
+});
+
+test("a mount entry binds a generated file only when ReadOnly is true", async () => {
+  const mounts = (extra: Record<string, unknown>) => {
+    const body = baseCreate();
+    delete body.HostConfig.Binds;
+    body.HostConfig.Mounts = [{
+      Type: "bind",
+      Source: `${GENERATED}/secrets/a`,
+      Target: "/run/secrets/a",
+      ...extra,
+    }];
+    return body;
+  };
+  for (const extra of [{ ReadOnly: false }, {}, { ReadOnly: "true" }]) {
+    assertEquals(
+      ruleNames(await verdict({ body: mounts(extra) })),
+      ["bind-forbidden-path"],
+      JSON.stringify(extra),
+    );
+  }
+});
+
+test("a local volume cannot bind a generated path through o=bind and device", async () => {
+  for (const o of ["bind", "rbind", "bind,ro"]) {
+    const found = await verdict({
+      path: "/volumes/create",
+      body: {
+        Driver: "local",
+        DriverOpts: {
+          type: "none",
+          o,
+          device: `${GENERATED}/secrets/a`,
+        },
+      },
+    });
+    assertEquals(ruleNames(found), ["volume-bind-forbidden-path"], o);
   }
 });

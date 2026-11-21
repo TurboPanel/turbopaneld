@@ -199,7 +199,7 @@ async function listTasks(playbook: string): Promise<string[]> {
 
 test({
   name:
-    "daemon-converge's real task list skips the Docker install and the ungated hosting Caddy grants",
+    "daemon-converge's real task list skips the Docker install and the hosting Caddy and orchestrator roles",
   ignore: !(await ansiblePlaybookAvailable()),
   fn: async () => {
     const tasks = await listTasks("daemon-converge.yml");
@@ -218,31 +218,18 @@ test({
       [],
     );
 
-    // hosting-caddy's main.yml runs only through the backfill, behind its
-    // incomplete-edge check (after the probes and the vendored Caddy), never
-    // ahead of it where the Caddy binary may not exist.
-    const grant =
-      "hosting-caddy : Grant the hosting Caddy execute on the vendored Caddy binary";
-    const grants = tasks.flatMap((t, i) => (t === grant ? [i] : []));
-    assertEquals(grants.length, 1, grant);
-    const [firstProbe] = await taskNames(
-      "hosting-caddy",
-      "backfill-edge-account.yml",
-    );
-    const probe = tasks.indexOf(`hosting-caddy : ${firstProbe}`);
-    assert(probe >= 0, "backfill-edge-account tasks are missing");
-    assert(grants[0]! > probe, "hosting-caddy main.yml runs before backfill");
+    // Neither the orchestrator nor hosting Caddy runs on a converge: both
+    // are set up lazily by the daemon.
+    assertEquals(tasks.filter((t) => t.startsWith("hosting-caddy : ")), []);
+    assertEquals(tasks.filter((t) => t.startsWith("orchestrator : ")), []);
 
-    // The play keeps its order: converge-builder, then the gate, then the
-    // orchestrator and hosting Caddy backfills.
+    // The play keeps its order: build-user, converge-builder, then the gate.
     const firstOf = (prefix: string) =>
       tasks.findIndex((t) => t.startsWith(prefix));
     const order = [
       firstOf("build-user : "),
       firstOf("docker : "),
       firstOf("docker-gate : "),
-      firstOf("orchestrator : "),
-      probe,
     ];
     assert(order.every((i) => i >= 0), String(order));
     assertEquals([...order].sort((a, b) => a - b), order);

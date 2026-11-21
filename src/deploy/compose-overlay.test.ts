@@ -361,3 +361,84 @@ test("mergeComposeOverlayFragments treats nested arrays of different lengths as 
     { items: [1] },
   ]);
 });
+
+test("mergeOverlayIntoComposeYaml merges overlay labels into list-form and map-form labels", () => {
+  const overlay = {
+    services: {
+      web: {
+        labels: {
+          "io.turbopanel.project": "p1",
+          "io.turbopanel.environment": "e1",
+        },
+      },
+    },
+  };
+  const listForm = [
+    "services:",
+    "  web:",
+    "    image: nginx",
+    "    labels:",
+    "      - io.turbopanel.project=forged",
+    "      - io.turbopanel.environment=forged",
+    "      - io.turbopanel.service=web",
+    "      - tenant.keep=yes",
+    "      - bare.key",
+    "",
+  ].join("\n");
+  const listOut = parse(mergeOverlayIntoComposeYaml(listForm, overlay)) as {
+    services: { web: { labels: Record<string, string> } };
+  };
+  assertEquals(listOut.services.web.labels, {
+    "io.turbopanel.project": "p1",
+    "io.turbopanel.environment": "e1",
+    "io.turbopanel.service": "web",
+    "tenant.keep": "yes",
+    "bare.key": "",
+  });
+
+  const mapForm = [
+    "services:",
+    "  web:",
+    "    image: nginx",
+    "    labels:",
+    "      io.turbopanel.project: forged",
+    "      tenant.keep: yes",
+    "",
+  ].join("\n");
+  const mapOut = parse(mergeOverlayIntoComposeYaml(mapForm, overlay)) as {
+    services: { web: { labels: Record<string, string> } };
+  };
+  assertEquals(mapOut.services.web.labels, {
+    "io.turbopanel.project": "p1",
+    "io.turbopanel.environment": "e1",
+    "tenant.keep": "yes",
+  });
+});
+
+test("mergeOverlayIntoComposeYaml never reads an object or array list entry as a turbopanel label", () => {
+  const overlay = {
+    services: { web: { labels: { "io.turbopanel.project": "p1" } } },
+  };
+  const listForm = [
+    "services:",
+    "  web:",
+    "    image: nginx",
+    "    labels:",
+    "      - io.turbopanel.environment: forged",
+    "      - [io.turbopanel.project=forged]",
+    "      - 8080",
+    "",
+  ].join("\n");
+  const out = parse(mergeOverlayIntoComposeYaml(listForm, overlay)) as {
+    services: { web: { labels: Record<string, string> } };
+  };
+  const keys = Object.keys(out.services.web.labels);
+  assertEquals(out.services.web.labels["io.turbopanel.project"], "p1");
+  assertEquals(
+    keys.filter((k) =>
+      k.includes("turbopanel.") && !k.startsWith("{") && !k.startsWith("[")
+    ),
+    ["io.turbopanel.project"],
+  );
+  assertEquals(out.services.web.labels["8080"], "");
+});

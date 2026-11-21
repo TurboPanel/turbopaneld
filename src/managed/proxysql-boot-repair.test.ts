@@ -19,7 +19,7 @@ const compose = (ip: string) =>
       - "${ip}:13306:13306"
       - "${ip}:15432:15432"
 `;
-const COMPOSE = compose("10.10.1.20");
+const COMPOSE = compose("10.50.1.20");
 
 type Step = { success: boolean; stdout?: string; stderr?: string };
 
@@ -31,7 +31,7 @@ const portsFor = (ip: string) =>
   });
 const GOOD: Step = {
   success: true,
-  stdout: `true|${portsFor("10.10.1.20")}\n`,
+  stdout: `true|${portsFor("10.50.1.20")}\n`,
 };
 const RUNNING_NO_BINDINGS: Step = { success: true, stdout: "true|{}\n" };
 const RUNNING_NULL_PORTS: Step = { success: true, stdout: "true|null\n" };
@@ -74,7 +74,7 @@ function harness(opts: {
     },
     readCompose: () =>
       Promise.resolve(composes[Math.min(reads++, composes.length - 1)] ?? null),
-    localAddresses: opts.addresses ?? (() => ["10.10.1.20"]),
+    localAddresses: opts.addresses ?? (() => ["10.50.1.20"]),
     sleep: (ms) => {
       clock += ms;
       opts.onSleep?.(++sleeps);
@@ -120,7 +120,7 @@ Deno.test("boot repair: bindings on the wrong address are not enough", async () 
   const h = harness({
     inspectSteps: [{
       success: true,
-      stdout: `true|${portsFor("10.10.9.9")}\n`,
+      stdout: `true|${portsFor("10.50.9.9")}\n`,
     }],
   });
   assertEquals(await run(h), "started");
@@ -138,7 +138,7 @@ Deno.test("boot repair: waits for the address, then recreates", async () => {
   let polls = 0;
   const h = harness({
     addresses:
-      () => (++polls < 3 ? ["127.0.0.1"] : ["127.0.0.1", "10.10.1.20"]),
+      () => (++polls < 3 ? ["127.0.0.1"] : ["127.0.0.1", "10.50.1.20"]),
   });
   assertEquals(await run(h), "started");
   assertEquals(ups(h.calls), 1);
@@ -160,11 +160,11 @@ Deno.test("boot repair: gives up and logs when the address never appears", async
   assertEquals(ups(h.calls), 0);
   assertEquals(h.warns.length, 1);
   assertStringIncludes(h.warns[0]!, "gave up after 30s");
-  assertStringIncludes(h.warns[0]!, "10.10.1.20");
+  assertStringIncludes(h.warns[0]!, "10.50.1.20");
 });
 
 Deno.test("boot repair: compose file changing mid-wait aborts", async () => {
-  const h = harness({ composes: [COMPOSE, compose("10.10.1.21")] });
+  const h = harness({ composes: [COMPOSE, compose("10.50.1.21")] });
   assertEquals(await run(h), "aborted");
   assertEquals(ups(h.calls), 0);
   assertStringIncludes(h.warns[0]!, "addresses changed");

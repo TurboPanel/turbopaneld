@@ -159,7 +159,7 @@ roles that need it. The role
   pools too.
 - **Always-on egress block** (`tasks/egress-guard.yml`, `files/turbopanel-docker-egress`, installed as `/opt/turbopanel/lib/docker-egress`, unit
   `turbopanel-docker-egress.service`, var `turbopanel_docker_egress_guard`, default true; audit P1-4): chain `TP-EGRESS`
-  hung off `DOCKER-USER` and `INPUT` for traffic entering on `docker0` / `br-+` only. Drops 169.254.0.0/16,
+  hung off `DOCKER-USER` and `INPUT` for forwarded traffic entering on any interface (`DOCKER-USER`) and for host-bound traffic entering on `docker0` / `br-+` (`INPUT`). Drops 169.254.0.0/16,
   168.63.129.16, 100.100.100.200 (IPv4) and fe80::/10 (ICMPv6 allowed), fd00:ec2::254 (IPv6), with a DNS (53)
   exception for link-local resolvers. Independent of the opt-in host firewall (`TP-FWD`/`TP-INPUT`). Re-applied after
   every docker.service restart (`PartOf`/`After`), never removed on stop; purge removes unit, script, chain and jumps.
@@ -370,12 +370,7 @@ access groups (`tpsftp`, `tpshell`, `tppasswd`, `tpprincipal`), which are the
 only groups the daemon reconciles on a site owner's Linux user.
 
 The `runtime-access` role (included by `php-fpm`, `openlitespeed` for lsphp,
-`node-app-runtime` and `deno-app-runtime`) sets those ACLs and removes what
-older releases left behind: every group named `tpphp<NN>`, `tpnode<N>` or
-`tpdeno<N>` with a gid in **9900–9979** (name and band must both match), first
-the `dpkg-statoverride` entries that name one (dpkg refuses to run while an
-override names a missing group; the binary is put back to `root:root 0755`),
-then their ACL entries, then the group. Nothing else may take a gid in that
+`node-app-runtime` and `deno-app-runtime`) sets those ACLs. Nothing else may take a gid in that
 band; **9980–9999** is service identities (9994 stays reserved for `tpbuild`,
 the retired shared build account; builds now run as per-build systemd
 `DynamicUser=` identities). `../src/orchestration/service-accounts.test.ts`
@@ -529,10 +524,24 @@ the install, vendor and config roots. `tp-host` refuses every generic verb on
 the folder (`tp_path_class`).
 `caddy-setup.yml` runs this role after `caddy`; the daemon runs that playbook
 whenever the binary **or** the account is missing (`ensureHostingCaddy`).
-`playbooks/daemon-converge.yml` also runs `tasks/backfill-edge-account.yml`
-when `tpedge`, the vendored Caddy binary, or the ingress guard is missing or
-stale, so enrolled hosts are edge-ready before the first compose deploy. The
-role grants `tpedge` exactly what Caddy loads, as ACL entries for that one
+An update also repairs modes a fresh install sets: `daemon-converge.yml` and
+`daemon-colocated-refresh.yml` import `caddy/tasks/repair-modes.yml` (vendor
+Caddy folders root:tp `rx`, ACL traverse) and
+`turbopanel-user/tasks/vendor-locks.yml` (uv lock-file modes). After a Deno
+bump, `deno-runtime/tasks/restart-dependents.yml` restarts every
+`turbopanel-*` unit still running the deleted binary, except the daemon and
+instance units, whose restarts the update flow owns. The control-plane units
+(caddy, dbstudio, ui, website, redis) set `StartLimitIntervalSec=0` and
+`RestartSteps`/`RestartMaxDelaySec`, so a burst never leaves one stopped; the
+redis unit is not re-rendered by an update playbook, so an updated host gets
+the same settings from a drop-in (`redis/tasks/retry-dropin.yml`, written by
+daemon-converge and the co-located refresh; daemon-reload only). `RestartSteps`
+needs systemd 254; an older systemd ignores it with a warning. A unit that
+fails to restart after a Deno bump is reported, never failing the play.
+
+`daemon-converge` does not run the hosting-caddy role; the daemon sets the edge
+up on the first compose deploy that needs it. The role grants `tpedge` exactly
+what Caddy loads, as ACL entries for that one
 user: traverse (`x`) on `/opt/turbopanel`, `vendor/` and `/etc/turbopanel`,
 `rx` on the vendored binary, `rx` plus a default `rx` entry on
 `/etc/turbopanel/hosting{,/sites}` (so every Caddyfile and snippet the daemon
@@ -911,8 +920,12 @@ download cache is disposable scratch — first-party roles live under FHS
 `share/orchestration/roles`; Galaxy collections live under
 `vendor/ansible/galaxy-collections`. Managed
 `run.sh` + `daemon-install.yml` remove `/tmp/turbopanel-ansible` and any
-accidental `/root/.ansible` after install. Runtime orchestration runs as
-`tp` (dev: the current dev user).
+accidental `/root/.ansible` after install. `ansible-lint` ignores both: it
+keeps its own `.ansible/` in the project directory it finds from the cwd (`/`
+from the installer), so `ansibleLintWorks()` passes `--project-dir` pointing at
+a private temp folder it removes (never the tp-owned state leaf).
+`scripts/purge.sh` also removes a stale `/.ansible`. Runtime orchestration runs
+as `tp` (dev: the current dev user).
 
 **Galaxy content ships in the package, nothing is downloaded:** the exact
 `ansible.posix` release tarball is committed under

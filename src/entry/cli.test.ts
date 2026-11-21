@@ -170,8 +170,6 @@ test("parseInstallerFlags reads known flags", () => {
     "false",
     "--instance-ca",
     "/tmp/ca.pem",
-    "--tunnel-token",
-    "tok",
     "--vars-file",
     "/tmp/vars.yml",
   ], io);
@@ -179,7 +177,6 @@ test("parseInstallerFlags reads known flags", () => {
     instanceUrl: "https://panel.example",
     start: false,
     instanceCa: "/tmp/ca.pem",
-    tunnelToken: "tok",
     varsFile: "/tmp/vars.yml",
   });
 });
@@ -209,7 +206,6 @@ test("parseInstallerFlags exits when a value is missing", () => {
     const flag of [
       "--instance-url",
       "--instance-ca",
-      "--tunnel-token",
       "--vars-file",
       "--start",
     ]

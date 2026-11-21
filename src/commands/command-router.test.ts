@@ -1,3 +1,4 @@
+import { useTempCommandJournal } from "../testing/command-journal.ts";
 import { assert, assertEquals, assertMatch } from "@std/assert";
 import type { CommandDispatchMessage } from "../contracts/commands-contracts.ts";
 
@@ -8,6 +9,7 @@ import type { CommandDispatchMessage } from "../contracts/commands-contracts.ts"
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+useTempCommandJournal();
 
 class MockWebSocket extends EventTarget {
   static readonly OPEN = 1;
@@ -29,7 +31,7 @@ function parseFrames(frames: string[]): Record<string, unknown>[] {
 
 test({
   name: "handleCommandDispatch acks then returns ping outcome",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const ws = new MockWebSocket() as unknown as WebSocket;
@@ -68,7 +70,7 @@ test({
 test({
   name:
     "handleCommandDispatch acks at once but runs nothing until the boot converge has finished",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const gate = await import("../orchestration/boot-converge-gate.ts");
@@ -156,7 +158,7 @@ test({
 test({
   name:
     "handleCommandDispatch returns sanitized error for unknown command type",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const ws = new MockWebSocket() as unknown as WebSocket;
@@ -183,7 +185,7 @@ test({
 
 test({
   name: "handleCommandDispatch acks then returns reboot outcome",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const { setRebootExecutorForTests } = await import("./reboot.ts");
@@ -225,7 +227,7 @@ test({
 
 test({
   name: "handleCommandDispatch rejects invalid hostname before ansible",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const ws = new MockWebSocket() as unknown as WebSocket;
@@ -253,7 +255,7 @@ test({
 
 test({
   name: "handleCommandDispatch acks then returns timezone outcome",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const {
@@ -299,7 +301,7 @@ test({
 
 test({
   name: "handleCommandDispatch rejects invalid timezone before ansible",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const { setTimeSyncApplyForTests } = await import("./timezone.ts");
@@ -337,7 +339,7 @@ test({
 
 test({
   name: "handleCommandDispatch acks then returns ntp outcome",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const {
@@ -389,7 +391,7 @@ test({
 
 test({
   name: "handleCommandDispatch rejects invalid ntp payload before ansible",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const { setTimeSyncApplyForTests } = await import("./ntp.ts");
@@ -427,7 +429,7 @@ test({
 
 test({
   name: "handleCommandDispatch acks then returns hostname outcome",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const {
@@ -465,7 +467,7 @@ test({
 
 test({
   name: "handleCommandDispatch strips URL credentials from handler errors",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const {
@@ -511,7 +513,7 @@ test({
 
 test({
   name: "handleCommandDispatch truncates sanitized handler errors",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const {
@@ -553,7 +555,7 @@ test({
 
 test({
   name: "handleCommandDispatch skips outcome when websocket is not open",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const ws = new MockWebSocket() as unknown as MockWebSocket;
@@ -867,8 +869,8 @@ async function dispatchWithStubHandler(
     const ws = new MockWebSocket() as unknown as WebSocket;
     const message: CommandDispatchMessage = {
       type: "command-dispatch",
-      id: `req-${commandType}`,
-      commandId: `cmd-${commandType}`,
+      id: `req-${commandType.replaceAll(".", "-")}`,
+      commandId: `cmd-${commandType.replaceAll(".", "-")}`,
       commandType,
       payload,
       at: new Date().toISOString(),
@@ -896,7 +898,7 @@ function echoDecryptSecrets(
 
 test({
   name: "handleCommandDispatch routes environment.deploy through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "environment.deploy",
@@ -949,7 +951,7 @@ function deployDispatch(commandId: string): CommandDispatchMessage {
 test({
   name:
     "a cancel landing mid-deploy ends the command with the cancelled: outcome and frees the registry",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
@@ -987,7 +989,7 @@ test({
 test({
   name:
     "a deploy dispatched after its cancel fails at once without running the handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
@@ -1015,7 +1017,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.apply through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.apply",
@@ -1030,7 +1032,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.lifecycle through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.lifecycle",
@@ -1046,7 +1048,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.destroy through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.destroy",
@@ -1065,7 +1067,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.promote through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.promote",
@@ -1084,7 +1086,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.backup through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.backup",
@@ -1107,7 +1109,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.restore through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.restore",
@@ -1130,7 +1132,7 @@ test({
 test({
   name:
     "handleCommandDispatch routes managed.ingress.reconcile through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.ingress.reconcile",
@@ -1152,7 +1154,7 @@ test({
 test({
   name:
     "handleCommandDispatch routes managed.ha.reconcile through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.ha.reconcile",
@@ -1172,7 +1174,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes managed.ha.failover through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "managed.ha.failover",
@@ -1188,7 +1190,7 @@ test({
 
 test({
   name: "handleCommandDispatch routes system.reconcile through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "system.reconcile",
@@ -1204,7 +1206,7 @@ test({
 test({
   name:
     "handleCommandDispatch routes server.principals.reconcile through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "server.principals.reconcile",
@@ -1229,7 +1231,7 @@ test({
 test({
   name:
     "handleCommandDispatch routes server.backups.reconcile through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const outcome = await dispatchWithStubHandler(
       "server.backups.reconcile",
@@ -1253,7 +1255,7 @@ test({
 test({
   name:
     "handleCommandDispatch routes server.folders.remove through stub handler",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const folder = { owner: "alice", scope: "production", slug: "uploads" };
     const outcome = await dispatchWithStubHandler(
@@ -1276,7 +1278,7 @@ test({
 test({
   name:
     "handleCommandDispatch wraps lifecycle rehydrate through parseRehydrateDeploymentResults",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
@@ -1363,9 +1365,7 @@ test({
     try {
       const mock = new MockWebSocket();
       const ws = mock as unknown as WebSocket;
-      await outbox.flushCommandOutcomes(ws, {
-        supports: (feature) => feature === "command-recovery-v1",
-      });
+      await outbox.flushCommandOutcomes(ws);
       const dispatch = (id: string): CommandDispatchMessage => ({
         type: "command-dispatch",
         id,
@@ -1431,7 +1431,7 @@ test({
 
 test({
   name: "handleCommandDispatch sends a result over the cap as a failed outcome",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");
@@ -1469,7 +1469,7 @@ test({
 test({
   name:
     "handleCommandDispatch runs cache.apply and returns its per-cache results",
-  permissions: { env: true, read: true },
+  permissions: { env: true, read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch, setCommandRouterHandlersForTests } =
       await import("./command-router.ts");

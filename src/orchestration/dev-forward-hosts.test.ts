@@ -16,9 +16,9 @@ test("mergeDevCertPublicUrls keeps configured https origins and forwarded LAN na
   assertEquals(
     mergeDevCertPublicUrls(
       "https://panel.lan:8443",
-      "192.0.2.10\nlab.lan\n192.0.2.10\n",
+      "192.0.2.10\nserver-d.example.lan\n192.0.2.10\n",
     ),
-    "https://panel.lan:8443,192.0.2.10,lab.lan",
+    "https://panel.lan:8443,192.0.2.10,server-d.example.lan",
   );
 });
 

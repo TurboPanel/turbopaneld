@@ -26,6 +26,8 @@ import {
 import {
   type PeerUpstream,
   peerUpstreamText,
+  TUNNEL_ERROR_STATUS,
+  TUNNEL_ERROR_TEXT,
   TUNNEL_SITE_FILE,
   tunnelLockLines,
   tunnelTrustedRanges,
@@ -38,6 +40,7 @@ import {
   type EnvironmentDeployPayload,
   HOSTING_FALLBACK_HOSTNAME,
   hostingServedNames,
+  hostingTlsForName,
   hostingWwwRedirects,
   isValidIpv4Literal,
   isValidIpv6Literal,
@@ -76,6 +79,7 @@ import {
   LABEL_ROUTED,
   LABEL_SERVICE_ID,
   LABEL_SYSTEM_COMPONENT,
+  traefikLabelConstraint,
 } from "./labels.ts";
 import { type DockerProxyStep, planDockerProxy } from "./docker-proxy-plan.ts";
 import {
@@ -605,7 +609,7 @@ export function parseIngressNetworkGateways(
  *
  * With `identity`, emits allocated `container_name`, an `x-turbopanel` block
  * (`kind: system`), and canonical role / system-component / service labels —
- * never `traefik.enable`, HTTP router labels, or `com.turbopanel.raw-port`
+ * never `traefik.enable`, HTTP router labels, or `io.turbopanel.raw-port`
  * (omitting raw-port keeps the shared container invisible to every tenant
  * Traefik provider constraint).
  *
@@ -672,7 +676,9 @@ export function traefikCompose(
       ? [
         `      - ${
           quoteYamlScalar(
-            `--providers.docker.constraints=Label(\`${LABEL_ROUTED}\`,\`true\`)`,
+            `--providers.docker.constraints=${
+              traefikLabelConstraint(LABEL_ROUTED, "true")
+            }`,
           )
         }`,
       ]
@@ -816,7 +822,7 @@ export function serviceIngressComposePath(
  * Joins `ingressNetwork` (the `hosting-ingress` component's allocated
  * `serviceId`, supplied by the caller from the deploy payload's
  * `hostingIngressNetwork`), constrains the Docker provider to
- * `com.turbopanel.service=<serviceId>` **and** `com.turbopanel.raw-port=true`
+ * `io.turbopanel.service=<serviceId>` **and** `io.turbopanel.raw-port=true`
  * (stamped by `buildHostingLabelsFragment` only on services that publish tcp/udp),
  * and emits only that service's tcp/udp entrypoints + published ports.
  * HTTP routers on mixed-hosting services are pinned to `web,websecure`, which
@@ -837,8 +843,9 @@ export function serviceTraefikCompose(
   assertSafeComposeProjectName(project);
   const staticArgs = tcpUdpStaticArgLines(entries);
   const portLines = tcpUdpPortLines(entries);
-  const constraint =
-    `Label(\`${LABEL_SERVICE_ID}\`,\`${identity.serviceId}\`) && Label(\`${LABEL_RAW_PORT}\`,\`true\`)`;
+  const constraint = `${
+    traefikLabelConstraint(LABEL_SERVICE_ID, identity.serviceId)
+  } && ${traefikLabelConstraint(LABEL_RAW_PORT, "true")}`;
   const lines = [
     `name: ${project}`,
     "",
@@ -1291,7 +1298,9 @@ export async function legacyHttpContainersPresent(
   if (!inspect.success) return true;
   return inspect.stdout.split("\n").some((line) => {
     const labels = parseLabelsLine(line);
-    if (labels === undefined || labels[LABEL_ROUTED] === "true") return false;
+    if (labels === undefined || labels[LABEL_ROUTED] === "true") {
+      return false;
+    }
     return Object.keys(labels).some((k) => k.startsWith("traefik.http."));
   });
 }
@@ -1573,8 +1582,8 @@ export async function ensureHostingIngress(
 /**
  * True when the compose-ps row carries the allowlisted platform labels for
  * the shared hosting-ingress Traefik (`turbopanel.role=ingress`,
- * `com.turbopanel.system.component=hosting-ingress`, and
- * `com.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
+ * `io.turbopanel.system.component=hosting-ingress`, and
+ * `io.turbopanel.service=<serviceId>`). Unlabelled / legacy rows fail.
  */
 function hasHostingIngressLabels(
   entry: Record<string, unknown>,
@@ -1583,7 +1592,8 @@ function hasHostingIngressLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_HOSTING_INGRESS_COMPONENT &&
+    labels[LABEL_SYSTEM_COMPONENT] ===
+      SYSTEM_HOSTING_INGRESS_COMPONENT &&
     labels[LABEL_SERVICE_ID] === serviceId
   );
 }
@@ -2082,17 +2092,37 @@ function headerDeletionBlock(names: readonly string[], indent: string): string {
  * 502 when the upstream is down, for one) skip that block, so `handle_errors`
  * repeats it; it writes nothing itself, so the status and the empty body stay
  * as Caddy sends them.
+ *
+ * `peerErrorPage` is the one answer a block that forwards to a peer server
+ * gives when that server cannot answer (see {@link peerErrorPageLines}); it
+ * shares the `handle_errors` block with the header removal.
  */
 function headerDeletions(
   choices: HostingHeaderChoices,
   errors = true,
+  peerErrorPage = "",
 ): string {
   const names = deletedHeaders(choices);
-  if (names.length === 0) return "";
-  if (!errors) return headerDeletionBlock(names, "  ");
-  return `${headerDeletionBlock(names, "  ")}  handle_errors {
-${headerDeletionBlock(names, "    ")}  }
+  const hasNames = names.length > 0;
+  if (!errors) return hasNames ? headerDeletionBlock(names, "  ") : "";
+  if (!hasNames && peerErrorPage === "") return "";
+  const outer = hasNames ? headerDeletionBlock(names, "  ") : "";
+  const inner = hasNames ? headerDeletionBlock(names, "    ") : "";
+  return `${outer}  handle_errors {
+${inner}${peerErrorPage}  }
 `;
+}
+
+/**
+ * The error answer of a site block that forwards to a peer server: always 503
+ * with the tunnel error text, as a tunnel forward block does. With one
+ * upstream and a retry window the error is 502 or 503 at random, and the edge
+ * replaces a 502 with its own page.
+ */
+function peerErrorPageLines(routes: readonly CaddySiteRoute[]): string {
+  return routes.some((route) => route.upstream.kind === "peer")
+    ? `    respond "${TUNNEL_ERROR_TEXT}" ${TUNNEL_ERROR_STATUS}\n`
+    : "";
 }
 
 /** A deletion line for `name` anywhere in a written site file. */
@@ -2101,51 +2131,228 @@ function deletesHeader(text: string, name: string): boolean {
 }
 
 /**
+ * The page shown for a name that reaches a server but has no deployed site.
+ * Self-contained: inline CSS, no external fonts, scripts or images, light and
+ * dark through `prefers-color-scheme`. It never reflects the requested name:
+ * Caddy's `respond` expands placeholders without HTML escaping, so echoing the
+ * Host would hand a visitor-controlled string to the page. It holds no other
+ * request data and no placeholder; {@link hostingDefaultPageResponse} escapes
+ * the CSS braces for Caddy.
+ */
+function hostingDefaultPageHtml(
+  hideWebServerNames: boolean | undefined,
+): string {
+  const footer = hideWebServerNames === true
+    ? ""
+    : `<footer>Hosted with <a href="https://turbopanel.io">TurboPanel</a></footer>\n`;
+  const css = [
+    ":root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1c2330;--muted:#5b6575;--link:#0b5cd5}",
+    "@media (prefers-color-scheme:dark){:root{--bg:#10141b;--fg:#e8ecf3;--muted:#98a3b5;--link:#7db2ff}}",
+    "*{box-sizing:border-box}",
+    'body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;text-align:center}',
+    "main{max-width:32rem}",
+    "h1{margin:0 0 12px;font-size:1.75rem;font-weight:600}",
+    "p{margin:0;color:var(--muted)}",
+    "footer{margin-top:40px;font-size:.875rem;color:var(--muted)}",
+    "a{color:var(--link)}",
+  ].join("\n");
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Site Not Live Yet</title>
+<style>
+${css}
+</style>
+</head>
+<body>
+<main>
+<h1>This site isn't live yet.</h1>
+<p>If you own this site, deploy it from your TurboPanel control plane.</p>
+</main>
+${footer}</body>
+</html>
+`;
+}
+
+/** One `respond` handler serving {@link hostingDefaultPageHtml} as a 404. */
+function hostingDefaultPageResponse(
+  hideWebServerNames: boolean | undefined,
+): string {
+  // Caddy reads an unescaped `{` as a placeholder, so the CSS rules need `\{`.
+  const html = hostingDefaultPageHtml(hideWebServerNames)
+    .replaceAll("{", String.raw`\{`)
+    .split("\n")
+    .map((line) => (line === "" ? "" : `    ${line}`))
+    .join("\n");
+  return `  header Content-Type "text/html; charset=utf-8"
+  header Cache-Control "no-store"
+  respond <<HTML
+${html}    HTML 404
+`;
+}
+
+/**
  * The hosting web server's answer for a name nobody hosts, on :80 and :443.
- * Ports 80/443 are for hosting, so an unconfigured name is answered here (an
- * empty 200, no redirect) rather than refused. The HTTPS side shows one fixed
- * self-signed certificate, made for {@link HOSTING_FALLBACK_HOSTNAME} and handed
- * to every other name by the Caddyfile's `default_sni` / `fallback_sni`, so the
- * number of certificates never depends on what clients send. Hosted names keep
- * their own site blocks, which always win. The panel's own address is a
- * different listener and is not affected.
+ * Ports 80/443 are for hosting, so an unconfigured name is answered here (a
+ * 404 with a small default page, no redirect) rather than refused. The 404 keeps
+ * the name out of search indexes and lets a monitor see the site is not up. The
+ * HTTPS side shows one fixed self-signed certificate, made for
+ * {@link HOSTING_FALLBACK_HOSTNAME} and handed to every other name by the
+ * Caddyfile's `default_sni` / `fallback_sni`, so the number of certificates
+ * never depends on what clients send. Hosted names keep their own site blocks,
+ * which always win. The panel's own address is a different listener and is not
+ * affected. The page's "Hosted with" footer is left out when names are hidden.
  *
  * This one file is shared by every environment on the server: each hosting
  * deploy rewrites it, so the hide-names and Via choices in force are those of
  * whichever environment deployed last.
+ *
+ * A site that sets `bind` listens on its own addresses, and Caddy makes a
+ * server for them apart from the one that listens everywhere. The blocks above
+ * belong to the latter, so a request that arrives on a bound address for a
+ * name that server does not hold (a tunnel connector dials loopback, which a
+ * tunnel name's `bind` includes) matches no route and gets an empty 200. Each
+ * address in `bindAddresses` therefore gets its own `http://` and `https://`
+ * block with the same answer. Caddy refuses a repeated site address per
+ * listen address, not per `bind` set, so the list holds every address once
+ * even where sets overlap, never one block per set.
  */
 export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
   sendViaHeader?: boolean,
+  bindAddresses: BoundAddresses = NO_BOUND_ADDRESSES,
 ): string {
   // No handle_errors here: the http:// and https:// blocks match every host,
   // so their error routes would become the fallback for every other site's
   // errors and impose this deploy's choices on sites that delete nothing.
   // `respond` never raises an error, so nothing is lost.
   const hide = headerDeletions({ hideWebServerNames, sendViaHeader }, false);
+  const page = hostingDefaultPageResponse(hideWebServerNames);
+  const bound = (["http", "https"] as const).map((scheme) =>
+    bindAddresses[scheme].map((address) => `
+# Names nobody hosts, on ${scheme} at ${address}.
+${scheme}:// {
+  bind ${address}
+${hide}${page}}
+`).join("")
+  ).join("");
   return `# Names nobody hosts. Rewritten on every deploy.
 http:// {
-${hide}  respond "" 200
-}
+${hide}${page}}
 
 https:// {
-${hide}  respond "" 200
-}
+${hide}${page}}
 
 ${HOSTING_FALLBACK_HOSTNAME} {
   tls internal
-${hide}  respond "" 200
+${hide}${page}}
+${bound}`;
 }
-`;
+
+/** The addresses site blocks bind to, by the scheme the block serves. */
+export type BoundAddresses = {
+  readonly http: readonly string[];
+  readonly https: readonly string[];
+};
+
+const NO_BOUND_ADDRESSES: BoundAddresses = { http: [], https: [] };
+
+/** A top-level block of a site file: its address line and its body. */
+const SITE_BLOCK_RE = /^(\S[^\n]*?) \{\n([\s\S]*?)^\}$/gm;
+const SITE_BIND_LINE_RE = /^ {2}bind (\S+(?: \S+)*)$/m;
+
+function isBindToken(token: string): boolean {
+  const bare = token.startsWith("[") && token.endsWith("]")
+    ? token.slice(1, -1)
+    : token;
+  return isValidIpv4Literal(bare) || isValidIpv6Literal(bare);
+}
+
+/**
+ * The addresses the `bind` lines of written site files listen on, by the
+ * scheme of the block that binds them (`http://name` is plain HTTP, any other
+ * name is HTTPS), each listed once and sorted. A catch-all on a scheme and an
+ * address that no site listens on would open a listener of its own and take
+ * that traffic from the server that listens everywhere, so the catch-all
+ * follows the blocks, not the files. A token that is not an IP literal is
+ * ignored, so a hand-edited file cannot put other text into the catch-all.
+ */
+export function siteBindAddresses(texts: readonly string[]): BoundAddresses {
+  const found = { http: new Set<string>(), https: new Set<string>() };
+  for (const text of texts) collectBlockBindings(text, found);
+  const sorted = (set: Set<string>) =>
+    [...set].sort((a, b) => a.localeCompare(b));
+  return { http: sorted(found.http), https: sorted(found.https) };
+}
+
+/** Adds the IP literals the `bind` lines of one site file's blocks name. */
+function collectBlockBindings(
+  text: string,
+  found: { readonly http: Set<string>; readonly https: Set<string> },
+): void {
+  for (const block of text.matchAll(SITE_BLOCK_RE)) {
+    const bind = SITE_BIND_LINE_RE.exec(block[2]);
+    if (bind === null) continue;
+    const scheme = block[1].startsWith("http://") ? "http" : "https";
+    for (const token of bind[1].split(" ")) {
+      if (isBindToken(token)) found[scheme].add(token);
+    }
+  }
+}
+
+/**
+ * The bind addresses of every site file on disk but the catch-all, with `pending`
+ * replacing (or adding) files that are about to be written.
+ */
+async function liveBindAddresses(
+  sitesDir: string,
+  pending: ReadonlyMap<string, string> = new Map(),
+): Promise<BoundAddresses> {
+  const names = await liveSnippetNames(sitesDir).catch((err) => {
+    if (err instanceof Deno.errors.NotFound) return [] as string[];
+    throw err;
+  });
+  const texts = await Promise.all(
+    names.filter((name) => name !== HOSTING_FALLBACK_SITE && !pending.has(name))
+      .map((name) =>
+        readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
+      ),
+  );
+  return siteBindAddresses([
+    ...texts.filter((text) => text !== undefined),
+    ...pending.values(),
+  ]);
+}
+
+/**
+ * The catch-all file as it should be once `pending` site files are written,
+ * with the header choices it has on disk; `undefined` when none is on disk (a
+ * server that never deployed has none to keep current).
+ */
+export async function plannedFallbackForSites(
+  sitesDir: string,
+  pending: ReadonlyMap<string, string>,
+): Promise<string | undefined> {
+  const live = await readTextIfPresent(join(sitesDir, HOSTING_FALLBACK_SITE));
+  if (live === undefined) return undefined;
+  return hostingFallbackSnippet(
+    deletesHeader(live, "Server"),
+    !deletesHeader(live, "Via"),
+    await liveBindAddresses(sitesDir, pending),
+  );
 }
 
 /** The bind line plus, when asked, the header removal that follows it. */
 function siteBlockPreamble(
   bindAddress: string | readonly string[] | undefined,
   choices: HostingHeaderChoices,
+  peerErrorPage = "",
 ): string {
   const bindLine = bindAddress ? formatBindDirective(bindAddress) : "";
-  return bindLine + headerDeletions(choices);
+  return bindLine + headerDeletions(choices, true, peerErrorPage);
 }
 
 /** The import line for a host's proof handler, or "" when the block takes none. */
@@ -2244,6 +2451,7 @@ export function siteSnippet(options: SiteSnippetOptions): string {
   const bindLine = siteBlockPreamble(
     tunnelBindAddresses(bindAddress, tunnel),
     options,
+    peerErrorPageLines(effectiveRoutes),
   );
   // The connector speaks HTTPS to localhost, so a tunnel name always has an
   // HTTPS site; a locked one has no HTTP site at all (the catch-all answers
@@ -2389,7 +2597,7 @@ function mergeHostingIntoHostnameSite(
 ): void {
   const tunnel = mergeSiteTunnel(site.tunnel, hosting, hostname);
   if (tunnel) site.tunnel = tunnel;
-  if (hosting.tlsMode === "acme") {
+  if (hostingTlsForName(hosting, hostname).tlsMode === "acme") {
     site.tlsMode = "acme";
   }
   // ACME on this hostname always keeps HTTPS — a sibling `forceHttps: false`
@@ -2446,7 +2654,10 @@ function addWwwRedirectSites(
     if ((hosting.protocol ?? "http") !== "http") continue;
     for (const { from, to } of hostingWwwRedirects(hosting)) {
       if (byHostname.has(from)) continue;
-      byHostname.set(from, redirectSiteFor(hosting, to, byHostname.get(to)));
+      byHostname.set(
+        from,
+        redirectSiteFor(hosting, from, to, byHostname.get(to)),
+      );
     }
   }
 }
@@ -2458,10 +2669,11 @@ function addWwwRedirectSites(
  */
 function redirectSiteFor(
   hosting: EnvironmentDeployHosting,
+  from: string,
   to: string,
   target: HostnameSite | undefined,
 ): HostnameSite {
-  const acme = hosting.tlsMode === "acme";
+  const acme = hostingTlsForName(hosting, from).tlsMode === "acme";
   const forceHttps = target
     ? emitHttpsSite(target.forceHttps, target.tlsMode)
     : acme || (hosting.proxy?.forceHttps ?? true);
@@ -3248,7 +3460,11 @@ async function guardHostingCaddySitesLocked(
       names,
     );
     await quarantineHostingSnippets(sitesDir, bad);
-    if (bad.length > 0) {
+    // A set-aside site's addresses leave the catch-all; swapping it in
+    // reloads, so the reload below is then not repeated.
+    const refreshed = bad.length > 0 &&
+      await refreshFallbackFile(layout, hostingDir, sitesDir);
+    if (bad.length > 0 && !refreshed) {
       const reload = await run(
         "sudo",
         hostSudoArgs(["-n", "systemctl", "reload", CADDY_SERVICE]),
@@ -3336,16 +3552,22 @@ async function ensureHostingFallbackLocked(
   });
   const fallbackPath = join(sitesDir, HOSTING_FALLBACK_SITE);
   const liveFallback = await readTextIfPresent(fallbackPath);
-  if (liveFallback !== undefined && liveCaddyfile === wantCaddyfile) {
+  // A live file keeps the hide-names and Via choices of the deploy that wrote
+  // it; only its content is brought up to date (an older daemon wrote an empty
+  // 200 here).
+  const choices: HostingHeaderChoices = liveFallback !== undefined
+    ? {
+      hideWebServerNames: deletesHeader(liveFallback, "Server"),
+      sendViaHeader: !deletesHeader(liveFallback, "Via"),
+    }
+    : await lastKnownHeaderChoices(sitesDir, names);
+  const fallback = hostingFallbackSnippet(
+    choices.hideWebServerNames,
+    choices.sendViaHeader,
+    await liveBindAddresses(sitesDir),
+  );
+  if (liveFallback === fallback && liveCaddyfile === wantCaddyfile) {
     return false;
-  }
-  let fallback = liveFallback;
-  if (fallback === undefined) {
-    const known = await lastKnownHeaderChoices(sitesDir, names);
-    fallback = hostingFallbackSnippet(
-      known.hideWebServerNames,
-      known.sendViaHeader,
-    );
   }
 
   const candidate = await openHostingCandidate(layout, hostingDir);
@@ -3628,6 +3850,7 @@ async function rewriteHostingCaddySitesLocked(
   const fallbackContent = hostingFallbackSnippet(
     payload.hideWebServerNames === true,
     payload.sendViaHeader,
+    await liveBindAddresses(sitesDir, new Map([[siteFile, siteContent]])),
   );
   // Tunnel names that run on other servers have forward blocks in a reserved
   // file. Which names run here just changed, so that file is re-rendered with
@@ -3681,7 +3904,9 @@ async function rewriteHostingCaddySitesLocked(
       : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),
   ]);
 
-  await tryRecordTunnelGeneration(hostingDir, tunnelGeneration);
+  if (tunnelGeneration !== undefined) {
+    await tryRecordTunnelGeneration(hostingDir, tunnelGeneration);
+  }
 
   // Rewritten unconditionally, same lifecycle as the .caddy file above, so an
   // environment that moves off acme-mode entirely never leaves a stale entry
@@ -3746,20 +3971,21 @@ async function removeHostingCaddySiteLocked(
     }
   }
 
-  await refreshTunnelFileAfterRemoval(layout);
-
-  const reload = await run(
-    "sudo",
-    hostSudoArgs([
-      "-n",
-      "systemctl",
-      "reload",
-      CADDY_SERVICE,
-    ]),
-  );
-  if (!reload.success) {
-    logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
-    return;
+  // Reloading is part of putting the reserved files in, so it is not repeated.
+  if (!await refreshReservedFilesAfterRemoval(layout)) {
+    const reload = await run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "systemctl",
+        "reload",
+        CADDY_SERVICE,
+      ]),
+    );
+    if (!reload.success) {
+      logWarn("deploy", `hosting Caddy reload skipped: ${reload.stderr}`);
+      return;
+    }
   }
   // The environment's certificates went with its site: only after Caddy let go
   // of the files does the cleanup remove them.
@@ -3767,36 +3993,88 @@ async function removeHostingCaddySiteLocked(
 }
 
 /**
- * Names the removed environment served are now served from elsewhere: give the
- * reserved tunnel file the forward blocks for them. Best effort, because
- * removing a site must not fail on forwarding; the next table from the control
- * plane repairs what this cannot.
+ * Bring the catch-all in line with the written sites after a site left them
+ * (set aside as unloadable): judged by the pinned validator, swapped in and
+ * loaded. Best effort; true when it was swapped in (which reloaded Caddy).
  */
-async function refreshTunnelFileAfterRemoval(
+async function refreshFallbackFile(
   layout: LayoutPaths,
-): Promise<void> {
-  const hostingDir = join(layout.configDir, "hosting");
-  const sitesDir = join(hostingDir, "sites");
+  hostingDir: string,
+  sitesDir: string,
+): Promise<boolean> {
   try {
-    const planned = await plannedTunnelContents(hostingDir, sitesDir);
-    if (planned === undefined) return;
+    const planned = await plannedFallbackForSites(sitesDir, new Map());
+    const path = join(sitesDir, HOSTING_FALLBACK_SITE);
+    if (planned === undefined || planned === await readTextIfPresent(path)) {
+      return false;
+    }
     await validateHostingCaddyCandidate(
       layout,
       hostingDir,
       sitesDir,
-      TUNNEL_SITE_FILE,
+      HOSTING_FALLBACK_SITE,
       planned,
       grantHostingCaddyRead,
     );
-    await activateHostingSites([{
-      live: join(sitesDir, TUNNEL_SITE_FILE),
-      contents: planned,
-    }]);
+    await activateHostingSites([{ live: path, contents: planned }]);
+    return true;
+  } catch (err) {
+    logWarn("deploy", `unhosted-name answer left as it was: ${errorText(err)}`);
+    return false;
+  }
+}
+
+/**
+ * The reserved files that follow the written sites once one is gone. Names the
+ * removed environment served are now served from elsewhere, so the reserved
+ * tunnel file gets the forward blocks for them; and the catch-all lists the
+ * bind addresses of the written sites, so a removed site's address must leave
+ * it (an address no site uses any more could be one this host no longer has).
+ * Both are judged together by the pinned validator, swapped in and loaded with
+ * one reload. Best effort, because removing a site must not fail on this; the
+ * next table from the control plane or the next deploy repairs what this
+ * cannot. True when the files were swapped in (which reloaded Caddy).
+ */
+async function refreshReservedFilesAfterRemoval(
+  layout: LayoutPaths,
+): Promise<boolean> {
+  const hostingDir = join(layout.configDir, "hosting");
+  const sitesDir = join(hostingDir, "sites");
+  const tunnelPath = join(sitesDir, TUNNEL_SITE_FILE);
+  const fallbackPath = join(sitesDir, HOSTING_FALLBACK_SITE);
+  try {
+    const tunnel = await plannedTunnelContents(hostingDir, sitesDir);
+    const fallback = await plannedFallbackForSites(
+      sitesDir,
+      tunnel === undefined ? new Map() : new Map([[TUNNEL_SITE_FILE, tunnel]]),
+    );
+    const fallbackChanged = fallback !== undefined &&
+      fallback !== await readTextIfPresent(fallbackPath);
+    const swaps: { live: string; contents: string }[] = [];
+    if (tunnel !== undefined) {
+      swaps.push({ live: tunnelPath, contents: tunnel });
+    }
+    if (fallbackChanged) swaps.push({ live: fallbackPath, contents: fallback });
+    if (swaps.length === 0) return false;
+    await validateHostingCaddyCandidate(
+      layout,
+      hostingDir,
+      sitesDir,
+      tunnel === undefined ? HOSTING_FALLBACK_SITE : TUNNEL_SITE_FILE,
+      swaps[0].contents,
+      grantHostingCaddyRead,
+      tunnel !== undefined && fallbackChanged ? { fallback } : {},
+    );
+    await activateHostingSites(swaps);
+    return true;
   } catch (err) {
     logWarn(
       "deploy",
-      `tunnel forwarding not refreshed after a removal: ${errorText(err)}`,
+      `tunnel forwarding and unhosted-name answer left as they were after a removal: ${
+        errorText(err)
+      }`,
     );
+    return false;
   }
 }
 

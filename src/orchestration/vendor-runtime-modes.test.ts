@@ -17,10 +17,18 @@ const ROLES = join(DAEMON_ROOT, "orchestration/roles");
 
 type Task = Record<string, unknown>;
 
-async function tasks(role: string): Promise<Task[]> {
-  return parse(
-    await Deno.readTextFile(join(ROLES, role, "tasks/main.yml")),
-  ) as Task[];
+/** A task file's tasks, with the tasks inside `block:` lifted out. */
+async function tasks(role: string, file = "main.yml"): Promise<Task[]> {
+  const flat = (list: Task[]): Task[] =>
+    list.flatMap((t) => [t, ...flat((t.block as Task[] | undefined) ?? [])]);
+  return flat(
+    parse(await Deno.readTextFile(join(ROLES, role, "tasks", file))) as Task[],
+  );
+}
+
+/** Where a role's main.yml imports another task file (-1 when it does not). */
+function importIndex(list: Task[], file: string): number {
+  return list.findIndex((t) => t["ansible.builtin.import_tasks"] === file);
 }
 
 function args(task: Task, module: string): Record<string, unknown> {
@@ -49,18 +57,24 @@ test("the Caddy runtime folders are root:tp and only traversable by others", asy
   );
   assert(install >= 0, "the install task is still there");
 
-  const dirs = caddy.findIndex((t) =>
+  // Fixed after install -d made them, by the file a daemon update runs too.
+  assert(
+    importIndex(caddy, "repair-modes.yml") > install,
+    "the install imports the repair after install -d",
+  );
+  const repair = await tasks("caddy", "repair-modes.yml");
+  const dirs = repair.findIndex((t) =>
     args(t, "ansible.builtin.file")?.state === "directory"
   );
-  assert(dirs > install, "the folders are fixed after install -d made them");
-  const dirArgs = args(caddy[dirs], "ansible.builtin.file");
-  assertEquals(loopItems(caddy[dirs]), CADDY_DIRS);
+  assert(dirs >= 0, "the folders are fixed");
+  const dirArgs = args(repair[dirs], "ansible.builtin.file");
+  assertEquals(loopItems(repair[dirs]), CADDY_DIRS);
   assertEquals(dirArgs.owner, "root");
   assertEquals(dirArgs.group, "{{ turbopanel_group }}");
   assert(noOtherBits(String(dirArgs.mode)), "no listing for other accounts");
 
   // The hosting Caddy's account is not in group tp: it needs traverse.
-  const acl = caddy.find((t) => t["ansible.posix.acl"] !== undefined);
+  const acl = repair.find((t) => t["ansible.posix.acl"] !== undefined);
   assert(acl, "an ACL lets every account traverse the folders");
   const aclArgs = args(acl, "ansible.posix.acl");
   assertEquals(aclArgs.etype, "other");
@@ -75,7 +89,11 @@ test("the Caddy runtime folders are root:tp and only traversable by others", asy
 });
 
 test("uv lock files are owner-writable only, with the owner of their tree", async () => {
-  const user = await tasks("turbopanel-user");
+  assert(
+    importIndex(await tasks("turbopanel-user"), "vendor-locks.yml") >= 0,
+    "the install imports the lock repair",
+  );
+  const user = await tasks("turbopanel-user", "vendor-locks.yml");
 
   const find = user.find((t) => {
     const a = args(t, "ansible.builtin.find");

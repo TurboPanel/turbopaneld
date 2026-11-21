@@ -16,7 +16,7 @@ import type {
 } from "./commands-contracts.ts";
 import type { HardwareProfile } from "../metrics/collector/types.ts";
 import type { MetricsCapabilityPlan } from "../metrics/capability-plan.ts";
-import type { TopologyReportSnapshot } from "./topology-types.ts";
+import type { TopologySnapshot } from "./topology-types.ts";
 import type { ManagedPermissionsObserved } from "./managed-permissions-observed.ts";
 export {
   OBSERVED_LEVELS,
@@ -85,6 +85,26 @@ export type CommandRecoveryReport = {
 };
 
 /**
+ * What this daemon process remembers about commands (feature
+ * `command-recovery-v2`), sent on every `hello` (never on `heartbeat`),
+ * including when `known` is empty. `processStartId` is a random id made once
+ * per daemon process: it stays the same across reconnects and changes on a
+ * restart. `known` holds the ids of commands this daemon has accepted and
+ * still holds state for: running, finished with the outcome not yet
+ * confirmed, and entries a previous process left in the on-disk journal. It
+ * is read from disk before the socket opens, so it is complete on the first
+ * hello after a restart. At most 256 ids of 64
+ * characters; `complete` is `false` when the list was cut or the journal could
+ * not be read, and then an id missing from `known` proves nothing. Twin of
+ * the control plane's contract once it reads the field.
+ */
+export type CommandStateReport = {
+  processStartId: string;
+  known: string[];
+  complete: boolean;
+};
+
+/**
  * Control plane → daemon: the final outcome of command `id` is stored, so the
  * daemon may drop its journaled copy. Until it arrives the daemon sends the
  * outcome again on every attach and every 30 seconds. Twin of
@@ -102,6 +122,7 @@ export type DaemonHelloMessage = {
   at: string;
   features?: string[];
   commands?: CommandRecoveryReport;
+  commandState?: CommandStateReport;
 };
 
 /** Control-plane → daemon self-update. Optional pin fields are expand-only. */
@@ -264,8 +285,8 @@ export type CommandProgressMessage = {
  * One control-plane hostname on `public-urls-update`. For an `uploaded`
  * source the key arrives as `keyEnvelope`, a `tpdaemon` envelope this daemon
  * opens through `POST /api/daemon/v1/secrets/decrypt` (it advertises
- * `sealed-instance-secrets-v1`); an older control plane sends the legacy
- * plaintext `keyPem`, still accepted. The daemon writes the pair under the
+ * `sealed-instance-secrets-v1`); the legacy
+ * plaintext `keyPem` is refused. The daemon writes the pair under the
  * instance certs dir and does not echo it back.
  */
 export type InstanceHostnameCertSource =
@@ -301,9 +322,8 @@ export type InstanceEdgeTrustWire = {
 
 /**
  * Instance → daemon: start (or, with an empty `token`, stop) the Cloudflare
- * tunnel. A non-empty token arrives as `tokenEnvelope` (`tpdaemon`) from a
- * control plane that sees `sealed-instance-secrets-v1`; `token` is the legacy
- * plaintext field. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
+ * tunnel. A non-empty token arrives as `tokenEnvelope` (`tpdaemon`); only the
+ * empty teardown `token` is accepted as plaintext. Twin of `turbopanel/src/contracts/cell-protocol.ts`.
  */
 export type TunnelTokenMessage = {
   type: "tunnel-token";
@@ -640,6 +660,51 @@ export type AcmeIssueRequestMessage = {
   startByIso: string;
   /** Other servers that pass the proof path on; each is checked before the order. */
   helpers: AcmeProofHelper[];
+  /**
+   * How the names are proved (feature `acme-issue-dns-v1`). Absent or
+   * `http-01`: the HTTP proof, exactly as before. `dns-01`: the control plane
+   * publishes the TXT records through the relay messages below; `helpers` is
+   * ignored, no proof routes are made, and wildcard names are allowed.
+   */
+  challenge?: "http-01" | "dns-01";
+  at: string;
+};
+
+/** One TXT record the control plane is asked to publish. */
+export type AcmeDnsRecord = { name: string; value: string };
+
+/**
+ * Daemon to control plane (feature `acme-issue-dns-v1`, `challenge: 'dns-01'`):
+ * publish these TXT records for the order `requestId`. The daemon never holds
+ * a DNS credential and never writes a record itself.
+ */
+export type AcmeDnsPublishMessage = {
+  type: "acme-dns-publish";
+  requestId: string;
+  records: AcmeDnsRecord[];
+  at: string;
+};
+
+/**
+ * Control plane to daemon: the records of `requestId` read back at every
+ * authoritative name server (`ok`), or could not be published (`error`, one
+ * plain sentence).
+ */
+export type AcmeDnsPublishedMessage = {
+  type: "acme-dns-published";
+  requestId: string;
+  ok: boolean;
+  error?: string;
+  at: string;
+};
+
+/**
+ * Daemon to control plane: the order `requestId` is over (validated or
+ * failed), so its records can go.
+ */
+export type AcmeDnsRemoveMessage = {
+  type: "acme-dns-remove";
+  requestId: string;
   at: string;
 };
 
@@ -941,18 +1006,13 @@ export type DaemonMessage =
     /**
      * Daemon-initiated, fire-and-forget (no correlated request/result) —
      * `../metrics/topology/`'s stable device/filesystem/GPU/signal identity
-     * and generation, reported over the socket by `TopologyReporter`
-     * (`./topology-reporter.ts`) so the control plane can persist per-server
-     * topology-generation history (`turbopanel/src/client/servers/
-     * server-topology-records.ts`).
-     *
-     * `generation` and `bootGeneration` (here and inside the snapshot) are
-     * left out once the control plane lists `topology-generation-optional-v1`.
+     * reported over the socket by `TopologyReporter`
+     * (`./topology-reporter.ts`). The control plane tells topologies apart by
+     * their content (`topologyIdentityKey`); the report carries no generation
+     * number.
      */
     type: "topology-report";
-    generation?: number;
-    bootGeneration?: number;
-    snapshot: TopologyReportSnapshot;
+    snapshot: TopologySnapshot;
     at: string;
   }
   | {
@@ -1070,6 +1130,9 @@ export type DaemonMessage =
   | AcmeProofForwardEndMessage
   | AcmeIssueEventMessage
   | AcmeProofForwardReportMessage
+  | AcmeDnsPublishMessage
+  | AcmeDnsPublishedMessage
+  | AcmeDnsRemoveMessage
   | {
     type: "tunnel-token-result";
     id: string;
@@ -1085,10 +1148,7 @@ export type DaemonMessage =
   | {
     type: "public-urls-update";
     id: string;
-    /** Flat compatibility list. Daemons below the per-hostname floor read only this. */
-    urls: string[];
-    /** Present when the daemon can render per-hostname certificate sources. */
-    hostnames?: InstanceHostnameWireEntry[];
+    hostnames: InstanceHostnameWireEntry[];
     /** Present when any hostname uses `lets-encrypt`. */
     instanceAcme?: InstanceAcmeWireSettings;
     /** Present only when this daemon advertises `instance-edge-trust-v1`. */
@@ -1191,17 +1251,27 @@ function validateAcmeRequestId(value: unknown): string | null {
     : "invalid requestId";
 }
 
-function validateAcmeNames(value: unknown): string | null {
+function validateAcmeNames(value: unknown, wildcards = false): string | null {
   if (
     !Array.isArray(value) || value.length === 0 ||
     value.length > MAX_ACME_ISSUE_NAMES
   ) {
     return "invalid names";
   }
-  const ok = value.every((n) =>
-    typeof n === "string" && n.length <= 253 && ACME_NAME_RE.test(n)
-  );
+  const ok = value.every((n) => {
+    if (typeof n !== "string" || n.length > 253) return false;
+    if (!wildcards || !n.startsWith("*.")) return ACME_NAME_RE.test(n);
+    // A wildcard sits over a name of at least two labels: `*.com` is no name.
+    const base = n.slice(2);
+    return base.includes(".") && ACME_NAME_RE.test(base);
+  });
   return ok ? null : "invalid names";
+}
+
+function validateAcmeChallenge(value: unknown): string | null {
+  return value === undefined || value === "http-01" || value === "dns-01"
+    ? null
+    : "invalid challenge";
 }
 
 function validateAcmeAddress(value: unknown): boolean {
@@ -1242,7 +1312,9 @@ export function validateAcmeIssueRequestFields(
   return firstProblem(
     validateAcmeRequestId(record.requestId),
     isBoundedId(record.tlsId) ? null : "invalid tlsId",
-    validateAcmeNames(record.names),
+    validateAcmeChallenge(record.challenge),
+    // A wildcard is a DNS-only name: the HTTP proof cannot show one.
+    validateAcmeNames(record.names, record.challenge === "dns-01"),
     record.directory === "production" || record.directory === "staging"
       ? null
       : "invalid directory",
@@ -1308,6 +1380,66 @@ export function validateAcmeProofForwardReportFields(
   return firstProblem(
     validateAcmeRequestId(record.requestId),
     validateOptionalError(record.reason),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** The most records one `acme-dns-publish` carries (one per name of the order). */
+export const MAX_ACME_DNS_RECORDS = MAX_ACME_ISSUE_NAMES;
+/** `_acme-challenge.` then a plain name: letters, digits, dots, hyphens, underscore only up front. */
+const ACME_DNS_RECORD_NAME_RE = /^_acme-challenge\.[a-z0-9.-]+$/;
+const ACME_DNS_RECORD_VALUE_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+function validateAcmeDnsRecords(value: unknown): string | null {
+  if (
+    !Array.isArray(value) || value.length === 0 ||
+    value.length > MAX_ACME_DNS_RECORDS
+  ) {
+    return "invalid records";
+  }
+  const ok = value.every((item) => {
+    const record = item as { name?: unknown; value?: unknown } | null;
+    return typeof record === "object" && record !== null &&
+      typeof record.name === "string" && record.name.length <= 253 &&
+      ACME_DNS_RECORD_NAME_RE.test(record.name) &&
+      typeof record.value === "string" &&
+      ACME_DNS_RECORD_VALUE_RE.test(record.value);
+  });
+  return ok ? null : "invalid records";
+}
+
+/** Shape check for `acme-dns-publish`. Never accepts certificate material. */
+export function validateAcmeDnsPublishFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    validateAcmeDnsRecords(record.records),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-dns-published`. Never accepts certificate material. */
+export function validateAcmeDnsPublishedFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
+    typeof record.ok === "boolean" ? null : "invalid ok",
+    validateOptionalError(record.error),
+    isIsoTimestamp(record.at) ? null : "invalid at timestamp",
+    acmeForbiddenKey(record),
+  );
+}
+
+/** Shape check for `acme-dns-remove`. */
+export function validateAcmeDnsRemoveFields(
+  record: Record<string, unknown>,
+): string | null {
+  return firstProblem(
+    validateAcmeRequestId(record.requestId),
     isIsoTimestamp(record.at) ? null : "invalid at timestamp",
     acmeForbiddenKey(record),
   );

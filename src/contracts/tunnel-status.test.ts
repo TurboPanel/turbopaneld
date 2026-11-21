@@ -14,9 +14,9 @@ const test = Deno.test.bind(Deno);
 
 const ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
 const GOOD = {
-  pinnedVersion: "2026.10.7",
+  pinnedVersion: "2026.11.1",
   connectors: [
-    { tunnelId: ID, status: "connected", version: "2026.10.7", slot: "a" },
+    { tunnelId: ID, status: "connected", version: "2026.11.1", slot: "a" },
     { tunnelId: "instance", status: "stopped", version: "2026.5.0", slot: "b" },
   ],
 };
@@ -31,8 +31,8 @@ test("server.tunnel.status takes no input", () => {
 test("server.tunnel.status parses a result and an empty one", () => {
   assertEquals(parseTunnelStatusResult(GOOD), GOOD);
   assertEquals(
-    parseTunnelStatusResult({ pinnedVersion: "2026.10.7", connectors: [] }),
-    { pinnedVersion: "2026.10.7", connectors: [] },
+    parseTunnelStatusResult({ pinnedVersion: "2026.11.1", connectors: [] }),
+    { pinnedVersion: "2026.11.1", connectors: [] },
   );
 });
 
@@ -110,4 +110,69 @@ test("server.tunnel.status keeps the connector facts and refuses bad ones", () =
   bad({
     hostnames: Array.from({ length: 101 }, (_, i) => `n${i}.example.com`),
   });
+});
+
+test("server.tunnel.status carries what the hop does about client certificates", () => {
+  const down = {
+    ...GOOD,
+    peerClientAuth: "verify",
+    peerClientAuthDowngraded: true,
+  };
+  assertEquals<unknown>(parseTunnelStatusResult(down), down);
+  const ok = { ...GOOD, peerClientAuth: "require" };
+  assertEquals<unknown>(parseTunnelStatusResult(ok), ok);
+  assertThrows(() => parseTunnelStatusResult({ ...GOOD, peerClientAuth: "x" }));
+  assertThrows(() =>
+    parseTunnelStatusResult({ ...GOOD, peerClientAuthDowngraded: false })
+  );
+});
+
+test("server.tunnel.status carries the last metrics port lock load, optionally", () => {
+  assertEquals<unknown>(parseTunnelStatusResult(GOOD), GOOD);
+  const at = "2026-11-19T10:00:00.000Z";
+  const locked = {
+    ...GOOD,
+    statusPortsLocked: true,
+    statusPortsLockCheckedAt: at,
+  };
+  assertEquals<unknown>(parseTunnelStatusResult(locked), locked);
+  const bare = { ...GOOD, statusPortsLocked: true };
+  assertEquals<unknown>(parseTunnelStatusResult(bare), bare);
+  const failed = {
+    ...GOOD,
+    statusPortsLocked: false,
+    statusPortsLockReason: "nft is not installed",
+    statusPortsLockCheckedAt: at,
+  };
+  assertEquals<unknown>(parseTunnelStatusResult(failed), failed);
+  const bad = (extra: Record<string, unknown>) =>
+    assertThrows(() => parseTunnelStatusResult({ ...GOOD, ...extra }));
+  bad({ statusPortsLocked: "yes" });
+  bad({ statusPortsLockReason: "x" }); // a reason without a fact
+  bad({ statusPortsLockCheckedAt: at }); // a time without a fact
+  bad({ statusPortsLocked: true, statusPortsLockReason: "x" }); // reason only when false
+  bad({ statusPortsLocked: false, statusPortsLockReason: 3 });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\nb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\rb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\tb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "a\u001b[31mb" });
+  bad({ statusPortsLocked: false, statusPortsLockReason: "x".repeat(201) });
+  bad({ statusPortsLocked: true, statusPortsLockCheckedAt: "yesterday" });
+});
+
+test("a status answer naming the retired tunnel id default is refused", () => {
+  assertThrows(
+    () =>
+      parseTunnelStatusResult({
+        pinnedVersion: "2026.5.2",
+        connectors: [{
+          tunnelId: "default",
+          status: "connected",
+          version: "2026.5.2",
+          slot: "a",
+        }],
+      }),
+    TypeError,
+  );
 });

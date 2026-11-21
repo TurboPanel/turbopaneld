@@ -37,7 +37,6 @@ import { forEachSequential } from "../util/sequential.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import {
   runDockerSetup as defaultRunDockerSetup,
-  runProxySqlSetup,
 } from "../orchestration/ansible.ts";
 import {
   assertPublicPrivateListenerTls,
@@ -60,7 +59,11 @@ import {
   isManagedMemberDestroyed,
   ManagedDestroyedError,
 } from "./destroyed-marker.ts";
-import { reconcileManagedPublicFirewallBestEffort } from "./firewall.ts";
+import { reconcileManagedPublicFirewall } from "./firewall.ts";
+import {
+  reconcileManagedFirewallBefore,
+  recordManagedListenerCleared,
+} from "./firewall-boot.ts";
 import { sessionEndsFor } from "./session-end-marker.ts";
 import { withManagedLifecycleLock } from "./target-lock.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
@@ -78,10 +81,6 @@ import {
   managedRootPasswordPath,
   managedSecretsDir,
 } from "./engine-paths.ts";
-import {
-  loadProxySqlMonitorCredentials,
-  proxySqlHostPrepPresent,
-} from "./proxysql-admin.ts";
 import {
   buildNeedsResyncMember,
   stopManagedProjectForResync,
@@ -105,8 +104,6 @@ export type ManagedApplyHandlerDeps = {
   ensureDocker?: () => Promise<void>;
   /** Test seam — defaults to {@link defaultRunDockerSetup}. */
   runDockerSetup?: () => Promise<void>;
-  /** Test seam — defaults to {@link runProxySqlSetup}. */
-  runHostPrep?: () => Promise<void>;
 };
 
 /**
@@ -402,11 +399,8 @@ export async function provisionManagedRootPasswordFile(
 }
 
 /**
- * Pick the compose form for this apply. A cluster created before the file
- * form has a persisted compose with the password as an env var; when this
- * apply changes nothing else about that compose, keep it byte-identical so
- * `compose up` does not recreate (restart) the engine. Any apply that
- * recreates the container anyway moves it to the file form.
+ * Build the compose for this apply: the root password always in the file form,
+ * and the image already stored on disk kept unless the payload moves it.
  */
 export async function chooseManagedCompose(
   composePath: string,
@@ -425,13 +419,6 @@ export async function chooseManagedCompose(
     } catch {
       storedImage = undefined;
     }
-  }
-  if (previous !== null && composeUsesRootPasswordInterpolation(previous)) {
-    const legacy = normalizeManagedCompose(payload, {
-      legacyRootPasswordEnv: true,
-      storedImage,
-    });
-    if (legacy.composeYaml === previous) return legacy;
   }
   return normalizeManagedCompose(payload, { storedImage });
 }
@@ -587,7 +574,6 @@ export async function applyManagedEngineState(
   payload: ManagedApplyPayload,
   credentials: ManagedApplyCredential[],
   deps?: {
-    runHostPrep?: () => Promise<void>;
     /** Decrypted per-fronting-server monitor roles from payload.monitorUsers. */
     monitorUsers?: Array<{ user: string; password: string }>;
     topologyUser?: { user: string; password: string };
@@ -684,7 +670,6 @@ async function configureStandbyIfSupported(
  * Control-plane-minted per-server monitor roles: one per fronting server
  * (members + bound consumers), so every server's ProxySQL can monitor this
  * engine with its own identity. Standbys inherit the roles via WAL replay.
- * Legacy fallback: host-seeded monitor.cnf (older control planes).
  */
 async function ensureOrchestratorTopologyRole(
   ctx: ManagedEngineContext,
@@ -704,7 +689,6 @@ async function ensureProxySqlMonitorRoles(
   ctx: ManagedEngineContext,
   engine: ReturnType<typeof getManagedEngineRuntime>,
   deps?: {
-    runHostPrep?: () => Promise<void>;
     monitorUsers?: Array<{ user: string; password: string }>;
     topologyUser?: { user: string; password: string };
   },
@@ -712,32 +696,14 @@ async function ensureProxySqlMonitorRoles(
   if (!engine.ensureProxySqlMonitor) return;
 
   const monitorUsers = deps?.monitorUsers;
-  if (monitorUsers && monitorUsers.length > 0) {
-    await forEachSequential(monitorUsers, async (monitor) => {
-      await engine.ensureProxySqlMonitor?.(ctx, monitor);
-    });
-    logInfo(
-      "managed",
-      `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,
-    );
-    return;
-  }
-
-  const layout = resolveLayout(Deno.env.toObject());
-  const prepPresent = await proxySqlHostPrepPresent(layout);
-  if (!prepPresent && deps?.runHostPrep) {
-    await deps.runHostPrep();
-  }
-  const monitor = await loadProxySqlMonitorCredentials(layout);
-  if (monitor) {
-    await engine.ensureProxySqlMonitor(ctx, monitor);
-    logInfo("managed", "managed.apply ensured ProxySQL monitor role");
-  } else {
-    logInfo(
-      "managed",
-      "managed.apply skipped ProxySQL monitor role (monitor.cnf missing)",
-    );
-  }
+  if (!monitorUsers?.length) return;
+  await forEachSequential(monitorUsers, async (monitor) => {
+    await engine.ensureProxySqlMonitor?.(ctx, monitor);
+  });
+  logInfo(
+    "managed",
+    `managed.apply ensured ${monitorUsers.length} ProxySQL monitor role(s)`,
+  );
 }
 
 function buildManagedApplyResult(
@@ -934,7 +900,6 @@ async function applyManagedEngine(
   logSink.setPhase(COMMAND_LOG_PHASES.MANAGED_APPLY);
   const ensureDocker = deps?.ensureDocker ?? defaultEnsureDocker;
   const runDockerSetup = deps?.runDockerSetup ?? defaultRunDockerSetup;
-  const runHostPrep = deps?.runHostPrep ?? runProxySqlSetup;
 
   await ensureDocker();
   // Before any `compose up` (engine or bootstrap `docker run --network …`):
@@ -1024,6 +989,13 @@ async function applyManagedEngine(
     managedComposePath(layout, payload.managedId),
     payload,
   );
+  // Install or widen scoping BEFORE compose publishes the port, so it is never
+  // reachable unscoped (the rules match the original address/port and do not
+  // need the container). Removal and narrowing wait until compose succeeded:
+  // the old container keeps publishing its old port until then, and a failed
+  // compose leaves the old scoping in place. A failure to scope a public
+  // listener fails the apply before anything is published.
+  await reconcileManagedFirewallBefore(layout, payload);
   const project = await composeUpManagedEngine({
     layout,
     payload,
@@ -1038,9 +1010,10 @@ async function applyManagedEngine(
     engineGroup: engine.containerGroup,
   });
 
-  // Scope a public listener once the publish exists; drop the legacy chain
-  // when the listener is gone. Never blocks apply.
-  await reconcileManagedPublicFirewallBestEffort(payload);
+  // Compose replaced the container: now drop scoping for a listener that is
+  // gone and narrow the chain to the new port only.
+  await recordManagedListenerCleared(layout, payload);
+  await reconcileManagedPublicFirewall(payload, "after");
 
   const engineContainers = await collectManagedContainers(project, redact, run);
   const containerId = resolveEngineContainerId(
@@ -1067,7 +1040,7 @@ async function applyManagedEngine(
       engine,
       payload,
       decrypted.credentials,
-      { runHostPrep, monitorUsers, topologyUser },
+      { monitorUsers, topologyUser },
     );
 
     const member = await collectMemberHealth(

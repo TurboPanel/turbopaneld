@@ -116,25 +116,6 @@ export type ReleaseManifestV1 = {
   builderPlanVersion?: string;
 };
 
-/**
- * Pre-rename spellings of the two build-tool version fields. Manifests sealed
- * by an earlier daemon carry these; they stay readable so a rollback to such a
- * release keeps working. New manifests are always written with the new names.
- */
-const LEGACY_VERSION_FIELDS = [
-  ["railpackFrontendVersion", "builderFrontendVersion"],
-  ["railpackPlanVersion", "builderPlanVersion"],
-] as const;
-
-/** Move a legacy-named version field to its new name (the new name wins). */
-function normalizeLegacyVersionFields(record: Record<string, unknown>): void {
-  for (const [legacy, current] of LEGACY_VERSION_FIELDS) {
-    if (record[legacy] === undefined) continue;
-    if (record[current] === undefined) record[current] = record[legacy];
-    delete record[legacy];
-  }
-}
-
 /** Every named field is absent or passes `ok`. */
 function optionalFieldsOk(
   record: Record<string, unknown>,
@@ -187,7 +168,6 @@ function isReleaseManifestV1(value: unknown): value is ReleaseManifestV1 {
         "imageDigest",
         "builderFrontendVersion",
         "builderPlanVersion",
-        ...LEGACY_VERSION_FIELDS.flat(),
       ],
       (field) => typeof field === "string",
     );
@@ -232,6 +212,5 @@ export async function readReleaseManifest(
     return null;
   }
   if (!isReleaseManifestV1(parsed)) return null;
-  normalizeLegacyVersionFields(parsed as Record<string, unknown>);
   return parsed;
 }

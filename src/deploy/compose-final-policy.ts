@@ -75,6 +75,7 @@ export const RESERVED_HOST_PORT_RANGES: ReadonlyArray<
   [6070, 6070],
   [7080, 7081],
   [7443, 7443],
+  [9443, 9443],
   [18080, 18999],
   [19100, 19799],
 ];

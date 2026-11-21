@@ -12,6 +12,34 @@ cd "$ROOT"
 # Secret scan is never skippable.
 "$ROOT/scripts/scan-secrets.sh"
 
+# The checkout's dev mode: TURBOPANEL_DEV_ENV in <repos folder>/.turbopanel-dev-mode
+# (written by dev/scripts/setup.sh on the editing machine, never in the Vagrant
+# guest). The repos folder is the parent of the main checkout, also when this
+# is a worktree. The file is parsed with sed, never sourced.
+tp_precommit_dev_env() {
+  _common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _common=""
+  if [ -n "$_common" ]; then
+    _folder=$(CDPATH= cd -- "$_common/../.." 2>/dev/null && pwd) || _folder=""
+  else
+    _folder=""
+  fi
+  [ -n "$_folder" ] || _folder=$(CDPATH= cd -- "$ROOT/.." 2>/dev/null && pwd) || return 0
+  sed -n "s/^TURBOPANEL_DEV_ENV='\(.*\)'\$/\1/p" "$_folder/.turbopanel-dev-mode" 2>/dev/null | tail -n 1
+  return 0
+}
+
+# On a Vagrant or Incus host the toolchain lives in the guest and the host needs
+# no Deno: do not resolve, fetch or install one under /opt/turbopanel. The guest
+# and CI still run fmt, lint and the guards. A Direct machine, the guest (which
+# has no mode file) and CI are unchanged.
+case "$(tp_precommit_dev_env)" in
+  vagrant | incus)
+    echo "pre-commit: Vagrant/Incus host - fmt + guards skipped, secret scan only (the guest and CI run them)" >&2
+    exit 0
+    ;;
+  *) ;;
+esac
+
 # Typecheck and the test suite stay deferred to `deno task verify` / CI (they
 # need the Vagrant guest or minutes of wall clock). Everything below is the
 # cheap, offline half of verify.yml -- fmt, lint, and the two static contract
@@ -32,8 +60,8 @@ tp_precommit_dev_checkout() {
     CDPATH= cd -- "$ROOT/../dev" && pwd
     return 0
   fi
-  # From a worktree (for example .claude/worktrees/<name>), ROOT's parent is
-  # not the folder holding the sibling checkouts; the main checkout's is.
+  # From a linked worktree, ROOT's parent is not the folder holding the
+  # sibling checkouts; the main checkout's is.
   _common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || _common=""
   if [ -n "$_common" ] && [ -f "$(dirname -- "$_common")/../dev/Vagrantfile" ]; then
     CDPATH= cd -- "$(dirname -- "$_common")/../dev" && pwd

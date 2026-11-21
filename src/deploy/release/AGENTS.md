@@ -358,7 +358,7 @@ account, never in docker or tp), inside the site owner's
 sandbox: daemon trees and sockets inaccessible, only this build's work tree and
 its owner's project cache visible under `/var/lib/turbopanel-build`,
 private-range / metadata egress denied, loopback platform ports refused for the
-unit's cgroup, 4G memory, 2 CPUs, 1024 tasks, 30 minutes, one build per host
+unit's cgroup, CPU core and memory limits (see below), 1024 tasks, 30 minutes, one build per host
 (the daemon also queues its own builds and says so in the transcript). Output streams back line by line. On any abort (the
 daemon-side ceiling, a lost client) the daemon runs `tp-host systemctl stop
 turbopanel-build-<id>.service`; then, success or not, `tp-host build-return
@@ -371,8 +371,46 @@ repository) runs in this same sandbox (`image-prepare-sandbox.ts`: the daemon
 copies the vendored tool into `work/<id>/tools/`, the spec runs it, and the
 plan comes back as one regular file checked on its open handle); with no site
 owner the build runs in `turbopanel-tpbuild.slice`. The image build itself
-(`docker buildx`, Compose `build:`) stays on the Docker lane: the Engine's
-BuildKit, driven by `tp`, with no per-site-owner limits yet. There is no opt-out on a managed
+(`docker buildx`) stays on the Docker lane (the Engine's BuildKit, driven by
+`tp`). **Its steps are not CPU limited yet; only the prepare step is.**
+`ensureImageBuildSlice` (`build-sandbox.ts`) runs `sudo tp-host
+image-build-slice <build-id> [cores]` first, which makes the build's own slice
+`turbopanel-imagebuild-<id>.slice` below `turbopanel-imagebuild.slice` (the
+parent is capped at the host's cores; the child gets the build-core limit,
+default half the host's) and returns its cgroup path and the host-clamped core
+count; `imageBuildBuildxArgs` passes the path as `--cgroup-parent`. That
+parameter is honoured by a plain Dockerfile (with a leading-slash cgroupfs
+path) but **ignored by the pinned frontend** (Checked on Docker 29 / buildx
+0.39, systemd 257: its RUN step lands in the Engine's own container slice), so
+no cap holds. The build log says so (`imageBuildLimitsNotice`) and never
+claims one; do not word anything else as a cap. The real step cap waits until
+after launch; `scripts/image-build-cgroup-proof.sh` runs the pinned frontend
+with the daemon's exact argv, prints the cgroup the step ran in and exits
+non-zero while the cap does not hold: re-run it when that work resumes. The
+slice is removed (`removeImageBuildSlice`, in a `finally`) when the build ends
+by success, failure or cancel, and the daemon sweeps leftovers at start
+(`sweepImageBuildSlicesAtStart` in `entry/run.ts`). The slice is best
+effort until the proof script passes: when it cannot be set up (no cpu
+controller or `cpu.max`, cgroup v1, nested without delegation, or a `tp-host`
+older than the daemon without the verbs) the build logs a warning, leaves out
+`--cgroup-parent` and goes on, as native `build-run` does there. Memory is not limited for
+the build steps (the memory limit covers the prepare step only), and Compose
+`build:` is not limited at all (Compose offers no cgroup parent or CPU option
+for builds, only `--memory`).
+
+**Build limits (`build-limits-v1`).** The control plane sends the smallest
+core limit and the smallest memory limit set among the organization (per
+build), the server and the service as `buildLimits` (`{ cores?: { cores,
+source }, memory?: { bytes, source }, swap?: { allowed, source } }`) on a `sourceMaterial[]` entry and
+deploy-wide; unknown to an older daemon (ignored), absent from an older
+control plane (defaults). Swap is off unless a level opts in and no level says off (off at any level wins); when on, a build may use swap up to the size of its own memory limit (`MemorySwapMax` = the resolved memory limit), shown as "swap allowed up to X GB" in the log line. Defaults are not a ceiling: a service may set limits above the defaults when no wider level sets a smaller one (still capped at the host). The server's RAM is read at every build start, and a build killed for memory on a server whose total was then below the largest the daemon has seen since it started adds "This server's memory may be ballooned down; it had X when the build started." Defaults: half the server's cores (rounded down, at
+least 1); the server's RAM less 1 GiB (at least 1 GiB, at most the RAM).
+Limits above the host are capped to it. `build-limits.ts` resolves and words
+the transcript line ("Build limited to 2 cores (server limit) and 2.8 GB
+memory (default)"); `build-run` takes the numbers as arguments 4 and 5 and
+clamps them again. A build killed for memory (the unit exits 137, or the runner's own last line says a step exited 137; text the build prints never counts)
+ends with "The build ran out of memory (limit X). Raise Build Memory or reduce
+the build's memory use." There is no opt-out on a managed
 host. A development install runs the commands as the developer with `clearEnv` and an explicit
 allow-list, and no resource caps.
 
@@ -529,19 +567,10 @@ record written by that same deploy no longer names it.
 
 A source binding may set `x-turbopanel.source.buildKind: image`, which
 deploy-prepare passes straight through as `sourceMaterial[].build.kind`.
-**Both spellings are accepted** while the rename rolls out: `image` is the new
-value and the old one still parses and behaves the same
-(`isImageBuildKind` in `commands-contracts.ts` is the one check). Likewise the
-two version fields are written as `builderFrontendVersion` /
-`builderPlanVersion`; `readReleaseManifest` still reads the old field names from
-manifests sealed earlier and maps them to the new ones, so a rollback to an old
-release keeps working. A daemon older than this change still reads a manifest
-written with the new names (it ignores unknown keys) and only loses the two
-version fields when it reports the release. Both fallbacks stay until wipe day:
-released control planes still send the old build kind value, and live hosts
-still hold manifests sealed with the old field names. On wipe day, when every
-database is wiped and every server reinstalled, the control plane switches to
-sending `image` and both fallbacks are removed in one step. That is
+`image` is the only accepted build kind
+(`isImageBuildKind` in `commands-contracts.ts` is the one check). The two
+version fields are written as `builderFrontendVersion` /
+`builderPlanVersion`. That is
 the **fourth deploy pattern** on this host, alongside compose, site,
 and native app — and the four differ only in what a release *is*:
 
@@ -565,7 +594,7 @@ Concretely (`release/image-build.ts`, branch in `apply-source-releases.ts`):
   reports the redacted tail of BuildKit's own output.
 - **No private `buildkitd`.** The daemon runs as `tp`, and a non-root
   `buildkitd` demands rootless mode (rootlesskit, newuidmap/newgidmap,
-  subuid/subgid for `tp`): on adrastea it exited with "rootless mode requires to
+  subuid/subgid for `tp`): on host-a it exited with "rootless mode requires to
   be executed as the mapped root in a user namespace" and the lane only ever saw
   a readiness timeout. A root `buildkitd` socket would be a second privileged
   build API the Docker gate cannot observe. The Engine's builder already exists

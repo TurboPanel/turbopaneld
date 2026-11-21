@@ -2,6 +2,9 @@
 Description=TurboPanel UI (Expo web dev server)
 After=network-online.target
 Wants=network-online.target
+# Never give up retrying: the default start limit (5 starts in 10 s) left this
+# unit failed after a burst of quick failures until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -41,6 +44,8 @@ StandardError=append:{{ ui_log_dir }}/ui.err.log
 ExecStart={{ turbopanel_node }} {{ turbopanel_ui_dir }}/node_modules/expo/bin/cli start --web --host localhost --port {{ expo_port }}
 Restart=always
 RestartSec=3
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

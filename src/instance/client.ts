@@ -111,12 +111,6 @@ import {
   signPinReport,
 } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
-import {
-  setTopologyGenerationOptional,
-  setTopologySizesNegotiated,
-  sizesFeaturesNegotiated,
-  topologyGenerationOptional,
-} from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   createPanelSealKeySource,
@@ -216,9 +210,11 @@ import {
   writeActiveUpgradeContext,
 } from "./update-active-context.ts";
 import {
+  clearUpdateSkip,
   handleSelfUpdateAttachOutcome,
   readUpdateGuardArmed,
   readUpdateRollback,
+  readUpdateSkip,
 } from "./update-guard.ts";
 import { UpdateProgressReporter } from "./update-progress-reporter.ts";
 import {
@@ -248,31 +244,17 @@ import { AcmeIssueHandler } from "./acme-issue-handler.ts";
 import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
-import { DAEMON_VERSION } from "../version.ts";
 import {
-  BACKUP_S3_COPY_FEATURE,
-  DEV_HOST_FEATURE,
-  FABRIC_PEER_REPORT_FEATURE,
-  HOST_CAPACITY_FEATURE,
-  MANAGED_HA_BOOT_HOLD_FEATURE,
-  MANAGED_HA_PROBE_FEATURE,
-  MANAGED_HEALTH_REPORT_FEATURE,
-  REPO_KEY_REPORT_FEATURE,
-  resolveDaemonCapabilities,
   SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
-  TLS_CAPTURE_FEATURE,
-  TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
 } from "./version-wire.ts";
-import {
-  TopologyReporter,
-  topologyReportForWire,
-} from "./topology-reporter.ts";
+import { TopologyReporter } from "./topology-reporter.ts";
 import { answerDevHostAction, type DevHostPort } from "../dev-host/wire.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
 import type {
   CommandRecoveryReport,
+  CommandStateReport,
   DaemonMessage,
   DevHostActionMessage,
   InstanceHostnameWireEntry,
@@ -326,22 +308,13 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers unconfirmed command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
   /**
-   * Runs when a session attaches: delivers held command outcomes. `peer`
-   * answers whether the control plane advertised a feature.
+   * A session socket opened (before its attach frame): send unconfirmed
+   * results on it without clearing anything.
    */
-  handleSessionAttach?: (
-    ws: WebSocket,
-    peer: { supports(feature: string): boolean },
-  ) => Promise<void>;
-  /**
-   * A session socket opened (before its attach frame): send held results on
-   * it without clearing anything.
-   */
-  handleSessionOpen?: (
-    ws: WebSocket,
-    peer: { supports(feature: string): boolean; known(): boolean },
-  ) => void;
+  handleSessionOpen?: (ws: WebSocket) => void;
   /** The control plane stored a command's outcome (`command-outcome-ack`). */
   handleCommandOutcomeAck?: (id: string) => Promise<void>;
   /**
@@ -355,6 +328,12 @@ export type CommandPorts = {
   ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** What this process remembers about commands, for `hello` (`command-recovery-v2`). */
+  commandState?: () => CommandStateReport | undefined;
+  /** True when no command runs and no outcome waits for its ack (connection recycle). */
+  commandsQuiet?: () => boolean;
+  /** Runs before a socket opens: read the command journal so the first hello is complete. */
+  prepareSession?: () => Promise<void>;
   /** Hear every 60 s `tp0` peer reading (`fabric-peers-report`). */
   subscribeFabricPeers?: FabricPeerSubscribe;
 };
@@ -391,7 +370,7 @@ export interface InstanceClientOptions {
   /** When set, enables host metrics on the daemon WebSocket. */
   metricsCollectorFactory?: () => MetricsCollector;
   /** When set, enables `topology-report` emission on the daemon WebSocket (see `TopologyReporter`). */
-  collectTopologyFn?: () => Promise<TopologySnapshot>;
+  collectTopologyFn?: () => Promise<CollectedTopology>;
   /**
    * Checkout-sync unpack implementation. Production compile never supplies this;
    * source `main.ts` registers it via `enableCheckoutDevSync`.
@@ -725,7 +704,7 @@ export class InstanceClient {
    */
   #liveLeases: LiveLeaseManager | undefined;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
-  readonly #collectTopologyFn?: () => Promise<TopologySnapshot>;
+  readonly #collectTopologyFn?: () => Promise<CollectedTopology>;
   /** Created lazily once `#collectTopologyFn` is set; lives across reconnects (unlike `#liveLeases`). */
   #topologyReporter: TopologyReporter | undefined;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
@@ -822,9 +801,7 @@ export class InstanceClient {
     this.#updateProgress.setContext({
       progressId,
       upgradeId: options.upgradeId,
-      canSend: () =>
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN,
+      canSend: () => ws.readyState === WebSocket.OPEN,
       send: (message) => {
         if (ws.readyState !== WebSocket.OPEN) return false;
         ws.send(JSON.stringify(message));
@@ -852,21 +829,10 @@ export class InstanceClient {
     this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
   }
 
-  /** What the command outbox may ask about the attached control plane. */
-  #commandPeer(): { supports(feature: string): boolean; known(): boolean } {
-    return {
-      supports: (feature) => this.instanceSupports(feature),
-      known: () => this.#peerFeaturesKnown,
-    };
-  }
-
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
-      this.#runSocketHandler(
-        "session-attach",
-        sessionAttach(ws, this.#commandPeer()),
-      );
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
     }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
@@ -874,9 +840,7 @@ export class InstanceClient {
       ws.send(JSON.stringify({ ...pending, at: new Date().toISOString() }));
     }
     this.#updateProgress.setContext({
-      canSend: () =>
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN,
+      canSend: () => ws.readyState === WebSocket.OPEN,
       send: (message) => {
         if (ws.readyState !== WebSocket.OPEN) return false;
         ws.send(JSON.stringify(message));
@@ -1014,8 +978,6 @@ export class InstanceClient {
     this.#peerFeaturesKnown = true;
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
-      setTopologySizesNegotiated(false);
-      setTopologyGenerationOptional(false);
       this.#releaseHeldReports();
       return;
     }
@@ -1024,13 +986,6 @@ export class InstanceClient {
       if (typeof entry === "string") accepted.push(entry);
     }
     this.#peerFeatures = accepted;
-    setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
-    setTopologyGenerationOptional(
-      accepted.includes(TOPOLOGY_GENERATION_OPTIONAL_FEATURE),
-    );
-    // A change kept for an older control plane goes out once this one lists the feature.
-    void this.#repoKeyReporter?.flush();
-    this.#devHost?.peerFeaturesChanged();
     this.#releaseHeldReports();
   }
 
@@ -2088,8 +2043,8 @@ export class InstanceClient {
       panelSealKey: () => panelSealKeys.get(),
       signRequest: (request) =>
         this.#signRequestWithDaemonKey(daemonSigningKey, request),
-      onPlaintextSecretsAnswer: () =>
-        this.#sealingRegistration?.afterPlaintextAnswer() ??
+      onSealingKeyRequired: () =>
+        this.#sealingRegistration?.afterKeyRequired() ??
           Promise.resolve(false),
       ...this.#apiClientHooks(),
     });
@@ -2187,6 +2142,7 @@ export class InstanceClient {
 
     const jwt = await this.#tokenManager!.getToken();
     await this.#sealingRegistration?.atConnect();
+    await commandPorts.prepareSession?.().catch(() => undefined);
     await this.#openDaemonWebSocket(jwt, identity.serverId);
   }
 
@@ -2219,14 +2175,16 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupports: () => this.instanceSupports(DEV_HOST_FEATURE),
     });
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
     this.#ensureProofForward();
-    this.#ensureAcmeIssue();
+    this.#runSocketHandler(
+      "acme-dns sweep",
+      this.#ensureAcmeIssue().sweepRestartedDnsOrders(),
+    );
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -2237,7 +2195,7 @@ export class InstanceClient {
       ws.send(JSON.stringify(
         {
           type: "topology-report",
-          ...topologyReportForWire(report, topologyGenerationOptional()),
+          ...report,
         } satisfies DaemonMessage,
       ));
     });
@@ -2391,7 +2349,7 @@ export class InstanceClient {
           if (this.#ws !== ws) return;
           this.#startSessionWork(ws, attachProof, panelPin);
           this.#applySignedHello(hello);
-          commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+          commandPorts.handleSessionOpen?.(ws);
         },
         onFrame: (json) => this.#dispatchRawMessage(json, ws),
         onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),
@@ -2458,8 +2416,6 @@ export class InstanceClient {
       this.#ws = undefined;
       this.#peerFeatures = [];
       this.#peerFeaturesKnown = false;
-      setTopologySizesNegotiated(false);
-      setTopologyGenerationOptional(false);
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
@@ -2490,7 +2446,7 @@ export class InstanceClient {
     // never wait on one frame that may be lost with the upgrade. Nothing is
     // cleared until the attach frame says the control plane confirms results
     // (or it confirms one); a repeat send is harmless.
-    if (!signed) commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+    if (!signed) commandPorts.handleSessionOpen?.(ws);
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
@@ -2541,7 +2497,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
     });
   }
 
@@ -2553,10 +2508,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerBootHoldSupport: () =>
-        this.#peerFeaturesKnown
-          ? this.instanceSupports(MANAGED_HA_BOOT_HOLD_FEATURE)
-          : undefined,
     });
   }
 
@@ -2567,8 +2518,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () =>
-        this.instanceSupports(MANAGED_HEALTH_REPORT_FEATURE),
     });
     return this.#managedHealthReporter;
   }
@@ -2580,7 +2529,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () => this.instanceSupports(REPO_KEY_REPORT_FEATURE),
       ledger: () => repoKeyLedgerFor(),
     });
     return this.#repoKeyReporter;
@@ -2593,8 +2541,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () =>
-        this.instanceSupports(FABRIC_PEER_REPORT_FEATURE),
       subscribe: () => commandPorts.subscribeFabricPeers,
     });
     return this.#fabricPeerReporter;
@@ -2631,7 +2577,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
     });
     return this.#backupCopyReporter;
   }
@@ -2665,6 +2610,11 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
+      sendDns: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
       report: (input) => {
         const api = this.#apiClient;
         if (api === undefined) {
@@ -2673,7 +2623,6 @@ export class InstanceClient {
         return api.reportIssuedCertificate(input);
       },
     });
-    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
     return this.#acmeIssue;
   }
 
@@ -2685,9 +2634,7 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
       },
       capture: createCertificateCapture({
-        supported: () =>
-          this.#apiClient !== undefined &&
-          this.instanceSupports(TLS_CAPTURE_FEATURE),
+        supported: () => this.#apiClient !== undefined,
         report: (input) => {
           const api = this.#apiClient;
           if (api === undefined) {
@@ -2737,10 +2684,10 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
-      hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
       // Running and unconfirmed commands ride on hello / heartbeat.
       commandReport: () => commandPorts.commandReport?.(),
-      peerSupports: (feature) => this.instanceSupports(feature),
+      commandState: () => commandPorts.commandState?.(),
+      commandsQuiet: () => commandPorts.commandsQuiet?.() ?? true,
     });
   }
 
@@ -2752,10 +2699,6 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
-      schedulerOptions: {
-        durabilityFlag: () => this.instanceSupports("metrics-v8"),
-        sizesFlag: () => this.instanceSupports("metrics-v8-sizes"),
-      },
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;
@@ -3035,6 +2978,9 @@ export class InstanceClient {
           this.#ensureAcmeIssue().handleRequest(message),
         );
         return true;
+      case "acme-dns-published":
+        this.#ensureAcmeIssue().handleDnsPublished(message);
+        return true;
       case "acme-proof-forward":
         this.#runSocketHandler(
           "acme-proof-forward",
@@ -3237,37 +3183,40 @@ export class InstanceClient {
 
   /**
    * The plaintext tunnel token: opened from `tokenEnvelope` through the same
-   * `/secrets/decrypt` path every deploy secret uses, or the legacy `token`
-   * from an older control plane. An envelope that cannot be opened fails the
-   * request rather than tearing the tunnel down.
+   * `/secrets/decrypt` path every deploy secret uses. An envelope that cannot
+   * be opened fails the request rather than tearing the tunnel down. An empty
+   * `token` with no envelope is the teardown; any other plaintext token is
+   * refused.
    */
   async #resolveTunnelToken(
     message: Extract<DaemonMessage, { type: "tunnel-token" }>,
   ): Promise<string> {
-    if (message.tokenEnvelope !== undefined) {
-      const [plaintext] = await this.#openSealedSecrets([
-        message.tokenEnvelope,
-      ]);
-      if (typeof plaintext !== "string") {
-        throw new TypeError("tunnel token envelope could not be opened");
-      }
-      return plaintext;
+    if (message.tokenEnvelope === undefined) {
+      if (message.token === "") return "";
+      throw new TypeError("tunnel-token carries no token envelope");
     }
-    if (typeof message.token !== "string") {
-      throw new TypeError("tunnel-token carries no token");
+    const [plaintext] = await this.#openSealedSecrets([message.tokenEnvelope]);
+    if (typeof plaintext !== "string") {
+      throw new TypeError("tunnel token envelope could not be opened");
     }
-    return message.token;
+    return plaintext;
   }
 
   /**
    * Replace every `keyEnvelope` with the opened `keyPem`, in one
-   * `/secrets/decrypt` call. Entries from an older control plane already
-   * carry `keyPem` and pass through.
+   * `/secrets/decrypt` call. An entry that carries a plaintext `keyPem` is
+   * refused.
    */
   async #openHostnameKeys(
     hostnames: InstanceHostnameWireEntry[],
   ): Promise<InstanceHostnameWireEntry[]> {
     const sealed = hostnames.filter((entry) => entry.keyEnvelope !== undefined);
+    const plain = hostnames.find((entry) => entry.keyPem !== undefined);
+    if (plain) {
+      throw new TypeError(
+        `certificate key for ${plain.host} arrived unsealed and was refused`,
+      );
+    }
     if (sealed.length === 0) return hostnames;
     const opened = await this.#openSealedSecrets(
       sealed.map((entry) => entry.keyEnvelope as string),
@@ -3314,28 +3263,14 @@ export class InstanceClient {
       return;
     }
     try {
-      const capable = resolveDaemonCapabilities(DAEMON_VERSION)[
-        "instance-cert-sources-per-hostname"
-      ] === true;
-      const hostnames = capable && message.hostnames
-        ? await this.#openHostnameKeys(message.hostnames)
-        : null;
-      if (!hostnames) {
-        logInfo(
-          "public-urls",
-          "instance-cert-sources: public-urls-update degrading to the flat urls list",
-        );
+      if (!Array.isArray(message.hostnames)) {
+        throw new TypeError("public-urls-update carried no hostnames");
       }
-      await clientTestHooks.applyPublicUrls(
-        hostnames ?? message.urls.map((host) => ({
-          host,
-          source: "platform-ca" as const,
-        })),
-        {
-          ...(hostnames ? { instanceAcme: message.instanceAcme } : {}),
-          ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
-        },
-      );
+      const hostnames = await this.#openHostnameKeys(message.hostnames);
+      await clientTestHooks.applyPublicUrls(hostnames, {
+        instanceAcme: message.instanceAcme,
+        ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
+      });
       ok = true;
       await this.#instanceAcmeRenewal?.check();
     } catch (err) {
@@ -3600,10 +3535,7 @@ export class InstanceClient {
   ): void {
     const upgradeId = message.upgradeId?.trim() || undefined;
     const error = "preflight_in_progress: update already in progress";
-    if (
-      this.instanceSupports("update-progress-v1") &&
-      ws.readyState === WebSocket.OPEN
-    ) {
+    if (ws.readyState === WebSocket.OPEN) {
       const progress: DaemonMessage = {
         type: "update-progress",
         id: message.id,
@@ -3677,6 +3609,14 @@ export class InstanceClient {
           `signed manifest commit ${verified.commit} does not match targetCommit ${targetCommit}`,
         );
       }
+      const skipped = await readUpdateSkip();
+      if (skipped?.commit.trim() === verified.commit) {
+        throw new UpdatePreflightError(
+          "update_skipped_after_rollback",
+          `build ${verified.commit} was rolled back automatically (${skipped.reason}); the host needs attention before it is tried again`,
+        );
+      }
+      if (skipped) await clearUpdateSkip();
       await this.#wireUpdateProgress(ws, message.id, {
         upgradeId,
         targetCommit: verified.commit,
@@ -3801,10 +3741,7 @@ export class InstanceClient {
     const upgradeId = message.upgradeId?.trim() || undefined;
     const error =
       "preflight_in_progress: control-plane update already in progress";
-    if (
-      this.instanceSupports("update-progress-v1") &&
-      ws.readyState === WebSocket.OPEN
-    ) {
+    if (ws.readyState === WebSocket.OPEN) {
       const progress: DaemonMessage = {
         type: "update-progress",
         id: message.id,
@@ -4224,12 +4161,6 @@ export class InstanceClient {
       // Full replacement: the pushed object is the complete hardware profile.
       await writeHardwareProfile(message.overrides ?? {});
       ok = true;
-
-      // A pushed nicSlot*/hostingFilesystemId override can reassign a slot
-      // without changing any identity set — only the resolved SlotMapping
-      // reflects that (see `../metrics/topology/generation.ts`). Force a
-      // recompute now rather than waiting for the next scheduled tick.
-      void this.#topologyReporter?.reportNow();
 
       // A flip from false/unset to true is the only edge that should load
       // the module — every later push with drivetempEnabled already true is

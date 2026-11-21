@@ -16,6 +16,10 @@ import {
   setFabricRunForTests,
   setFabricSkipRealSyscallsForTests,
 } from "./fabric.ts";
+import {
+  assertXtablesWaitHonoured,
+  stripXtablesWait,
+} from "../testing/xtables-wait.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -46,12 +50,12 @@ async function withFabricDir(
 ): Promise<void> {
   const networkDir = await Deno.makeTempDir({ prefix });
   const invocations: string[] = [];
-  const run: FabricRunFn = (cmd, args) => {
+  const run: FabricRunFn = stripXtablesWait((cmd, args) => {
     invocations.push(`${cmd} ${args.join(" ")}`);
     const extra = extras?.(cmd, args);
     if (extra) return Promise.resolve(extra);
     return Promise.resolve(ok());
-  };
+  });
   setFabricNetworkDirForTests(networkDir);
   setFabricSkipRealSyscallsForTests(true);
   setFabricRunForTests(run);
@@ -355,4 +359,8 @@ test({
       },
     );
   },
+});
+
+test("every fabric iptables call waited on the xtables lock", () => {
+  assertXtablesWaitHonoured();
 });

@@ -4,7 +4,7 @@ Each Cloudflare tunnel connector runs as its own systemd service,
 `turbopanel-tunnel-<id>.service`, never as a child of the daemon: systemd stops
 the daemon's process group on every daemon restart, so a child connector would
 drop with every update. `<id>` is the provider's tunnel id (lower-case UUID) or
-one of the two legacy names `instance` and `default`; `isTunnelId` and
+`instance`; `isTunnelId` and
 `tp_tunnel_id_ok` apply the same rule, and every operation refuses anything else.
 
 - `connector-unit.ts` is pure (ids, names, unit text, token line, status map);
@@ -56,10 +56,14 @@ one of the two legacy names `instance` and `default`; `isTunnelId` and
   and `<vendor>` are not set by this code, so a canary check must confirm both
   are traversable by other users (`namei -m` on the binary path as a non-tp user)
   before calling the feature proven.
-- Hosts that held a tunnel as `<id>.token` in the tunnels folder migrate on
-  daemon start: the file becomes a service and is deleted once the service is
-  enabled and (re)started (not once `/ready` passes; status shows that). If a
-  service already exists for that id the stale file is dropped, never installed. Files not named for a tunnel id are left alone with a warning.
+- A resend (`server.tunnel.connectors`) also repairs a connector whose record is
+  here but whose unit file is gone: the unit is written again from the record
+  (same port, slot and program) pointing at the token copy already in
+  `<config>/tunnel-env/`, started, then enabled, and the record is written with
+  the pinned version (so the next update does not switch slots for nothing); no
+  token is staged. If the token copy is gone too, the unit cannot start: the
+  command fails naming the missing token, and the unit is left stopped and not
+  enabled.
 - Purge needs no tunnel-specific code beyond the port lock's table name: it
   stops and removes every `turbopanel*` unit (the boot unit below included) and
   removes `/etc/turbopanel`, `/var/lib/turbopanel` and `/opt/turbopanel` whole,
@@ -94,7 +98,23 @@ decision 2026-10-28: keep the port, but only the daemon and root may reach it.
 - Independent of `inet turbopanel_php`: an accept ends only its own table's
   chain and a reject in either table is final, so neither table opens anything
   the other closes. A process running as root (a host-network container as
-  uid 0 too) passes the owner match by design.
+  uid 0 too) passes the owner match by design, and so does any account the
+  design allows (`tp`, `root`): the lock keeps site users out, it is not a
+  boundary against those two.
+- The outcome of the last load is remembered for this daemon run
+  (`metricsPortLockState`) and `server.tunnel.status` reports it as the
+  optional `statusPortsLocked` (boolean: the last lock load in this agent run
+  succeeded), `statusPortsLockCheckedAt` (ISO time of that load) and, when
+  false, `statusPortsLockReason` (one clean line, control characters and ANSI
+  codes removed, at most 200 characters; the daemon log keeps the full
+  message). It is not a live check: nothing unprivileged can list nftables and
+  there is no read-only `tp-host` verb for it (and none to add), so a ruleset
+  flushed after the load still reads locked until the next load (connector
+  install, the hourly update round while a tunnel exists). All three are left
+  out until a load was tried, so an older control plane ignores them and an
+  unknown state is not shown as locked. The Ansible task that loads the boot
+  unit still fails open, but a failed load is reported in a `WARNING:` debug
+  task that the daemon's ansible event log writes at warn level.
 - Tests: `src/orchestration/tunnel-loopback.test.ts` (rendered rules, band and
   account pinned to the code, boot unit and role tasks), the tp-host verb in
   `src/permissions/tp-host.test.ts`, the daemon calls in the two tunnel suites.
@@ -120,8 +140,7 @@ after repeated crashes; `Restart=always` covers a plain crash) is started again
 resend repairs it; a start the host refuses fails the command so the list is
 sent again. `remove` entries call `removeConnector`. Only the ids
 named in the command are touched, and the contract refuses `instance` and
-`default`, so the instance's own tunnel and legacy token files are never
-reached from here. One tunnel failing does not stop the others; the command
+`default`, so the instance's own tunnel is never reached from here. One tunnel failing does not stop the others; the command
 then fails with the tunnel ids and plain reasons (never a token or an
 envelope) and the control plane sends the list again.
 
@@ -144,7 +163,7 @@ transcript redactor here keeps its no-heuristics rule.
 - The daemon pins one connector version (`CLOUDFLARED_VERSION`, with checksums in
   `assets.ts`) and the permission list names that exact file, so a newer
   connector reaches servers only with a daemon release. After a daemon update,
-  `startTunnels` migrates legacy token files and then runs
+  `startTunnels` runs
   `runConnectorUpdates`: every tunnel whose recorded version differs from the pin
   is moved by `updateConnector`, one tunnel at a time.
 - A tunnel has two possible units: slot `a` (`turbopanel-tunnel-<id>.service`,

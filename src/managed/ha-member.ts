@@ -34,9 +34,8 @@ export type ManagedHaMemberRecord = {
   /**
    * Every other member of the cluster. After a promote the old primary is a
    * replica-to-be (it resyncs), so the new primary counts it at once.
-   * Absent in records written before this field.
    */
-  peerCount?: number;
+  peerCount: number;
   updatedAt: string;
 };
 
@@ -107,6 +106,7 @@ function parseRecord(text: string): ManagedHaMemberRecord | null {
       (value.role !== "primary" && value.role !== "replica") ||
       typeof value.containerName !== "string" ||
       typeof value.replicaPeerCount !== "number" ||
+      typeof value.peerCount !== "number" ||
       typeof value.updatedAt !== "string"
     ) {
       return null;
@@ -145,7 +145,7 @@ export async function markManagedHaMemberPromoted(
   // managed.apply.
   const replicaPeerCount = Math.max(
     record.replicaPeerCount,
-    record.peerCount ?? record.replicaPeerCount + 1,
+    record.peerCount,
   );
   await saveManagedHaMember(layout, {
     ...record,

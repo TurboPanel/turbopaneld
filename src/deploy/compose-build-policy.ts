@@ -241,6 +241,8 @@ type Ctx = {
   findings: BuildPolicyFinding[];
   topLevelSecrets: Record<string, unknown>;
   stageDir: string;
+  /** Further folders that count as inside the deployment (the repository checkout). */
+  insideRoots: readonly string[];
   exemptSecretNames: ReadonlySet<string>;
   remoteBuildSourcesApproved: boolean;
 };
@@ -340,9 +342,11 @@ function checkSecrets(ctx: Ctx, name: string, secrets: unknown): void {
     if (!isRecord(spec) || spec.file === undefined) continue;
     const file = spec.file;
     const inside = typeof file === "string" && !file.includes("$") &&
-      isWithin(
-        normalize(isAbsolute(file) ? file : resolve(ctx.stageDir, file)),
-        ctx.stageDir,
+      [ctx.stageDir, ...ctx.insideRoots].some((root) =>
+        isWithin(
+          normalize(isAbsolute(file) ? file : resolve(ctx.stageDir, file)),
+          root,
+        )
       );
     if (!inside) {
       refuse(
@@ -483,6 +487,11 @@ function checkContexts(
 export type BuildPolicyOptions = {
   /** Directory of the staged compose file relative paths resolve from. */
   stageDir: string;
+  /**
+   * The repository checkout (`compose-checkout-marker.ts`), when the deployment
+   * has one: it counts as inside the deployment directory.
+   */
+  checkoutRoot?: string;
   /** Secrets the daemon rewrote to its own run directory. */
   exemptSecretNames?: ReadonlySet<string>;
   /**
@@ -501,6 +510,7 @@ export function collectBuildPolicyFindings(
     findings: [],
     topLevelSecrets: isRecord(document.secrets) ? document.secrets : {},
     stageDir: normalize(opts.stageDir),
+    insideRoots: opts.checkoutRoot ? [normalize(opts.checkoutRoot)] : [],
     exemptSecretNames: opts.exemptSecretNames ?? new Set(),
     remoteBuildSourcesApproved: opts.remoteBuildSourcesApproved === true,
   };

@@ -354,8 +354,10 @@ test("run.sh reads the build identity of a published manifest", async () => {
       "tp_resolve_linux_arch",
       "tp_manifest_compact",
       "tp_manifest_field",
+      "tp_manifest_top_field",
       "tp_manifest_artifact_field",
       "tp_manifest_binary_artifact_field",
+      "tp_print_error",
       "tp_resolve_channel_manifest",
     ].map((name) => topLevelFunction(source, name)),
     'tp_resolve_channel_manifest "$1"',
@@ -369,12 +371,20 @@ test("run.sh reads the build identity of a published manifest", async () => {
       stdout: "piped",
       stderr: "piped",
     }).output();
+    if (version === undefined) {
+      // A manifest with no version fails closed.
+      assertEquals(out.code, 1);
+      assertEquals(new TextDecoder().decode(out.stdout), "");
+      assertStringIncludes(
+        new TextDecoder().decode(out.stderr),
+        "signed manifest has no version; refusing to install",
+      );
+      continue;
+    }
     assertEquals(out.code, 0, new TextDecoder().decode(out.stderr));
     assertEquals(
       new TextDecoder().decode(out.stdout),
-      `abcdef0123456789abcdef0123456789abcdef01|${
-        version ?? ""
-      }|2026-11-01T02:03:04.000Z`,
+      `abcdef0123456789abcdef0123456789abcdef01|${version}|2026-11-01T02:03:04.000Z`,
     );
   }
 });

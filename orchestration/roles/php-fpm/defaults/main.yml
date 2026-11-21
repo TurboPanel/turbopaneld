@@ -28,8 +28,6 @@ php_fpm_default_series: "8.4"
 # it was not asked about — the host serves many environments, but one payload
 # describes one. Retiring a series happens on the removal path.
 php_fpm_versions: ["{{ php_fpm_default_series }}"]
-# Back-compat alias for callers that still pass a single series.
-php_fpm_series: "{{ php_fpm_default_series }}"
 # Optional exact apt pin (e.g. "8.4.14-1+0~20251120.1+debian13~1.gbp1a2b3c").
 # Empty means "latest 8.4.x sury publishes". Pin it to freeze a fleet.
 php_fpm_apt_version: ""

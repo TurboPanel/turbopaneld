@@ -8,7 +8,6 @@ import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   ensureSystemPrincipals,
-  legacyPrincipalUnixGroupName,
   type PrincipalEnsureSpec,
   principalUnixGroupName,
   type RunFn,
@@ -66,66 +65,8 @@ function host(
 const verb = (calls: string[][], name: string) =>
   calls.find((args) => args[1] === name);
 
-test("the group carries the user's own name; the old name keeps its suffix", () => {
+test("the group carries the user's own name", () => {
   assertEquals(principalUnixGroupName("appuser"), "appuser");
-  assertEquals(legacyPrincipalUnixGroupName("appuser"), "appuser-grp");
-});
-
-test("an account whose primary group is still <name>-grp gets it renamed in place", async () => {
-  const { run, sudoCalls } = host(
-    { "appuser-grp": "appuser-grp:x:15001:tpnginx" },
-    PASSWD,
-  );
-  await ensureSystemPrincipals(layout, [spec], run);
-  assertEquals(verb(sudoCalls, "groupmod"), [
-    "-n",
-    "groupmod",
-    "-n",
-    "appuser",
-    "appuser-grp",
-  ]);
-  assertEquals(verb(sudoCalls, "groupadd"), undefined);
-  assertEquals(verb(sudoCalls, "useradd"), undefined);
-  // The tree is handed to the renamed group.
-  const install = sudoCalls.find((args) =>
-    args[1] === "install" && args.at(-1) === "/srv/users/appuser"
-  );
-  assertEquals(install?.slice(-5), [
-    "-o",
-    "root",
-    "-g",
-    "appuser",
-    "/srv/users/appuser",
-  ]);
-});
-
-test("a failed rename stops the run with the host's reason", async () => {
-  const { run } = host(
-    { "appuser-grp": "appuser-grp:x:15001:" },
-    PASSWD,
-    (args) =>
-      args[1] === "groupmod"
-        ? { success: false, stdout: "", stderr: "groupmod: refused" }
-        : ok(),
-  );
-  await assertRejects(
-    () => ensureSystemPrincipals(layout, [spec], run),
-    Error,
-    "groupmod: refused",
-  );
-});
-
-test("an old <name>-grp outside the band is not renamed", async () => {
-  const { run, sudoCalls } = host(
-    { "appuser-grp": "appuser-grp:x:1001:" },
-    "appuser:x:15001:1001::/srv/users/appuser/home:/usr/sbin/nologin",
-  );
-  const err = await assertRejects(
-    () => ensureSystemPrincipals(layout, [spec], run),
-    Error,
-  );
-  assertStringIncludes(err.message, "below the current PRINCIPAL_ID_MIN");
-  assertEquals(verb(sudoCalls, "groupmod"), undefined);
 });
 
 test("an existing account without a group of its own is refused, never given a new one", async () => {

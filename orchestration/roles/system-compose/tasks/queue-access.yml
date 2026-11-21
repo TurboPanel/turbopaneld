@@ -84,34 +84,40 @@
          | selectattr('read', 'equalto', '.*') | list | length > 0 }}
 
 # One line per repair on standard output ("changed:<what>"), nothing when the
-# broker already matches. The password check runs every time: a user whose
-# password differs from the generated one is as locked out as one without
-# permissions.
+# broker already matches. A failing step prints one "failed:<what>:<reason>"
+# line (the password is blanked out of the reason) and stops; the task itself
+# never fails, because no_log would hide the reason: the next task reports it.
+# The password check runs every time: a user whose password differs from the
+# generated one is as locked out as one without permissions.
 - name: Repair the queue application user's access
   ansible.builtin.shell:
     cmd: |
-      set -euo pipefail
+      set -uo pipefail
       IFS= read -r password
       ctl() { docker exec "$TP_QUEUE_CONTAINER" rabbitmqctl -q "$@" </dev/null; }
       ctl_secret() { printf '%s\n' "$password" | docker exec -i "$TP_QUEUE_CONTAINER" rabbitmqctl -q "$@"; }
+      step() {
+        what="$1"; shift
+        if ! out="$("$@" 2>&1 >/dev/null)"; then
+          out="${out//"$password"/***}"
+          printf 'failed:%s:%s\n' "$what" "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+          exit 1
+        fi
+        echo "changed:$what"
+      }
       if [ "$TP_QUEUE_VHOST_PRESENT" != 1 ]; then
-        ctl add_vhost "$TP_QUEUE_VHOST" >/dev/null
-        echo changed:vhost
+        step vhost ctl add_vhost "$TP_QUEUE_VHOST"
       fi
       if [ "$TP_QUEUE_USER_PRESENT" != 1 ]; then
-        ctl_secret add_user "$TP_QUEUE_USER" >/dev/null
-        echo changed:user
+        step user ctl_secret add_user "$TP_QUEUE_USER"
       elif ! ctl_secret authenticate_user "$TP_QUEUE_USER" >/dev/null 2>&1; then
-        ctl_secret change_password "$TP_QUEUE_USER" >/dev/null
-        echo changed:password
+        step password ctl_secret change_password "$TP_QUEUE_USER"
       fi
       if [ "$TP_QUEUE_USER_TAGGED" != 1 ]; then
-        ctl set_user_tags "$TP_QUEUE_USER" administrator >/dev/null
-        echo changed:tags
+        step tags ctl set_user_tags "$TP_QUEUE_USER" administrator
       fi
       if [ "$TP_QUEUE_USER_GRANTED" != 1 ]; then
-        ctl set_permissions -p "$TP_QUEUE_VHOST" "$TP_QUEUE_USER" '.*' '.*' '.*' >/dev/null
-        echo changed:permissions
+        step permissions ctl set_permissions -p "$TP_QUEUE_VHOST" "$TP_QUEUE_USER" '.*' '.*' '.*'
       fi
     executable: /bin/bash
     stdin: "{{ _queue_access_pass_raw.content | b64decode | trim }}"
@@ -125,7 +131,17 @@
     TP_QUEUE_USER_GRANTED: "{{ _queue_access_user_granted | bool | ternary('1', '0') }}"
   register: _queue_access_repair
   changed_when: "'changed:' in (_queue_access_repair.stdout | default(''))"
+  failed_when: false
   no_log: true
+
+# Outside no_log on purpose: names the step that failed and the broker's reason.
+- name: Report why the queue access repair failed
+  ansible.builtin.fail:
+    msg: >-
+      Queue access repair failed:
+      {{ _queue_access_repair.stdout_lines | default([]) | select('match', '^failed:') | list | first
+         | default('exit ' ~ (_queue_access_repair.rc | default('unknown'))) }}
+  when: _queue_access_repair.rc | default(1) != 0
 
 # Outside no_log on purpose: this is the line an operator reads when the
 # repair did not take.

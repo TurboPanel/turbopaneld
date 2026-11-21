@@ -113,8 +113,8 @@ test("normalizeContainer prefers summary name, labels, and inspect ports", () =>
       Id: "abc123def4567890",
       Names: ["/web"],
       Labels: {
-        "com.turbopanel.project": "proj-1",
-        "com.turbopanel.service": "svc-1",
+        "io.turbopanel.project": "proj-1",
+        "io.turbopanel.service": "svc-1",
       },
       Ports: [{
         IP: "203.0.113.10",
@@ -142,7 +142,7 @@ test("normalizeContainer formats inspect NetworkSettings ports", () => {
       RestartCount: 2,
       Config: {
         Image: "api:1",
-        Labels: { "com.turbopanel.project": "p2" },
+        Labels: { "io.turbopanel.project": "p2" },
       },
       NetworkSettings: {
         Ports: {

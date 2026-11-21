@@ -577,6 +577,7 @@ test("demoted fence stop without memberId stores ha-member.json member id", asyn
         role: "primary",
         containerName: `${MEMBER_ID}-1`,
         replicaPeerCount: 1,
+        peerCount: 1,
         updatedAt: "2026-10-08T12:00:00.000Z",
       });
       const docker = fakeDocker(new Set());

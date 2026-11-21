@@ -583,6 +583,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   // Release records and release build scratch (release-layout.ts).
   { name: "release-records", mode: "0750" },
   { name: "release-build", mode: "0700" },
+  // Scratch clone of a Git Compose project's repository, before it is placed in the deployment (deploy/compose-checkout.ts).
+  { name: "compose-checkout-scratch", mode: "0700" },
   // One small record per asset folder: its owner, scope, kind and slug as first created (asset-folders.ts).
   { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.

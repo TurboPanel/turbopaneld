@@ -296,7 +296,7 @@ rail's signed manifests protect what the script then installs.
 installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
 (persisted in `daemon.env`) and must **never** fall back to the public rail.
 A configured `TURBOPANEL_DL_BASE` that is not https is refused
-(`InsecureOverlayBaseError`); only an absent base selects the public rail. `trunk` has no built-in location (the per-merge CDN drop and the `dl.trbp.nl` host left the rail with it): it is only the channel name this overlay catalog uses, and a host without an overlay that still follows it is refused with `preflight_manifest` and told to pick canary, rc or release.
+(`InsecureOverlayBaseError`); only an absent base selects the public rail. `trunk` has no built-in location (the per-merge CDN drop and its download host left the rail with it): it is only the channel name this overlay catalog uses, and a host without an overlay that still follows it is refused with `preflight_manifest` and told to pick canary, rc or release.
 Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
 same files work behind LAN HTTPS on `:8443` and a Cloudflare tunnel.
 `run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
@@ -372,3 +372,10 @@ in CI, and checked when it is present. A path that is not a repo file (a
 command run elsewhere, an installed path) goes in `ALLOWLIST` in the script
 with a reason. It is part of `deno task verify:static` and the `verify.yml`
 job.
+
+`scripts/image-build-cgroup-proof.sh` is a root-only canary check, run by hand on
+a managed host with Docker: it runs `tp-host image-build-slice`, builds a
+CPU-burning throwaway image with the same `--cgroup-parent` the daemon passes,
+and proves the build step lands in `turbopanel-imagebuild.slice` and its CPU time
+stays within the quota. `purge.sh` stops that slice with the other TurboPanel
+slices; it is a runtime-only unit, so there is no file to remove.

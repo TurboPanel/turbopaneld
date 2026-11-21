@@ -289,6 +289,120 @@ async function stageAndInstallEnv(
 }
 
 /**
+ * The outcome of the last lock load in this daemon run, and when it ran. It is
+ * not a live check of the rule set: nothing unprivileged can list nftables, so
+ * a ruleset flushed after the load still reads as locked until the next load.
+ */
+export type MetricsPortLockState = {
+  locked: boolean;
+  /** One plain line, at most 200 characters; only when `locked` is false. */
+  reason?: string;
+  /** ISO time of the load. */
+  checkedAt: string;
+};
+
+const MAX_LOCK_REASON = 200;
+
+let metricsPortLock: MetricsPortLockState | null = null;
+
+/** The outcome of the last lock load in this daemon run; null before any. */
+export function metricsPortLockState(): MetricsPortLockState | null {
+  return metricsPortLock;
+}
+
+/** Forget the recorded outcome (tests only). */
+export function resetMetricsPortLockState(): void {
+  metricsPortLock = null;
+}
+
+/**
+ * A host message as one plain line for the report: ANSI escapes dropped, every
+ * control character (tabs, carriage returns, newlines) turned into a space,
+ * blanks collapsed, cut to 200 characters.
+ */
+export function oneLineLockReason(raw: string): string {
+  const text = stripTerminalControls(raw).replace(/\s+/g, " ").trim();
+  return (text || "failed").slice(0, MAX_LOCK_REASON);
+}
+
+const ESC = 0x1b;
+const BEL = 0x07;
+
+function codeAt(text: string, i: number): number {
+  return text.codePointAt(i) ?? -1;
+}
+
+function isControl(code: number): boolean {
+  return code >= 0 && (code < 0x20 || (code >= 0x7f && code <= 0x9f));
+}
+
+/** Index just past a CSI sequence: after its final byte 0x40-0x7e, or the end. */
+function skipCsi(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    const code = codeAt(text, i);
+    i += 1;
+    if (code >= 0x40 && code <= 0x7e) break;
+  }
+  return i;
+}
+
+/** Index just past an OSC string: after BEL or ESC backslash, or the end. */
+function skipOsc(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    const code = codeAt(text, i);
+    if (code === BEL) return i + 1;
+    if (code === ESC) return codeAt(text, i + 1) === 0x5c ? i + 2 : i;
+    i += 1;
+  }
+  return i;
+}
+
+/** Index after the escape sequence that starts at the ESC at `at`. */
+function skipEscape(text: string, at: number): number {
+  const kind = codeAt(text, at + 1);
+  if (kind === 0x5b) return skipCsi(text, at + 2);
+  if (kind === 0x5d) return skipOsc(text, at + 2);
+  return at + 1;
+}
+
+/**
+ * Drop ANSI CSI and OSC sequences, drop a stray ESC, and turn every other C0
+ * or C1 control character and DEL into a space. An unterminated sequence runs
+ * to the end of the text. Written as a char-code loop so no pattern holds a
+ * control character.
+ */
+function stripTerminalControls(raw: string): string {
+  let out = "";
+  let i = 0;
+  while (i < raw.length) {
+    if (codeAt(raw, i) === ESC) {
+      i = skipEscape(raw, i);
+      continue;
+    }
+    out += isControl(codeAt(raw, i)) ? " " : raw[i];
+    i += 1;
+  }
+  return out;
+}
+
+function recordLockFailure(raw: string): void {
+  metricsPortLock = {
+    locked: false,
+    reason: oneLineLockReason(raw),
+    checkedAt: new Date().toISOString(),
+  };
+  // The log keeps everything the host said; only the reported field is cut.
+  logWarn(
+    "tunnels",
+    `connector metrics ports are not locked to the daemon: ${
+      raw.trim() || "failed"
+    }`,
+  );
+}
+
+/**
  * Reload the nftables table that lets only root and the daemon account reach
  * the connectors' metrics band on loopback (`tp-host tunnel-loopback-sync`,
  * `orchestration/scripts/tp-tunnel-loopback`). The connector program can only
@@ -298,7 +412,7 @@ async function stageAndInstallEnv(
  * Never fatal: a failure (no `nft`, a `tp-host` from before this verb, a
  * development host) is logged and the connector still starts. A tunnel that
  * visitors use is never taken down over its metrics port. Returns whether the
- * table was loaded.
+ * table was loaded, and records the outcome for the status report.
  */
 export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
   try {
@@ -306,20 +420,16 @@ export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
       "sudo",
       hostSudoArgs(["-n", "tunnel-loopback-sync"]),
     );
-    if (result.success) return true;
-    logWarn(
-      "tunnels",
-      `connector metrics ports are not locked to the daemon: ${
-        result.stderr || "tp-host refused it"
-      }`,
-    );
+    if (result.success) {
+      metricsPortLock = {
+        locked: true,
+        checkedAt: new Date().toISOString(),
+      };
+      return true;
+    }
+    recordLockFailure(result.stderr || "tp-host refused it");
   } catch (err) {
-    logWarn(
-      "tunnels",
-      `connector metrics ports are not locked to the daemon: ${
-        err instanceof Error ? err.message : "failed"
-      }`,
-    );
+    recordLockFailure(err instanceof Error ? err.message : "failed");
   }
   return false;
 }
@@ -508,26 +618,122 @@ export async function connectorTokenChanged(
 }
 
 /**
+ * Is the stored run token copy there? Only root can look (the folder is closed
+ * to the daemon), so `tp-host` answers. Null when it could not say.
+ */
+async function tokenCopyPresent(
+  io: ConnectorIo,
+  id: string,
+): Promise<boolean | null> {
+  const result = await io.run(
+    "sudo",
+    hostSudoArgs(["-n", "tunnel-env-present", id]),
+  );
+  if (!result.success) return null;
+  const said = result.stdout.trim();
+  if (said === "present") return true;
+  if (said === "absent") return false;
+  return null;
+}
+
+/**
+ * Put a connector's unit file back when the record is still here but the unit
+ * is gone (removed by hand, or lost with the host's unit folder). The unit is
+ * written from the record (same port, slot and pinned program) and points at
+ * the token copy already in the root-only folder, so no token is needed.
+ */
+async function reinstallMissingUnit(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+): Promise<void> {
+  const binary = await io.ensureBinary();
+  const slot = record.slot;
+  const staged = join(io.workDir, `${record.id}${slotSuffix(slot)}.service`);
+  try {
+    await installUnitFile(io.run, {
+      stagedPath: staged,
+      installedPath: tunnelUnitPath(record.id, undefined, slot),
+      contents: renderTunnelUnit({
+        id: record.id,
+        binary,
+        port: record.port,
+        envFile: tunnelEnvPath(io.layout, record.id),
+        slot,
+      }),
+    });
+  } finally {
+    await Deno.remove(staged).catch(() => undefined);
+  }
+  await mustSystemctl(io, ["daemon-reload"]);
+  await lockMetricsPorts(io);
+  const unit = tunnelUnitName(record.id, slot);
+  await systemctl(io, ["reset-failed", unit]);
+  // Started before it is enabled: the token copy sits in a folder only root
+  // can read, so a missing one shows as a unit that cannot start (systemd
+  // refuses a missing environment file), and then nothing is left enabled.
+  const started = await systemctl(io, ["restart", unit]);
+  if (!started.success) {
+    // Leave nothing half done: the unit is stopped and its file removed, so
+    // the next resend reinstalls it (and enables it) instead of starting a
+    // unit that would not survive a reboot.
+    await systemctl(io, ["stop", unit]);
+    const copy = await tokenCopyPresent(io, record.id);
+    await io.run(
+      "sudo",
+      hostSudoArgs([
+        "-n",
+        "rm",
+        "-f",
+        "--",
+        tunnelUnitPath(record.id, undefined, slot),
+      ]),
+    );
+    await systemctl(io, ["daemon-reload"]);
+    throw new Error(
+      copy === false
+        ? `the stored run token copy for tunnel ${record.id} is missing, so its connector was not started or enabled; the run token must be installed again`
+        : `systemctl restart failed: ${started.stderr || "no detail"}`,
+    );
+  }
+  await mustSystemctl(io, ["enable", unit]);
+  // The unit runs the program this daemon pins, so the record says so.
+  await writeRecord(io, { ...record, version: io.version });
+  logInfo("tunnels", `connector ${record.id}: put its missing unit back`);
+}
+
+/**
  * Start an installed connector whose service is stopped or failed (stopped by
- * hand, or given up on by systemd after repeated crashes). A unit that is
- * running or still starting is left alone, so a resend never bounces it.
- * Returns true when it was started.
+ * hand, or given up on by systemd after repeated crashes), or whose unit file
+ * is gone (it is written again from the record and the stored token copy). A
+ * unit that is running or still starting is left alone, so a resend never
+ * bounces it (it is enabled if it was not). Says what it did: `reinstalled`, `started`, or `null` when the
+ * connector was left alone.
  */
 export async function startStoppedConnector(
   io: ConnectorIo,
   id: string,
-): Promise<boolean> {
+): Promise<"reinstalled" | "started" | null> {
   assertTunnelId(id);
   return await serialized(async () => {
     const record = await readRecord(io, id);
-    if (!record) return false;
+    if (!record) return null;
+    const exists = io.unitExists ?? defaultUnitExists;
+    if (!(await exists(tunnelUnitPath(id, undefined, record.slot)))) {
+      await reinstallMissingUnit(io, record);
+      return "reinstalled";
+    }
     const unit = tunnelUnitName(id, record.slot);
     const state = await systemctl(io, ["is-active", unit]);
     const status = mapConnectorStatus(state.stdout.split("\n")[0] ?? "", null);
-    if (status !== "stopped" && status !== "failed") return false;
+    // A unit that is not enabled would not come back after a reboot.
+    const enabled = await systemctl(io, ["is-enabled", unit]);
+    if (enabled.stdout.trim() !== "enabled") {
+      await mustSystemctl(io, ["enable", unit]);
+    }
+    if (status !== "stopped" && status !== "failed") return null;
     await systemctl(io, ["reset-failed", unit]);
     await mustSystemctl(io, ["start", unit]);
-    return true;
+    return "started";
   });
 }
 

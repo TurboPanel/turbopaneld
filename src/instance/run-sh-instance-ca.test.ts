@@ -86,7 +86,6 @@ async function fingerprint(path: string): Promise<string> {
  */
 const CURL_STUB = [
   "TP_NO_SYSTEM_CAPATH=/nonexistent",
-  "TP_TRUST_FROM_OPEN_LEG=false",
   "tp_curl_http_code() {",
   '  _out=""; _mode=system; _prev=""',
   '  for _a in "$@"; do',
@@ -152,7 +151,6 @@ async function fetchCa(
     helpers,
     "tp_fetch_instance_ca",
     "printf 'RC=%s\\n' \"$?\"",
-    "printf 'OPEN=%s\\n' \"$TP_TRUST_FROM_OPEN_LEG\"",
   ].join("\n");
   const out = await new Deno.Command("sh", {
     args: ["-c", script],
@@ -775,35 +773,6 @@ test("an operator-supplied --instance-ca is checked against a fingerprint the co
   assertStringIncludes(branch, "exit 1");
 });
 
-test("trust from the public roots or an unverified connection is remembered for the key learning", async () => {
-  const source = await Deno.readTextFile(runShPath);
-  const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
-  try {
-    const served = await selfSignedCa(dir, "PlatformCA");
-    const caPath = `${dir}/instance-ca.pem`;
-    const system = await fetchCa(source, {
-      TP_TEST_SYSTEM: "200",
-      TP_TEST_SERVED_CA: served,
-    }, caPath);
-    assertStringIncludes(system.stdout, "OPEN=true");
-    await Deno.remove(caPath);
-    const insecure = await fetchCa(source, {
-      INSECURE_TLS: "true",
-      TP_TEST_INSECURE: "200",
-      TP_TEST_SERVED_CA: served,
-    }, caPath);
-    assertStringIncludes(insecure.stdout, "OPEN=true");
-    const stored = await fetchCa(source, {
-      TP_TEST_PINNED: "200",
-      TP_TEST_SERVED_CA: served,
-    }, caPath);
-    assertEquals(stored.calls, ["pinned"]);
-    assertStringIncludes(stored.stdout, "OPEN=false");
-  } finally {
-    await Deno.remove(dir, { recursive: true });
-  }
-});
-
 test("a host behind a public edge that still serves the same CA keeps it with a plain note", async () => {
   const source = await Deno.readTextFile(runShPath);
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-ca-" });
@@ -919,25 +888,6 @@ test("a host with stored trust but no fingerprint list is held to the stored fil
     }, caPath);
     assertEquals(deleted.status, 0, deleted.stderr);
     assertEquals(await exists(caPath), true);
-
-    // Belt and braces for the key learning: a run that began with stored
-    // trust remembers it, and a removal over the public roots (here on a host
-    // with no files to stand in, so nothing seeds a list) is remembered as
-    // trust from an open connection.
-    assertStringIncludes(
-      source,
-      'if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then\n  TP_STORED_TRUST_AT_START=true',
-    );
-    const unlisted = await fetchCa(source, {
-      TP_TEST_PINNED: "000",
-      TP_TEST_SYSTEM: "404",
-      TP_TEST_SERVED_CA: ca,
-    }, caPath);
-    assertEquals(unlisted.status, 0, unlisted.stderr);
-    assertStringIncludes(unlisted.stdout, "OPEN=true");
-    const learn = extractShellFunction(source, "tp_learn_panel_identity");
-    assertStringIncludes(learn, '[ "$TP_STORED_TRUST_AT_START" = true ]');
-    assertStringIncludes(learn, '[ "$TP_TRUST_FROM_OPEN_LEG" = true ]');
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

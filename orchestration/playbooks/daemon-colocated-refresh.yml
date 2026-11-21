@@ -36,7 +36,6 @@
     # /run/turbopanel/instance.sock.
     turbopanel_instance_url: ""
     turbopanel_instance_ca: ""
-    turbopanel_tunnel_token: ""
     turbopanel_after_instance_service: true
     turbopanel_start: true
 
@@ -91,8 +90,7 @@
     - role: principal-access
     # Debian security updates on their own; never restarts the server.
     - role: os-security-updates
-    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
-    # (and the retired shared tpbuild account removed).
+    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds.
     - role: build-user
     - role: deno-runtime
     - role: daemon-config
@@ -103,6 +101,20 @@
     - role: docker-gate
 
   post_tasks:
+    # Repairs that a fresh install makes but an update never reached. Both are
+    # idempotent and skip what is absent (no Caddy vendored yet, no uv locks).
+    - name: Repair the Caddy runtime directory modes
+      ansible.builtin.import_role:
+        name: caddy
+        tasks_from: repair-modes.yml
+    - name: Repair the vendored lock file modes
+      ansible.builtin.import_role:
+        name: turbopanel-user
+        tasks_from: vendor-locks.yml
+    - name: Give the cache unit its retry settings
+      ansible.builtin.import_role:
+        name: redis
+        tasks_from: retry-dropin.yml
     - name: Keep the state directory shared with the instance
       # daemon-layout and daemon-config pin this directory 0750. The instance
       # still writes the co-located license here. Directory mode only — never

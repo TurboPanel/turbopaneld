@@ -7,9 +7,9 @@
 # additionally omitted on Workers runtime (Mailgun replaces it — see
 # ../../turbopanel/AGENTS.md).
 #
-# Labels intentionally carry ONLY `com.turbopanel.system.component` +
-# `turbopanel.role: turbopanel` — never `com.turbopanel.service`, `traefik.enable`,
-# or `com.turbopanel.raw-port` (those identify *tenant* deploy containers; see
+# Labels intentionally carry ONLY `io.turbopanel.system.component` +
+# `turbopanel.role: turbopanel` — never `io.turbopanel.service`, `traefik.enable`,
+# or `io.turbopanel.raw-port` (those identify *tenant* deploy containers; see
 # ../../../src/deploy/system-component.ts and ../../../src/deploy/labels.ts).
 name: {{ system_compose_project_name }}
 
@@ -43,7 +43,7 @@ services:
       - "127.0.0.1:{{ postgres_port }}:5432"
 {% endif %}
     labels:
-      com.turbopanel.system.component: database
+      io.turbopanel.system.component: database
       turbopanel.role: turbopanel
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "{{ postgres_user }}"]
@@ -81,7 +81,7 @@ services:
       - "127.0.0.1:{{ rabbitmq_mgmt_port }}:15672"
 {% endif %}
     labels:
-      com.turbopanel.system.component: queue
+      io.turbopanel.system.component: queue
       turbopanel.role: turbopanel
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]

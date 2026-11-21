@@ -759,6 +759,31 @@ test({
 });
 
 test({
+  name: "a token under another label prefix covers nothing",
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: () =>
+    withApprovals(async (h, keys) => {
+      const token = await signToken(
+        keys,
+        payloadFor(NOW, {
+          features: ["privileged", "docker-socket"],
+          bodyDigest: await privilegedDigest(),
+        }),
+      );
+      await sendCreate(h, {
+        ...privilegedCreate(""),
+        Labels: {
+          "com.docker.compose.project": "tenantapp",
+          "com.turbopanel.approval": token,
+        },
+      });
+      assertEquals(wouldDeny(h.logs), ["privileged", "bind-docker-socket"]);
+      assertEquals(approvalLogs(h.logs), []);
+    }),
+});
+
+test({
   name:
     "an approval for another project, an expired one and a forged one cover nothing",
   sanitizeOps: false,
@@ -871,7 +896,7 @@ e2e(
 
 const PLATFORM = {
   "turbopanel.role": "ingress",
-  "com.turbopanel.system.component": "managed-ingress",
+  "io.turbopanel.system.component": "managed-ingress",
   "com.docker.compose.project": "p",
 };
 
@@ -899,7 +924,7 @@ e2e(
   async (h) => {
     await sendCreate(h, {
       Image: "alpine",
-      Labels: { "io.turbopanel.owner": "x" },
+      Labels: { "org.example.owner": "x" },
       HostConfig: {},
     });
     assertEquals(wouldDeny(h.logs), ["unlabeled-create"]);
@@ -1017,14 +1042,14 @@ e2e(
         status: 200,
         labels: {
           "turbopanel.role": "ingress",
-          "com.turbopanel.system.component": "managed-ingress",
+          "io.turbopanel.system.component": "managed-ingress",
         },
       },
       traefik: {
         status: 200,
         labels: {
           "turbopanel.role": "ingress",
-          "com.turbopanel.system.component": "hosting-ingress",
+          "io.turbopanel.system.component": "hosting-ingress",
         },
       },
       engine: { status: 200, labels: { "tp.managed.engine": "postgres" } },
@@ -1033,7 +1058,7 @@ e2e(
         status: 200,
         labels: {
           "turbopanel.role": "turbopanel",
-          "com.turbopanel.system.component": "backup-copy",
+          "io.turbopanel.system.component": "backup-copy",
         },
       },
     });

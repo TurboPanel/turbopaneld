@@ -50,9 +50,9 @@ as `hostnames[].keyEnvelope` and a non-empty tunnel token on `tunnel-token` as
 plaintext in the cell outbox. `#openHostnameKeys` / `#resolveTunnelToken` open
 them through `DaemonApiClient.decryptSecrets` (`POST /api/daemon/v1/secrets/decrypt`),
 the same path every deploy secret uses. An envelope that cannot be opened fails
-the request (nothing is applied, the tunnel is not torn down). The legacy
-plaintext `keyPem` / `token` from an older control plane is still accepted
-until both floors pass the release that ships this; then those fields go.
+the request (nothing is applied, the tunnel is not torn down). A plaintext
+`keyPem` on a hostname, or a non-empty plaintext `token`, is refused; only the
+empty teardown `token` is accepted unsealed.
 
 **Control plane host only.** `tunnel-token` and `public-urls-update` are
 applied only when `isControlPlaneHost()` (`control-plane-host.ts`) holds:
@@ -76,14 +76,11 @@ fields. Detail: `src/deploy/site/AGENTS.md`.
 
 **Project caches and helper ports (`project-cache-v1`).** `environment.deploy` may carry `caches` and `helperReach`, and the command `cache.apply` brings a host's caches for one environment in line between deploys. Each field is absent (leave the host), empty (clear it) or a list (set it). Detail: `src/deploy/cache/AGENTS.md`.
 
-**Topology generation off the wire (`topology-generation-optional-v1`).** A
-control plane that lists it no longer needs the topology generation numbers.
-The daemon then leaves `metadata.topologyGeneration` off metrics samples,
-`generation` and `bootGeneration` off `topology-report` (and its snapshot),
-and stops sending the `topology_generation_changed` event; it keeps tracking
-the generation itself. The flag is set on attach and cleared on close
-(`setTopologyGenerationOptional`); details in `../metrics/AGENTS.md`. No
-version floor moved: older control planes still get the numbers.
+**Repository checkout for Git Compose projects (`compose-checkout-v1`).** `environment.deploy` may carry `composeCheckout` (clone URL, ref, the commit the compose file was read from, the repo-relative compose path, and the sealed credential on the same lanes as `sourceMaterial[]`). The daemon checks that commit out into `deployments/<project>/<env>/repo/<commit>` before anything builds. The control plane sends it only to a daemon that lists the feature. Detail: `src/deploy/AGENTS.md`.
+
+**Topology reports carry no generation numbers.** `topology-report` is `{ snapshot, at }`; the control plane tells topologies apart by their content. `TopologyReporter` sends on connect and then only when the snapshot's identity key (`../metrics/topology/identity-key.ts`) changes. No feature string gates this: a control plane that reads the numbers is no longer supported.
+
+**DNS orders and per-name certificates (`acme-issue-dns-v1`, `hosting-name-tls-v1`).** Both are advertised in `hello.features` (`DAEMON_WIRE_FEATURES`, appended; no wire-version floor moved). `acme-issue-request` may carry `challenge` (`http-01` or `dns-01`; absent means HTTP, any other value is refused). For `dns-01` the daemon asks the control plane for TXT records over three messages and never touches DNS itself: `acme-dns-publish` (daemon to control plane: `requestId`, `records: [{ name, value }]`, `at`), `acme-dns-published` (control plane to daemon: `requestId`, `ok`, plain `error` when not ok, `at`) and `acme-dns-remove` (daemon to control plane: `requestId`, `at`). `AcmeDnsRelay` (`acme-dns-relay.ts`) is the daemon end; `AcmeIssueHandler.handleDnsPublished` feeds it from `#handleCentralCertificateMessage`, and `sweepRestartedDnsOrders` runs at attach. All three validators refuse certificate and key material. The control plane must never send `dns-01` to a daemon without `acme-issue-dns-v1` (an older daemon drops the field and would run HTTP) and must send `hostings[].nameTls` only to one with `hosting-name-tls-v1`. Details: `../deploy/AGENTS.md`.
 
 **Deploy cancel (`deploy-cancel-v1`).** The daemon advertises the feature in
 `hello.features`. A control plane that sees it may send `deploy-cancel`
@@ -309,7 +306,7 @@ is already valid and outside the renewal window is reported once as well
 before it answers, so a leaf it just installed is reported on the same
 request. A failure
 waits at least one hour before that hostname is tried again, then doubles up
-to 24 hours. The wait is stored in `<stateDir>/instance/acme-renewal-state.json` (not under `instance-acme`, which is the issuer's Caddy storage, `tpcaddy:tp` 2750; an older `instance-acme/renewal-state.json` is still read)
+to 24 hours. The wait is stored in `<stateDir>/instance/acme-renewal-state.json` (not under `instance-acme`, which is the issuer's Caddy storage, `tpcaddy:tp` 2750)
 so a restart cannot spend Let's Encrypt's five failed authorizations per
 identifier per hour (one refill every 12 minutes). The tenant
 `AcmeIssuanceObserver` is unchanged and still probes organization names.
@@ -403,6 +400,7 @@ Command handlers (`server.timezone.set`, `server.ntp.set`,
 `src/commands/` and are injected at the `src/entry/run.ts` composition root
 — see `src/commands/AGENTS.md`. This client never imports that directory.
 
+- **Quiet recycle:** past the age limit the recycle waits for no running command and no unconfirmed outcome, at most `MAX_CONNECTION_QUIET_WAIT_MS` (10 min) more.
 - **Max-connection-age self-recycle:** once per idle tick,
   `#checkMaxConnectionAge` enforces `MAX_CONNECTION_AGE_MS` (2 h, mirrors the
   instance `MAX_WS_CONNECTION_AGE_MS`). When the socket exceeds that age it
@@ -523,13 +521,12 @@ logs once:
 `instance-version: control plane version <version> is below the supported minimum <floor>; flagged — the daemon keeps reconnecting (update the control plane)`
 
 That is a flag, not `#enterParkedState`: the socket stays up and reconnect
-continues. Capability gates (`resolveDaemonCapabilities` /
-`resolveInstanceCapabilities`, map `DAEMON_FEATURE_MIN_VERSIONS`) are separate
-and default **closed** when the peer version is unknown. The first key is
-`instance-cert-sources-per-hostname` (daemon `0.1.1`, the control-plane
-Caddyfile per-hostname certificate-source release,
-`orchestration/roles/instance-launch/templates/Caddyfile.j2`). A panel feature gated on a daemon
-artifact adds its entry to that map; the UI calls the helper.
+continues. Instance capability gates (`resolveInstanceCapabilities`,
+map `INSTANCE_FEATURE_MIN_VERSIONS`) are separate and default **closed** when
+the peer version is unknown. The daemon-side semver map
+(`DAEMON_FEATURE_MIN_VERSIONS`, `resolveDaemonCapabilities`) is gone: every
+supported daemon renders per-hostname certificate sources, and a new
+daemon-rendered feature is gated on the advertised `features[]`.
 
 **Single-daemon guarantee:** only one live cell attachment per server. Runtime
 backstop is the instance cell's **single-writer lease** on attach
@@ -845,7 +842,9 @@ the service. Either way the guard unit runs
 `orchestration/scripts/tp-update-guard` (root, no sudoers entry). The guard
 restores `bin/turbopaneld.prev`, `bin/turbopaneld.js.prev` on JS-mode hosts,
 and `share/orchestration.prev`, writes `<stateDir>/update-rollback.json`, and
-restarts the daemon. A successful new build disarms via
+restarts the daemon. A failed build is always rolled back; the
+daemon then refuses that build via `<stateDir>/update-skip-target.json`. A successful new build
+disarms via
 `<stateDir>/update-guard-disarm.json` on attach (the armed file stays
 root-owned `0640` with the daemon group so the process can read it). A restored
 previous build reports `rolled-back` from `<stateDir>/update-rollback.json`
@@ -1016,7 +1015,7 @@ control plane, the contract check fails a control plane that lists a feature
 this daemon lacks, and an older control plane ignores names it does not know) and the daemon checks `InstanceClient.instanceSupports()`
 before treating the peer as able to speak it. `update-progress`
 (`update-progress-v1`) is the worked example — fire-and-forget progress,
-ignored by a peer that does not list the feature. `deploy-config-files-v1` gates the `configFiles` field of
+ignored by a peer that does not list the feature. `build-limits-v1` gates the optional `buildLimits` field of `environment.deploy` (deploy-wide and per `sourceMaterial[]` entry: the most CPU cores and memory one build may use, with the level that set each); an older daemon ignores it, an older control plane omits it and the daemon uses its defaults; no floor moved (`src/deploy/release/AGENTS.md`, Build limits). `deploy-config-files-v1` gates the `configFiles` field of
 `environment.deploy`: the control plane sends it only when every target daemon
 lists it, because an older daemon would drop the field. `command-progress` (the
 deploy step plan, `src/commands/deploy-progress.ts`) is fire-and-forget too
@@ -1036,16 +1035,9 @@ when the target version is below `MIN_SUPPORTED_INSTANCE_VERSION`; the
 daemon's own self-update does not consult that floor, and the control plane
 does not gate `instance-update` on the daemon version.
 
-`DAEMON_FEATURE_MIN_VERSIONS` (every control plane entry must be here with the
-same value; this daemon may have more, since it merges first) is
-the peer-version feature gate — not the metrics hardware-profile capability
-plan. A panel-visible admin feature that depends on a daemon-rendered artifact
-adds an entry here. The UI phase calls `resolveDaemonCapabilities` and does
-not re-implement semver comparison. An unknown peer version is not supported
-for a feature. The first entry is `instance-cert-sources-per-hostname` at
-daemon **`0.1.1`**, the release that renders per-hostname certificate sources
-in `orchestration/roles/instance-launch/templates/Caddyfile.j2`. Operational detail:
-the rest of this file.
+`public-urls-update` carries `hostnames` only; the flat `urls` list and the
+daemon-version fallback to it are gone. Operational detail: the rest of this
+file.
 
 ## Scope Summary (Former Root Index Entry)
 
@@ -1085,19 +1077,9 @@ form still works and, on a fresh install, pins nothing and writes no pin file.
   With `statement`, stdin is a passkey-approved key-set envelope (see
   **Key rotation** below); it rewrites `current=`, `keyset=`, `rp_id=`,
   `passkeys=` and `panel_key=` in `lib/update-origin`.
-- A host installed before panel keys (an update origin, no pin file) learns
-  the key on its first managed update with no TOKEN: once the trust files are
-  in place, `tp_learn_panel_identity` fetches the identity document from
-  `HOST_URL` with the host's existing TLS trust (never `--insecure-tls`, and
-  only when `HOST_URL` is the update origin's `host=`), checks its header
-  signature with the key it names, and pins that key with `pinned_by=upgrade`,
-  the document's key set and address list. Every address must be exactly
-  `https://host[:port]` (they become pin and update-origin lines). A missing,
-  forged or keyless document, or a bad address, leaves the host unpinned and
-  the update goes on. TLS is what vouches for the learned key (the design
-  learned it over the daemon session; same trust). A host installed with
-  `--unsafe-no-panel-key` keeps its pin file and never learns; reinstalling it
-  with a fresh command pins it.
+- A managed update with no TOKEN never learns or loosens a pin: a host with
+  an update origin and no pin file stays unpinned until it is reinstalled with
+  a fresh command (`--unsafe-no-panel-key` hosts too).
   A fresh install with the older license value has no update origin and
   still pins nothing.
 - `tp-orchestrate update` passes `--panel-key` only when the fetched `run.sh`
@@ -1289,10 +1271,10 @@ A pinned server never sends its license token in clear to a control plane that c
 
 ## Sealed secrets (`daemon-sealed-secrets-v1`)
 
-- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; a 404 (older control plane) is logged and retried on the next connect. Every plaintext decrypt answer also registers the key again without a reconnect, even when this process registered it before, because the control plane answers in plaintext only when no key is on file: a control plane upgraded under an open socket, or a superadmin's Clear Sealing Key (`createSealingRegistration`: one attempt at a time; after a failed attempt the next waits ten minutes, after one that worked a minute). That control plane adds `daemon-sealed-secrets-v1` to the stored features on a verified registration, because the older one dropped the then-unknown feature from the hello. Only the key id is logged.
-- `decryptSecrets` takes `{ sealed }` (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set) or `{ plaintexts }`, never both. After the first sealed answer is opened the daemon writes `<state>/trust-level` = `sealed` and refuses any later plaintext answer (`plaintext secrets refused`). A refused plaintext answer still registers the key again (awaited), and when that worked the decrypt is asked once more; that second answer goes through the same refusal, so a sealed server never takes plaintext and never asks a third time. The daemon never lowers the mark; after a deliberate control plane rollback an operator removes the file by hand.
+- The sealing key (X25519) lives beside the server key as `sealing-key.json` (0600, `src/crypto/sealing-key.ts`) and is regenerated when the server key id changes. `sealing.ts` registers it once per connect with `POST /api/daemon/v1/servers/self/sealing-key`, signed with the server key over `"tp-sealing-key\n" + pub`, after the token exists and before the socket opens. A failure never blocks the connect; any registration failure is warned and retried, rate-limited (ten minutes after a failure, a minute after a success). A decrypt the control plane refuses with `409 sealing_key_required` (no key on file for this server) registers the key again without a reconnect, even when this process registered it before (`createSealingRegistration`: one attempt at a time; after a failed attempt the next waits ten minutes, after one that worked a minute). Only the key id is logged.
+- `decryptSecrets` takes only a `{ sealed }` answer (HPKE envelopes, `aad` = server id, opened locally, then added to the redaction deny-set). A `{ plaintexts }` answer is refused (`plaintext secrets refused`). After a `sealing_key_required` refusal that the key registration fixed, the decrypt is asked once more; a second refusal is the error. A leftover `<state>/trust-level` file from an earlier build is ignored.
 - The Hosting Account password hash may arrive as `passwordHashEnvelope`; `openPrincipalPasswordEnvelopes` opens it through `decryptSecrets` before the account is touched. `server.principals.reconcile` opens it the same way (`daemon-sealed-principal-reconcile-v1`; the control plane sends the envelope there only to a daemon that lists it), and an envelope that cannot be opened fails the whole command rather than lock the account.
 - `scripts/scan-secrets.patterns` (`daemon-identity-file`) does not name `sealing-key.json`; it is byte-identical across five repos, so it is a follow-up for all five together.
-- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and sends plain PEM otherwise, except that a server that has ever received a sealed secret (`trust-level`) fails the report with 503 instead. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). On a pinned server `isTrustedSigningKey` accepts only a pinned key; without a pin the document is trusted as far as TLS.
+- **Keys sent up.** `reportIssuedCertificate` seals the private key to the control plane's sealing key (`privateKeyEnvelope`, aad = the control plane's signing key fingerprint) when `panel-identity-cache.ts` has one, and fails the report with 503 otherwise; the key is never sent as plain PEM. The sealing key comes from the signed identity document (signature checked against its own `current` key, cached a day, a lower `keyset` ignored). On a pinned server `isTrustedSigningKey` accepts only a pinned key; without a pin the document is trusted as far as TLS.
 
 **Bound session (`panel-bound-session-v1`).** The control plane's signed hello always carries `forServer` and `forKey`; the daemon refuses one naming another server or key (or half a pair), closing 4403 like any signature failure. A hello naming neither is an older control plane's and is accepted unbound. Every frame carries the hello's random session id, so a session whose hello names server A never verifies at server V, and a stripped `hello-nonce` offer cannot downgrade it. The offer (`features` in the `hello-nonce`, sent when a daemon key is loaded) only asks the control plane to name the two on every frame too; a frame that names them must match, and one that names nothing is accepted. A verified, pin-checked identity document with `boundSessions: 1` (`PanelSigningKey.boundSessions`) makes the daemon refuse an unbound hello. Remaining gap: an identity document from before the upgrade, replayed within its 30-day lifetime, has no member; tracked with the license follow-up.

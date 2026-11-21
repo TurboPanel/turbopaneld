@@ -49,6 +49,8 @@ export type AcmeErrorCode =
   | "foreign_address"
   | "timeout"
   | "unsupported"
+  /** The control plane could not publish the DNS records (its sentence is plain). */
+  | "relay"
   | "unknown";
 
 /** A refusal or failure from the certificate authority. */

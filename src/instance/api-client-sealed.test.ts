@@ -32,9 +32,7 @@ const test = Deno.test.bind(Deno);
 const DECRYPT_PATH = "/api/daemon/v1/secrets/decrypt";
 const REGISTER_PATH = "/api/daemon/v1/servers/self/sealing-key";
 
-function sealingContext(
-  state: { sealed: boolean; marks: number },
-): DaemonSealingContext {
+function sealingContext(): DaemonSealingContext {
   return {
     open: async (envelope) =>
       new TextDecoder().decode(
@@ -44,12 +42,6 @@ function sealingContext(
           envelope,
         ),
       ),
-    isTrustSealed: () => Promise.resolve(state.sealed),
-    markTrustSealed: () => {
-      state.sealed = true;
-      state.marks += 1;
-      return Promise.resolve();
-    },
   };
 }
 
@@ -91,18 +83,16 @@ async function captureOutput(fn: () => Promise<void>): Promise<string> {
   return lines.join("");
 }
 
-test("a sealed answer is opened locally, remembered for redaction and marks the trust level", async () => {
+test("a sealed answer is opened locally and remembered for redaction", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
     api.script(DECRYPT_PATH, answer({ sealed: [HPKE_VECTOR, null] }));
-    const state = { sealed: false, marks: 0 };
-    const plaintexts = await clientWith(sealingContext(state)).decryptSecrets([
+    const plaintexts = await clientWith(sealingContext()).decryptSecrets([
       "tpdaemon.v1.a",
       "tpdaemon.v1.b",
     ]);
     assertEquals(plaintexts, [HPKE_VECTOR_PLAINTEXT, null]);
-    assertEquals(state, { sealed: true, marks: 1 });
     assert(
       !sharedSecretRedactor().redact(`x ${HPKE_VECTOR_PLAINTEXT} y`).includes(
         HPKE_VECTOR_PLAINTEXT,
@@ -113,16 +103,12 @@ test("a sealed answer is opened locally, remembered for redaction and marks the 
   }
 });
 
-test("plaintext is accepted until a sealed answer has been seen, then refused", async () => {
+test("a plaintext answer is refused", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
     api.script(DECRYPT_PATH, answer({ plaintexts: ["plain"] }));
-    const state = { sealed: false, marks: 0 };
-    const client = clientWith(sealingContext(state));
-    assertEquals(await client.decryptSecrets(["tpdaemon.v1.a"]), ["plain"]);
-
-    state.sealed = true;
+    const client = clientWith(sealingContext());
     const err = await assertRejects(
       () => client.decryptSecrets(["tpdaemon.v1.a"]),
       DaemonApiError,
@@ -134,12 +120,11 @@ test("plaintext is accepted until a sealed answer has been seen, then refused", 
   }
 });
 
-test("a malformed sealed answer is refused without marking the trust level", async () => {
+test("a malformed sealed answer is refused", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
-    const state = { sealed: false, marks: 0 };
-    const client = clientWith(sealingContext(state));
+    const client = clientWith(sealingContext());
     const cases: unknown[] = [
       { sealed: [HPKE_VECTOR], plaintexts: ["plain"] },
       { sealed: [HPKE_VECTOR, HPKE_VECTOR] },
@@ -155,7 +140,6 @@ test("a malformed sealed answer is refused without marking the trust level", asy
         DaemonApiError,
       );
     }
-    assertEquals(state, { sealed: false, marks: 0 });
   } finally {
     restore();
   }
@@ -191,11 +175,11 @@ test("registerSealingKey posts kid, pub and sig", async () => {
   }
 });
 
-test("a 404 from an older control plane is tolerated and registration is retried later", async () => {
+test("a failed registration answers false so it is retried later", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
-    // Nothing is scripted for the path, so the fake answers 404.
+    // Nothing is scripted for the path, so the fake answers 404 (a failure).
     const client = clientWith();
     const signing = await crypto.subtle.generateKey({ name: "Ed25519" }, true, [
       "sign",
@@ -228,7 +212,7 @@ test("opening and registering log no plaintext or private key material", async (
       REGISTER_PATH,
       () => new Response(JSON.stringify({ ok: false }), { status: 500 }),
     );
-    const client = clientWith(sealingContext({ sealed: false, marks: 0 }));
+    const client = clientWith(sealingContext());
     const privateText = btoa(
       String.fromCharCode(...HPKE_VECTOR_RECIPIENT_SEED),
     );
@@ -283,7 +267,7 @@ async function panelKey(): Promise<
 }
 
 function reportClient(
-  options: { seal: PanelSealKey | null; trustSealed?: boolean },
+  options: { seal: PanelSealKey | null },
 ): DaemonApiClient {
   return new DaemonApiClient({
     config: {
@@ -294,7 +278,7 @@ function reportClient(
     getToken: () => Promise.resolve("tok"),
     sleep: () => Promise.resolve(),
     panelSealKey: () => Promise.resolve(options.seal),
-    sealing: sealingContext({ sealed: options.trustSealed === true, marks: 0 }),
+    sealing: sealingContext(),
   });
 }
 
@@ -337,24 +321,16 @@ test("an issued key is sent as an envelope the panel can open, never as PEM", as
   assert(!JSON.stringify(sent).includes("PRIVATE KEY"));
 });
 
-test("without a panel sealing key the key goes as PEM, unless a sealed answer was ever received", async () => {
-  const sent = await reportAndCapture(reportClient({ seal: null })) as Record<
-    string,
-    unknown
-  >;
-  assertEquals(sent.privateKeyPem, KEY_PEM);
-  assertEquals("privateKeyEnvelope" in sent, false);
-
+test("without a panel sealing key the report fails and the key is never sent as PEM", async () => {
   const err = await assertRejects(
-    () => reportAndCapture(reportClient({ seal: null, trustSealed: true })),
+    () => reportAndCapture(reportClient({ seal: null })),
     DaemonApiError,
   );
   assertEquals(err.status, 503);
 });
 
-/** A client whose plaintext hook counts calls and resolves `registered`. */
+/** A client whose key-required hook counts calls and resolves `registered`. */
 function clientWithHook(
-  state: { sealed: boolean; marks: number },
   hook: { calls: number; registered: boolean },
 ): DaemonApiClient {
   return new DaemonApiClient({
@@ -365,13 +341,15 @@ function clientWithHook(
     },
     getToken: () => Promise.resolve("tok"),
     sleep: () => Promise.resolve(),
-    sealing: sealingContext(state),
-    onPlaintextSecretsAnswer: () => {
+    sealing: sealingContext(),
+    onSealingKeyRequired: () => {
       hook.calls += 1;
       return Promise.resolve(hook.registered);
     },
   });
 }
+
+const KEY_REQUIRED = { ok: false, error: "sealing_key_required" };
 
 /** Script the decrypt route with one body per request; returns the request count. */
 function scriptDecryptAnswers(
@@ -381,49 +359,24 @@ function scriptDecryptAnswers(
   const seen = { requests: 0 };
   api.script(DECRYPT_PATH, () => {
     seen.requests += 1;
-    return answer(bodies.shift())();
+    const body = bodies.shift();
+    return body === KEY_REQUIRED
+      ? new Response(JSON.stringify(body), { status: 409 })
+      : answer(body)();
   });
   return seen;
 }
 
-test("every plaintext answer tells the client, a sealed one does not", async () => {
+test("a decrypt refused for want of a sealing key registers it again and asks once more", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
-    const state = { sealed: false, marks: 0 };
-    const hook = { calls: 0, registered: false };
-    const client = clientWithHook(state, hook);
-    scriptDecryptAnswers(api, [
-      { plaintexts: ["plain"] },
-      { sealed: [HPKE_VECTOR] },
-      { plaintexts: ["plain"] },
-    ]);
-    assertEquals(await client.decryptSecrets(["tpdaemon.v1.a"]), ["plain"]);
-    assertEquals(hook.calls, 1);
-
-    await client.decryptSecrets(["tpdaemon.v1.a"]);
-    assertEquals(hook.calls, 1);
-
-    // Refused (a sealed answer was opened before), but the client still
-    // hears that the control plane has no key on file.
-    await assertRejects(() => client.decryptSecrets(["tpdaemon.v1.a"]));
-    assertEquals(hook.calls, 2);
-  } finally {
-    restore();
-  }
-});
-
-test("a refused plaintext answer registers the key again and asks once more", async () => {
-  const api = createFakeInstanceApi();
-  const restore = api.install();
-  try {
-    const state = { sealed: true, marks: 0 };
     const hook = { calls: 0, registered: true };
     const seen = scriptDecryptAnswers(api, [
-      { plaintexts: ["plain"] },
+      KEY_REQUIRED,
       { sealed: [HPKE_VECTOR] },
     ]);
-    const plaintexts = await clientWithHook(state, hook).decryptSecrets([
+    const plaintexts = await clientWithHook(hook).decryptSecrets([
       "tpdaemon.v1.a",
     ]);
     assertEquals(plaintexts, [HPKE_VECTOR_PLAINTEXT]);
@@ -434,23 +387,22 @@ test("a refused plaintext answer registers the key again and asks once more", as
   }
 });
 
-test("a second plaintext answer after registering again is refused, with no third request", async () => {
+test("a second refusal after registering again is the error, with no third request", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
-    const state = { sealed: true, marks: 0 };
     const hook = { calls: 0, registered: true };
     const seen = scriptDecryptAnswers(api, [
-      { plaintexts: ["first"] },
-      { plaintexts: ["second"] },
-      { plaintexts: ["third"] },
+      KEY_REQUIRED,
+      KEY_REQUIRED,
+      { sealed: [HPKE_VECTOR] },
     ]);
     const err = await assertRejects(
-      () => clientWithHook(state, hook).decryptSecrets(["tpdaemon.v1.a"]),
+      () => clientWithHook(hook).decryptSecrets(["tpdaemon.v1.a"]),
       DaemonApiError,
     );
-    assertEquals(err.status, 400);
-    assertEquals(err.message, "plaintext secrets refused");
+    assertEquals(err.status, 409);
+    assertEquals(err.message, "sealing_key_required");
     assertEquals(hook.calls, 1);
     assertEquals(seen.requests, 2);
   } finally {
@@ -458,18 +410,17 @@ test("a second plaintext answer after registering again is refused, with no thir
   }
 });
 
-test("a refused plaintext answer is not asked again when the key could not be registered", async () => {
+test("a refused decrypt is not asked again when the key could not be registered", async () => {
   const api = createFakeInstanceApi();
   const restore = api.install();
   try {
-    const state = { sealed: true, marks: 0 };
     const hook = { calls: 0, registered: false };
     const seen = scriptDecryptAnswers(api, [
-      { plaintexts: ["plain"] },
+      KEY_REQUIRED,
       { sealed: [HPKE_VECTOR] },
     ]);
     await assertRejects(
-      () => clientWithHook(state, hook).decryptSecrets(["tpdaemon.v1.a"]),
+      () => clientWithHook(hook).decryptSecrets(["tpdaemon.v1.a"]),
       DaemonApiError,
     );
     assertEquals(hook.calls, 1);
@@ -479,7 +430,7 @@ test("a refused plaintext answer is not asked again when the key could not be re
   }
 });
 
-test("the sealing key is registered again after a plaintext answer, at most once per interval", async () => {
+test("the sealing key is registered again after a refused decrypt, at most once per interval", async () => {
   let clock = 1_000_000;
   const outcomes = [false, false, true];
   let attempts = 0;
@@ -487,18 +438,18 @@ test("the sealing key is registered again after a plaintext answer, at most once
     register: () => Promise.resolve(outcomes[attempts++] ?? true),
     now: () => clock,
   });
-  // Connect: the older control plane answered 404.
+  // Connect: the registration did not take.
   await registration.atConnect();
   assertEquals(attempts, 1);
-  // Plaintext answer right away: still inside the interval.
-  assertEquals(await registration.afterPlaintextAnswer(), false);
+  // Refused decrypt right away: still inside the interval.
+  assertEquals(await registration.afterKeyRequired(), false);
   assertEquals(attempts, 1);
   clock += SEALING_RETRY_INTERVAL_MS;
-  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(await registration.afterKeyRequired(), false);
   assertEquals(attempts, 2);
   assertEquals(registration.isRegistered(), false);
   clock += SEALING_RETRY_INTERVAL_MS;
-  assertEquals(await registration.afterPlaintextAnswer(), true);
+  assertEquals(await registration.afterKeyRequired(), true);
   assertEquals(attempts, 3);
   assertEquals(registration.isRegistered(), true);
   // Registered: a reconnect does not post it again.
@@ -506,7 +457,7 @@ test("the sealing key is registered again after a plaintext answer, at most once
   assertEquals(attempts, 3);
 });
 
-test("a plaintext answer after a registration that worked registers the key again", async () => {
+test("a refused decrypt after a registration that worked registers the key again", async () => {
   let clock = 1_000_000;
   const outcomes = [true, false, true];
   let attempts = 0;
@@ -517,18 +468,18 @@ test("a plaintext answer after a registration that worked registers the key agai
   await registration.atConnect();
   assertEquals(registration.isRegistered(), true);
   // Too soon after the registration that worked: nothing is posted.
-  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(await registration.afterKeyRequired(), false);
   assertEquals(attempts, 1);
   assertEquals(registration.isRegistered(), true);
-  // The key was cleared: the next plaintext answer posts it again. This
+  // The key was cleared: the next refused decrypt posts it again. This
   // attempt fails, so the process no longer counts the key as on file.
   clock += SEALING_REREGISTER_INTERVAL_MS;
-  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(await registration.afterKeyRequired(), false);
   assertEquals(attempts, 2);
   assertEquals(registration.isRegistered(), false);
   // A failed attempt waits the longer retry interval, or for the next connect.
   clock += SEALING_REREGISTER_INTERVAL_MS;
-  assertEquals(await registration.afterPlaintextAnswer(), false);
+  assertEquals(await registration.afterKeyRequired(), false);
   assertEquals(attempts, 2);
   await registration.atConnect();
   assertEquals(attempts, 3);
@@ -548,9 +499,9 @@ test("a registration in flight is not started twice", async () => {
     now: () => 0,
   });
   const first = registration.atConnect();
-  const second = registration.afterPlaintextAnswer();
+  const second = registration.afterKeyRequired();
   const third = registration.atConnect();
-  const fourth = registration.afterPlaintextAnswer();
+  const fourth = registration.afterKeyRequired();
   finish(true);
   const [, secondOutcome, , fourthOutcome] = await Promise.all([
     first,

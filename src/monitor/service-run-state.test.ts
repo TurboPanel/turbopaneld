@@ -192,19 +192,23 @@ test("services are sorted by id", () => {
 });
 
 test("ingress and platform containers do not count as services", () => {
-  assertEquals(serviceIdForContainer({ "com.turbopanel.service": "s" }), "s");
+  assertEquals(serviceIdForContainer({ "io.turbopanel.service": "s" }), "s");
   assertEquals(
     serviceIdForContainer({
-      "com.turbopanel.service": "s",
+      "io.turbopanel.service": "s",
       "turbopanel.role": "ingress",
     }),
     undefined,
   );
   assertEquals(
     serviceIdForContainer({
-      "com.turbopanel.service": "s",
+      "io.turbopanel.service": "s",
       "turbopanel.role": "turbopanel",
     }),
+    undefined,
+  );
+  assertEquals(
+    serviceIdForContainer({ "com.turbopanel.service": "s" }),
     undefined,
   );
   assertEquals(serviceIdForContainer({}), undefined);

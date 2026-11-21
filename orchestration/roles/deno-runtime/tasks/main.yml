@@ -134,3 +134,6 @@
     dest: "{{ turbopanel_vendor_dir }}/deno/bin/deno"
     state: link
     force: true
+
+- name: Restart units still running a replaced Deno binary
+  ansible.builtin.import_tasks: restart-dependents.yml

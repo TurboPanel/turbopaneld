@@ -18,9 +18,12 @@ test("a tenant compose may not claim the labels that make a container the platfo
   for (
     const labels of [
       { "turbopanel.role": "turbopanel" },
-      { "com.turbopanel.system.component": "managed-ha" },
       { "tp.managed.engine": "postgres" },
-      { "com.turbopanel.approval": "v2.a.b" },
+      { "io.turbopanel.approval": "v2.a.b" },
+      { "io.turbopanel.system.component": "managed-ha" },
+      { "io.turbopanel.system.routed": "true" },
+      { "io.turbopanel.raw-port": "true" },
+      ["IO.turbopanel.approval=x"],
       ["turbopanel.role=ingress"],
     ]
   ) {
@@ -47,8 +50,8 @@ test("the control plane's identity labels and anything else stay allowed", () =>
     services: {
       web: {
         labels: {
-          "com.turbopanel.service": "web",
-          "com.turbopanel.environment": "e1",
+          "io.turbopanel.service": "web",
+          "io.turbopanel.environment": "e1",
           "com.example": "keep",
         },
       },
@@ -89,7 +92,7 @@ test("only the turbopanel. prefix and the existing reserved names are refused", 
         labels: {
           "turbopanelx.role": "ok",
           "my.turbopanel.role": "ok",
-          "com.turbopanel.project": "p",
+          "io.turbopanel.project": "p",
           "turbopanel": "bare",
         },
       },
@@ -103,8 +106,8 @@ test("a tenant compose may not author traefik routing labels or the routed marke
       { "traefik.http.routers.steal.rule": "Host(`victim.example.com`)" },
       ["traefik.enable=true"],
       { "Traefik.http.routers.x.priority": "9" },
-      { "com.turbopanel.raw-port": "true" },
-      { "com.turbopanel.system.routed": "true" },
+      { "io.turbopanel.raw-port": "true" },
+      { "io.turbopanel.system.routed": "true" },
     ]
   ) {
     assertThrows(

@@ -304,16 +304,7 @@ test("converge and web-service account ids are globally unique", async () => {
   // 9900-9979 held the old per-version runtime groups. The runtime-access role
   // deletes any `tpphp<NN>` / `tpnode<N>` / `tpdeno<N>` group left there, so
   // nothing else may take a gid in that band.
-  const legacy = parse(
-    await readRole("roles/runtime-access/defaults/main.yml"),
-  ) as {
-    runtime_access_legacy_gid_min: number;
-    runtime_access_legacy_gid_max: number;
-  };
-  const band = {
-    min: legacy.runtime_access_legacy_gid_min,
-    max: legacy.runtime_access_legacy_gid_max,
-  };
+  const band = { min: 9900, max: 9979 };
 
   // SSH access groups share the same numeric space as service accounts, so a
   // collision would be just as bad: they go through the same check.

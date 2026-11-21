@@ -2,7 +2,13 @@
  * Deploy payload validators — keep in sync with instance `src/contracts/commands/deploy-validation.ts`.
  */
 
-import { isValidHostname, wwwSiblingHostname } from "./commands-contracts.ts";
+import {
+  hostingServedNames,
+  hostingTlsForName,
+  hostingWwwRedirects,
+  isValidHostname,
+  wwwSiblingHostname,
+} from "./commands-contracts.ts";
 import type {
   EnvironmentDeployHosting,
   EnvironmentDeployStorageMaterial,
@@ -111,7 +117,17 @@ function recordHostnameAcmeHttps(
   hostname: string,
   hosting: EnvironmentDeployHosting,
 ): string | null {
-  if (hosting.tlsMode === "acme") {
+  // A name a `www` mode expands answers on its served spellings too, and each
+  // may pick its own certificate: any one on acme needs the HTTPS site (a redirect name on acme sends visitors to https).
+  const own = { hostnames: [hostname], www: hosting.www };
+  const names = [
+    hostname,
+    ...hostingServedNames(own),
+    ...hostingWwwRedirects(own).map((redirect) => redirect.from),
+  ];
+  if (
+    names.some((name) => hostingTlsForName(hosting, name).tlsMode === "acme")
+  ) {
     state.hasAcme = true;
   }
   if (hosting.proxy?.forceHttps === false) {

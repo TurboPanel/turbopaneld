@@ -41,7 +41,6 @@ import {
   applyProxySqlAdminStatements,
   assertProxySqlHostRegularFile,
   loadProxySqlAdminCredentials,
-  loadProxySqlMonitorCredentials,
   proxySqlHostPrepPresent,
   readProxySqlRuntimeInterfaces,
   readProxySqlRuntimeServers,
@@ -141,7 +140,7 @@ function desiredStateFromPayload(
         ? { engineVersion: cluster.engineVersion }
         : {}),
       protocolPort: cluster.protocolPort,
-      ...(cluster.family !== undefined ? { family: cluster.family } : {}),
+      family: cluster.family,
       writerHostgroup: cluster.writerHostgroup,
       readerHostgroup: cluster.readerHostgroup,
       backends: cluster.backends.map((backend) => ({ ...backend })),
@@ -810,8 +809,12 @@ async function resolveMonitorCredentials(
   layout: ReturnType<typeof resolveLayout>,
   monitor: ManagedIngressReconcilePayload["monitor"],
   decryptSecrets: DecryptSecretsFn,
-): Promise<{ user: string; password: string } | null> {
-  if (!monitor) return await loadProxySqlMonitorCredentials(layout);
+): Promise<{ user: string; password: string }> {
+  if (!monitor) {
+    throw new Error(
+      "managed.ingress.reconcile requires the control-plane monitor credential",
+    );
+  }
   const [monitorPassword] = await decryptSecrets([monitor.password]);
   if (typeof monitorPassword !== "string" || monitorPassword.length === 0) {
     throw new Error(
@@ -875,11 +878,10 @@ async function reconcileManagedIngress(
   );
 
   const adminCredentials = await loadProxySqlAdminCredentials(layout);
-  // Payload monitor credential (control-plane minted, per server) wins over
-  // the host-seeded `monitor.cnf`: cross-host clusters need every server to
-  // monitor with its own control-plane-known identity (the engine roles are
-  // created from `managed.apply` monitorUsers). Rewrite `monitor.cnf` so the
-  // engine-apply fallback path stays consistent with what ProxySQL uses.
+  // The payload monitor credential (control-plane minted, per server) is the
+  // only source: cross-host clusters need every server to monitor with its own
+  // control-plane-known identity (the engine roles are created from
+  // `managed.apply` monitorUsers). `monitor.cnf` is rewritten to match.
   const monitorCredentials = await resolveMonitorCredentials(
     layout,
     parsed.monitor,

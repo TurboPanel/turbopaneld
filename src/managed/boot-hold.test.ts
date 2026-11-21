@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
+import { managedDir } from "./engine-paths.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import { waitFor } from "../testing/wait-for.ts";
@@ -10,7 +11,6 @@ import {
   ensureHoldStopped,
   isHoldablePrimary,
   listActiveBootHolds,
-  releaseBootHoldLocally,
   resetUnsettledBootHoldsForTests,
 } from "./boot-hold.ts";
 import {
@@ -19,8 +19,12 @@ import {
   lookupManagedIntent,
   resetManagedIntentsForTests,
 } from "./ha-intent.ts";
-import { writeManagedDemotedMarker } from "./demoted-marker.ts";
-import type { ManagedHaMemberRecord } from "./ha-member.ts";
+import {
+  managedHaMemberPath,
+  type ManagedHaMemberRecord,
+  readManagedHaMember,
+  saveManagedHaMember,
+} from "./ha-member.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -66,11 +70,26 @@ function docker(outcomes: boolean[] = []) {
   return { run, calls };
 }
 
+test("a stored member record without peerCount is rejected, not read as peerless", async () => {
+  await withTempLayout(async ({ env }) => {
+    const layout = resolveLayout(env);
+    await Deno.mkdir(managedDir(layout, PRIMARY_ID), { recursive: true });
+    await saveManagedHaMember(layout, record());
+    assertEquals(
+      (await readManagedHaMember(layout, PRIMARY_ID))?.peerCount,
+      1,
+    );
+    const { peerCount: _dropped, ...partial } = record();
+    await Deno.writeTextFile(
+      managedHaMemberPath(layout, PRIMARY_ID),
+      JSON.stringify(partial),
+    );
+    assertEquals(await readManagedHaMember(layout, PRIMARY_ID), null);
+  });
+});
+
 test("only a primary with a peer is holdable", () => {
   assert(isHoldablePrimary(record()));
-  assert(
-    isHoldablePrimary(record({ peerCount: undefined, replicaPeerCount: 2 })),
-  );
   assert(!isHoldablePrimary(record({ peerCount: 0, replicaPeerCount: 0 })));
   assert(!isHoldablePrimary(record({ role: "replica" })));
 });
@@ -214,64 +233,6 @@ async function assertRejectsMissing(path: string): Promise<void> {
   }
   assert(missing, `${path} should be gone`);
 }
-
-test("a demoted member is held on boot and never started on local release", async () => {
-  await withTempLayout(async ({ env }) => {
-    resetManagedIntentsForTests();
-    resetUnsettledBootHoldsForTests();
-    const layout = resolveLayout(env);
-    const fake = docker();
-    const demoted = record({ managedId: REPLICA_ID, role: "replica" });
-    await Deno.mkdir(`${layout.stateDir}/managed/${REPLICA_ID}`, {
-      recursive: true,
-    });
-    await writeManagedDemotedMarker(
-      layout,
-      REPLICA_ID,
-      MEMBER_ID,
-      "2026-10-08T12:00:00.000Z",
-    );
-    assertEquals(
-      await applyBootHold("unclean", {
-        layout,
-        run: fake.run,
-        listMembers: () => Promise.resolve([demoted]),
-      }),
-      true,
-    );
-    assertEquals(fake.calls, [["compose", "-p", REPLICA_ID, "stop"]]);
-    const [hold] = await listActiveBootHolds(layout);
-    assertEquals(hold?.managedId, REPLICA_ID);
-    await releaseBootHoldLocally(hold!, { layout, run: fake.run }, "test");
-    assertEquals(
-      fake.calls.some((args) => args.at(-1) === "start"),
-      false,
-    );
-    assertEquals((await listActiveBootHolds(layout)).length, 1);
-  });
-});
-
-test("releasing locally clears the marker, removes the file and starts the engine", async () => {
-  await withTempLayout(async ({ env }) => {
-    resetManagedIntentsForTests();
-    resetUnsettledBootHoldsForTests();
-    const layout = resolveLayout(env);
-    const fake = docker();
-    await applyBootHold("unclean", {
-      layout,
-      run: fake.run,
-      listMembers: () => Promise.resolve([record()]),
-    });
-    const [hold] = await listActiveBootHolds(layout);
-    await releaseBootHoldLocally(hold!, { layout, run: fake.run }, "test");
-    assertEquals(fake.calls.at(-1), ["compose", "-p", PRIMARY_ID, "start"]);
-    assertEquals(
-      (await lookupManagedIntent(layout.stateDir, PRIMARY_ID)).status,
-      "none",
-    );
-    assertEquals(await listActiveBootHolds(layout), []);
-  });
-});
 
 test("a planned reboot (clean stamp) holds the primary until the control plane answers", async () => {
   await withTempLayout(async ({ env }) => {

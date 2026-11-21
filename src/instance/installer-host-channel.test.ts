@@ -80,15 +80,18 @@ test("isCdnRunScript recognises all three public installer hosts and nothing els
   for (const url of [CDN_RUN_SCRIPT, STAGING_RUN_SCRIPT, TESTING_RUN_SCRIPT]) {
     assertEquals(isCdnRunScript(url), true);
   }
-  assertEquals(isCdnRunScript("https://huey.lan:8443/run.sh"), false);
+  assertEquals(
+    isCdnRunScript("https://server-a.example.lan:8443/run.sh"),
+    false,
+  );
   assertEquals(isCdnRunScript("https://evil.turbopanel.sh"), false);
 });
 
 test("resolveRunScriptUrl follows the channel for a public control plane, but the overlay origin wins", () => {
   const config = {
     kind: "url" as const,
-    baseUrl: "https://huey.lan:8443",
-    wsBaseUrl: "wss://huey.lan:8443",
+    baseUrl: "https://server-a.example.lan:8443",
+    wsBaseUrl: "wss://server-a.example.lan:8443",
   };
   assertEquals(
     resolveRunScriptUrl(config, { channel: "canary" }),
@@ -101,9 +104,9 @@ test("resolveRunScriptUrl follows the channel for a public control plane, but th
   assertEquals(
     resolveRunScriptUrl(config, {
       channel: "canary",
-      dlBase: "https://huey.lan:8443/downloads",
+      dlBase: "https://server-a.example.lan:8443/downloads",
     }),
-    "https://huey.lan:8443/run.sh",
+    "https://server-a.example.lan:8443/run.sh",
   );
 });
 

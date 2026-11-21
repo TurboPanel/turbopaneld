@@ -348,6 +348,7 @@ const OWNED_PATHS = [
   "/srv/users/bob",
   "/tmp/turbopanel-ansible",
   "/root/.ansible",
+  "/.ansible",
   "/var/lib/docker",
   "/etc/docker",
   "/etc/systemd/system/turbopaneld.service.d",
@@ -356,12 +357,11 @@ const OWNED_PATHS = [
   "/etc/turbopanel/tunnel-env",
   "/etc/turbopanel/tunnel-env/0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.env",
   "/opt/turbopanel/vendor/cloudflared",
-  "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
+  "/opt/turbopanel/vendor/cloudflared/2026.11.1/cloudflared",
   "/var/lib/turbopanel/cloudflared/tunnels",
-  // The daemon's sealing key and secrets trust mark live loose in the state
-  // root; the purge removes them with the tree.
+  // The daemon's sealing key lives loose in the state root; the purge removes
+  // it with the tree.
   "/var/lib/turbopanel/sealing-key.json",
-  "/var/lib/turbopanel/trust-level",
   // A site's variables copies (one 0700 folder per Linux user), the daemon's
   // staging folder for them, and the vendored PHP package manager.
   "/etc/turbopanel/site-env",
@@ -1212,6 +1212,49 @@ test("the build slice is stopped and its unit file removed although it is not tu
   assertEquals(await exists(join(units, "tpother.slice")), true);
 });
 
+test("the image-build slices are stopped and their runtime drop-ins removed, and nothing else in the control directory", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-purge-imagebuild-" });
+  const control = join(dir, "system.control");
+  for (
+    const name of [
+      "turbopanel-imagebuild.slice.d",
+      "turbopanel-imagebuild-svc1_r1.slice.d",
+      "other.slice.d",
+    ]
+  ) {
+    await Deno.mkdir(join(control, name), { recursive: true });
+  }
+  const log = join(dir, "systemctl.log");
+  const stub = await stubBin(
+    "systemctl",
+    [`echo "$*" >> ${log}`].join("\n"),
+  );
+  const result = await runPurgeSh(
+    ["tp_remove_image_build_slices"],
+    `TP_SYSTEMD_CONTROL_DIR=${control}\ntp_remove_image_build_slices`,
+    { PATH: `${stub}:${BASE_PATH}` },
+  );
+  assertEquals(result.code, 0, result.stderr);
+  assertEquals(
+    (await Deno.readTextFile(log)).trim(),
+    "stop turbopanel-imagebuild-*.slice turbopanel-imagebuild.slice",
+  );
+  assertEquals(
+    await exists(join(control, "turbopanel-imagebuild.slice.d")),
+    false,
+  );
+  assertEquals(
+    await exists(join(control, "turbopanel-imagebuild-svc1_r1.slice.d")),
+    false,
+  );
+  assertEquals(await exists(join(control, "other.slice.d")), true);
+  // The final unit step runs it before the TurboPanel slices.
+  const source = await Deno.readTextFile(purgePath);
+  const finalize = extractFunction(source, "tp_finalize_turbopanel_units") ??
+    "";
+  assert(finalize.includes("tp_remove_image_build_slices"), finalize);
+});
+
 const TUNNEL_UNITS = [
   "turbopanel-tunnel-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d.service",
   "turbopanel-tunnel-1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e.service",
@@ -1608,6 +1651,14 @@ test("look-alike -ha names are not merged from the pre-purge inventory", async (
   assertStringIncludes(result.stdout, "no_removals", result.stderr);
 });
 
+test("the container listing format asks only for the io.turbopanel labels", async () => {
+  const source = await Deno.readTextFile(purgePath);
+  const fmt = source.match(/_dc_fmt='([^']*)'/);
+  assert(fmt !== null, "_dc_fmt is missing from purge.sh");
+  assertStringIncludes(fmt[1], "io.turbopanel.system.component");
+  assert(!fmt[1].includes("com.turbopanel"), "_dc_fmt reads an old label");
+});
+
 test("container removal merges the pre-purge inventory and removes every name", async () => {
   const stub = await stubBin(
     "docker",
@@ -1615,8 +1666,24 @@ test("container removal merges the pre-purge inventory and removes every name", 
       'case "$1" in',
       "  ps)",
       '    if [ "$2" = "-a" ]; then',
-      '      printf "%s\\n" "turbopanel-database|turbopanel.role|database|-|-|-|-"',
-      `      printf "%s\\\\n" "${TP_TEST_UUID}-ha|-|managed-ha|-|-|-|-"`,
+      // Render each row from the label keys the format string asks for, so a
+      // container only shows a label when purge.sh looks up that exact key.
+      `      awk -v fmt="$4" 'BEGIN { FS = ":" } {`,
+      `        n = split($2, kv, ","); delete L`,
+      `        for (i = 1; i <= n; i++) { split(kv[i], p, "="); L[p[1]] = p[2] }`,
+      `        m = split(fmt, f, "|"); out = ""`,
+      `        for (j = 1; j <= m; j++) {`,
+      `          if (f[j] == "{{.Names}}") v = $1; else { split(f[j], q, "\\""); v = L[q[2]] }`,
+      `          out = out (j > 1 ? "|" : "") v`,
+      `        }`,
+      `        print out`,
+      `      }' <<'ROWS'`,
+      "turbopanel-database:turbopanel.role=database",
+      `${TP_TEST_UUID}-ha:io.turbopanel.system.component=managed-ha`,
+      "queuebox:io.turbopanel.system.component=queue",
+      // Only the old com.turbopanel.* labels: purge.sh no longer asks for them.
+      "oldlabelbox:com.turbopanel.system.component=queue,com.turbopanel.service=queue",
+      "ROWS",
       "    fi",
       "    ;;",
       '  rm) echo rm:$3 >> "$TP_TMP/docker.rmlog" ;;',
@@ -1652,6 +1719,8 @@ test("container removal merges the pre-purge inventory and removes every name", 
   assertEquals(lines, [
     `rm:${TP_TEST_UUID}-ha`,
     `rm:${TP_TEST_UUID}-ha`,
+    "rm:queuebox",
+    "rm:queuebox",
     "rm:turbopanel-database",
     "rm:turbopanel-database",
   ]);

@@ -22,7 +22,10 @@ import {
   isValidHostname,
   isValidIpv4Literal,
   isValidIpv6Literal,
+  TUNNEL_PEER_PORT,
   TUNNEL_PEER_TLS_NAME,
+  type TunnelInbound,
+  type TunnelPeerClientAuth,
   type TunnelRoute,
 } from "../contracts/commands-contracts.ts";
 import { ConfigValueError } from "../contracts/config-values.ts";
@@ -44,12 +47,37 @@ export const TUNNEL_PEER_FILES = {
 /** What a visitor sees when the server that runs the site cannot answer. */
 export const TUNNEL_ERROR_TEXT = "This site is not running right now.";
 
+/**
+ * The one status the error page answers with. With one upstream and a three
+ * second retry window the error is 502 or 503 at random, and the edge replaces
+ * a 502 with its own page, so the page always answers 503, which it passes on.
+ */
+export const TUNNEL_ERROR_STATUS = 503;
+
 const LOOPBACK_RANGES = "127.0.0.0/8 ::1";
 const DEFAULT_PEER_PORT = 443;
+/**
+ * The port of the peer-facing server when the table sets `peerClientAuth`. It
+ * is separate from the hosting port on purpose: Caddy turns on strict SNI
+ * matching for a server that checks client certificates, and a certificate
+ * check that sat on a name of the shared server would not cover a connection
+ * that names a real hostname. The number is a contract constant (the control
+ * plane opens the same port in its firewall rule) and is reserved for apps in
+ * `RESERVED_HOST_PORT_RANGES`.
+ */
+export { TUNNEL_PEER_PORT };
+/** The header the peer-facing server sets on what it passes to the hosting sites. */
+export const TUNNEL_PEER_HOP_HEADER = "X-Tp-Peer-Hop";
+/** Carries the real Host from the sender to the peer-facing server. */
+export const TUNNEL_PEER_HOST_HEADER = "X-Tp-Peer-Host";
 /** Named matchers are per site block, and these names are used once in each. */
 const OUTSIDE_MATCHER = "@tp_outside";
 const PEER_MATCHER = "@tp_peer";
 const LOCAL_MATCHER = "@tp_local";
+const REPEATED_HOST_MATCHER = "@tp_repeated_host";
+/** Caddy joins a repeated header with a comma, and a hostname never holds one. */
+const TUNNEL_PEER_HOST_HEADER_PLACEHOLDER =
+  `{http.request.header.${TUNNEL_PEER_HOST_HEADER}}`;
 
 const SAFE_PATH_RE = /^\/[A-Za-z0-9_./-]+$/;
 
@@ -65,6 +93,18 @@ export type PeerUpstream = {
   trustFile: string;
   /** Source ranges whose visitor-address headers are kept (loopback and peers). */
   trustedProxies: readonly string[];
+  /** Certificate and key shown to the receiving server as a client certificate. */
+  clientCertificate?: Readonly<{ certificate: string; key: string }>;
+  /**
+   * The receiver is a dedicated peer-facing server. It matches the Host header
+   * to the connecting name (Caddy does that on any server that checks client
+   * certificates), so the request names the fixed peer name as its Host and
+   * carries the real one in {@link TUNNEL_PEER_HOST_HEADER}, which the receiver
+   * puts back before handing the request to the sites.
+   */
+  carryHostInHeader?: true;
+  /** The source address of the hop (`local_address`); a bare address on this host. */
+  localAddress?: string;
 };
 
 /** Where one folder of peer material sits and the paths its files get. */
@@ -133,8 +173,14 @@ export function tunnelLockLines(peers: readonly string[]): string {
  * fails to connect is skipped for ten seconds, and a request is retried on the
  * other targets for up to three seconds before the error page answers.
  * `header_up Host` is needed because Caddy rewrites Host on a TLS hop.
+ * The transport has a dial timeout inside the retry window, a limit on the
+ * wait for the first response header only (a long body is never cut off), and
+ * a short idle keepalive so a pooled connection to a silent peer is not reused.
  * `tls_server_name` is fixed: the receiving server presents the certificate it
  * loaded for that name, and the sender trusts only the organization's bundle.
+ * With `clientCertificate` the sender also shows its own peer certificate
+ * (`tls_client_auth`), so the receiving server, which refuses a connection
+ * without a certificate of the organization's authority, lets it in.
  */
 export function peerUpstreamText(upstream: PeerUpstream): string {
   if (upstream.targets.length === 0) {
@@ -152,18 +198,35 @@ export function peerUpstreamText(upstream: PeerUpstream): string {
       throw new ConfigValueError("tunnel trusted range", "must be an address");
     }
   });
+  const clientAuth = upstream.clientCertificate
+    ? `    tls_client_auth ${
+      assertPath(
+        "tunnel client certificate",
+        upstream.clientCertificate.certificate,
+      )
+    } ${assertPath("tunnel client key", upstream.clientCertificate.key)}\n`
+    : "";
+  if (upstream.localAddress !== undefined) assertAddress(upstream.localAddress);
+  const sourceLine = upstream.localAddress === undefined
+    ? ""
+    : `    local_address ${upstream.localAddress}\n`;
+  const hostLines = upstream.carryHostInHeader
+    ? `  header_up Host ${TUNNEL_PEER_TLS_NAME}\n  header_up ${TUNNEL_PEER_HOST_HEADER} {host}\n`
+    : "  header_up Host {host}\n";
   return `reverse_proxy ${targets.join(" ")} {
   lb_policy round_robin
   lb_try_duration 3s
   fail_duration 10s
   max_fails 1
-  header_up Host {host}
-  trusted_proxies ${upstream.trustedProxies.join(" ")}
+${hostLines}  trusted_proxies ${upstream.trustedProxies.join(" ")}
   transport http {
     tls
     tls_trust_pool file ${trust}
     tls_server_name ${TUNNEL_PEER_TLS_NAME}
-    versions 2
+${clientAuth}${sourceLine}    versions 2
+    dial_timeout 2s
+    response_header_timeout 60s
+    keepalive 15s
   }
 }`;
 }
@@ -186,10 +249,89 @@ export type TunnelFileInputs = Readonly<{
   listenAddresses?: readonly string[];
   /** Absent when the table has nothing to receive or forward. */
   material?: Readonly<{ certificate: string; key: string; trust: string }>;
+  /**
+   * Set = the peer-facing server is its own server on {@link TUNNEL_PEER_PORT}
+   * and checks client certificates ({@link TunnelPeerClientAuth}), and forwards
+   * go to that port. Absent = the shared hosting port, no client certificate.
+   */
+  clientAuth?: TunnelPeerClientAuth;
+  /**
+   * True when the peer certificate allows client use: forward blocks then show
+   * it to the receiving server. False (a certificate from before the change)
+   * sends nothing, as before.
+   */
+  presentCertificate?: boolean;
+  /**
+   * Names that run here and who may forward each (strict mode only): the peer
+   * server hands a request on only for a listed name from one of its peers.
+   */
+  inbound?: readonly TunnelInbound[];
+  /**
+   * The addresses this host owns. When set, an upstream's `localAddress` is used
+   * only if it is in here; otherwise it is left out and a warning is returned.
+   * Absent = not checked.
+   */
+  localAddresses?: ReadonlySet<string>;
 }>;
 
+/**
+ * One spelling per address: IPv6 compressed and lower case, no zone, so
+ * `FD00:0:0::7` and `fd00::7` compare equal. Anything else is returned as is.
+ */
+export function canonicalAddress(address: string): string {
+  const bare = address.split("%")[0].toLowerCase();
+  if (!bare.includes(":")) return bare;
+  try {
+    return new URL(`http://[${bare}]`).hostname.slice(1, -1);
+  } catch {
+    return bare;
+  }
+}
+
+const familyOf = (address: string): 4 | 6 => address.includes(":") ? 6 : 4;
+
+/**
+ * The source address for one forward block, or why there is none. One
+ * `reverse_proxy` has one transport, so every upstream must name the same
+ * address; targets of the other address family could not be dialed from it and
+ * are dropped.
+ */
+function pinnedSource(
+  route: TunnelRoute,
+  inputs: TunnelFileInputs,
+): { address?: string; warning?: string } {
+  const named = new Set(
+    route.upstreams.map((upstream) => upstream.localAddress),
+  );
+  if (named.size === 1 && named.has(undefined)) return {};
+  const [address] = named;
+  if (named.size !== 1 || address === undefined) {
+    return {
+      warning:
+        `${route.hostname}: the servers that carry it name different source addresses, so none is pinned`,
+    };
+  }
+  assertAddress(address);
+  if (
+    inputs.localAddresses &&
+    ![...inputs.localAddresses].some((own) =>
+      canonicalAddress(own) === canonicalAddress(address)
+    )
+  ) {
+    return {
+      warning:
+        `${route.hostname}: source address ${address} is not on this server, so none is pinned`,
+    };
+  }
+  return { address: canonicalAddress(address) };
+}
+
 /** One forward block for a site that runs on other servers. */
-function forwardBlock(route: TunnelRoute, inputs: TunnelFileInputs): string {
+function forwardBlock(
+  route: TunnelRoute,
+  inputs: TunnelFileInputs,
+  warnings: string[],
+): string {
   if (!isValidHostname(route.hostname)) {
     throw new ConfigValueError("tunnel hostname", "must be a hostname");
   }
@@ -197,23 +339,71 @@ function forwardBlock(route: TunnelRoute, inputs: TunnelFileInputs): string {
   if (!material) {
     throw new ConfigValueError("tunnel material", "is required to forward");
   }
-  const targets = route.upstreams.flatMap((upstream) =>
-    upstream.addresses.map((address) =>
-      formatTunnelTarget(address, upstream.port ?? DEFAULT_PEER_PORT)
-    )
-  );
+  const source = pinnedSource(route, inputs);
+  if (source.warning) warnings.push(source.warning);
+  const allTargets = (pinned: string | undefined) =>
+    route.upstreams.flatMap((upstream) =>
+      upstream.addresses
+        .filter((address) =>
+          pinned === undefined || familyOf(address) === familyOf(pinned)
+        )
+        .map((address) =>
+          formatTunnelTarget(
+            address,
+            upstream.port ??
+              (inputs.clientAuth ? TUNNEL_PEER_PORT : DEFAULT_PEER_PORT),
+          )
+        )
+    );
+  // Targets of the other family cannot be dialed from the pinned address; if
+  // none are left, the pin is dropped rather than the route.
+  let pinned = source.address;
+  let targets = allTargets(pinned);
+  if (pinned !== undefined) {
+    const all = allTargets(undefined).length;
+    if (targets.length > 0 && targets.length < all) {
+      warnings.push(
+        `${route.hostname}: ${
+          all - targets.length
+        } target(s) of the other address family than source address ${pinned} are left out`,
+      );
+    }
+  }
+  if (pinned !== undefined && targets.length === 0) {
+    warnings.push(
+      `${route.hostname}: no target shares the family of source address ${pinned}, so none is pinned`,
+    );
+    pinned = undefined;
+    targets = allTargets(undefined);
+  }
   const proxy = peerUpstreamText({
     kind: "peer",
     targets,
+    ...(pinned === undefined ? {} : { localAddress: pinned }),
     trustFile: material.trust,
+    ...(inputs.clientAuth ? { carryHostInHeader: true as const } : {}),
+    ...(inputs.presentCertificate
+      ? {
+        clientCertificate: {
+          certificate: material.certificate,
+          key: material.key,
+        },
+      }
+      : {}),
     trustedProxies: tunnelTrustedRanges(inputs.peerAddresses),
   }).split("\n").map((line) => `    ${line}`).join("\n");
   // A request that came from a peer is never passed on again, so a moved site
   // with a stale table shows the error page instead of looping. A server that
   // only carries tunnels has no peers sending to it, so it has no such rule.
+  // With the dedicated peer port (`clientAuth`) a forwarded request reaches
+  // the sites over loopback and says where it came from in a header the
+  // peer-facing server always sets; otherwise it is told by its source address.
+  const peerMatch = inputs.clientAuth
+    ? `header ${TUNNEL_PEER_HOP_HEADER} 1`
+    : `remote_ip ${inputs.peerAddresses.join(" ")}`;
   const peerRule = inputs.peerAddresses.length === 0
     ? ""
-    : `  ${PEER_MATCHER} remote_ip ${inputs.peerAddresses.join(" ")}
+    : `  ${PEER_MATCHER} ${peerMatch}
   handle ${PEER_MATCHER} {
     error 421
   }
@@ -236,7 +426,7 @@ ${proxy}
   return `${route.hostname} {
   tls internal
 ${peerRule}${forward}  handle_errors {
-    respond "${TUNNEL_ERROR_TEXT}" {err.status_code}
+    respond "${TUNNEL_ERROR_TEXT}" ${TUNNEL_ERROR_STATUS}
   }
 }
 `;
@@ -244,10 +434,10 @@ ${peerRule}${forward}  handle_errors {
 
 /**
  * The small site that makes this server present the peer certificate when
- * another server connects with the fixed name. Caddy picks a certificate by the
- * connecting name, not by the Host header, so without a site that loads the
- * certificate the sender would be shown the wrong one and refuse it. Only
- * listed peers get any answer.
+ * another server connects with the fixed name (table without `peerClientAuth`).
+ * Caddy picks a certificate by the connecting name, not by the Host header, so
+ * without a site that loads the certificate the sender would be shown the
+ * wrong one and refuse it. Only listed peers get any answer.
  *
  * The site has no `bind`. Caddy makes one server per set of listen addresses,
  * so a site bound to this server's own address would become a server of its own
@@ -256,7 +446,7 @@ ${peerRule}${forward}  handle_errors {
  * a `bind` it shares the server of the other sites that listen everywhere, and
  * the `remote_ip` check below is what keeps everyone but the listed peers out.
  */
-function peerSite(inputs: TunnelFileInputs): string {
+function sharedPeerSite(inputs: TunnelFileInputs): string {
   const material = inputs.material!;
   const certificate = assertPath("tunnel certificate", material.certificate);
   const key = assertPath("tunnel key", material.key);
@@ -274,6 +464,95 @@ function peerSite(inputs: TunnelFileInputs): string {
 `;
 }
 
+/**
+ * The peer-facing server (table with `peerClientAuth`): its own Caddy server on
+ * {@link TUNNEL_PEER_PORT}, so nothing about it touches the hosting sites on
+ * 443. A connection needs a client certificate of the organization's
+ * authority (`require`; `verify` only checks one that is shown) and a listed
+ * source address. What passes is handed to the hosting sites over loopback with
+ * the original Host, marked with {@link TUNNEL_PEER_HOP_HEADER} (set here, so a
+ * visitor cannot make it up on the way in), and so reaches the site, or its
+ * forward block, as local traffic. Locked sites therefore admit loopback only
+ * and nothing that connects to 443 with a peer address gets in on that alone.
+ */
+function dedicatedPeerSite(inputs: TunnelFileInputs): string {
+  const material = inputs.material!;
+  const certificate = assertPath("tunnel certificate", material.certificate);
+  const key = assertPath("tunnel key", material.key);
+  const trust = assertPath("tunnel trust file", material.trust);
+  const mode = inputs.clientAuth === "require"
+    ? "require_and_verify"
+    : "verify_if_given";
+  const peers = inputs.peerAddresses.join(" ");
+  const proxy = `    reverse_proxy https://127.0.0.1:443 {
+      header_up Host {header.${TUNNEL_PEER_HOST_HEADER}}
+      header_up -${TUNNEL_PEER_HOST_HEADER}
+      header_up ${TUNNEL_PEER_HOP_HEADER} 1
+      trusted_proxies ${tunnelTrustedRanges(inputs.peerAddresses).join(" ")}
+      transport http {
+        tls_server_name {http.request.header.${TUNNEL_PEER_HOST_HEADER}}
+        tls_insecure_skip_verify
+        dial_timeout 2s
+        response_header_timeout 60s
+      }
+    }`;
+  // A repeated peer-host header is refused outright, before any door: the
+  // header matcher alone passes on any one value, and the Host would then be
+  // the joined list.
+  // One door per name the table lists with peers: the name in the header and a
+  // source address that name allows. Anything else (a name not listed, a
+  // local-only name with no peers, a listed name from an unlisted peer) is cut,
+  // so a valid certificate alone reaches nothing.
+  const byName = new Map<string, readonly string[]>();
+  for (const entry of inputs.inbound ?? []) {
+    const name = foldHostname(entry.hostname);
+    if (!byName.has(name)) byName.set(name, entry.peers);
+  }
+  const doors = [...byName].filter(([, who]) => who.length > 0).map((
+    [name, who],
+    index,
+  ) => {
+    if (!isValidHostname(name)) {
+      throw new ConfigValueError("tunnel hostname", "must be a hostname");
+    }
+    const matcher = `@tp_door_${index}`;
+    return `  ${matcher} {
+    header ${TUNNEL_PEER_HOST_HEADER} ${name}
+    remote_ip ${who.join(" ")}
+  }
+  handle ${matcher} {
+${proxy}
+  }
+`;
+  }).join("");
+  return `https://:${TUNNEL_PEER_PORT} {
+  tls ${certificate} ${key} {
+    client_auth {
+      mode ${mode}
+      trust_pool file ${trust}
+    }
+  }
+  ${OUTSIDE_MATCHER} not remote_ip ${peers}
+  handle ${OUTSIDE_MATCHER} {
+    abort
+  }
+  ${REPEATED_HOST_MATCHER} {
+    vars_regexp ${TUNNEL_PEER_HOST_HEADER_PLACEHOLDER} ,
+  }
+  handle ${REPEATED_HOST_MATCHER} {
+    abort
+  }
+${doors}  handle {
+    abort
+  }
+}
+`;
+}
+
+function peerSite(inputs: TunnelFileInputs): string {
+  return inputs.clientAuth ? dedicatedPeerSite(inputs) : sharedPeerSite(inputs);
+}
+
 /** What {@link renderTunnelFile} made and what it left out. */
 export type RenderedTunnelFile = {
   contents: string;
@@ -281,6 +560,8 @@ export type RenderedTunnelFile = {
   forwarded: string[];
   /** Names left out because a site on this server answers them. */
   dropped: string[];
+  /** Source addresses that were not used, and why. */
+  warnings: string[];
 };
 
 /**
@@ -297,6 +578,7 @@ export function renderTunnelFile(
   const forwarded: string[] = [];
   const dropped: string[] = [];
   const blocks: string[] = [];
+  const warnings: string[] = [];
   const ordered = routes.toSorted((a, b) =>
     foldHostname(a.hostname).localeCompare(foldHostname(b.hostname))
   );
@@ -305,16 +587,18 @@ export function renderTunnelFile(
       dropped.push(route.hostname);
       continue;
     }
-    blocks.push(forwardBlock(route, inputs));
+    blocks.push(forwardBlock(route, inputs, warnings));
     forwarded.push(route.hostname);
   }
   if (inputs.material && inputs.peerAddresses.length > 0) {
     blocks.push(peerSite(inputs));
   }
-  if (blocks.length === 0) return { contents: "", forwarded, dropped };
+  if (blocks.length === 0) {
+    return { contents: "", forwarded, dropped, warnings };
+  }
   const contents =
     `# Tunnel names that run on other servers. Rewritten by the control plane.\n${
       blocks.join("\n")
     }`;
-  return { contents, forwarded, dropped };
+  return { contents, forwarded, dropped, warnings };
 }

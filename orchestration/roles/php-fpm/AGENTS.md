@@ -27,7 +27,7 @@ cleanly removed once enabled** — it also ships replacement builds of libraries
 such as OpenSSL, so dropping the repo breaks the PHP install. Treat it as
 permanent on any host that ever serves PHP.
 
-`php_fpm_series` (`8.4`) drives every package name. `php_fpm_apt_version` is an
+`php_fpm_default_series` (`8.4`) and `php_fpm_versions` drive every package name. `php_fpm_apt_version` is an
 optional exact apt pin; empty means "latest in the series". Extension packages
 split into `php_fpm_baseline_extensions` (always installed, parity with the flags the previous
 source build compiled in.
@@ -101,7 +101,7 @@ FHS layout:
 | `/var/log/turbopanel/php/` | `tpapache:tpapache` | `0750` | `php-fpm.log` / `php-error.log` |
 | `/run/turbopanel/php/` | `tpapache:tp` | `0750` | pidfile + unix sockets |
 
-Driven by **`turbopanel-php-fpm.service`**. The FPM master, its bootstrap pool,
+Driven by **`turbopanel-php-fpm@.service`**. The FPM master, its bootstrap pool,
 and the FHS config/log dirs are owned by **tpapache** (provisioned by
 `web-service-user` before this role) — that stays true on an nginx-only host,
 which is why `site-nginx-apply.yml` provisions the `apache` identity before

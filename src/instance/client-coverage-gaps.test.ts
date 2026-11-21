@@ -1,4 +1,5 @@
 import { it } from "@std/testing/bdd";
+import { sealedDecryptResponse } from "../testing/sealed-decrypt-response.ts";
 import { assertEquals } from "@std/assert";
 import {
   DEFAULT_INITIAL_BACKOFF_MS,
@@ -15,7 +16,7 @@ import {
   writeCapabilityPlan,
 } from "../metrics/collector/capability-plan-store.ts";
 import { setDrivetempExecutorForTests } from "../metrics/collector/sensors/drivetemp.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
 import {
   challengeResponse,
   createFakeInstanceApi,
@@ -90,9 +91,8 @@ function scriptStandardAuth(
   );
 }
 
-function fakeTopologySnapshot(): TopologySnapshot {
+function fakeTopologySnapshot(): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 0,
     networks: [],
     filesystems: [],
@@ -710,7 +710,10 @@ it({
             "topology-report",
             () => lastFrameOfType(socket, "topology-report"),
           );
-          assertEquals((report as { generation?: number }).generation, 1);
+          const frame = report as Record<string, unknown>;
+          assertEquals("generation" in frame, false);
+          assertEquals("bootGeneration" in frame, false);
+          assertEquals("bootGeneration" in (frame.snapshot as object), false);
         } finally {
           client.stop();
         }
@@ -822,12 +825,9 @@ it({
         "/api/daemon/v1/secrets/decrypt",
         () => {
           decryptCalls += 1;
-          return new Response(
-            JSON.stringify({
-              plaintexts: [decryptCalls === 1 ? null : "ssh-key-material"],
-            }),
-            { status: 200 },
-          );
+          return sealedDecryptResponse([
+            decryptCalls === 1 ? null : "ssh-key-material",
+          ]);
         },
       );
       api.script(

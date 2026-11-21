@@ -294,3 +294,82 @@ test("hostnameTlsMap puts each www name under its own hosting's pair", () => {
   assertEquals(map.get("b.example.com"), "tls-b");
   assertEquals(map.get("www.b.example.com"), "tls-b");
 });
+
+test("hostnameTlsMap pins each name to its own certificate, www redirect following its target", () => {
+  const map = hostnameTlsMap({
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["example.com", "shop.example.com"],
+        www: "www-to-root",
+        tlsId: "tls-row",
+        nameTls: [
+          { hostname: "example.com", tlsId: "tls-own" },
+          { hostname: "shop.example.com", tlsMode: "acme" },
+        ],
+      },
+    ],
+  } as EnvironmentDeployPayload);
+  assertEquals(map.get("example.com"), "tls-own");
+  assertEquals(map.get("www.example.com"), "tls-own");
+  // An acme name has no pin, and neither does its www name.
+  assertEquals(map.has("shop.example.com"), false);
+  assertEquals(map.has("www.shop.example.com"), false);
+});
+
+test("hostnameTlsMap leaves unlisted names on the row's certificate", () => {
+  const map = hostnameTlsMap({
+    hostings: [
+      {
+        hostingId: "h1",
+        serviceId: "s1",
+        composeServiceName: "web",
+        hostnames: ["a.example.com", "b.example.com"],
+        tlsId: "tls-row",
+        nameTls: [{ hostname: "b.example.com", tlsMode: "internal" }],
+      },
+    ],
+  } as EnvironmentDeployPayload);
+  assertEquals(map.get("a.example.com"), "tls-row");
+  // An entry replaces the row's pin: this name has none.
+  assertEquals(map.has("b.example.com"), false);
+});
+
+test("hostnameTlsMap pins a redirect name to its own certificate under either www mode", () => {
+  const row = (www: "www-to-root" | "root-to-www") => ({
+    hostingId: "h1",
+    serviceId: "s1",
+    composeServiceName: "web",
+    hostnames: ["example.com"],
+    www,
+    tlsId: "tls-row",
+    nameTls: [
+      { hostname: "example.com", tlsId: "tls-bare" },
+      { hostname: "www.example.com", tlsId: "tls-www" },
+    ],
+  });
+  for (const www of ["www-to-root", "root-to-www"] as const) {
+    const map = hostnameTlsMap(
+      { hostings: [row(www)] } as unknown as EnvironmentDeployPayload,
+    );
+    assertEquals(map.get("example.com"), "tls-bare");
+    assertEquals(map.get("www.example.com"), "tls-www");
+  }
+});
+
+test("hostnameTlsMap keeps both mode unchanged", () => {
+  const map = hostnameTlsMap({
+    hostings: [{
+      hostingId: "h1",
+      serviceId: "s1",
+      composeServiceName: "web",
+      hostnames: ["example.com"],
+      www: "both",
+      tlsId: "tls-row",
+    }],
+  } as unknown as EnvironmentDeployPayload);
+  assertEquals(map.get("example.com"), "tls-row");
+  assertEquals(map.get("www.example.com"), "tls-row");
+});

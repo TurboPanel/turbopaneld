@@ -244,6 +244,7 @@ export class DemotedMemberGuard {
             role: "primary" as const,
             containerName: "",
             replicaPeerCount: 0,
+            peerCount: 0,
             updatedAt: "",
           }];
         });

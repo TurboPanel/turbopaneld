@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   tpOrchestratePlaybookAllowlist,
@@ -426,7 +431,7 @@ async function runUpdateVerb(
 
 const PUBLIC_PIN = "host=https://panel.example.com\ndl_base=\ninstance_ca=\n";
 const OVERLAY_PIN =
-  "host=https://huey.lan:8443\ndl_base=https://huey.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
+  "host=https://server-a.example.lan:8443\ndl_base=https://server-a.example.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
 
 for (
   const [channel, host] of [
@@ -670,16 +675,23 @@ test("tp-orchestrate update pins a signed release only off an overlay, which wou
 });
 
 test("tp-orchestrate update uses the pinned overlay host with the pinned Platform CA, never -k", async () => {
+  // A path no host has, so a machine with the real Platform CA installed
+  // (such as the dev VM) still sees the file as missing.
+  const absentCaPin = OVERLAY_PIN.replace(
+    "/etc/turbopanel/instance-ca.pem",
+    "/etc/turbopanel/test-absent-ca.pem",
+  );
+  assertNotEquals(absentCaPin, OVERLAY_PIN);
   const result = await runUpdateVerb(
     [
       "--license-stdin",
       "--host",
-      "https://huey.lan:8443",
+      "https://server-a.example.lan:8443",
       "--dl-base",
-      "https://huey.lan:8443/downloads",
+      "https://server-a.example.lan:8443/downloads",
       "--no-start",
     ],
-    OVERLAY_PIN,
+    absentCaPin,
   );
   // The pinned CA file does not exist on this test host: fail closed.
   assertEquals(result.status, 1);
@@ -732,8 +744,8 @@ test("tp-orchestrate update refuses traversal and other packages' rails as the d
   for (
     const url of [
       // the retired CDN host is off the rail for every channel
-      "https://dl.trbp.nl/channels/trunk/manifest.json",
-      "https://dl.trbp.nl/channels/release/manifest.json",
+      "https://dl.example.net/channels/trunk/manifest.json",
+      "https://dl.example.net/channels/release/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/%2e%2e/%2e%2e/attacker/manifest.json",
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
@@ -812,7 +824,7 @@ test("tp-orchestrate update-instance forwards a UI pin and refuses other rails",
   for (
     const refused of [
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
-      "https://dl.trbp.nl/channels/release/manifest.json",
+      "https://dl.example.net/channels/release/manifest.json",
     ]
   ) {
     const denied = await runUpdateVerb(
@@ -873,7 +885,7 @@ test("tp-orchestrate update-instance refuses trunk, missing flags, and daemon en
         "--channel",
         "release",
         "--manifest-url",
-        "https://dl.trbp.nl/channels/release/manifest.json",
+        "https://dl.example.net/channels/release/manifest.json",
         "--no-start",
       ],
       "not a TurboPanel release rail",

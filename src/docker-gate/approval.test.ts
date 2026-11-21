@@ -3,6 +3,7 @@ import {
   APPROVABLE_RULES,
   APPROVAL_CLOCK_SKEW_SEC,
   approvalBodyDigest,
+  approvalTokenOf,
   canonicalJson,
   importApprovalKeys,
   MAX_APPROVAL_TTL_SEC,
@@ -319,7 +320,7 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
   );
   // The token rides in the body's own label; the digest ignores it.
   const withToken = structuredClone(body);
-  Object.assign(withToken.Labels, { "com.turbopanel.approval": token });
+  Object.assign(withToken.Labels, { "io.turbopanel.approval": token });
   assertEquals(await approvalBodyDigest(withToken), digest);
   for (
     const other of [
@@ -453,4 +454,12 @@ test("a token for one container name is refused for another, or for none", async
     ),
     "malformed",
   );
+});
+
+test("approvalTokenOf reads only the io.turbopanel approval label", () => {
+  assertEquals(approvalTokenOf({}), undefined);
+  assertEquals(approvalTokenOf({ "io.turbopanel.approval": "t" }), {
+    token: "t",
+  });
+  assertEquals(approvalTokenOf({ "com.turbopanel.approval": "t" }), undefined);
 });

@@ -68,7 +68,6 @@ export const ALLOWLIST_LINE_PATTERNS: RegExp[] = [
 // --- Directories / files never scanned --------------------------------------
 const SKIP_DIRS = new Set([
   ".git",
-  ".claude",
   "node_modules",
   "dist",
   "publish",
@@ -99,6 +98,30 @@ export function isSkippedPath(rel: string): boolean {
 
 const SCAN_EXTENSIONS = /\.(ts|tsx|js|mjs|cjs|md|mdx|yml|yaml|sh|j2|json|css)$/;
 
+/** Tracked dot-directories that are scanned; every other one is local state. */
+const SCANNED_DOT_DIRS = new Set([".github", ".githooks", ".vscode"]);
+
+/** True for a nested checkout or linked worktree (it has its own `.git`). */
+async function isNestedCheckout(abs: string): Promise<boolean> {
+  try {
+    await Deno.lstat(`${abs}/.git`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Directories the walk never enters: skip lists, local dot-dirs, checkouts. */
+async function shouldSkipDir(
+  abs: string,
+  name: string,
+  rel: string,
+): Promise<boolean> {
+  if (SKIP_DIRS.has(name) || isSkippedPath(rel)) return true;
+  if (name.startsWith(".") && !SCANNED_DOT_DIRS.has(name)) return true;
+  return await isNestedCheckout(abs);
+}
+
 export async function* walkVocabularyFiles(
   dir: string,
   root = repoRoot,
@@ -107,7 +130,7 @@ export async function* walkVocabularyFiles(
     const abs = `${dir}/${entry.name}`;
     const rel = relative(root, abs);
     if (entry.isDirectory) {
-      if (SKIP_DIRS.has(entry.name) || isSkippedPath(rel)) continue;
+      if (await shouldSkipDir(abs, entry.name, rel)) continue;
       yield* walkVocabularyFiles(abs, root);
     } else if (entry.isFile) {
       if (SKIP_FILENAMES.has(entry.name) || isSkippedPath(rel)) continue;

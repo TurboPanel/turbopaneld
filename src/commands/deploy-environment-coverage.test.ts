@@ -1,5 +1,5 @@
 import { assertEquals, assertRejects } from "@std/assert";
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
 import {
   COMPOSE_ENV_FILENAME,
@@ -958,9 +958,9 @@ test({
   permissions: { env: true, read: true, write: true, run: true },
   fn: async () => {
     await withDeployEnv(async ({ stateDir }) => {
-      const environmentId = "env-railpack1";
+      const environmentId = "env-image1";
       const projectId = "proj-1";
-      const projectName = "tp-demo-railpack";
+      const projectName = "tp-demo-image";
       const serviceId = "00000000-0000-4000-8000-0000000000cc";
       const rollbackReleaseId = "rel-old";
       const imageTag = "registry.example.test/web:rel-old";
@@ -1019,7 +1019,7 @@ test({
             commitSha: "a".repeat(40),
             releaseId: "rel-new",
             rollbackToReleaseId: rollbackReleaseId,
-            build: { kind: "railpack" },
+            build: { kind: "image" },
           }],
         } as unknown as EnvironmentDeployPayload,
         new Date().toISOString(),
@@ -1947,6 +1947,7 @@ test({
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
+            releaseServiceId: "svc-web",
             provider: "github",
             cloneUrl: "https://example.test/repo.git",
             ref: "main",
@@ -2051,6 +2052,7 @@ async function deployWithDroppedRelease(
           sourceMaterial: [{
             sourceId: "src-1",
             composeServiceName: "web",
+            releaseServiceId: "svc-web",
             provider: "github",
             cloneUrl: "https://example.test/repo.git",
             ref: "main",
@@ -2395,3 +2397,157 @@ test("siteCronWritableDirs: a service folder adds logs/, and the uploaded folder
     `${root}/logs`,
   ]);
 });
+
+/** A fake `docker compose config` that resolves `web` to a `./vpn` context. */
+function buildContextRunDocker(
+  seen: string[][],
+  extra: Record<string, unknown> = {},
+): (args: string[]) => Promise<DockerCliResult> {
+  return (args) => {
+    seen.push(args);
+    if (args.includes("config") && args.includes("--format")) {
+      const staged = args[args.indexOf("-f") + 1];
+      return Promise.resolve({
+        success: true,
+        stdout: fakeConfigJson({
+          web: { build: { context: join(dirname(staged), "vpn") }, ...extra },
+        }),
+        stderr: "",
+        code: 0,
+      });
+    }
+    return Promise.resolve({ success: true, stdout: "", stderr: "", code: 0 });
+  };
+}
+
+const buildContextPayload = {
+  environmentId: "env-buildctx1",
+  projectId: "proj-1",
+  organizationId: "org-1",
+  projectName: "tp-demo-buildctx",
+  composeFiles: [{
+    filename: RUNTIME_COMPOSE_FILENAME,
+    role: "runtime" as const,
+    content: "services:\n  web:\n    build: ./vpn\n",
+  }],
+  hostings: [],
+};
+
+test({
+  name:
+    "handleEnvironmentDeploy names a local build context that is not on the host",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async () => {
+      const seen: string[][] = [];
+      const error = await assertRejects(
+        () =>
+          handleEnvironmentDeploy(
+            buildContextPayload,
+            new Date().toISOString(),
+            {
+              runDocker: buildContextRunDocker(seen),
+              ...hermeticDeployDeps,
+            },
+          ),
+        Error,
+        "build context not found in the deployment directory: service web build context ./vpn",
+      );
+      assertEquals(error.message.includes("remote context"), true);
+      // Refused before anything is built or started.
+      assertEquals(
+        seen.some((args) => args.includes("up") || args.includes("build")),
+        false,
+      );
+    });
+  },
+});
+
+test({
+  name: "handleEnvironmentDeploy builds a local context that is on the host",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    await withDeployEnv(async ({ stateDir }) => {
+      await Deno.mkdir(
+        join(
+          stateDir,
+          "deployments",
+          buildContextPayload.projectId,
+          buildContextPayload.environmentId,
+          "vpn",
+        ),
+        { recursive: true, mode: 0o750 },
+      );
+      const seen: string[][] = [];
+      await handleEnvironmentDeploy(
+        buildContextPayload,
+        new Date().toISOString(),
+        { runDocker: buildContextRunDocker(seen), ...hermeticDeployDeps },
+      );
+      assertEquals(seen.some((args) => args.includes("up")), true);
+    });
+  },
+});
+
+const imageAndBuild = { image: "registry.example.net/web:1" };
+
+/** Deploys the `image` + `build: ./vpn` service with `./vpn` absent. */
+async function deployImageAndBuild(
+  extra: Record<string, unknown>,
+  payloadExtra: Record<string, unknown>,
+  seen: string[][],
+): Promise<void> {
+  await withDeployEnv(async () => {
+    await handleEnvironmentDeploy(
+      { ...buildContextPayload, ...payloadExtra },
+      new Date().toISOString(),
+      {
+        runDocker: buildContextRunDocker(seen, extra),
+        ...hermeticDeployDeps,
+      },
+    );
+  });
+}
+
+test({
+  name:
+    "handleEnvironmentDeploy rolling path leaves an image service with a missing context alone",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: async () => {
+    const seen: string[][] = [];
+    await deployImageAndBuild(imageAndBuild, {}, seen);
+    assertEquals(seen.some((args) => args.includes("up")), true);
+  },
+});
+
+for (
+  const [label, extra, payloadExtra] of [
+    ["noCache", imageAndBuild, { noCache: true }],
+    ["the sequential strategy", imageAndBuild, {
+      deployStrategy: "sequential",
+    }],
+    [
+      "pull_policy: build",
+      { ...imageAndBuild, pull_policy: "build" },
+      {},
+    ],
+  ] as const
+) {
+  test({
+    name:
+      `handleEnvironmentDeploy refuses an image service with a missing context under ${label}`,
+    permissions: { env: true, read: true, write: true, run: true },
+    fn: async () => {
+      const seen: string[][] = [];
+      await assertRejects(
+        () => deployImageAndBuild(extra, payloadExtra, seen),
+        Error,
+        "build context not found in the deployment directory: service web build context ./vpn",
+      );
+      assertEquals(
+        seen.some((args) => args.includes("up") || args.includes("build")),
+        false,
+      );
+    },
+  });
+}

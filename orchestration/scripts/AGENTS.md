@@ -123,7 +123,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
     staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
     `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
-    <id>`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
+    <id>`; `tunnel-env-present <id>` prints `present` or `absent`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
     sync`, which lets only root and the daemon account reach the connector
     metrics band on loopback, see `src/tunnels/AGENTS.md`); a project's helper
     container ports work the same way in `<config>/reach-ports/<environment
@@ -213,8 +213,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     takes the same names and only a fresh group of the user's own name: in the
     band, nobody's primary group yet, no members. Residual risk accepted with
     the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
-    lines that name a group are not scanned. `groupmod` only renames a site
-    owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
+    lines that name a group are not scanned. It takes `chpasswd`
     input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
@@ -233,8 +232,30 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `$P/tp-test/ip-route-kernel`; for `tp0` routes, `tp0`'s own subnet is
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
+  - sets up one image build's CPU slice only through `image-build-slice
+    BUILD-ID [cores|-]` (the id is checked like `build-run`'s, cores is the
+    same number `build-run` takes and is validated the same way; nothing else
+    in argv). It makes `turbopanel-imagebuild-<id>.slice` (the id's dashes
+    become underscores: a dash is a hierarchy level in a unit name) below the
+    parent `turbopanel-imagebuild.slice`, with `systemctl set-property
+    --runtime ... CPUAccounting=yes CPUQuota=<N>%`: the parent is capped at the
+    host's cores, the child at the build's cores (default half the host's, and
+    never more than the host has), then `systemctl start`. It is idempotent,
+    outside test mode it checks the child's `cpu.max` and fails closed, and it
+    prints two lines: the child's cgroup path (what the daemon passes to
+    `docker buildx build --cgroup-parent`) and the core count it really set
+    (the host-clamped one, for the build log). Nothing here claims the image
+    build steps are capped: the pinned frontend ignores the cgroup parent
+    today (`scripts/image-build-cgroup-proof.sh`);
+  - removes them only through `image-build-slice-remove [BUILD-ID]`: stops the
+    build's slice and deletes the runtime drop-in `set-property --runtime`
+    left under `/run/systemd/system.control`; with no id it does that for every
+    build slice (the daemon's start-up sweep). A missing slice is not an error;
+    the parent's own properties are left to `purge.sh`. Both verbs are in
+    `TP_HOST_ONLY_VERBS`, so a `tp-host` older than the daemon fails image
+    builds (they ship together; fine before the first release);
   - starts tenant builds only through
-    `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
+    `build-run <build-id> <project-id> <owner> [cores [memory-bytes [swap]]]` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid
     in 15001-60000 and a plain name with no `--`, never another `tp*` name,
     or `tpbuild` for a build nobody owns; checked again under the build lock;
@@ -265,8 +286,26 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     empty by `build-run` to prove nft works, then with the build's rules as the
     unit's first `ExecStartPre=+ … sync <id> <owner>`, which refuses unless
     its own cgroup is exactly the one systemd builds for that owner's build
-    slice; no `nft` or a load failure means the build does not start), 4G
-    memory, 200% CPU, 1800 s). The unit's second `ExecStartPre=+` is
+    slice; no `nft` or a load failure means the build does not start),
+    CPU and memory limits, 1800 s). The limits are the optional fourth and
+    fifth `build-run` arguments (cores, as `2` or `1.5`; memory, whole bytes;
+    `-` for unset), validated strictly (never trimmed): cores clamped to 1..the
+    host's cores (no value below 1, none with a leading zero), memory to
+    1 GiB..the host's RAM; unset means half the cores and the RAM less 1 GiB.
+    The host's figures come from
+    `nproc` and `/proc/meminfo`; only test mode reads `TP_TEST_CORES` /
+    `TP_TEST_MEM_KB`. The daemon sends the smallest limit set among the
+    organization, server and service (`src/deploy/release/build-limits.ts`);
+    a helper that predates them is found out BEFORE the build by a probe
+    (`build-run -probe -probe tpbuild - - -`: an old helper answers with its
+    argument-count message, a current one refuses the id; no unit starts) and
+    the build then runs once without the arguments; a build is never rerun
+    and its own output never decides this. The sixth argument is `on`, `off` or `-`:
+    swap stays off (`MemorySwapMax=0`) unless it says `on`, which sets
+    `MemorySwapMax` to the unit's own `MemoryMax` (swap up to the size of the
+    memory limit, never unlimited). The host's RAM is
+    read afresh at every build start (a ballooned virtual machine's total
+    changes), never cached. The unit's second `ExecStartPre=+` is
     `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
     is exactly that unit's, it reads the throwaway uid from the unit's
     `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd

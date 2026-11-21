@@ -84,6 +84,7 @@ function clusterDesired(
     managedId: "m1",
     engine: "postgres",
     protocolPort: 15432,
+    family: "pgsql",
     writerHostgroup: 0,
     readerHostgroup: 1,
     backends: [
@@ -148,7 +149,7 @@ test("proxysqlCompose with descriptor emits identity + system labels", () => {
   assertStringIncludes(compose, "component: managed-ingress");
   assertStringIncludes(
     compose,
-    'com.turbopanel.system.component: "managed-ingress"',
+    'io.turbopanel.system.component: "managed-ingress"',
   );
   assertStringIncludes(compose, "turbopanel.role: ingress");
   // The compose project rides the document itself, so the stack unit and the
@@ -713,6 +714,7 @@ test("assertNoFrontendUserConflict allows one name on a pgsql and a mysql cluste
       clusterDesired({
         managedId: "my",
         engine: "mysql",
+        family: "mysql",
         protocolPort: 13306,
         users: [{ username: "shared", role: "user", password: "p2" }],
       }),
@@ -735,12 +737,14 @@ test("assertNoFrontendUserConflict still rejects one name on a mysql and a maria
           clusterDesired({
             managedId: "my",
             engine: "mysql",
+            family: "mysql",
             protocolPort: 13306,
             users: [{ username: "shared", role: "user", password: "p1" }],
           }),
           clusterDesired({
             managedId: "maria",
             engine: "mariadb",
+            family: "mysql",
             protocolPort: 13306,
             users: [{ username: "shared", role: "user", password: "p2" }],
           }),
@@ -1111,6 +1115,7 @@ test("admin user statements carry the cluster use_ssl decision", () => {
       clusterDesired({
         requireTls: true,
         engine: "mysql",
+        family: "mysql",
         protocolPort: 3306,
         users: [{
           username: "app",
@@ -1169,6 +1174,7 @@ test("read-split query rules are username-scoped per cluster on the same port", 
       clusterDesired({
         managedId: "m-a",
         engine: "mysql",
+        family: "mysql",
         protocolPort: 3306,
         autoReadSplit: true,
         writerHostgroup: 10,
@@ -1196,6 +1202,7 @@ test("read-split query rules are username-scoped per cluster on the same port", 
       clusterDesired({
         managedId: "m-b",
         engine: "mysql",
+        family: "mysql",
         protocolPort: 3306,
         autoReadSplit: true,
         writerHostgroup: 20,
@@ -1369,61 +1376,7 @@ test("readPublishedBindAddressesFromCompose recovers new 15432 publish markers",
   assertEquals(readPublishedBindAddressesFromCompose(compose), ["203.0.113.9"]);
 });
 
-test("legacy and new protocolPort values route into the same family", () => {
-  const pgsqlLegacy = renderProxySqlConfig({
-    bindAddresses: [],
-    clusters: [clusterDesired({ protocolPort: 5432 })],
-  });
-  const pgsqlNew = renderProxySqlConfig({
-    bindAddresses: [],
-    clusters: [clusterDesired({ protocolPort: 15432 })],
-  });
-  assertStringIncludes(pgsqlLegacy, "pgsql_servers");
-  assertStringIncludes(pgsqlNew, "pgsql_servers");
-  assertEquals(pgsqlLegacy.includes("mysql_servers"), false);
-  assertEquals(pgsqlNew.includes("mysql_servers"), false);
-
-  const mysqlLegacy = renderProxySqlConfig({
-    bindAddresses: [],
-    clusters: [clusterDesired({ engine: "mysql", protocolPort: 3306 })],
-  });
-  const mysqlNew = renderProxySqlConfig({
-    bindAddresses: [],
-    clusters: [clusterDesired({ engine: "mysql", protocolPort: 13306 })],
-  });
-  assertStringIncludes(mysqlLegacy, "mysql_servers");
-  assertStringIncludes(mysqlNew, "mysql_servers");
-  assertEquals(mysqlLegacy.includes("pgsql_servers"), false);
-  assertEquals(mysqlNew.includes("pgsql_servers"), false);
-});
-
-test("an explicit cluster family wins over the port number", () => {
-  // Once ports are organization-configurable a number no longer identifies a
-  // protocol: an org may run Postgres on what used to be the MySQL default.
-  const cnf = renderProxySqlConfig({
-    bindAddresses: [],
-    listenerPorts: { pgsql: 16306, mysql: 15432 },
-    clusters: [
-      clusterDesired({ protocolPort: 16306, family: "pgsql" }),
-      clusterDesired({
-        managedId: "m2",
-        engine: "mysql",
-        protocolPort: 15432,
-        family: "mysql",
-        writerHostgroup: 2,
-        readerHostgroup: 3,
-        users: [{ username: "app2", role: "user", password: "s3cret-app2" }],
-      }),
-    ],
-  });
-  assertStringIncludes(cnf, "pgsql_servers");
-  assertStringIncludes(cnf, "mysql_servers");
-  // The listener bindings follow listenerPorts, not the cluster ordering.
-  assertEquals(listenerInterface(cnf, "pgsql"), "0.0.0.0:16306");
-  assertEquals(listenerInterface(cnf, "mysql"), "0.0.0.0:15432");
-});
-
-test("protocolFamilyForCluster prefers the payload family, then engine, then port", () => {
+test("protocolFamilyForCluster is the payload family, not the engine or port", () => {
   assertEquals(
     protocolFamilyForCluster(clusterDesired({
       engine: "mysql",
@@ -1431,26 +1384,6 @@ test("protocolFamilyForCluster prefers the payload family, then engine, then por
       family: "pgsql",
     })),
     "pgsql",
-  );
-  // No family on the wire (older control plane): the engine decides.
-  assertEquals(
-    protocolFamilyForCluster(
-      clusterDesired({ engine: "mariadb", protocolPort: 15432 }),
-    ),
-    "mysql",
-  );
-  // Unknown engine and no family: fall back to the port.
-  assertEquals(
-    protocolFamilyForCluster(
-      clusterDesired({ engine: "percona", protocolPort: 13306 }),
-    ),
-    "mysql",
-  );
-  assertEquals(
-    protocolFamilyForCluster(
-      clusterDesired({ engine: "percona", protocolPort: 9999 }),
-    ),
-    null,
   );
 });
 
@@ -1882,6 +1815,7 @@ test("a remote-only cluster still emits frontend users for both families", () =>
       clusterDesired({
         managedId: "m2",
         engine: "mysql",
+        family: "mysql",
         protocolPort: 13306,
         writerHostgroup: 2,
         readerHostgroup: 3,
@@ -1907,6 +1841,7 @@ test("renderProxySqlConfig includes mysql family and default_schema users", () =
     clusters: [
       clusterDesired({
         engine: "mysql",
+        family: "mysql",
         protocolPort: 3306,
         users: [
           {
@@ -1977,7 +1912,7 @@ test("inspectProxySqlContainer matches labelled managed-ingress row", async () =
         State: "running",
         Labels: {
           "turbopanel.role": "ingress",
-          "com.turbopanel.system.component": "managed-ingress",
+          "io.turbopanel.system.component": "managed-ingress",
         },
       },
     ]);
@@ -2349,7 +2284,7 @@ async function runEnsureWithContainer(
         return ok("");
       },
       {
-        bindAddresses: ["10.10.1.10"],
+        bindAddresses: ["10.50.1.10"],
         segmentAttachments: [],
         listenerPorts: null,
         managedNetwork: MANAGED_NETWORK,

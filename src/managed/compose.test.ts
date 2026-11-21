@@ -4,7 +4,6 @@ import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   assertPublicPrivateListenerTls,
-  composeUsesRootPasswordInterpolation,
   MANAGED_ENGINE_LABEL,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
@@ -635,13 +634,4 @@ test("normalizeManagedCompose covers the mysql and mariadb root password keys", 
     assertEquals(env[`${key}_FILE`], "/run/secrets/tp_root_password");
     assertEquals(env["KEEP"], "1");
   }
-});
-
-test("normalizeManagedCompose legacy option keeps the env form byte-for-byte", () => {
-  const { composeYaml } = normalizeManagedCompose(basePayload(), {
-    legacyRootPasswordEnv: true,
-  });
-  const env = serviceOf(composeYaml).environment as Record<string, string>;
-  assertEquals(env["POSTGRES_PASSWORD"], `\${${MANAGED_ROOT_PASSWORD_VAR}}`);
-  assertEquals(composeUsesRootPasswordInterpolation(composeYaml), true);
 });

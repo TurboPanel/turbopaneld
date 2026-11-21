@@ -12,7 +12,9 @@ import {
   DEFAULT_PLATFORM_ROOTS,
   isPlatformContainer,
   LABEL_COMPOSE_PROJECT,
+  LABEL_ENVIRONMENT,
   LABEL_MANAGED_ENGINE,
+  LABEL_PROJECT,
   LABEL_ROLE,
   LABEL_SYSTEM_COMPONENT,
   ownedObject,
@@ -27,6 +29,8 @@ import {
   HELPER_COMPONENTS,
   helperLabelArgs,
   LABEL_COMPOSE_PROJECT as DEPLOY_COMPOSE_PROJECT,
+  LABEL_ENVIRONMENT as DEPLOY_ENVIRONMENT,
+  LABEL_PROJECT as DEPLOY_PROJECT,
   LABEL_ROLE as DEPLOY_ROLE,
   LABEL_ROLE_INGRESS,
   LABEL_ROLE_SYSTEM,
@@ -68,6 +72,8 @@ test("the gate's label names are the ones the platform stamps", () => {
   assertEquals(LABEL_ROLE, DEPLOY_ROLE);
   assertEquals(LABEL_SYSTEM_COMPONENT, DEPLOY_SYSTEM_COMPONENT);
   assertEquals(LABEL_COMPOSE_PROJECT, DEPLOY_COMPOSE_PROJECT);
+  assertEquals(LABEL_PROJECT, DEPLOY_PROJECT);
+  assertEquals(LABEL_ENVIRONMENT, DEPLOY_ENVIRONMENT);
   assertEquals(LABEL_MANAGED_ENGINE, MANAGED_ENGINE_LABEL);
   assertEquals(
     [...PLATFORM_ROLES].toSorted(),
@@ -99,7 +105,16 @@ test("ownerOf separates platform, compose / TurboPanel workloads and the rest", 
   );
   assertEquals(ownerOf({ [LABEL_MANAGED_ENGINE]: "postgres" }), "platform");
   assertEquals(ownerOf({ [LABEL_COMPOSE_PROJECT]: "app" }), "tenant");
-  assertEquals(ownerOf({ "com.turbopanel.service": "x" }), "tenant");
+  assertEquals(ownerOf({ "io.turbopanel.service": "x" }), "tenant");
+  // Labels of another prefix identify nothing.
+  assertEquals(ownerOf({ "com.turbopanel.service": "x" }), "unlabeled");
+  assertEquals(
+    ownerOf({
+      "turbopanel.role": "turbopanel",
+      "com.turbopanel.system.component": "database",
+    }),
+    "tenant",
+  );
   // A role without a known component is not platform.
   assertEquals(ownerOf({ "turbopanel.role": "turbopanel" }), "tenant");
   assertEquals(
@@ -110,7 +125,7 @@ test("ownerOf separates platform, compose / TurboPanel workloads and the rest", 
     false,
   );
   assertEquals(ownerOf({}), "unlabeled");
-  assertEquals(ownerOf({ "io.turbopanel.owner": "x" }), "unlabeled");
+  assertEquals(ownerOf({ "org.example.owner": "x" }), "unlabeled");
 });
 
 test("platformBindVerdict: config trees read-only, state trees any mode, nothing else", () => {
@@ -428,7 +443,7 @@ test("the system-compose template stamps the platform labels the gate reads", as
   );
   const text = await Deno.readTextFile(path);
   const components = [
-    ...text.matchAll(/com\.turbopanel\.system\.component: (\w+)/g),
+    ...text.matchAll(/io\.turbopanel\.system\.component: (\w+)/g),
   ].map((m) => m[1]);
   assertEquals(components.sort(), ["database", "queue"]);
   assertEquals(text.match(/^\s+turbopanel\.role: turbopanel$/gm)?.length, 2);

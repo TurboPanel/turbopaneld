@@ -1,5 +1,8 @@
 import { assertEquals } from "@std/assert";
 import {
+  validateAcmeDnsPublishedFields,
+  validateAcmeDnsPublishFields,
+  validateAcmeDnsRemoveFields,
   validateAcmeIssueEventFields,
   validateAcmeIssueRequestFields,
   validateAcmeProofForwardEndFields,
@@ -122,4 +125,141 @@ test("forward, end, event and report shapes", () => {
     }),
     "string",
   );
+});
+
+test("the challenge is http-01, dns-01 or absent; any other value is refused, never run as HTTP", () => {
+  assertEquals(validateAcmeIssueRequestFields(request), null);
+  for (const challenge of ["http-01", "dns-01"]) {
+    assertEquals(
+      validateAcmeIssueRequestFields({ ...request, challenge }),
+      null,
+    );
+  }
+  for (const challenge of ["tls-alpn-01", "DNS-01", "", null, 1]) {
+    assertEquals(
+      validateAcmeIssueRequestFields({ ...request, challenge }),
+      "invalid challenge",
+    );
+  }
+});
+
+test("a wildcard name is accepted only with dns-01", () => {
+  const names = ["example.com", "*.example.com"];
+  assertEquals(
+    validateAcmeIssueRequestFields({ ...request, names, challenge: "dns-01" }),
+    null,
+  );
+  for (const challenge of [undefined, "http-01"]) {
+    assertEquals(
+      validateAcmeIssueRequestFields({ ...request, names, challenge }),
+      "invalid names",
+    );
+  }
+  // Only a leading wildcard label counts.
+  // A wildcard needs a base of at least two labels: `*.com` is no name.
+  for (
+    const bad of [
+      "a.*.example.com",
+      "*.*.example.com",
+      "*example.com",
+      "*.com",
+      "*.localhost",
+    ]
+  ) {
+    assertEquals(
+      validateAcmeIssueRequestFields({
+        ...request,
+        names: [bad],
+        challenge: "dns-01",
+      }),
+      "invalid names",
+    );
+  }
+});
+
+const publish = {
+  requestId: "req_1",
+  records: [{
+    name: "_acme-challenge.example.com",
+    value: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
+  }],
+  at: AT,
+};
+
+test("the DNS relay messages pass when well formed and refuse a bad field", () => {
+  assertEquals(validateAcmeDnsPublishFields(publish), null);
+  assertEquals(
+    validateAcmeDnsPublishedFields({ requestId: "req_1", ok: true, at: AT }),
+    null,
+  );
+  assertEquals(
+    validateAcmeDnsPublishedFields({
+      requestId: "req_1",
+      ok: false,
+      error: "the record did not appear",
+      at: AT,
+    }),
+    null,
+  );
+  assertEquals(
+    validateAcmeDnsRemoveFields({ requestId: "req_1", at: AT }),
+    null,
+  );
+  const badPublish: Array<Record<string, unknown>> = [
+    { ...publish, requestId: "has space" },
+    { ...publish, records: [] },
+    { ...publish, records: [{ name: "example.com", value: "abc" }] },
+    {
+      ...publish,
+      records: [{ name: "_acme-challenge.example.com", value: "has space" }],
+    },
+    {
+      ...publish,
+      records: Array.from({ length: 101 }, () => publish.records[0]),
+    },
+    { ...publish, at: "yesterday" },
+  ];
+  for (const record of badPublish) {
+    assertEquals(typeof validateAcmeDnsPublishFields(record), "string");
+  }
+  assertEquals(
+    validateAcmeDnsPublishedFields({ requestId: "req_1", ok: "yes", at: AT }),
+    "invalid ok",
+  );
+  assertEquals(
+    typeof validateAcmeDnsPublishedFields({
+      requestId: "req_1",
+      ok: false,
+      error: 5,
+      at: AT,
+    }),
+    "string",
+  );
+  assertEquals(
+    typeof validateAcmeDnsRemoveFields({ requestId: "", at: AT }),
+    "string",
+  );
+});
+
+test("no DNS relay message may carry certificate or key material", () => {
+  for (const key of ["certificatePem", "privateKeyPem", "privateKey", "pem"]) {
+    const refused = "must not carry certificate material";
+    assertEquals(
+      validateAcmeDnsPublishFields({ ...publish, [key]: "x" }),
+      refused,
+    );
+    assertEquals(
+      validateAcmeDnsPublishedFields({
+        requestId: "r",
+        ok: true,
+        at: AT,
+        [key]: "x",
+      }),
+      refused,
+    );
+    assertEquals(
+      validateAcmeDnsRemoveFields({ requestId: "r", at: AT, [key]: "x" }),
+      refused,
+    );
+  }
 });

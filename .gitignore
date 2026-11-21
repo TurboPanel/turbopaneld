@@ -48,9 +48,3 @@ orchestration/.ansible/
 
 # Isolated Workers deploy tooling (Node/wrangler only).
 .DS_Store
-
-# Claude Code nested worktree checkouts (background-session isolation).
-/.claude/worktrees/
-
-# Local Claude Code settings (background-session isolation)
-.claude/settings.json

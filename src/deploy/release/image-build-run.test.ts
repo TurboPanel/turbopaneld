@@ -1,5 +1,5 @@
 import { dirname, join } from "@std/path";
-import { assertEquals, assertRejects } from "@std/assert";
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import { resolveLayout } from "../../paths/layout.ts";
 import { withTempLayout } from "../../testing/temp-layout.ts";
 import { forEachSequential } from "../../util/sequential.ts";
@@ -18,6 +18,7 @@ import {
   imageBuildFrontendLayoutDir,
   imageBuildFrontendRef,
   imageBuildImageTag,
+  imageBuildLimitsNotice,
   runImageBuildBuild,
 } from "./image-build.ts";
 
@@ -194,10 +195,35 @@ test("imageBuildBuildxArgs targets the Engine builder with the pinned frontend",
     "--load",
     "/w/checkout",
   ]);
+  // With a cgroup parent, only that option is added.
+  const limited = imageBuildBuildxArgs(
+    {
+      workingDir: "/w/checkout",
+      cacheKey: "proj-1",
+      imageTag: "turbopanel-app/web:rel-1",
+      tools: SEAM_TOOLS,
+    },
+    "/w/scratch/railpack-plan.json",
+    "/turbopanel.slice/x.slice",
+  );
+  assertEquals(limited.filter((arg) => !args.includes(arg)), [
+    "--cgroup-parent",
+    "/turbopanel.slice/x.slice",
+  ]);
+  assertEquals(limited.indexOf("--cgroup-parent"), 5);
   // Never a host network or an insecure entitlement: the gate's strict profile
   // refuses host-network builds.
   assertEquals(args.some((arg) => arg.startsWith("--network")), false);
   assertEquals(args.some((arg) => arg.startsWith("--allow")), false);
+});
+
+test("the image build transcript says the steps are not CPU limited yet, and names the slice's cores", () => {
+  assertEquals(
+    imageBuildLimitsNotice(2),
+    "Image build steps are not CPU limited yet; only the prepare step is. This build's slice is set to 2 cores for when they are",
+  );
+  assertStringIncludes(imageBuildLimitsNotice(1), "set to 1 core for");
+  assertStringIncludes(imageBuildLimitsNotice(1.5), "set to 1.5 cores for");
 });
 
 test("imageBuildFrontendRef names the frontend by digest only", () => {
@@ -235,7 +261,7 @@ test({
       const lines: string[] = [];
       const result = await runImageBuildBuild({
         build: {
-          kind: "railpack",
+          kind: "image",
           installCommand: "npm ci",
           buildCommand: "npm run build",
           startCommand: "node server.js",
@@ -350,7 +376,7 @@ test({
       const commands: string[][] = [];
       const lines: string[] = [];
       await runImageBuildBuild({
-        build: { kind: "railpack" },
+        build: { kind: "image" },
         workingDir,
         scratchDir,
         cacheKey: "proj-load",
@@ -410,7 +436,7 @@ test({
           load: variant.load,
         });
         const result = await runImageBuildBuild({
-          build: { kind: "railpack" },
+          build: { kind: "image" },
           workingDir,
           scratchDir,
           cacheKey: "proj-noload",
@@ -453,7 +479,7 @@ test({
       await assertRejects(
         () =>
           runImageBuildBuild({
-            build: { kind: "railpack" },
+            build: { kind: "image" },
             workingDir,
             scratchDir,
             cacheKey: "proj-nobuildx",
@@ -471,7 +497,7 @@ test({
       await assertRejects(
         () =>
           runImageBuildBuild({
-            build: { kind: "railpack" },
+            build: { kind: "image" },
             workingDir,
             scratchDir,
             cacheKey: "proj-nobuildx",
@@ -506,7 +532,7 @@ test({
       const err = await assertRejects(
         () =>
           runImageBuildBuild({
-            build: { kind: "railpack" },
+            build: { kind: "image" },
             workingDir,
             scratchDir,
             cacheKey: "proj-fail",
@@ -526,7 +552,7 @@ test({
       await assertRejects(
         () =>
           runImageBuildBuild({
-            build: { kind: "railpack" },
+            build: { kind: "image" },
             workingDir,
             scratchDir,
             cacheKey: "proj-fail",
@@ -539,7 +565,7 @@ test({
       await assertRejects(
         () =>
           runImageBuildBuild({
-            build: { kind: "railpack" },
+            build: { kind: "image" },
             workingDir,
             scratchDir,
             cacheKey: "proj-fail",
@@ -567,7 +593,7 @@ test({
         imageBuildPrepareScript(captureDir, '{"version":3}'),
       );
       const result = await runImageBuildBuild({
-        build: { kind: "railpack" },
+        build: { kind: "image" },
         workingDir,
         scratchDir,
         cacheKey: "proj-num",
@@ -597,7 +623,7 @@ test({
             imageBuildPrepareScript(captureDir, planBody),
           );
           const result = await runImageBuildBuild({
-            build: { kind: "railpack" },
+            build: { kind: "image" },
             workingDir,
             scratchDir,
             cacheKey: "proj-fallback",
@@ -624,7 +650,7 @@ test({
         "#!/bin/sh\necho 'visible on stdout'\nexit 1\n",
       );
       const params = {
-        build: { kind: "railpack" as const },
+        build: { kind: "image" as const },
         workingDir,
         scratchDir,
         cacheKey: "proj-stdout",
@@ -659,7 +685,7 @@ test({
       const calls: Array<{ args: string[]; env: Record<string, string> }> = [];
       const result = await runImageBuildBuild({
         build: {
-          kind: "railpack",
+          kind: "image",
           env: { GIT_ASKPASS: "leak", VISIBLE: "ok" },
         },
         workingDir,
@@ -703,7 +729,7 @@ test({
         await assertRejects(
           () =>
             runImageBuildBuild({
-              build: { kind: "railpack" },
+              build: { kind: "image" },
               workingDir,
               scratchDir,
               cacheKey: "proj-abort",
@@ -759,7 +785,7 @@ exit 0
       try {
         const params = {
           build: {
-            kind: "railpack" as const,
+            kind: "image" as const,
             env: { FOO: "tenant-value", DOCKER_CONFIG: "/evil/config" },
           },
           workingDir,

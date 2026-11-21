@@ -4,12 +4,10 @@
  *
  * Every accepted command is journaled on disk (atomic writes) while it runs,
  * together with the latest step plan. Its final outcome is journaled before it
- * is sent. With a control plane that advertises `command-recovery-v1` the
- * journal entry stays until the control plane answers with a
+ * is sent. The journal entry stays until the control plane answers with a
  * `command-outcome-ack`: the outcome is sent again on every attach and every
  * {@link RESEND_INTERVAL_MS} until then, so a send into a socket that looked
- * open but was not cannot lose it. With an older control plane the entry is
- * removed once the outcome has been sent on an open socket, as before.
+ * open but was not cannot lose it.
  *
  * An entry left behind by a killed daemon is answered on the next attach with
  * its journaled final outcome or, if none was recorded, with a failed outcome
@@ -17,12 +15,13 @@
  * (last step, whether the new release had been made live).
  */
 import { join } from "@std/path";
+import { writeAll } from "../util/write-all.ts";
 import type {
   CommandProgress,
   CommandRecoveryReport,
+  CommandStateReport,
   DaemonMessage,
 } from "../contracts/cell-messages.ts";
-import { COMMAND_RECOVERY_FEATURE } from "../instance/version-wire.ts";
 import { resolveLayout } from "../paths/layout.ts";
 import { assertTestRunMayWrite } from "../permissions/test-write-guard.ts";
 import { logWarn } from "../util/logger.ts";
@@ -35,16 +34,6 @@ type OutcomeMessage =
   >;
 
 type OutboxSocket = Pick<WebSocket, "readyState" | "send">;
-
-/** What the outbox needs to know about the attached control plane. */
-export type OutboxPeer = {
-  supports(feature: string): boolean;
-  /**
-   * False while the current socket's attach frame (which carries the feature
-   * list) has not arrived. Absent means always known.
-   */
-  known?(): boolean;
-};
 
 /** How often unconfirmed outcomes are sent again while any are waiting. */
 export const RESEND_INTERVAL_MS = 30_000;
@@ -67,6 +56,9 @@ export const UNACKED_MAX_ENTRIES = 64;
  */
 export const OUTCOME_BURST_MAX = 20;
 
+/** Most ids in `hello.commandState.known` (`command-recovery-v2`). */
+export const STATE_MAX_IDS = 256;
+
 /** Wire bounds for {@link CommandRecoveryReport}. */
 export const REPORT_MAX_IDS = 64;
 export const REPORT_MAX_ID_CHARS = 64;
@@ -86,6 +78,12 @@ type JournalEntry = {
   progress?: CommandProgress;
   outcome?: OutcomeMessage;
   journaledAt?: string;
+  /**
+   * An id-only marker left when an unconfirmed outcome was dropped past the
+   * entry cap: the command ran, so `hello.commandState.known` keeps listing it
+   * until {@link UNACKED_RETENTION_MS} after `journaledAt`.
+   */
+  tombstone?: true;
 };
 
 type OutboxTimers = {
@@ -106,9 +104,7 @@ const defaultTimers: OutboxTimers = {
 
 let timers: OutboxTimers = defaultTimers;
 
-/** Outcomes not yet sent on any socket (control plane without the feature). */
-const held = new Map<string, OutcomeMessage>();
-/** Outcomes kept until the control plane confirms them (feature present). */
+/** Outcomes kept until the control plane confirms them. */
 const unacked = new Map<string, OutcomeMessage>();
 const running = new Set<string>();
 const acceptedAt = new Map<string, string>();
@@ -119,12 +115,19 @@ const lastProgress = new Map<
 const writeChains = new Map<string, Promise<void>>();
 /** The most recently attached session socket; it outlives any one command. */
 let currentSocket: OutboxSocket | undefined;
-let currentPeer: OutboxPeer | undefined;
 let resendTimer: unknown;
 /** Outcome ids sent on the current socket, with when; cleared on a new socket. */
 const sentOnSocket = new Map<string, number>();
 /** Kept outcomes sent in the current window (see {@link OUTCOME_BURST_MAX}). */
 let burstWindow = { start: 0, used: 0 };
+/** Made once per process, so a restart is visible on the wire. */
+const processStartId = crypto.randomUUID();
+/** Journal ids a previous process left on disk, read before the first hello. */
+const diskIds = new Set<string>();
+/** Ids in {@link diskIds} that are tombstones: never answered, never resent. */
+const tombstones = new Set<string>();
+/** True once the journal directory was read without error. */
+let journalRead = false;
 /** When an outcome answered from a dead daemon's journal was first recorded. */
 const keptSince = new Map<string, number>();
 
@@ -149,23 +152,6 @@ function noteSent(id: string): void {
   burstWindow.used += 1;
 }
 
-function recovers(): boolean {
-  return currentPeer?.supports(COMMAND_RECOVERY_FEATURE) === true;
-}
-
-/**
- * Keep a result until the control plane confirms it: it says it confirms
- * results, or it has not said yet on this socket (features unknown).
- */
-function keepsUntilAck(): boolean {
-  return recovers() || currentPeer?.known?.() === false;
-}
-
-/** True when the attached control plane keeps command results until it confirms them. */
-export function recoveryEnabled(): boolean {
-  return recovers();
-}
-
 function journalDir(): string {
   return join(
     resolveLayout(Deno.env.toObject()).stateDir,
@@ -179,6 +165,8 @@ function journalFile(id: string): string | undefined {
 }
 
 async function removeJournal(id: string): Promise<void> {
+  diskIds.delete(id);
+  tombstones.delete(id);
   const file = journalFile(id);
   if (!file) return;
   try {
@@ -191,19 +179,45 @@ async function removeJournal(id: string): Promise<void> {
   }
 }
 
-/** Write a journal entry atomically: temp file in the same directory, then rename. */
+/**
+ * Write a journal entry atomically and durably: temp file in the same
+ * directory, flushed, renamed, then the directory flushed, so an accepted
+ * command is on disk before it runs.
+ */
 async function writeJournalAtomic(entry: JournalEntry): Promise<void> {
   const file = journalFile(entry.id);
-  if (!file) return;
+  if (!file) throw new Error("command id cannot be journaled");
   assertTestRunMayWrite(file);
   const temp = `${file}.${crypto.randomUUID()}.tmp`;
-  await Deno.mkdir(journalDir(), { recursive: true, mode: 0o750 });
+  const dir = journalDir();
+  await Deno.mkdir(dir, { recursive: true, mode: 0o750 });
   try {
-    await Deno.writeTextFile(temp, JSON.stringify(entry), { mode: 0o640 });
+    const handle = await Deno.open(temp, {
+      write: true,
+      create: true,
+      truncate: true,
+      mode: 0o640,
+    });
+    try {
+      await writeAll(handle, new TextEncoder().encode(JSON.stringify(entry)));
+      await handle.sync();
+    } finally {
+      handle.close();
+    }
     await Deno.rename(temp, file);
   } catch (err) {
     await Deno.remove(temp).catch(() => undefined);
     throw err;
+  }
+  try {
+    const dirHandle = await Deno.open(dir, { read: true });
+    try {
+      await dirHandle.sync();
+    } finally {
+      dirHandle.close();
+    }
+  } catch (err) {
+    logWarn("commands", `in-flight journal directory sync failed: ${err}`);
   }
 }
 
@@ -217,6 +231,22 @@ function queueWrite(id: string, write: () => Promise<void>): Promise<void> {
   return next;
 }
 
+/** Like {@link queueWrite}, but says whether this write landed. */
+function queueWriteChecked(
+  id: string,
+  write: () => Promise<void>,
+): Promise<boolean> {
+  let ok = true;
+  return queueWrite(id, async () => {
+    try {
+      await write();
+    } catch (err) {
+      ok = false;
+      throw err;
+    }
+  }).then(() => ok);
+}
+
 function entryFor(id: string, extra: Partial<JournalEntry>): JournalEntry {
   return {
     v: 1,
@@ -226,11 +256,22 @@ function entryFor(id: string, extra: Partial<JournalEntry>): JournalEntry {
   };
 }
 
-/** Record that `id` is running; never throws (the journal is best effort). */
-export async function markCommandInFlight(id: string): Promise<void> {
+/**
+ * Record that `id` is running. Resolves `false` when the entry could not be
+ * written (or the id cannot be journaled): the command must then not run, since
+ * a command that ran without a journal entry would be missing from
+ * `hello.commandState.known`. Never throws.
+ */
+export async function markCommandInFlight(id: string): Promise<boolean> {
   running.add(id);
   acceptedAt.set(id, new Date(timers.now()).toISOString());
-  await queueWrite(id, () => writeJournalAtomic(entryFor(id, {})));
+  const ok = journalFile(id) !== undefined &&
+    await queueWriteChecked(id, () => writeJournalAtomic(entryFor(id, {})));
+  if (!ok) {
+    running.delete(id);
+    acceptedAt.delete(id);
+  }
+  return ok;
 }
 
 /**
@@ -255,7 +296,7 @@ export function answerRepeatedDispatch(
     }
     return true;
   }
-  const kept = held.get(id) ?? unacked.get(id);
+  const kept = unacked.get(id);
   if (kept === undefined) return false;
   sendOutcome(ws, kept);
   return true;
@@ -359,10 +400,8 @@ function sendKept(outcome: OutcomeMessage): boolean {
 /**
  * Journal the final outcome, then send it on the live session socket (the one
  * attached most recently, which may be newer than `ws` if the daemon
- * reconnected while the command ran), falling back to `ws`. Without the
- * recovery feature a delivered outcome clears the journal and an undelivered
- * one is held for the next attach. With it, the outcome stays journaled and
- * unconfirmed until {@link acknowledgeCommandOutcome}.
+ * reconnected while the command ran), falling back to `ws`. The outcome stays
+ * journaled and unconfirmed until {@link acknowledgeCommandOutcome}.
  */
 export async function deliverCommandOutcome(
   ws: OutboxSocket,
@@ -376,17 +415,9 @@ export async function deliverCommandOutcome(
   });
   await queueWrite(outcome.id, () => writeJournalAtomic(entry));
   acceptedAt.delete(outcome.id);
-  const sent = sendLive(ws, outcome);
-  if (keepsUntilAck()) {
-    unacked.set(outcome.id, outcome);
-    scheduleResend();
-    return;
-  }
-  if (sent) {
-    await removeJournal(outcome.id);
-    return;
-  }
-  held.set(outcome.id, outcome);
+  sendLive(ws, outcome);
+  unacked.set(outcome.id, outcome);
+  scheduleResend();
 }
 
 /**
@@ -396,21 +427,18 @@ export async function deliverCommandOutcome(
 export async function acknowledgeCommandOutcome(id: string): Promise<void> {
   if (running.has(id)) return;
   unacked.delete(id);
-  held.delete(id);
   keptSince.delete(id);
   writeChains.delete(id);
   await removeJournal(id);
 }
 
 function scheduleResend(): void {
-  if (resendTimer !== undefined || (unacked.size === 0 && held.size === 0)) {
+  if (resendTimer !== undefined || unacked.size === 0) {
     return;
   }
   resendTimer = timers.setTimer(() => {
     resendTimer = undefined;
     resendUnacked(RESEND_INTERVAL_MS);
-    // An older control plane gets what one window could not carry now.
-    if (!keepsUntilAck()) void flushHeld();
     scheduleResend();
   }, RESEND_INTERVAL_MS);
 }
@@ -466,12 +494,57 @@ async function orphanedIds(): Promise<string[]> {
     return names
       .filter((name) => name.endsWith(".json"))
       .map((name) => name.slice(0, -".json".length))
-      .filter((id) => !running.has(id) && !held.has(id) && !unacked.has(id));
+      .filter((id) =>
+        !running.has(id) && !unacked.has(id) && !tombstones.has(id)
+      );
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) {
       logWarn("commands", `in-flight journal unreadable: ${err}`);
     }
     return [];
+  }
+}
+
+/**
+ * Read the journal directory once, before the socket opens, so the first
+ * `hello` after a restart already names every command a previous process
+ * accepted (`command-recovery-v2`). Never throws; an unreadable directory
+ * leaves the report incomplete.
+ */
+export async function primeCommandJournal(): Promise<void> {
+  if (journalRead) return;
+  try {
+    const dir = journalDir();
+    const names = await Array.fromAsync(Deno.readDir(dir), (e) => e.name);
+    const cutoff = timers.now() - UNACKED_RETENTION_MS;
+    // Each file is handled on its own: nothing here depends on another file's
+    // result, and the sets are only added to, so the order does not matter.
+    await Promise.all(names.map(async (name) => {
+      if (name.endsWith(".tmp")) {
+        // A write the previous process did not finish.
+        await Deno.remove(join(dir, name)).catch(() => undefined);
+        return;
+      }
+      if (!name.endsWith(".json")) return;
+      const id = name.slice(0, -".json".length);
+      const entry = await readJournalEntry(id);
+      if (entry?.tombstone === true) {
+        const at = Date.parse(entry.journaledAt ?? "");
+        if (Number.isFinite(at) && at < cutoff) {
+          await removeJournal(id);
+          return;
+        }
+        tombstones.add(id);
+      }
+      diskIds.add(id);
+    }));
+    journalRead = true;
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) {
+      journalRead = true;
+      return;
+    }
+    logWarn("commands", `in-flight journal unreadable: ${err}`);
   }
 }
 
@@ -570,29 +643,6 @@ function orphanReply(id: string, entry: JournalEntry | undefined) {
   };
 }
 
-/**
- * Send held outcomes. With a control plane that confirms results they become
- * unconfirmed (journal kept until the ack; sent by the resend that follows);
- * without one a sent outcome is done. One already sent on this socket (when
- * it opened) is not sent again; what the window cannot carry stays held.
- */
-async function flushHeld(): Promise<void> {
-  if (recovers()) {
-    for (const [id, outcome] of held) {
-      unacked.set(id, outcome);
-      held.delete(id);
-    }
-    return;
-  }
-  const sent: string[] = [];
-  for (const [id, outcome] of held) {
-    if (!sentOnSocket.has(id) && !sendKept(outcome)) break;
-    held.delete(id);
-    sent.push(id);
-  }
-  await Promise.all(sent.map(removeJournal));
-}
-
 /** When a dead daemon's journal entry was recorded, if it says so readably. */
 function entryRecordedMs(entry: JournalEntry | undefined): number | undefined {
   const times = [entry?.journaledAt, entry?.outcome?.at, entry?.acceptedAt];
@@ -603,33 +653,28 @@ function entryRecordedMs(entry: JournalEntry | undefined): number | undefined {
   return undefined;
 }
 
-/** Answer journal entries of a daemon that died, then keep or clear them. */
+/** Answer journal entries of a daemon that died, and keep them until confirmed. */
 async function answerOrphans(): Promise<void> {
   const ids = await orphanedIds();
   const entries = await Promise.all(ids.map((id) => readJournalEntry(id)));
-  const keep = recovers();
   ids.forEach((id, index) => {
     const recorded = entryRecordedMs(entries[index]);
     if (recorded !== undefined) keptSince.set(id, recorded);
-    (keep ? unacked : held).set(id, orphanReply(id, entries[index]));
+    unacked.set(id, orphanReply(id, entries[index]));
   });
-  if (keep) {
-    await Promise.all(ids.map((id, index) => {
-      const reply = unacked.get(id);
-      return reply && !journaledOutcome(entries[index], id)
-        ? queueWrite(id, () =>
-          writeJournalAtomic(
-            entryFor(id, {
-              outcome: reply,
-              journaledAt: outcomeTimeIso(reply) ??
-                new Date(timers.now()).toISOString(),
-            }),
-          ))
-        : Promise.resolve();
-    }));
-    return;
-  }
-  await flushHeld();
+  await Promise.all(ids.map((id, index) => {
+    const reply = unacked.get(id);
+    return reply && !journaledOutcome(entries[index], id)
+      ? queueWrite(id, () =>
+        writeJournalAtomic(
+          entryFor(id, {
+            outcome: reply,
+            journaledAt: outcomeTimeIso(reply) ??
+              new Date(timers.now()).toISOString(),
+          }),
+        ))
+      : Promise.resolve();
+  }));
 }
 
 /** When an outcome message says it was sent, if that is a readable timestamp. */
@@ -669,59 +714,62 @@ async function pruneUnacked(): Promise<void> {
   const overflow = ids.filter((id) => !stale.includes(id))
     .sort((a, b) => recordedMs(a) - recordedMs(b))
     .slice(0, Math.max(0, ids.length - stale.length - UNACKED_MAX_ENTRIES));
-  const drop = [...stale, ...overflow];
-  if (drop.length === 0) return;
+  if (stale.length + overflow.length === 0) return;
   logWarn(
     "commands",
-    `dropping ${drop.length} unconfirmed command outcome(s) past the retention bound`,
+    `dropping ${
+      stale.length + overflow.length
+    } unconfirmed command outcome(s) past the retention bound`,
   );
-  await Promise.all(drop.map((id) => acknowledgeCommandOutcome(id)));
+  // Past retention the control plane no longer resends the command, so the
+  // entry goes. An outcome dropped for the cap is young: its id stays on disk
+  // as a tombstone so the next hello still lists a command that ran.
+  await Promise.all([
+    ...stale.map((id) => acknowledgeCommandOutcome(id)),
+    ...overflow.map((id) => tombstoneOutcome(id, recordedMs(id))),
+  ]);
+}
+
+/** Drop the outcome of `id` but keep its id on disk (see {@link JournalEntry.tombstone}). */
+async function tombstoneOutcome(id: string, recordedMs: number): Promise<void> {
+  unacked.delete(id);
+  keptSince.delete(id);
+  tombstones.add(id);
+  diskIds.add(id);
+  const recordedAt = Number.isFinite(recordedMs) ? recordedMs : timers.now();
+  await queueWrite(id, () =>
+    writeJournalAtomic({
+      v: 1,
+      id,
+      acceptedAt: new Date(recordedAt).toISOString(),
+      journaledAt: new Date(recordedAt).toISOString(),
+      tombstone: true,
+    }));
 }
 
 /**
- * A socket just opened, before its attach frame says what the control plane
- * supports. Held and unconfirmed outcomes go out on it at once, but every
- * journal is kept: only the attach frame ({@link flushCommandOutcomes}) or a
- * `command-outcome-ack` may clear one. Interrupted commands are left to the
- * attach frame too.
+ * A socket just opened, before its attach frame. Unconfirmed outcomes go out
+ * on it at once, but every journal is kept: only a `command-outcome-ack` may
+ * clear one. Interrupted commands are left to the attach frame
+ * ({@link flushCommandOutcomes}).
  */
-export function noteSessionOpen(ws: OutboxSocket, peer?: OutboxPeer): void {
-  currentPeer = peer ?? currentPeer;
+export function noteSessionOpen(ws: OutboxSocket): void {
   if (ws.readyState !== WebSocket.OPEN) return;
   useSocket(ws);
-  for (const outcome of [...unacked.values(), ...held.values()]) {
+  for (const outcome of unacked.values()) {
     if (!sendKept(outcome)) break;
   }
   scheduleResend();
 }
 
 /**
- * Outcomes kept while the features were unknown, now that the attach frame
- * says the control plane does not confirm results: handled like any outcome
- * for such a control plane (sent, then cleared).
+ * On a new session: send unconfirmed outcomes again, then answer journaled
+ * commands that are not running or unconfirmed (their daemon died
+ * mid-command) with their journaled outcome, or as interrupted when none was
+ * recorded.
  */
-function releaseForOlderPeer(): void {
-  if (recovers()) return;
-  for (const [id, outcome] of unacked) {
-    held.set(id, outcome);
-    unacked.delete(id);
-  }
-}
-
-/**
- * On a new session: send held outcomes, send unconfirmed ones again, then
- * answer journaled commands that are neither running nor held (their daemon
- * died mid-command) with their journaled outcome, or as interrupted when none
- * was recorded.
- */
-export async function flushCommandOutcomes(
-  ws: OutboxSocket,
-  peer?: OutboxPeer,
-): Promise<void> {
+export async function flushCommandOutcomes(ws: OutboxSocket): Promise<void> {
   useSocket(ws);
-  currentPeer = peer ?? currentPeer;
-  releaseForOlderPeer();
-  await flushHeld();
   if (ws.readyState !== WebSocket.OPEN) return;
   await answerOrphans();
   await pruneUnacked();
@@ -742,9 +790,32 @@ function boundedIds(ids: Iterable<string>): string[] {
  */
 export function commandRecoveryReport(): CommandRecoveryReport | undefined {
   const runningIds = boundedIds(running);
-  const unackedIds = boundedIds(new Set([...unacked.keys(), ...held.keys()]));
+  const unackedIds = boundedIds(unacked.keys());
   if (runningIds.length === 0 && unackedIds.length === 0) return undefined;
   return { running: runningIds, unacked: unackedIds };
+}
+
+/**
+ * What this process knows about commands, for every `hello`
+ * (`command-recovery-v2`): running, unconfirmed and journaled ids. Never
+ * `undefined`: an empty, complete list is the answer "nothing here".
+ */
+export function commandStateReport(): CommandStateReport {
+  const all = new Set<string>([...running, ...unacked.keys(), ...diskIds]);
+  const usable = [...all].filter((id) =>
+    id.length > 0 && id.length <= REPORT_MAX_ID_CHARS
+  );
+  return {
+    processStartId,
+    known: usable.slice(0, STATE_MAX_IDS),
+    complete: journalRead && usable.length === all.size &&
+      usable.length <= STATE_MAX_IDS,
+  };
+}
+
+/** True when no command is running and no outcome waits for its confirmation. */
+export function commandsQuiet(): boolean {
+  return running.size === 0 && unacked.size === 0;
 }
 
 /** Resolves when every queued journal write has finished. */
@@ -752,13 +823,12 @@ export async function settleCommandJournalWrites(): Promise<void> {
   await Promise.all(writeChains.values());
 }
 
-/** Test seam: forget held outcomes and running ids; optionally swap the clock and timers. */
+/** Test seam: forget unconfirmed outcomes and running ids; optionally swap the clock and timers. */
 export function resetCommandOutboxForTests(
   override?: Partial<OutboxTimers>,
 ): void {
   if (resendTimer !== undefined) timers.clearTimer(resendTimer);
   resendTimer = undefined;
-  held.clear();
   unacked.clear();
   running.clear();
   acceptedAt.clear();
@@ -766,8 +836,10 @@ export function resetCommandOutboxForTests(
   writeChains.clear();
   sentOnSocket.clear();
   keptSince.clear();
+  diskIds.clear();
+  tombstones.clear();
+  journalRead = false;
   burstWindow = { start: 0, used: 0 };
   currentSocket = undefined;
-  currentPeer = undefined;
   timers = { ...defaultTimers, ...override };
 }

@@ -112,6 +112,7 @@ test("the command journal and release folders are leaves with their modes", () =
   assertEquals(modes.get("commands"), "0750");
   assertEquals(modes.get("release-records"), "0750");
   assertEquals(modes.get("release-build"), "0700");
+  assertEquals(modes.get("compose-checkout-scratch"), "0700");
 });
 
 test("the asset folder records are a daemon state leaf", () => {

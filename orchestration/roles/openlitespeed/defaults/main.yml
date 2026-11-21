@@ -201,9 +201,6 @@ openlitespeed_lsphp_ini_extensions:
   - extension=pgsql.so
   - extension=pdo_pgsql.so
 
-# Back-compat alias for callers that still pass a single series.
-openlitespeed_lsphp_series: "{{ openlitespeed_lsphp_default_series }}"
-
 # FHS mutable paths — decoupled from the vendored (read-mostly) tree via
 # symlinks so `current` can be repointed at a new version without losing
 # config/logs. Daemon TypeScript (src/deploy/site.ts) owns the

@@ -58,11 +58,6 @@
     repo_key_fingerprints: "{{ php_fpm_sury_key_fingerprints }}"
     repo_key_policy: "{{ php_fpm_key_policy }}"
 
-- name: Remove any legacy sury sources.list entry
-  ansible.builtin.file:
-    path: /etc/apt/sources.list.d/sury-php.list
-    state: absent
-
 # deb822 format with an explicit Signed-By — apt-key and `[signed-by=]` one-liners
 # are both deprecated.
 - name: Configure sury PHP apt repository
@@ -138,20 +133,6 @@
 # The PHP package manager site builds use, vendored and digest-checked.
 - name: Vendor the PHP package manager
   ansible.builtin.include_tasks: composer.yml
-
-# Left over from the single-series layout, where config lived directly under
-# `php/` and the unit was not templated. Removed so a host converged before
-# multi-version does not keep a second, unmanaged master around.
-- name: Remove obsolete single-series php-fpm layout
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - /etc/systemd/system/turbopanel-php-fpm.service
-    - "{{ turbopanel_config_dir }}/php/php-fpm.conf"
-    - "{{ turbopanel_config_dir }}/php/php.ini"
-    - "{{ turbopanel_config_dir }}/php/pools"
-    - "{{ turbopanel_config_dir }}/php/conf.d"
 
 # /usr/local/bin precedes /usr/bin in Debian's default PATH, so this shadows
 # sury's `update-alternatives` link for `php` without removing it. Removing the

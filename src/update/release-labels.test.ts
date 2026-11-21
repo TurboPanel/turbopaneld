@@ -4,7 +4,6 @@ import {
   compareSemver,
   MIN_SUPPORTED_INSTANCE_VERSION,
   parseSemver,
-  resolveDaemonCapabilities,
   resolveInstanceSupport,
 } from "../instance/version-wire.ts";
 import { assertControlPlaneUpdateAllowed } from "../instance/run-reconcile.ts";
@@ -72,19 +71,10 @@ test("no real control-plane label is flagged unsupported or refused as an update
   }
 });
 
-test("the daemon reports its plain base, so base-keyed capability floors open on canary builds too", () => {
+test("the daemon reports its plain base, so base-keyed floors open on canary builds too", () => {
   // Canary artifacts are labelled `<base>-canary.<id>` but the binary
   // reports deno.json's base; a label here would rank below its own floor.
   assertEquals(parseSemver(DAEMON_VERSION)?.prerelease, []);
-  const floorOpen = resolveDaemonCapabilities("0.1.1");
-  assert(Object.values(floorOpen).every(Boolean));
-  const canaryLabel = LABELS.find((l) => l.name === "canary")!.version;
-  const labelled = resolveDaemonCapabilities(canaryLabel);
-  assertEquals(
-    labelled["instance-cert-sources-per-hostname"],
-    false,
-    "a canary label ranks below 0.1.1: never report the label as the version",
-  );
 });
 
 /** run.sh's `tp_pinned_channel_manifest_url`, run for real. */

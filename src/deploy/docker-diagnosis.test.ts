@@ -10,9 +10,9 @@ import {
 
 const test = Deno.test.bind(Deno);
 
-// kore, 2026-09-27: tp in docker (989), daemon process started before that.
-const KORE_GROUP_FILE = "root:x:0:\ntp:x:9999:\ndocker:x:989:tp\n";
-const KORE_STALE_STATUS =
+// host-b, 2026-09-27: tp in docker (989), daemon process started before that.
+const HOST_B_GROUP_FILE = "root:x:0:\ntp:x:9999:\ndocker:x:989:tp\n";
+const HOST_B_STALE_STATUS =
   "Name:\tturbopaneld\nUid:\t9999\t9999\t9999\t9999\nGroups:\t9999 \n";
 const FRESH_STATUS = "Name:\tturbopaneld\nGroups:\t989 9999\n";
 
@@ -28,13 +28,13 @@ test("parseSystemctlShow reads ActiveState and Result", () => {
 });
 
 test("parseProcessGroups reads the Groups line", () => {
-  assertEquals(parseProcessGroups(KORE_STALE_STATUS), [9999]);
+  assertEquals(parseProcessGroups(HOST_B_STALE_STATUS), [9999]);
   assertEquals(parseProcessGroups(FRESH_STATUS), [989, 9999]);
   assertEquals(parseProcessGroups("Name:\tx\n"), []);
 });
 
 test("parseDockerGroup finds the docker gid and members", () => {
-  assertEquals(parseDockerGroup(KORE_GROUP_FILE), {
+  assertEquals(parseDockerGroup(HOST_B_GROUP_FILE), {
     gid: 989,
     members: ["tp"],
   });
@@ -109,8 +109,8 @@ test("diagnoseDockerUnreachable reads the host through its seams", async () => {
   const msg = await diagnoseDockerUnreachable("permission denied", {
     systemctlShow: () =>
       Promise.resolve("ActiveState=active\nResult=success\n"),
-    readProcStatus: () => Promise.resolve(KORE_STALE_STATUS),
-    readGroupFile: () => Promise.resolve(KORE_GROUP_FILE),
+    readProcStatus: () => Promise.resolve(HOST_B_STALE_STATUS),
+    readGroupFile: () => Promise.resolve(HOST_B_GROUP_FILE),
     username: () => Promise.resolve("tp"),
   });
   assertStringIncludes(msg, "restart the daemon");

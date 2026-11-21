@@ -562,10 +562,10 @@ test("parseManagedApplyPayload accepts forceResync and ingressSourceAddresses", 
   const payload = parseManagedApplyPayload({
     ...VALID_MANAGED_APPLY,
     forceResync: true,
-    ingressSourceAddresses: ["10.10.1.50", "10.10.1.51"],
+    ingressSourceAddresses: ["10.50.1.50", "10.50.1.51"],
   });
   assertEquals(payload.forceResync, true);
-  assertEquals(payload.ingressSourceAddresses, ["10.10.1.50", "10.10.1.51"]);
+  assertEquals(payload.ingressSourceAddresses, ["10.50.1.50", "10.50.1.51"]);
 
   // Absent stays absent.
   const bare = parseManagedApplyPayload({ ...VALID_MANAGED_APPLY });

@@ -2,7 +2,7 @@
  * The contract's `extended.sizes`, `filesystemSizes` and `gpuSizes` (v12): the
  * capacity every percentage is taken against, read in the same tick as the
  * reading itself. This is what lets a resize or a balloon change a total
- * without starting a new topology generation. Pure and synchronous. A total
+ * without a new topology report. Pure and synchronous. A total
  * that is unknown or not positive is left out, never sent as `0`.
  */
 import type {

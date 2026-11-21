@@ -54,7 +54,7 @@ const UNITS: Record<string, string> = {
 /** `ip -o addr show`: eth0 is the host's scope address; vmbr0 and br-lan are not Docker's. */
 const IP_ADDR = [
   "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever",
-  "2: eth0    inet 10.10.0.169/24 brd 10.10.0.255 scope global eth0\\       valid_lft forever preferred_lft forever",
+  "2: eth0    inet 10.50.0.169/24 brd 10.50.0.255 scope global eth0\\       valid_lft forever preferred_lft forever",
   "3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever",
   "7: br-0123456789ab    inet 172.20.0.1/16 brd 172.20.255.255 scope global br-0123456789ab\\       valid_lft forever preferred_lft forever",
   "7: br-0123456789ab    inet6 fd00:dead:0:1::1/64 scope global \\       valid_lft forever preferred_lft forever",
@@ -78,8 +78,8 @@ const IP_LINK = [
  * are not destinations.
  */
 const IP_ROUTE = [
-  "default via 10.10.0.1 dev eth0 proto dhcp src 10.10.0.169 metric 100",
-  "10.10.0.0/24 dev eth0 proto kernel scope link src 10.10.0.169",
+  "default via 10.50.0.1 dev eth0 proto dhcp src 10.50.0.169 metric 100",
+  "10.50.0.0/24 dev eth0 proto kernel scope link src 10.50.0.169",
   "10.88.0.0/16 dev tp0 scope link",
   "10.90.0.5 dev tp0 scope link",
   "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown",
@@ -544,7 +544,7 @@ test("a configured /8 pool that holds the host's own network is not refused; the
   ]);
   assertStringIncludes(
     out.stderr,
-    "not refusing pool 10.0.0.0/8: this host routes 10.10.0.0/24 outside Docker",
+    "not refusing pool 10.0.0.0/8: this host routes 10.50.0.0/24 outside Docker",
   );
   // Docker's own bridge routes never drop a pool (bip is docker0's route).
   assert(!out.stderr.includes("172.17.0.1/16"));

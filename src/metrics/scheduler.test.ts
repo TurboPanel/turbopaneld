@@ -8,9 +8,9 @@ import {
 import type { CollectorDeps } from "./collector/types.ts";
 import {
   buildMetricsSample,
-  METRICS_LEGACY_WIRE_VERSION,
+  METRICS_SCHEMA_VERSION,
 } from "../contracts/metrics-contract.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "./topology/topology.ts";
 import {
   deterministicJitterMs,
   METRICS_INTERVAL_MS,
@@ -177,9 +177,8 @@ function fixture(name: string): string {
 }
 
 /** Minimal fixed topology snapshot: one service block device, nothing else. */
-function fixtureTopologySnapshot(): TopologySnapshot {
+function fixtureTopologySnapshot(): CollectedTopology {
   return {
-    generation: 1,
     bootGeneration: 0,
     networks: [],
     filesystems: [],
@@ -285,11 +284,10 @@ function supportedSample(sequence: number): MetricsCollectResult {
     supported: true,
     sample: buildMetricsSample({
       metadata: {
-        version: METRICS_LEGACY_WIRE_VERSION,
+        version: METRICS_SCHEMA_VERSION,
         sampledAt: new Date(0).toISOString(),
         intervalSeconds: 60,
         sequence,
-        topologyGeneration: 1,
         bootGeneration: 0,
       },
       host: {
@@ -348,8 +346,6 @@ function makeScheduler(options: {
   jitterMaxMs?: number;
   primeMs?: number;
   logRateLimitMs?: number;
-  durabilityFlag?: () => boolean;
-  sizesFlag?: () => boolean;
   collectDeadlineMs?: number;
   onLog?: (level: "info" | "warn", message: string) => void;
 }): MetricsScheduler {
@@ -368,8 +364,6 @@ function makeScheduler(options: {
     clearIntervalFn: options.clock
       .clearIntervalFn as unknown as typeof clearInterval,
     logRateLimitMs: options.logRateLimitMs,
-    durabilityFlag: options.durabilityFlag,
-    sizesFlag: options.sizesFlag,
     collectDeadlineMs: options.collectDeadlineMs,
     onLog: options.onLog,
   });
@@ -392,7 +386,7 @@ it("MetricsScheduler emits first metrics frame immediately on attach", async () 
   const frames = parseMetricsFrames(sent);
   assertEquals(frames.length, 1);
   assertEquals(frames[0].type, "metrics");
-  assertEquals(frames[0].metadata.version, METRICS_LEGACY_WIRE_VERSION);
+  assertEquals(frames[0].metadata.version, 8);
   assertEquals(typeof frames[0].metadata.sequence, "number");
 });
 
@@ -1155,7 +1149,6 @@ it("wire version 8 live stream runs beside the baseline on its own collector; on
   const scheduler = makeScheduler({
     clock,
     intervalMs: 60_000,
-    durabilityFlag: () => true,
     collectorFactory: () => {
       collectors += 1;
       return createFakeCollector((sequence) => supportedSample(sequence));
@@ -1177,181 +1170,38 @@ it("wire version 8 live stream runs beside the baseline on its own collector; on
   assertEquals(sent.length, 1);
 });
 
-it("closed durability flag leaves samples unflagged and no stream collector", async () => {
+it("every sample carries wire version 8, the extended block and the sizes", async () => {
   const clock = new FakeClock();
   const sent: unknown[] = [];
   const scheduler = makeScheduler({
     clock,
     collectorFactory: () =>
-      createFakeCollector((sequence) => supportedSample(sequence)),
+      createFakeCollector((sequence) => {
+        const r = supportedSample(sequence);
+        if (r.supported) {
+          r.sample.extended = {
+            docker: { containersRunning: 2 },
+            sizes: { memoryTotalBytes: 8e9 },
+            filesystemSizes: [{ filesystemId: "fs-a", totalBytes: 1e9 }],
+            gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 16e9 }],
+            networkSizes: [{ deviceId: "nic0", linkSpeedMbps: 1000 }],
+          };
+        }
+        return r;
+      }),
   });
   scheduler.attach(capturingSink(sent));
   await clock.advance(0);
-  assertEquals(scheduler.splitsLiveStream(), false);
-  assertEquals(
-    (sent[0] as { metadata: { durable?: boolean } }).metadata.durable,
-    undefined,
-  );
-});
-
-it("extended text is stripped on the v6 wire and kept under metrics-v8", async () => {
-  for (const wire8 of [false, true]) {
-    const clock = new FakeClock();
-    const sent: unknown[] = [];
-    const scheduler = makeScheduler({
-      clock,
-      durabilityFlag: () => wire8,
-      collectorFactory: () =>
-        createFakeCollector((sequence) => {
-          const r = supportedSample(sequence);
-          if (r.supported) {
-            r.sample.extended = { text: { kernel: "6.1" } };
-          }
-          return r;
-        }),
-    });
-    scheduler.attach(capturingSink(sent));
-    await clock.advance(0);
-    assertEquals(
-      (sent[0] as { extended?: unknown }).extended !== undefined,
-      wire8,
-    );
+  const frame = sent[0] as {
+    metadata: { version: number; durable?: boolean };
+    extended: Record<string, unknown>;
+  };
+  assertEquals(frame.metadata.version, 8);
+  assertEquals(frame.metadata.durable, true);
+  assertEquals(frame.extended.docker, { containersRunning: 2 });
+  for (const key of ["sizes", "filesystemSizes", "gpuSizes", "networkSizes"]) {
+    assertEquals(key in frame.extended, true, key);
   }
-});
-
-it("metrics-v8 stamps sample version 8; the v6 wire keeps 6 and no extended", async () => {
-  for (const wire8 of [false, true]) {
-    const clock = new FakeClock();
-    const sent: unknown[] = [];
-    const scheduler = makeScheduler({
-      clock,
-      durabilityFlag: () => wire8,
-      collectorFactory: () =>
-        createFakeCollector((sequence) => {
-          const r = supportedSample(sequence);
-          if (r.supported) {
-            r.sample.extended = { docker: { containersRunning: 2 } };
-          }
-          return r;
-        }),
-    });
-    scheduler.attach(capturingSink(sent));
-    await clock.advance(0);
-    const frame = sent[0] as {
-      metadata: { version: number };
-      extended?: unknown;
-    };
-    assertEquals(
-      frame.metadata.version,
-      wire8 ? 8 : METRICS_LEGACY_WIRE_VERSION,
-    );
-    assertEquals(frame.extended !== undefined, wire8);
-  }
-});
-
-it("the per-sample sizes are sent only once the control plane advertises metrics-v8-sizes", async () => {
-  for (const sizes of [false, true]) {
-    const clock = new FakeClock();
-    const sent: unknown[] = [];
-    const scheduler = makeScheduler({
-      clock,
-      durabilityFlag: () => true,
-      sizesFlag: () => sizes,
-      collectorFactory: () =>
-        createFakeCollector((sequence) => {
-          const r = supportedSample(sequence);
-          if (r.supported) {
-            r.sample.extended = {
-              docker: { containersRunning: 2 },
-              sizes: { memoryTotalBytes: 8e9 },
-              filesystemSizes: [{ filesystemId: "fs-a", totalBytes: 1e9 }],
-              gpuSizes: [{ gpuId: "gpu0", memoryTotalBytes: 16e9 }],
-              networkSizes: [{ deviceId: "nic0", linkSpeedMbps: 1000 }],
-            };
-          }
-          return r;
-        }),
-    });
-    scheduler.attach(capturingSink(sent));
-    await clock.advance(0);
-    const extended = (sent[0] as { extended: Record<string, unknown> })
-      .extended;
-    // A wire8 control plane without the sizes still gets the rest of the wire8 block.
-    assertEquals(extended.docker, { containersRunning: 2 });
-    assertEquals("sizes" in extended, sizes);
-    assertEquals("filesystemSizes" in extended, sizes);
-    assertEquals("gpuSizes" in extended, sizes);
-    assertEquals("networkSizes" in extended, sizes);
-  }
-});
-
-it("the wire ladder follows only metrics-v8 and metrics-v8-sizes", async () => {
-  const cases = [
-    { wire8: true, sizes: true, version: 8, extended: true, hasSizes: true },
-    { wire8: true, sizes: false, version: 8, extended: true, hasSizes: false },
-    // Sizes without metrics-v8 never reach the wire: stamp 6, no extended.
-    { wire8: false, sizes: true, version: 6, extended: false, hasSizes: false },
-    {
-      wire8: false,
-      sizes: false,
-      version: 6,
-      extended: false,
-      hasSizes: false,
-    },
-  ];
-  for (const c of cases) {
-    const clock = new FakeClock();
-    const sent: unknown[] = [];
-    const scheduler = makeScheduler({
-      clock,
-      durabilityFlag: () => c.wire8,
-      sizesFlag: () => c.sizes,
-      collectorFactory: () =>
-        createFakeCollector((sequence) => {
-          const r = supportedSample(sequence);
-          if (r.supported) {
-            r.sample.extended = {
-              docker: { containersRunning: 2 },
-              sizes: { memoryTotalBytes: 8e9 },
-            };
-          }
-          return r;
-        }),
-    });
-    scheduler.attach(capturingSink(sent));
-    await clock.advance(0);
-    const frame = sent[0] as {
-      metadata: { version: number };
-      extended?: Record<string, unknown>;
-    };
-    assertEquals(frame.metadata.version, c.version);
-    assertEquals(frame.extended !== undefined, c.extended);
-    assertEquals(
-      frame.extended !== undefined && "sizes" in frame.extended,
-      c.hasSizes,
-    );
-  }
-});
-
-it("a control plane that negotiates metrics-v8 later flips the same scheduler from wire version 6 to 8", async () => {
-  const clock = new FakeClock();
-  const sent: unknown[] = [];
-  let wire8 = false;
-  const scheduler = makeScheduler({
-    clock,
-    intervalMs: 1_000,
-    durabilityFlag: () => wire8,
-    collectorFactory: () =>
-      createFakeCollector((sequence) => supportedSample(sequence)),
-  });
-  scheduler.attach(capturingSink(sent));
-  await clock.advance(0);
-  wire8 = true;
-  await clock.advance(1_000);
-  const versions = sent.map((s) =>
-    (s as { metadata: { version: number } }).metadata.version
-  );
-  assertEquals(versions, [6, 8]);
 });
 
 it("the live-stream collector is told it is live (so it skips event detection); the baseline is not", async () => {
@@ -1360,7 +1210,6 @@ it("the live-stream collector is told it is live (so it skips event detection); 
   const scheduler = makeScheduler({
     clock,
     intervalMs: 60_000,
-    durabilityFlag: () => true,
     collectorFactory: () => ({
       collect: ({ sequence, live }) => {
         seen.push(live);

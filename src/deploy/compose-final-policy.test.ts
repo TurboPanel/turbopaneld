@@ -181,7 +181,7 @@ test("custom bridge options on a network are refused without approval", () => {
 
 test("the shared Traefik only reads containers the daemon marked as routed", () => {
   const compose = traefikCompose("net", ["172.18.0.1"]);
-  if (!compose.includes("com.turbopanel.system.routed")) {
+  if (!compose.includes("io.turbopanel.system.routed")) {
     throw new TypeError("shared Traefik has no provider constraint");
   }
 });
@@ -214,7 +214,7 @@ test("the reserved host port refusal names who reserves them and lists the ports
   assertThrows(
     () => assertComposePolicy(doc, {}),
     Error,
-    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 18080-18999, 19100-19799",
+    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 9443, 18080-18999, 19100-19799",
   );
 });
 

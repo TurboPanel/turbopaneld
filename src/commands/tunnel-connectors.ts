@@ -86,7 +86,9 @@ export async function handleTunnelConnectors(
     if (outcome.status === "fulfilled" && outcome.value) {
       logInfo(
         "tunnels",
-        `started the stopped connector of tunnel ${unchanged[index]!.tunnelId}`,
+        `${outcome.value} the connector of tunnel ${
+          unchanged[index]!.tunnelId
+        }`,
       );
     }
   });

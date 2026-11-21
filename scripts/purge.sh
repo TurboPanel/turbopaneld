@@ -1322,7 +1322,7 @@ tp_docker_collect() {
   : > "$TP_TMP/work.volumes"
   : > "$TP_TMP/work.cpmarkers"
   _dc_rows=$TP_TMP/docker.rows
-  _dc_fmt='{{.Names}}|{{.Label "turbopanel.role"}}|{{.Label "com.turbopanel.system.component"}}|{{.Label "com.turbopanel.service"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "com.docker.compose.project"}}'
+  _dc_fmt='{{.Names}}|{{.Label "turbopanel.role"}}|{{.Label "io.turbopanel.system.component"}}|{{.Label "io.turbopanel.service"}}|{{.Label "com.docker.compose.project.working_dir"}}|{{.Label "com.docker.compose.project.config_files"}}|{{.Label "com.docker.compose.project"}}'
   if docker ps -a --format "$_dc_fmt" > "$_dc_rows" 2>>"$TP_LOG_FILE"; then
     awk -F '|' '{
       name = $1
@@ -1702,6 +1702,8 @@ tp_inventory_folders() {
       tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_root" ""
     done
     tp_add_existing "$TP_TMP/inv.folders_remove" /root/.ansible ""
+    # An ansible-lint probe run from / (older installs) left its project cache here.
+    tp_add_existing "$TP_TMP/inv.folders_remove" /.ansible ""
   fi
 }
 
@@ -2300,12 +2302,28 @@ tp_remove_docker_containers() {
   return 0
 }
 
+# Container image builds run in one slice per build below
+# turbopanel-imagebuild.slice (tp-host image-build-slice). They only exist as
+# runtime properties: stop them, then remove the drop-ins `systemctl
+# set-property --runtime` left in the control directory.
+TP_SYSTEMD_CONTROL_DIR="${TP_SYSTEMD_CONTROL_DIR:-/run/systemd/system.control}"
+tp_remove_image_build_slices() {
+  tp_run "stop the image build slices" systemctl stop \
+    'turbopanel-imagebuild-*.slice' turbopanel-imagebuild.slice || true
+  for _rib_dir in "$TP_SYSTEMD_CONTROL_DIR"/turbopanel-imagebuild*.slice.d; do
+    [ -d "$_rib_dir" ] || continue
+    tp_run "remove $_rib_dir" rm -rf "$_rib_dir" || true
+  done
+  return 0
+}
+
 tp_finalize_turbopanel_units() {
   tp_print_step "▸" "Units (after Docker)"
   if ! tp_has_tool systemctl; then
     tp_record_skip "systemctl not installed"
     return 0
   fi
+  tp_remove_image_build_slices
   for _ftu_slice in turbopanel.slice turbopanel-containers.slice turbopaneld.slice; do
     tp_stop_disable_unit "$_ftu_slice"
   done
@@ -2833,6 +2851,7 @@ tp_remove_folders_and_shell() {
   tp_safe_rm_tree /run/turbopanel-gate
   tp_safe_rm_tree /var/cache/turbopanel
   tp_safe_rm_tree /root/.ansible
+  tp_safe_rm_tree /.ansible
   tp_strip_shell_rcs
 }
 
@@ -4269,7 +4288,7 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # folder configured elsewhere in daemon.env; those are listed as kept.
 # Root's update records (lib/installed-build, lib/update-guard-armed) go with
 # /opt/turbopanel.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
 # Where systemd keeps the stamp files of persistent timers (outside the owned
 # trees; only stamp-turbopanel-*.timer is ever removed from it).
 TP_TIMER_STAMP_DIR=/var/lib/systemd/timers

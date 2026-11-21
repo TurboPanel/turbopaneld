@@ -5,6 +5,14 @@
  * stamped by `compose-labels.ts` and the Traefik compose emitters.
  */
 
+/** Prefix of every label the daemon writes. */
+export const LABEL_PREFIX = "io.turbopanel.";
+
+/** A Traefik provider constraint that matches `key=value`. */
+export function traefikLabelConstraint(key: string, value: string): string {
+  return `Label(\`${key}\`,\`${value}\`)`;
+}
+
 /**
  * Role of a container in the TurboPanel inventory vocabulary:
  * `service` (tenant workload / managed engine row), `ingress` (Traefik),
@@ -15,30 +23,30 @@
 export const LABEL_ROLE = "turbopanel.role";
 
 /** TurboPanel service UUID (tenant hosting or system Traefik). */
-export const LABEL_SERVICE_ID = "com.turbopanel.service";
+export const LABEL_SERVICE_ID = "io.turbopanel.service";
 
 /** Marks a container that publishes raw tcp/udp ports (per-service Traefik boundary). */
-export const LABEL_RAW_PORT = "com.turbopanel.raw-port";
+export const LABEL_RAW_PORT = "io.turbopanel.raw-port";
 
 /**
  * Marks a container the platform routes through the shared Traefik. Only the
- * daemon stamps it (the `com.turbopanel.system.` namespace is reserved), and the
+ * daemon stamps it (the `io.turbopanel.system.` namespace is reserved), and the
  * shared Traefik's provider constraint requires it, so a `traefik.*` label a
  * site owner wrote can never route traffic by itself.
  */
-export const LABEL_ROUTED = "com.turbopanel.system.routed";
+export const LABEL_ROUTED = "io.turbopanel.system.routed";
 
 /** Project UUID stamped on tenant app containers. */
-export const LABEL_PROJECT = "com.turbopanel.project";
+export const LABEL_PROJECT = "io.turbopanel.project";
 
 /** Environment UUID stamped on tenant app containers. */
-export const LABEL_ENVIRONMENT = "com.turbopanel.environment";
+export const LABEL_ENVIRONMENT = "io.turbopanel.environment";
 
 /**
  * Platform-owned system component name (e.g. `hosting-ingress`).
- * Joins the existing `com.turbopanel.*` identity namespace.
+ * Joins the `io.turbopanel.*` identity namespace.
  */
-export const LABEL_SYSTEM_COMPONENT = "com.turbopanel.system.component";
+export const LABEL_SYSTEM_COMPONENT = "io.turbopanel.system.component";
 
 /**
  * Inventory role for tenant workload / managed-engine container rows.
@@ -62,13 +70,13 @@ export const LABEL_ROLE_SYSTEM = "turbopanel";
  * owns it (the `deployment.json` under `<stateDir>/deployments`): the compose
  * project name identifies the deployment, the compose service name keys into
  * the manifest's `serviceIds`. Compose owns them, so they cannot be re-stamped by
- * a tenant's own `labels:` block the way `com.turbopanel.*` values could be.
+ * a tenant's own `labels:` block the way `io.turbopanel.*` values could be.
  */
 export const LABEL_COMPOSE_PROJECT = "com.docker.compose.project";
 export const LABEL_COMPOSE_SERVICE = "com.docker.compose.service";
 
 /**
- * `com.turbopanel.system.component` values of the throwaway helper containers
+ * `io.turbopanel.system.component` values of the throwaway helper containers
  * the daemon starts with a plain `docker run` (backup tar, restore swap, managed
  * file ownership, engine volume bootstrap). The Docker gate allows them as
  * platform containers by this label, so every such `docker run` must stamp it

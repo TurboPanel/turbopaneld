@@ -9,6 +9,10 @@ import { rehydrateLocalDeployments } from "./rehydrate-deployments.ts";
 import type { DockerCliResult } from "./docker-cli.ts";
 import { DaemonApiClient } from "../instance/api-client.ts";
 import { createFakeInstanceApi } from "../testing/fake-instance-api.ts";
+import {
+  STUB_SEALING_CONTEXT,
+  stubSealedAnswer,
+} from "../testing/stub-sealed-answer.ts";
 import { collectContainerLogs } from "../logs/container-tail.ts";
 import { createNoopCommandOutputSink } from "../logs/contracts.ts";
 import { resetSharedSecretRedactorForTests } from "../logs/redactor.ts";
@@ -38,6 +42,7 @@ function newClient(): DaemonApiClient {
   return new DaemonApiClient({
     config: INSTANCE_CONFIG,
     getToken: () => Promise.resolve("tok"),
+    sealing: STUB_SEALING_CONTEXT,
   });
 }
 
@@ -53,9 +58,10 @@ test({
       api.script(
         "/api/daemon/v1/secrets/decrypt",
         () =>
-          new Response(JSON.stringify({ plaintexts: [SEALED, null, 7] }), {
-            status: 200,
-          }),
+          new Response(
+            JSON.stringify(stubSealedAnswer([SEALED, null, null])),
+            { status: 200 },
+          ),
       );
       const out = await newClient().decryptSecrets(["a", "b", "c"]);
       assertEquals(out, [SEALED, null, null]);
@@ -117,7 +123,7 @@ test({
       api.script(
         "/api/daemon/v1/secrets/decrypt",
         () =>
-          new Response(JSON.stringify({ plaintexts: [SEALED] }), {
+          new Response(JSON.stringify(stubSealedAnswer([SEALED])), {
             status: 200,
           }),
       );

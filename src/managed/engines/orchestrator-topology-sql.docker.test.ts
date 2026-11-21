@@ -144,7 +144,7 @@ async function withEngineContainer(
     await waitForEngineTcpReady(containerName, engine);
     await fn(containerName);
   } finally {
-    await runDocker(["rm", "-f", containerName]);
+    await runDocker(["rm", "-f", "-v", containerName]);
   }
 }
 

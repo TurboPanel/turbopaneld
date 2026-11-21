@@ -43,6 +43,7 @@ import {
   inspectHostingIngressContainer,
   listPersistedTcpUdpServiceIds,
   parseIngressNetworkGateways,
+  plannedFallbackForSites,
   readAcmeModeHostnames,
   readEnvironmentTcpUdpServiceIds,
   removeEnvironmentTcpUdpServiceIngress,
@@ -59,6 +60,7 @@ import {
   setEnsureHostingCaddyRuntimeForTest,
   setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
+  siteBindAddresses,
   siteSnippet,
   snippetSiteAddresses,
   sortCaddySiteRoutes,
@@ -319,14 +321,14 @@ test("traefikCompose with identity emits container_name, system x-turbopanel, an
   assertStringIncludes(compose, "turbopanel.role: ingress");
   assertStringIncludes(
     compose,
-    'com.turbopanel.system.component: "hosting-ingress"',
+    'io.turbopanel.system.component: "hosting-ingress"',
   );
   assertStringIncludes(
     compose,
-    `com.turbopanel.service: "${SYSTEM_INGRESS_IDENTITY.serviceId}"`,
+    `io.turbopanel.service: "${SYSTEM_INGRESS_IDENTITY.serviceId}"`,
   );
   assertEquals(compose.includes("traefik.enable"), false);
-  assertEquals(compose.includes("com.turbopanel.raw-port"), false);
+  assertEquals(compose.includes("io.turbopanel.raw-port"), false);
   // Loopback / PROXY / TLS / socket / network unchanged vs anonymous shape.
   assertStringIncludes(compose, "127.0.0.1:7080:7080");
   assertStringIncludes(compose, "127.0.0.1:7443:7443");
@@ -588,6 +590,59 @@ const HIDE_HEADER_BLOCK = `  header {
   }
 `;
 
+const PEER_UPSTREAM = {
+  kind: "peer" as const,
+  targets: ["192.0.2.5:443"],
+  trustFile: "/etc/turbopanel/tunnel/ca.pem",
+  trustedProxies: ["127.0.0.0/8"],
+};
+
+test("siteSnippet answers a fixed 503 and times out a silent peer on the peer path", () => {
+  const base = {
+    hostname: "app.example.com",
+    tlsDir: TLS_DIR,
+    upstream: PEER_UPSTREAM,
+  };
+  const snippet = siteSnippet(base);
+  const error = `  handle_errors {
+    respond "This site is not running right now." 503
+  }
+`;
+  // Both blocks carry the page: the HTTPS block forwards to the peer, and the
+  // HTTP redirect block is given the same page by the shared block preamble.
+  assertStringIncludes(snippet, error);
+  assertEquals(snippet.split("handle_errors {").length - 1, 2);
+  const httpBlock = snippet.slice(
+    snippet.indexOf("http://app.example.com {"),
+    snippet.indexOf("\napp.example.com {"),
+  );
+  assertStringIncludes(httpBlock, error);
+  assertStringIncludes(snippet, "dial_timeout 2s");
+  assertStringIncludes(snippet, "response_header_timeout 60s");
+  assertStringIncludes(snippet, "keepalive 15s");
+
+  // With header removal the answer shares the one handle_errors block.
+  const hidden = siteSnippet({ ...base, hideWebServerNames: true });
+  assertEquals(hidden.split("handle_errors {").length - 1, 2);
+  assertStringIncludes(
+    hidden,
+    `  handle_errors {
+    header {
+      -Server
+      -Via
+      -X-Powered-By
+      defer
+    }
+    respond "This site is not running right now." 503
+  }
+`,
+  );
+
+  // A name served on this server keeps Caddy's own error answer.
+  const local = siteSnippet({ hostname: "app.example.com", tlsDir: TLS_DIR });
+  assertEquals(local.includes("handle_errors"), false);
+});
+
 test("siteSnippet strips server names from every block only when asked", () => {
   const base = { hostname: "app.example.com", tlsDir: TLS_DIR };
   assertEquals(siteSnippet(base).includes("-Server"), false);
@@ -718,6 +773,54 @@ test("hostingFallbackSnippet answers unhosted names on 80 and 443 and hides name
   assertEquals(hidden.split(HIDE_HEADER_BLOCK).length - 1, 3);
 });
 
+test("hostingFallbackSnippet serves the default page as a 404 on all three blocks", () => {
+  const plain = hostingFallbackSnippet(false);
+  assertEquals(plain.split("respond <<HTML").length - 1, 3);
+  assertEquals(plain.split("    HTML 404\n").length - 1, 3);
+  assertEquals(plain.includes('respond "" 200'), false);
+  assertEquals(
+    plain.split('header Content-Type "text/html; charset=utf-8"').length - 1,
+    3,
+  );
+  assertEquals(plain.split('header Cache-Control "no-store"').length - 1, 3);
+  assertStringIncludes(plain, "This site isn't live yet.");
+  assertStringIncludes(
+    plain,
+    "If you own this site, deploy it from your TurboPanel control plane.",
+  );
+  // Self-contained: no external fonts, scripts or images.
+  assertEquals(/<script|<img|<link|@import|url\(|src=/.test(plain), false);
+  assertStringIncludes(plain, "prefers-color-scheme:dark");
+  assertStringIncludes(plain, 'name="viewport"');
+});
+
+test("hostingFallbackSnippet leaves the footer out only when names are hidden", () => {
+  const link = '<a href="https://turbopanel.io">TurboPanel</a>';
+  for (
+    const shown of [
+      hostingFallbackSnippet(false),
+      hostingFallbackSnippet(undefined),
+    ]
+  ) {
+    assertEquals(shown.split(`Hosted with ${link}`).length - 1, 3);
+  }
+  assertEquals(hostingFallbackSnippet(true).includes("Hosted with"), false);
+  assertEquals(hostingFallbackSnippet(true).includes("turbopanel.io"), false);
+});
+
+test("hostingFallbackSnippet reflects no request data and escapes every CSS brace", () => {
+  const snippet = hostingFallbackSnippet(false, true);
+  // A placeholder would let a visitor-chosen Host reach the page unescaped.
+  assertEquals(/\{http\./.test(snippet), false);
+  assertEquals(snippet.includes("{{"), false);
+  // Every opening brace in the page body is escaped so Caddy keeps the CSS.
+  const body = snippet.slice(
+    snippet.indexOf("respond <<HTML"),
+    snippet.indexOf("    HTML 404"),
+  );
+  assertEquals(/(^|[^\\])\{/.test(body), false);
+});
+
 test("the Caddyfile hands every unmatched name the one fixed fallback certificate", () => {
   const config = caddyfile(CONFIG_DIR);
   assertStringIncludes(config, "default_sni unconfigured.invalid");
@@ -745,7 +848,12 @@ for (const sendViaHeader of [true, false, undefined]) {
       const fallback = await Deno.readTextFile(
         join(sitesDir, "00-fallback.caddy"),
       );
-      assertEquals(fallback, hostingFallbackSnippet(true, sendViaHeader));
+      // The deployed site binds to its own address, so its set is answered too.
+      assertEquals(
+        fallback,
+        hostingFallbackSnippet(true, sendViaHeader, siteBindAddresses([site])),
+      );
+      assertStringIncludes(fallback, "bind 203.0.113.10");
       for (const text of [site, fallback]) {
         assertEquals(/^\s*-Via$/m.test(text), sendViaHeader !== true);
         assertEquals(/^\s*-Server$/m.test(text), true);
@@ -776,7 +884,13 @@ for (const hide of [true, false]) {
       const fallback = await Deno.readTextFile(
         join(layout.configDir, "hosting", "sites", "00-fallback.caddy"),
       );
-      assertEquals(fallback, hostingFallbackSnippet(hide));
+      assertEquals(
+        fallback,
+        hostingFallbackSnippet(hide, undefined, {
+          http: ["203.0.113.10"],
+          https: ["203.0.113.10"],
+        }),
+      );
       assertEquals(fallback.includes("-Server"), hide);
     } finally {
       restore();
@@ -1155,7 +1269,7 @@ test("serviceTraefikCompose emits container_name, constraint, and x-turbopanel",
   );
   assertStringIncludes(
     compose,
-    `Label(\`com.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) && Label(\`com.turbopanel.raw-port\`,\`true\`)`,
+    `Label(\`io.turbopanel.service\`,\`${SERVICE_INGRESS_IDENTITY.serviceId}\`) && Label(\`io.turbopanel.raw-port\`,\`true\`)`,
   );
   assertStringIncludes(compose, HOSTING_INGRESS_NETWORK);
   assertEquals(compose.includes("entrypoints.web"), false);
@@ -4152,6 +4266,10 @@ test("gate mode: a service Traefik mounts the read-only socket directory and kee
   assertStringIncludes(yaml, GATE_ENDPOINT);
   assertStringIncludes(yaml, `      - ${GATE_MOUNT}`);
   assertStringIncludes(yaml, "--providers.docker.constraints=");
+  assertStringIncludes(
+    yaml,
+    "Label(`io.turbopanel.raw-port`,`true`)",
+  );
   assertEquals(yaml.includes("docker-socket-proxy"), false);
 });
 
@@ -4780,6 +4898,59 @@ test("buildCaddyHostnameRoutes www-to-root serves the bare name and redirects ww
   );
   assertEquals(routes.get("shop.example.com")!.routes.length, 1);
   assertEquals(routes.get("example.com")!.redirectTo, undefined);
+});
+
+test("buildCaddyHostnameRoutes gives each name its own certificate mode and its redirect follows", () => {
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com", "shop.example.com"], "www-to-root", {
+        tlsMode: "acme",
+        proxy: { forceHttps: false },
+        nameTls: [{ hostname: "example.com", tlsMode: "internal" }],
+      }),
+    ],
+  });
+  // example.com keeps the row's HTTPS setting and its www redirect follows it.
+  assertEquals(routes.get("example.com")!.tlsMode !== "acme", true);
+  assertEquals(routes.get("example.com")!.forceHttps, false);
+  assertEquals(routes.get("www.example.com")!.tlsMode !== "acme", true);
+  assertEquals(routes.get("www.example.com")!.forceHttps, false);
+  // shop.example.com is unlisted and stays on the row's acme.
+  assertEquals(routes.get("shop.example.com")!.tlsMode, "acme");
+  assertEquals(routes.get("shop.example.com")!.forceHttps, true);
+  assertEquals(routes.get("www.shop.example.com")!.tlsMode, "acme");
+});
+
+test("buildCaddyHostnameRoutes lets a redirect name choose its own certificate mode", () => {
+  for (const www of ["www-to-root", "root-to-www"] as const) {
+    const [from, to] = www === "www-to-root"
+      ? ["www.example.com", "example.com"]
+      : ["example.com", "www.example.com"];
+    const routes = buildCaddyHostnameRoutes({
+      ...WWW_BASE_PAYLOAD,
+      hostings: [
+        wwwHosting(["example.com"], www, {
+          nameTls: [{ hostname: from, tlsMode: "acme" }],
+        }),
+      ],
+    });
+    assertEquals(routes.get(from)!.redirectTo, to);
+    assertEquals(routes.get(from)!.tlsMode, "acme");
+    assertEquals(routes.get(to)!.tlsMode !== "acme", true);
+  }
+  // Own internal choice on the redirect name beats the target's acme.
+  const routes = buildCaddyHostnameRoutes({
+    ...WWW_BASE_PAYLOAD,
+    hostings: [
+      wwwHosting(["example.com"], "www-to-root", {
+        tlsMode: "acme",
+        nameTls: [{ hostname: "www.example.com", tlsMode: "internal" }],
+      }),
+    ],
+  });
+  assertEquals(routes.get("example.com")!.tlsMode, "acme");
+  assertEquals(routes.get("www.example.com")!.tlsMode !== "acme", true);
 });
 
 test("buildCaddyHostnameRoutes root-to-www serves www and redirects the bare name", () => {
@@ -5472,6 +5643,61 @@ test("ensureHostingFallback keeps a fallback a deploy wrote and takes the choice
   }
 });
 
+test("ensureHostingFallback replaces an older blank-200 fallback, keeps its choices, then is idempotent", async () => {
+  for (
+    const [hide, via] of [[true, false], [false, true], [false, false]] as const
+  ) {
+    const { layout, cleanup } = await makeTestLayout();
+    const calls: string[][] = [];
+    const restore = setIngressHostCommandForTest(fakeHostRun(layout, calls));
+    try {
+      const hostingDir = await startedHostingHost(layout);
+      const fallbackPath = join(hostingDir, "sites", "00-fallback.caddy");
+      const deletions = [
+        ...(hide ? ["-Server", "-X-Powered-By"] : []),
+        ...(via ? [] : ["-Via"]),
+      ].map((line) => `  ${line}\n`).join("");
+      const blank = `# Names nobody hosts. Rewritten on every deploy.
+http:// {
+${deletions}  respond "" 200
+}
+
+https:// {
+${deletions}  respond "" 200
+}
+
+unconfigured.invalid {
+  tls internal
+${deletions}  respond "" 200
+}
+`;
+      await Deno.writeTextFile(fallbackPath, blank);
+      await Deno.writeTextFile(
+        join(hostingDir, "Caddyfile"),
+        caddyfile(layout.configDir),
+      );
+      const where = JSON.stringify({ hide, via });
+      assertEquals(await ensureHostingFallback(layout, noGrant), true, where);
+      const next = await Deno.readTextFile(fallbackPath);
+      assertEquals(next, hostingFallbackSnippet(hide, via), where);
+      assertEquals(next.includes('respond "" 200'), false, where);
+      const reloads = calls.filter((a) => a.includes("reload")).length;
+      assertEquals(reloads, 1, where);
+
+      assertEquals(await ensureHostingFallback(layout, noGrant), false, where);
+      assertEquals(await Deno.readTextFile(fallbackPath), next, where);
+      assertEquals(
+        calls.filter((a) => a.includes("reload")).length,
+        reloads,
+        where,
+      );
+    } finally {
+      restore();
+      await cleanup();
+    }
+  }
+});
+
 test("ensureHostingFallback takes the Via choice from written sites", async () => {
   const { layout, cleanup } = await makeTestLayout();
   const restore = setIngressHostCommandForTest(fakeHostRun(layout));
@@ -5554,6 +5780,146 @@ test("ensureHostingFallback leaves live files untouched when Caddy refuses, and 
       0,
     );
     refuse = false;
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("siteBindAddresses lists each bound address once per scheme, sorted, across overlapping sets, and ignores anything but IP literals", () => {
+  const addresses = siteBindAddresses([
+    "http://a.test {\n  bind 127.0.0.1 10.0.0.5\n  respond ok\n}\n\na.test {\n  bind 127.0.0.1 10.0.0.5\n  tls internal\n}\n",
+    "https://b.test {\n  bind 10.0.0.5 127.0.0.1\n}\n",
+    "c.test {\n  bind [fd00::1]\n}\n",
+    "http://d.test {\n  bind 127.0.0.1\n}\n",
+    'e.test {\n  bind evil 192.0.2.9 999.1.1.1 [zz]\n  respond "x"\n}\n',
+    "f.test {\n    bind 192.0.2.1\n}\n",
+  ]);
+  assertEquals(addresses, {
+    http: ["10.0.0.5", "127.0.0.1"],
+    https: ["[fd00::1]", "10.0.0.5", "127.0.0.1", "192.0.2.9"],
+  });
+  assertEquals(siteBindAddresses(["a.test {\n  respond ok\n}\n"]), {
+    http: [],
+    https: [],
+  });
+});
+
+test("siteBindAddresses follows the schemes the site blocks really serve", () => {
+  const common = {
+    tlsDir: "/tls",
+    upstream: { kind: "http", host: "127.0.0.1", port: 9000 } as const,
+  };
+  // Plain HTTP only: no HTTPS listener, so none on :443.
+  assertEquals(
+    siteBindAddresses([
+      siteSnippet({
+        ...common,
+        hostname: "h.test",
+        forceHttps: false,
+        bindAddress: "192.0.2.5",
+      }),
+    ]),
+    { http: ["192.0.2.5"], https: [] },
+  );
+  // A locked tunnel name has an HTTPS site on its addresses and no HTTP site.
+  assertEquals(
+    siteBindAddresses([
+      siteSnippet({
+        ...common,
+        hostname: "t.test",
+        bindAddress: "192.0.2.5",
+        tunnel: { lock: true, peers: [], extraBind: [] },
+      }),
+    ]),
+    { http: [], https: ["127.0.0.1", "192.0.2.5"] },
+  );
+});
+
+test("hostingFallbackSnippet answers unhosted names on each bound scheme and address once", () => {
+  assertEquals(
+    hostingFallbackSnippet(false, false, { http: [], https: [] }),
+    hostingFallbackSnippet(false, false),
+  );
+  const bound = hostingFallbackSnippet(false, false, {
+    http: ["127.0.0.1"],
+    https: ["10.0.0.5", "127.0.0.1"],
+  });
+  assertStringIncludes(bound, "http:// {\n  bind 127.0.0.1\n");
+  assertStringIncludes(bound, "https:// {\n  bind 10.0.0.5\n");
+  assertEquals(bound.includes("http:// {\n  bind 10.0.0.5\n"), false);
+  // The unbound catch-all, its fixed-name block and one block per scheme and address.
+  assertEquals(bound.split("respond <<HTML").length - 1, 6);
+  assertEquals(bound.split("bind 127.0.0.1\n").length - 1, 2);
+  // Same page everywhere: no request data, every CSS brace escaped.
+  assertEquals(bound.includes("{host}"), false);
+  assertEquals(bound.includes(":root{"), false);
+  assertEquals(bound.includes("Hosted with"), true);
+  assertEquals(
+    hostingFallbackSnippet(true, false, { http: ["127.0.0.1"], https: [] })
+      .includes("Hosted with"),
+    false,
+  );
+});
+
+test("plannedFallbackForSites follows the bind addresses of the files on disk and the pending ones", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    assertEquals(await plannedFallbackForSites(sitesDir, new Map()), undefined);
+    await Deno.writeTextFile(
+      join(sitesDir, "00-fallback.caddy"),
+      hostingFallbackSnippet(false, true),
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-a.caddy"),
+      "http://a.test {\n  bind 127.0.0.1\n}\n",
+    );
+    // A quarantined file is not loaded, so its address is not answered.
+    await Deno.writeTextFile(
+      join(sitesDir, "env-q.caddy.quarantined"),
+      "q.test {\n  bind 192.0.2.99\n}\n",
+    );
+    assertEquals(
+      await plannedFallbackForSites(sitesDir, new Map()),
+      hostingFallbackSnippet(false, true, {
+        http: ["127.0.0.1"],
+        https: [],
+      }),
+    );
+    // A pending file replaces the one on disk; an unwritten one adds its own.
+    assertEquals(
+      await plannedFallbackForSites(
+        sitesDir,
+        new Map([
+          ["env-a.caddy", "a.test {\n  bind 127.0.0.1 10.0.0.5\n}\n"],
+          ["env-b.caddy", "http://b.test {\n  bind 192.0.2.7\n}\n"],
+        ]),
+      ),
+      hostingFallbackSnippet(false, true, {
+        http: ["192.0.2.7"],
+        https: ["10.0.0.5", "127.0.0.1"],
+      }),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("ensureHostingFallback adds a catch-all for the scheme and address of a bound site", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const hostingDir = await startedHostingHost(layout);
+    await Deno.writeTextFile(
+      join(hostingDir, "sites", "env-a.caddy"),
+      "a.test {\n  bind 127.0.0.1\n}\n",
+    );
+    assertEquals(await ensureHostingFallback(layout, noGrant), true);
+    assertEquals(
+      await Deno.readTextFile(join(hostingDir, "sites", "00-fallback.caddy")),
+      hostingFallbackSnippet(false, true, { http: [], https: ["127.0.0.1"] }),
+    );
   } finally {
     restore();
     await cleanup();

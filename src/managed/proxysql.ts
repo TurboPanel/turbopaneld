@@ -94,10 +94,6 @@ export const REST_API_PORT = 6070;
 export const PGSQL_PORT = 15432;
 export const MYSQL_PORT = 13306;
 
-/** Legacy client listeners accepted on the wire for control-plane skew. */
-const LEGACY_PGSQL_PORT = 5432;
-const LEGACY_MYSQL_PORT = 3306;
-
 /** Which protocol module a cluster (and therefore its listener) belongs to. */
 export type ProxySqlProtocolFamily = "pgsql" | "mysql";
 
@@ -241,11 +237,10 @@ export type ProxySqlClusterDesired = {
    */
   protocolPort: number;
   /**
-   * Protocol module this cluster belongs to. The instance always sends it;
-   * absent payloads fall back to the engine name (and then to the platform
-   * default ports) in {@link protocolFamilyForCluster}.
+   * Protocol module this cluster belongs to; the instance always sends it
+   * ({@link protocolFamilyForCluster}).
    */
-  family?: ProxySqlProtocolFamily;
+  family: ProxySqlProtocolFamily;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendDesired[];
@@ -595,7 +590,7 @@ export function assertNoFrontendUserConflict(
 ): void {
   const owners = new Map<string, Set<string>>();
   for (const cluster of desired.clusters) {
-    const family = protocolFamilyForCluster(cluster) ?? "unknown";
+    const family = protocolFamilyForCluster(cluster);
     for (const user of cluster.users) {
       const key = `${family}\0${user.username}`;
       let managedIds = owners.get(key);
@@ -792,7 +787,7 @@ function renderProxySqlTopLevelNetworks(
  * project without `-p` — which is what lets the Ansible stack unit stop
  * templating a project name it cannot know at converge time. Distinction from
  * tenant Traefik (same container suffix) is that compose project plus the
- * `com.turbopanel.system.component` label — not the suffix. Bare-uuid names
+ * `io.turbopanel.system.component` label — not the suffix. Bare-uuid names
  * remain for system-stack rows (`database` / `queue`).
  *
  * `bindAddresses` controls only the **host publish** of the client
@@ -981,34 +976,15 @@ export function buildProxySqlUndrainStatements(
   ];
 }
 
-function protocolFamilyForPort(
-  port: number,
-): ProxySqlProtocolFamily | null {
-  if (port === PGSQL_PORT || port === LEGACY_PGSQL_PORT) return "pgsql";
-  if (port === MYSQL_PORT || port === LEGACY_MYSQL_PORT) return "mysql";
-  return null;
-}
-
-function protocolFamilyForEngine(
-  engine: string,
-): ProxySqlProtocolFamily | null {
-  if (engine === "postgres") return "pgsql";
-  if (engine === "mysql" || engine === "mariadb") return "mysql";
-  return null;
-}
-
 /**
- * Resolve which protocol module a cluster belongs to, most trustworthy source
- * first: the explicit `family` the instance sends, then the engine name, then
- * (only for payloads predating both) the platform-default port map. Once ports
- * are organization-configurable the port number alone cannot answer this — an
- * org may well move PostgreSQL to a port that used to mean MySQL.
+ * The protocol module a cluster belongs to: the explicit `family` the instance
+ * sends. Ports are organization-configurable, so neither the port number nor
+ * the engine name stands in for it.
  */
 export function protocolFamilyForCluster(
   cluster: ProxySqlClusterDesired,
-): ProxySqlProtocolFamily | null {
-  return cluster.family ?? protocolFamilyForEngine(cluster.engine) ??
-    protocolFamilyForPort(cluster.protocolPort);
+): ProxySqlProtocolFamily {
+  return cluster.family;
 }
 
 function clusterMatchesFamily(
@@ -1986,7 +1962,8 @@ function hasProxySqlLabels(
   const labels = readComposePsLabels(entry);
   return (
     labels[LABEL_ROLE] === LABEL_ROLE_INGRESS &&
-    labels[LABEL_SYSTEM_COMPONENT] === SYSTEM_MANAGED_INGRESS_COMPONENT
+    labels[LABEL_SYSTEM_COMPONENT] ===
+      SYSTEM_MANAGED_INGRESS_COMPONENT
   );
 }
 

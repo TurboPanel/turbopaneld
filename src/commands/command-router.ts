@@ -4,7 +4,6 @@ import {
   deliverCommandOutcome,
   markCommandInFlight,
   noteCommandProgress,
-  recoveryEnabled,
   sendCommandFrame,
 } from "./command-outbox.ts";
 import { errorText, logWarn, sanitizeForLog } from "../util/logger.ts";
@@ -399,7 +398,22 @@ export async function handleCommandDispatch(
     return;
   }
 
-  await markCommandInFlight(message.id);
+  if (!await markCommandInFlight(message.id)) {
+    // Not run: a command with no journal entry would be unknown to the
+    // control plane's recovery after a restart.
+    const at = new Date().toISOString();
+    await deliverCommandOutcome(ws, {
+      type: "command-outcome",
+      id: message.id,
+      ok: false,
+      error:
+        "The server could not record this command on disk, so it was not run.",
+      at,
+      daemonReceivedAt,
+      daemonRespondedAt: at,
+    });
+    return;
+  }
   // A new server connects before its boot converge has finished; no command
   // runs on top of that converge. It was acknowledged above and is marked
   // running before the wait, so the same command sent again meanwhile is
@@ -572,7 +586,6 @@ export async function handleCommandDispatch(
           commandId: message.commandId,
           send: (progressMessage) => sendCommandFrame(ws, progressMessage),
           onSnapshot: (snapshot) => noteCommandProgress(message.id, snapshot),
-          keepalive: () => recoveryEnabled(),
         });
         try {
           result = await pickCommandRouterHandler(

@@ -28,12 +28,12 @@ import {
 const test = Deno.test.bind(Deno);
 
 const ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
-const BIN = "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared";
+const BIN = "/opt/turbopanel/vendor/cloudflared/2026.11.1/cloudflared";
 
-test("a tunnel id is a lower-case UUID or one of the two legacy names", () => {
+test("a tunnel id is a lower-case UUID or instance", () => {
   assert(isTunnelId(ID));
   assert(isTunnelId("instance"));
-  assert(isTunnelId("default"));
+  assert(!isTunnelId("default"));
 });
 
 test("an id that could become a path or a unit name is refused", () => {
@@ -134,7 +134,7 @@ test("a record round-trips and a damaged one is ignored", () => {
   const record = {
     id: ID,
     port: 20310,
-    version: "2026.10.7",
+    version: "2026.11.1",
     tokenDigest: "ab",
     slot: "a" as const,
   };

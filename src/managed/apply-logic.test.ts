@@ -20,7 +20,6 @@ import {
   provisionManagedRootPasswordFile,
   writeManagedRootPasswordFile,
 } from "./apply.ts";
-import { normalizeManagedCompose } from "./compose.ts";
 import {
   managedDir,
   managedEnvFilePath,
@@ -176,7 +175,7 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
   ]);
 });
 
-test("primary applyManagedEngineState runs host prep then ensures ProxySQL monitor", async () => {
+test("primary applyManagedEngineState ensures the payload ProxySQL monitor roles", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {
@@ -236,30 +235,13 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
         engine as never,
         payload,
         credentials,
-        {
-          runHostPrep: async () => {
-            calls.push("hostPrep");
-            const layout = resolveLayout(Deno.env.toObject());
-            await Deno.mkdir(`${layout.configDir}/proxysql`, {
-              recursive: true,
-            });
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/admin.cnf`,
-              "[client]\nuser=admin\npassword=admin-secret\n",
-            );
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/monitor.cnf`,
-              "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
-            );
-          },
-        },
+        { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
       );
 
       assertEquals(calls, [
         "waitReady",
         "applyDatabases",
         "applyCredentials",
-        "hostPrep",
         "ensure:tp_monitor",
         "readVersion",
       ]);
@@ -447,7 +429,7 @@ test("primary applyManagedEngineState skips drop when only the root username is 
   assertEquals(state.appliedUsers, ["postgres"]);
 });
 
-test("primary applyManagedEngineState skips ProxySQL monitor when monitor.cnf is missing", async () => {
+test("primary applyManagedEngineState skips ProxySQL monitor roles when the payload has no monitorUsers", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {
@@ -844,7 +826,7 @@ test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-
   }
 });
 
-test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a changed one to the file form", async () => {
+test("chooseManagedCompose always builds the file form", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const path = `${dir}/docker-compose.yml`;
@@ -867,13 +849,6 @@ test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a 
 
     const fresh = await chooseManagedCompose(path, payload);
     assertEquals(fresh.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
-
-    const legacy = normalizeManagedCompose(payload, {
-      legacyRootPasswordEnv: true,
-    });
-    await Deno.writeTextFile(path, legacy.composeYaml);
-    const same = await chooseManagedCompose(path, payload);
-    assertEquals(same.composeYaml, legacy.composeYaml);
 
     const changed = await chooseManagedCompose(path, {
       ...payload,

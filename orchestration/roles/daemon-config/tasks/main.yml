@@ -87,25 +87,3 @@
     group: "{{ turbopanel_group }}"
     mode: "0600"
   notify: Restart turbopanel daemon
-
-- name: Ensure Cloudflare tunnel token directory
-  ansible.builtin.file:
-    path: "{{ turbopanel_daemon_tunnels_dir }}"
-    state: directory
-    owner: "{{ turbopanel_user }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0750"
-    follow: false
-
-- name: Store Cloudflare tunnel token
-  ansible.builtin.copy:
-    dest: "{{ turbopanel_daemon_tunnels_dir }}/default.token"
-    content: "{{ turbopanel_tunnel_token }}\n"
-    owner: "{{ turbopanel_user }}"
-    group: "{{ turbopanel_group }}"
-    mode: "0600"
-    # The tunnels folder is the daemon's: replace a planted link, never write
-    # through it.
-    follow: false
-  when: turbopanel_tunnel_token | length > 0
-  no_log: true

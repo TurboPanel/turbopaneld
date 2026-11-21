@@ -879,7 +879,7 @@ test({
 
 test("the image builder tools get tenant build.env without any name that loads code or is the sandbox", () => {
   const env = imageBuildToolEnvironment({
-    kind: "railpack",
+    kind: "image",
     env: {
       NEXT_PUBLIC_SITE_URL: "https://example.test",
       LD_AUDIT: "/checkout/evil.so",
@@ -927,7 +927,7 @@ test("the image builder tools get tenant build.env without any name that loads c
 
 test("the names the image build lane drops are listed, by name only, and include tool config families", () => {
   const dropped = droppedImageBuildEnvNames({
-    kind: "railpack",
+    kind: "image",
     env: {
       NEXT_PUBLIC_SITE_URL: "https://example.test",
       GOFLAGS: "-toolexec=/x",
@@ -949,7 +949,7 @@ test("the names the image build lane drops are listed, by name only, and include
     "PIP_INDEX_URL",
   ]);
   assertEquals(
-    droppedImageBuildEnvNames({ kind: "railpack", env: { OK_NAME: "1" } }),
+    droppedImageBuildEnvNames({ kind: "image", env: { OK_NAME: "1" } }),
     [],
   );
 });

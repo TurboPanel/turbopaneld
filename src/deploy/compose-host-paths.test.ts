@@ -1319,3 +1319,183 @@ test("an exempt config is let through only at the exact path the daemon wrote", 
     1,
   );
 });
+
+test("paths in the repository checkout resolve there, relative to its project dir", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo");
+    const projectDir = join(root, "deploy");
+    await Deno.mkdir(join(projectDir, "conf"), { recursive: true });
+    await Deno.mkdir(join(root, "vpn"), { recursive: true });
+    const checkout = { root, projectDir };
+    // Resolved by Compose against the project directory: absolute, inside repo/.
+    await assertComposeHostPathsConfined(
+      [binds(
+        {
+          type: "bind",
+          source: join(projectDir, "conf"),
+          target: "/c",
+          read_only: true,
+        },
+        {
+          type: "bind",
+          source: join(root, "vpn"),
+          target: "/v",
+          read_only: true,
+        },
+      )],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        checkout,
+        hostLevelApproved: false,
+      },
+    );
+    // Authored relative paths resolve against the project directory too.
+    await assertComposeHostPathsConfined(
+      [collectAuthoredHostPaths(
+        "services:\n  web:\n    volumes:\n      - ./conf:/c:ro\n      - ../vpn:/v:ro\n",
+      )],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        checkout,
+        hostLevelApproved: false,
+      },
+    );
+  }));
+
+test("a writable bind into the checkout is refused, a read-only one is not", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo");
+    await Deno.mkdir(join(root, "data"), { recursive: true });
+    const opts = {
+      deploymentDir: f.dir,
+      stageDir: f.stage,
+      checkout: { root, projectDir: root },
+      hostLevelApproved: false,
+    };
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({ type: "bind", source: join(root, "data"), target: "/d" })],
+          opts,
+        ),
+      ComposeHostPathError,
+    );
+    assert(
+      err.message.includes("writable bind inside the repository checkout"),
+    );
+    await assertComposeHostPathsConfined(
+      [binds({
+        type: "bind",
+        source: join(root, "data"),
+        target: "/d",
+        read_only: true,
+      })],
+      opts,
+    );
+  }));
+
+test("a path that leaves the checkout is still refused", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo");
+    await Deno.mkdir(root, { recursive: true });
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({
+            type: "bind",
+            source: f.outside,
+            target: "/o",
+            read_only: true,
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            checkout: { root, projectDir: root },
+            hostLevelApproved: false,
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(err.message.includes("outside the deployment directory"));
+  }));
+
+test("a symlink in the checkout that leaves the deployment is refused", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo");
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.symlink(f.outside, join(root, "link"));
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({
+            type: "bind",
+            source: join(root, "link"),
+            target: "/o",
+            read_only: true,
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            checkout: { root, projectDir: root },
+            hostLevelApproved: false,
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(err.message.includes("resolves through a symlink"));
+  }));
+
+test("a symlink in the checkout to the deployment directory is refused, even read-only", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo", "c0ffee");
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.symlink("../..", join(root, "up"));
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({
+            type: "bind",
+            source: join(root, "up"),
+            target: "/o",
+            read_only: true,
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            checkout: { root, projectDir: root },
+            hostLevelApproved: false,
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(err.message.includes("deployment directory itself"));
+  }));
+
+test("a symlink in the checkout to a daemon file in the deployment directory is refused, even read-only", () =>
+  withFixture(async (f) => {
+    const root = join(f.dir, "repo", "c0ffee");
+    await Deno.mkdir(root, { recursive: true });
+    await Deno.writeTextFile(join(f.dir, "deployment.json"), "{}\n");
+    await Deno.symlink("../../deployment.json", join(root, "record"));
+    const err = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({
+            type: "bind",
+            source: join(root, "record"),
+            target: "/o",
+            read_only: true,
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            checkout: { root, projectDir: root },
+            hostLevelApproved: false,
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(err.message.includes("a file in it"));
+  }));

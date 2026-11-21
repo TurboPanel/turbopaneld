@@ -147,6 +147,21 @@ async function runLabelScript(
   await Deno.mkdir(join(root, "opt/lib"), { recursive: true });
   await Deno.mkdir(join(root, "opt/share/ui"), { recursive: true });
   await Deno.mkdir(join(root, "etc/instance"), { recursive: true });
+  // run.sh refuses a state folder that is group- or world-writable; a 0002
+  // umask would make these so, so pin the modes instead of trusting it.
+  for (
+    const dir of [
+      "opt",
+      "opt/bin",
+      "opt/lib",
+      "opt/share",
+      "opt/share/ui",
+      "etc",
+      "etc/instance",
+    ]
+  ) {
+    await Deno.chmod(join(root, dir), 0o755);
+  }
   await setup(root);
   const script = join(root, "label.sh");
   await Deno.writeTextFile(

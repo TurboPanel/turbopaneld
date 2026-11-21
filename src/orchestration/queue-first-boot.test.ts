@@ -145,8 +145,9 @@ test("the access tasks wait for a running broker, repair without leaking the pas
       "change_password",
       "set_user_tags",
       "set_permissions -p",
-      "set -euo pipefail",
+      "set -uo pipefail",
       "no_log: true",
+      "failed_when: false",
       "stdin: ",
       "changed_when: \"'changed:' in",
     ]
@@ -155,11 +156,23 @@ test("the access tasks wait for a running broker, repair without leaking the pas
   }
   // The password travels on standard input only: it is read once and piped
   // once, and never follows `docker exec` as an argument.
-  assertEquals(repair.split("$password").length - 1, 1);
+  assertEquals(repair.split(`printf '%s\\n' "$password"`).length - 1, 1);
+  // The only other use blanks it out of a failure reason before it is shown.
+  assertEquals(repair.split('"$password"').length - 1, 2);
   for (const line of repair.split("\n")) {
     const exec = line.indexOf("docker exec");
     if (exec >= 0) assertEquals(line.slice(exec).includes("password"), false);
   }
+
+  // The failure reason is shown by a task outside no_log.
+  const report = taskBlock(text, "Report why the queue access repair failed");
+  assertEquals(report.includes("no_log:"), false);
+  assert(report.includes("'^failed:'"));
+  assert(report.includes("_queue_access_repair.rc"));
+  assert(
+    text.indexOf("- name: Report why the queue access repair failed") >
+      text.indexOf("- name: Repair the queue application user's access"),
+  );
 
   const confirm = taskBlock(
     text,

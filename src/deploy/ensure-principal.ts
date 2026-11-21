@@ -135,14 +135,6 @@ export function principalUnixGroupName(username: string): string {
 }
 
 /**
- * The name the group carried before it took the user's own name. Only
- * {@link ensurePrincipalGroup} still looks for it, to rename it in place.
- */
-export function legacyPrincipalUnixGroupName(username: string): string {
-  return `${username}-grp`;
-}
-
-/**
  * A numeric id the control plane asked for is already held on this host by
  * something that is not this site owner's Linux user. The daemon refuses
  * before it creates anything (so no half-made account is left behind) and says
@@ -449,37 +441,6 @@ function assertGroupIsAccountPrimary(
   }
 }
 
-/**
- * A host set up before the group took the user's own name still has
- * `<name>-grp` as the account's primary group. Rename it in place (tp-host
- * `groupmod -n <name> <name>-grp`, which checks the same things again as
- * root); files and memberships follow the gid, so nothing else moves.
- * Returns false when there is no such group to rename.
- */
-async function renameLegacyPrincipalGroup(
-  principal: PrincipalEnsureSpec,
-  groupName: string,
-  account: { gid: number },
-  runFn: RunFn,
-): Promise<boolean> {
-  const legacyName = legacyPrincipalUnixGroupName(principal.username);
-  const legacyCheck = await runFn("getent", ["group", legacyName]);
-  if (!legacyCheck.success) return false;
-  const legacyGid = parseGroupGid(legacyCheck.stdout);
-  if (legacyGid === null || legacyGid !== account.gid) return false;
-  assertAdoptedGroupGid(principal, legacyName, legacyGid);
-  const rename = await runFn(
-    "sudo",
-    hostSudoArgs(["-n", "groupmod", "-n", groupName, legacyName]),
-  );
-  if (!rename.success) {
-    throw new Error(
-      rename.stderr || `Failed to rename group ${legacyName} to ${groupName}`,
-    );
-  }
-  return true;
-}
-
 async function ensurePrincipalGroup(
   principal: PrincipalEnsureSpec,
   groupName: string,
@@ -509,15 +470,8 @@ async function ensurePrincipalGroup(
   const account = await principalAccount(principal.username, runFn);
   if (!account) assertNewOwnerName(principal.username);
   if (account) {
-    if (
-      await renameLegacyPrincipalGroup(principal, groupName, account, runFn)
-    ) {
-      return;
-    }
     throw new Error(
-      `refusing to adopt the existing account ${principal.username}: its primary group (gid=${account.gid}) is neither ${groupName} nor ${
-        legacyPrincipalUnixGroupName(principal.username)
-      }`,
+      `refusing to adopt the existing account ${principal.username}: its primary group (gid=${account.gid}) is not ${groupName}`,
     );
   }
   const args = ["-n", "groupadd"];

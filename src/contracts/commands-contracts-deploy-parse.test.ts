@@ -1,5 +1,6 @@
 import { assertEquals, assertThrows } from "@std/assert";
 import {
+  hostingTlsForName,
   parseEnvironmentDeployPayload,
   parseEnvironmentLifecyclePayload,
   parseEnvironmentStopPayload,
@@ -44,6 +45,7 @@ const DEPLOY_BASE = {
 const SOURCE_ENTRY = {
   sourceId: "00000000-0000-4000-8000-000000000001",
   composeServiceName: "web",
+  releaseServiceId: "svc-web",
   provider: "github",
   cloneUrl: "https://gitlab.test/acme/app.git",
   ref: "main",
@@ -883,10 +885,14 @@ test("parseEnvironmentDeployPayload rejects sourceMaterial parse errors", () => 
     "Invalid sourceMaterial build kind",
   );
   rejectDeploy(
+    { sourceMaterial: [{ ...SOURCE_ENTRY, build: { kind: "railpack" } }] },
+    "Invalid sourceMaterial build kind",
+  );
+  rejectDeploy(
     {
       sourceMaterial: [{
         ...SOURCE_ENTRY,
-        build: { kind: "railpack", installCommand: "x".repeat(1001) },
+        build: { kind: "image", installCommand: "x".repeat(1001) },
       }],
     },
     "Invalid sourceMaterial build installCommand",
@@ -1962,4 +1968,293 @@ test("parseEnvironmentDeployPayload refuses config names ending in .tmp", () => 
     { configFiles: [configFile({ source: "web_conf.tmp" })] },
     "Invalid environment deploy configFiles name",
   );
+});
+
+test("parseEnvironmentDeployPayload carries optional build limits, deploy-wide and per source entry", () => {
+  const GIB = 1024 ** 3;
+  const plain = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    sourceMaterial: [SOURCE_ENTRY],
+  });
+  assertEquals(plain.buildLimits, undefined);
+  assertEquals(plain.sourceMaterial?.[0]?.buildLimits, undefined);
+
+  const limited = parseEnvironmentDeployPayload({
+    ...DEPLOY_BASE,
+    buildLimits: { cores: { cores: 2, source: "organization" } },
+    sourceMaterial: [{
+      ...SOURCE_ENTRY,
+      buildLimits: {
+        cores: { cores: 1.5, source: "service" },
+        memory: { bytes: 2 * GIB, source: "server" },
+      },
+    }],
+  });
+  assertEquals(limited.buildLimits, {
+    cores: { cores: 2, source: "organization" },
+  });
+  assertEquals(
+    limited.sourceMaterial?.[0]?.buildLimits?.memory?.bytes,
+    2 * GIB,
+  );
+  rejectDeploy(
+    { buildLimits: { cores: { cores: 0, source: "server" } } },
+    "Invalid buildLimits cores",
+  );
+  rejectDeploy(
+    {
+      sourceMaterial: [{
+        ...SOURCE_ENTRY,
+        buildLimits: { memory: { bytes: 5, source: "server" } },
+      }],
+    },
+    "Invalid sourceMaterial buildLimits memory",
+  );
+});
+
+function withoutKey(
+  record: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> {
+  const copy = { ...record };
+  delete copy[key];
+  return copy;
+}
+
+test("parseEnvironmentDeployPayload rejects a source entry without releaseServiceId", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      sourceMaterial: [SOURCE_ENTRY],
+    }).sourceMaterial?.[0]?.releaseServiceId,
+    "svc-web",
+  );
+  rejectDeploy(
+    { sourceMaterial: [withoutKey(SOURCE_ENTRY, "releaseServiceId")] },
+    "Invalid sourceMaterial releaseServiceId",
+  );
+});
+
+test("parseEnvironmentDeployPayload rejects a credential without credentialKind", () => {
+  assertEquals(
+    parseEnvironmentDeployPayload({
+      ...DEPLOY_BASE,
+      sourceMaterial: [SOURCE_ENTRY],
+    }).sourceMaterial?.[0]?.credentialKind,
+    "token",
+  );
+  rejectDeploy(
+    { sourceMaterial: [withoutKey(SOURCE_ENTRY, "credentialKind")] },
+    "Invalid sourceMaterial credentialKind",
+  );
+});
+
+const NAME_TLS_A = "00000000-0000-4000-8000-0000000000a1";
+const MATERIAL_A = {
+  tlsId: NAME_TLS_A,
+  certificatePem:
+    "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n",
+  privateKeyEnvelope: TP_ENVELOPE,
+};
+
+function nameTlsDeploy(
+  overrides: Record<string, unknown>,
+  withMaterial = true,
+): Record<string, unknown> {
+  return {
+    ...DEPLOY_BASE,
+    hostingIngressNetwork: SERVICE_UUID,
+    hostings: [hosting({
+      hostnames: ["example.test", "shop.example.test"],
+      www: "www-to-root",
+      ...overrides,
+    })],
+    ...(withMaterial ? { tlsMaterial: [MATERIAL_A] } : {}),
+  };
+}
+
+test("parseEnvironmentDeployPayload carries nameTls and leaves it off when absent", () => {
+  const parsed = parseEnvironmentDeployPayload(nameTlsDeploy({
+    tlsMode: "acme",
+    nameTls: [
+      { hostname: "shop.example.test", tlsId: NAME_TLS_A },
+      { hostname: "example.test", tlsMode: "internal" },
+    ],
+  }));
+  assertEquals(parsed.hostings[0]?.nameTls, [
+    { hostname: "shop.example.test", tlsId: NAME_TLS_A },
+    { hostname: "example.test", tlsMode: "internal" },
+  ]);
+  const plain = parseEnvironmentDeployPayload(nameTlsDeploy({}));
+  assertEquals("nameTls" in (plain.hostings[0] ?? {}), false);
+  const empty = parseEnvironmentDeployPayload(nameTlsDeploy({ nameTls: [] }));
+  assertEquals("nameTls" in (empty.hostings[0] ?? {}), false);
+});
+
+test("parseEnvironmentDeployPayload refuses a malformed nameTls", () => {
+  const refuse = (nameTls: unknown, message: string, material = true) =>
+    assertThrows(
+      () => parseEnvironmentDeployPayload(nameTlsDeploy({ nameTls }, material)),
+      TypeError,
+      message,
+    );
+  refuse("x", "hostings[].nameTls must be an array");
+  refuse(["x"], "hostings[].nameTls entries must be objects");
+  refuse(
+    [{ hostname: "other.example.test", tlsMode: "internal" }],
+    "must be one of the row's served or www redirect names",
+  );
+  refuse(
+    [{ hostname: "www.other.example.test", tlsMode: "internal" }],
+    "must be one of the row's served or www redirect names",
+  );
+  refuse(
+    [
+      { hostname: "shop.example.test", tlsMode: "internal" },
+      { hostname: "shop.example.test", tlsMode: "acme" },
+    ],
+    "names a hostname twice",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsMode: "pinned" }],
+    "tlsMode must be internal or acme",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsId: "" }],
+    "tlsId must be a non-empty string",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsMode: "acme", tlsId: NAME_TLS_A }],
+    "cannot pin a certificate on an acme name",
+  );
+  refuse(
+    [{ hostname: "shop.example.test", tlsId: NAME_TLS_A }],
+    "tlsId is not in tlsMaterial",
+    false,
+  );
+});
+
+test("parseEnvironmentDeployPayload applies the tunnel acme rule per name", () => {
+  const base = {
+    tunnel: {
+      hostnames: ["example.test", "shop.example.test"],
+      peers: ["192.0.2.10"],
+      generation: 1,
+    },
+  };
+  // Whole row acme on a tunnel name stays refused, as before.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(
+        nameTlsDeploy({ tlsMode: "acme", ...base }),
+      ),
+    TypeError,
+  );
+  // The same row is fine once its tunnel names choose another way.
+  parseEnvironmentDeployPayload(nameTlsDeploy({
+    tlsMode: "acme",
+    ...base,
+    nameTls: [
+      { hostname: "example.test", tlsMode: "internal" },
+      { hostname: "shop.example.test", tlsMode: "internal" },
+    ],
+  }));
+});
+
+test("parseEnvironmentDeployPayload accepts a nameTls entry on a www redirect name", () => {
+  const parsed = parseEnvironmentDeployPayload(nameTlsDeploy({
+    nameTls: [{ hostname: "www.shop.example.test", tlsId: NAME_TLS_A }],
+  }));
+  assertEquals(parsed.hostings[0]?.nameTls, [
+    { hostname: "www.shop.example.test", tlsId: NAME_TLS_A },
+  ]);
+  const rootToWww = parseEnvironmentDeployPayload(nameTlsDeploy({
+    hostnames: ["shop.example.test"],
+    www: "root-to-www",
+    nameTls: [{ hostname: "shop.example.test", tlsMode: "acme" }],
+  }));
+  assertEquals(
+    rootToWww.hostings[0]?.nameTls?.[0]?.hostname,
+    "shop.example.test",
+  );
+  // Both spellings are served under `both`, and `off` has no redirect name.
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload(nameTlsDeploy({
+        www: "off",
+        nameTls: [{ hostname: "www.shop.example.test", tlsMode: "internal" }],
+      })),
+    TypeError,
+    "served or www redirect names",
+  );
+});
+
+test("hostingTlsForName resolves own entry, then the redirect target's entry, then the row", () => {
+  const row = {
+    hostnames: ["shop.example.test"],
+    www: "www-to-root" as const,
+    tlsId: "row",
+    tlsMode: "internal" as const,
+  };
+  const www = "www.shop.example.test";
+  const root = "shop.example.test";
+  // No nameTls: the row level, as before.
+  assertEquals(hostingTlsForName(row, www), {
+    tlsId: "row",
+    tlsMode: "internal",
+  });
+  // Only the target has an entry: the redirect name follows it.
+  const targetOnly = { ...row, nameTls: [{ hostname: root, tlsId: "root" }] };
+  assertEquals(hostingTlsForName(targetOnly, www), {
+    tlsId: "root",
+    tlsMode: undefined,
+  });
+  // The redirect name's own entry wins over its target's.
+  const both = {
+    ...row,
+    nameTls: [
+      { hostname: root, tlsId: "root" },
+      { hostname: www, tlsMode: "acme" as const },
+    ],
+  };
+  assertEquals(hostingTlsForName(both, www), { tlsId: null, tlsMode: "acme" });
+  assertEquals(hostingTlsForName(both, root), {
+    tlsId: "root",
+    tlsMode: undefined,
+  });
+  // An entry only on the redirect name leaves the target on the row level.
+  const redirectOnly = {
+    ...row,
+    nameTls: [{ hostname: www, tlsId: "own" }],
+  };
+  assertEquals(hostingTlsForName(redirectOnly, www), {
+    tlsId: "own",
+    tlsMode: undefined,
+  });
+  assertEquals(hostingTlsForName(redirectOnly, root), {
+    tlsId: "row",
+    tlsMode: "internal",
+  });
+  // Under `both` every name is served and keeps its own choice.
+  const bothMode = {
+    ...row,
+    www: "both" as const,
+    nameTls: [{ hostname: www, tlsId: "own" }],
+  };
+  assertEquals(hostingTlsForName(bothMode, www).tlsId, "own");
+  assertEquals(hostingTlsForName(bothMode, root).tlsId, "row");
+});
+
+test("hostingTlsForName gives the redirect name its own certificate under root-to-www", () => {
+  const row = {
+    hostnames: ["shop.example.test"],
+    www: "root-to-www" as const,
+    tlsId: "row",
+    nameTls: [
+      { hostname: "shop.example.test", tlsId: "bare" },
+      { hostname: "www.shop.example.test", tlsId: "www" },
+    ],
+  };
+  assertEquals(hostingTlsForName(row, "shop.example.test").tlsId, "bare");
+  assertEquals(hostingTlsForName(row, "www.shop.example.test").tlsId, "www");
 });

@@ -173,7 +173,7 @@ function runningOrchestratorPsStdout(): string {
     State: "running",
     Labels: {
       "turbopanel.role": "turbopanel",
-      "com.turbopanel.system.component": "managed-ha",
+      "io.turbopanel.system.component": "managed-ha",
     },
   }]);
 }

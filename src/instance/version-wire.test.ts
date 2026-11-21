@@ -1,10 +1,13 @@
 import { assert, assertEquals } from "@std/assert";
 import {
+  ACME_ISSUE_DNS_FEATURE,
   ACME_ISSUE_FEATURE,
   BACKUP_S3_COPY_FEATURE,
+  BUILD_LIMITS_FEATURE,
   COMMAND_RECOVERY_FEATURE,
+  COMMAND_RECOVERY_V2_FEATURE,
+  COMPOSE_CHECKOUT_FEATURE,
   CUSTOM_NODE_APP_MODE_FEATURE,
-  DAEMON_FEATURE_MIN_VERSIONS,
   DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE,
   DAEMON_SEALED_SECRETS_FEATURE,
   DAEMON_WIRE_FEATURES,
@@ -16,6 +19,7 @@ import {
   FABRIC_PEER_REPORT_FEATURE,
   FABRIC_RETAIN_KEYS_FEATURE,
   HOST_CAPACITY_FEATURE,
+  HOSTING_NAME_TLS_FEATURE,
   HOSTING_VIA_HEADER_FEATURE,
   INSTALL_TOKEN_V2_FEATURE,
   INSTANCE_HOSTNAME_PUBLIC_PORT_FEATURE,
@@ -40,7 +44,6 @@ import {
   PHP_SITE_MODES_FEATURE,
   PROJECT_CACHE_FEATURE,
   REPO_KEY_REPORT_FEATURE,
-  resolveDaemonCapabilities,
   resolveInstanceCapabilities,
   resolveInstanceSupport,
   SERVER_NETWORK_CHECK_FEATURE,
@@ -55,6 +58,7 @@ import {
   TUNNEL_FORWARDING_FEATURE,
   TUNNEL_LOCK_ADD_FEATURE,
   TUNNEL_LOCK_FOLLOW_FEATURE,
+  TUNNEL_PEER_MTLS_FEATURE,
   TUNNEL_STATUS_FACTS_FEATURE,
   TUNNEL_STATUS_FEATURE,
   TUNNEL_TABLE_GENERATION_FEATURE,
@@ -67,8 +71,6 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
-
-const CERT_SOURCES = "instance-cert-sources-per-hostname";
 
 test("resolveInstanceSupport: at or above the floor is supported, below is unsupported, absent is unknown", () => {
   const cases: Array<{
@@ -120,27 +122,6 @@ test("the instance floor is a plain semver on the control plane's line", () => {
 });
 
 test("capability gates: above and equal open, below and unknown stay closed", () => {
-  const floors = { [CERT_SOURCES]: "0.1.1" };
-  assertEquals(resolveDaemonCapabilities("0.1.2", floors)[CERT_SOURCES], true);
-  assertEquals(resolveDaemonCapabilities("0.1.1", floors)[CERT_SOURCES], true);
-  assertEquals(resolveDaemonCapabilities("0.1.0", floors)[CERT_SOURCES], false);
-  assertEquals(
-    resolveDaemonCapabilities("0.1.1-rc.1", floors)[CERT_SOURCES],
-    false,
-  );
-  assertEquals(
-    resolveDaemonCapabilities(undefined, floors)[CERT_SOURCES],
-    false,
-  );
-  assertEquals(
-    resolveDaemonCapabilities("unstamped", floors)[CERT_SOURCES],
-    false,
-  );
-  assertEquals(
-    resolveDaemonCapabilities("0.1.1")[CERT_SOURCES],
-    true,
-  );
-  assertEquals(DAEMON_FEATURE_MIN_VERSIONS[CERT_SOURCES], "0.1.1");
   assertEquals(resolveInstanceCapabilities(undefined), {});
   assertEquals(
     resolveInstanceCapabilities("9.9.9", {
@@ -262,6 +243,15 @@ test("managed-switchover-final-position-v1 is advertised and raised no floor", (
 
 test("command-recovery-v1 is advertised", () => {
   assertEquals(COMMAND_RECOVERY_FEATURE, "command-recovery-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
+});
+
+test("command-recovery-v2 is advertised next to v1", () => {
+  assertEquals(COMMAND_RECOVERY_V2_FEATURE, "command-recovery-v2");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_V2_FEATURE),
+    true,
+  );
   assertEquals(DAEMON_WIRE_FEATURES.includes(COMMAND_RECOVERY_FEATURE), true);
 });
 
@@ -591,11 +581,51 @@ test("project-cache-v1 is advertised, right after site-db-url-ca-v1", () => {
   );
 });
 
-test("tunnel-lock-add-v1 is advertised, and is the last entry", () => {
+test("tunnel-lock-add-v1 is advertised, right after project-cache-v1", () => {
   assertEquals(TUNNEL_LOCK_ADD_FEATURE, "tunnel-lock-add-v1");
-  assertEquals(DAEMON_WIRE_FEATURES.at(-1), TUNNEL_LOCK_ADD_FEATURE);
   assertEquals(
     DAEMON_WIRE_FEATURES.indexOf(TUNNEL_LOCK_ADD_FEATURE),
     DAEMON_WIRE_FEATURES.indexOf(PROJECT_CACHE_FEATURE) + 1,
   );
+});
+
+test("build-limits-v1 is advertised and raised no floor", () => {
+  assertEquals(BUILD_LIMITS_FEATURE, "build-limits-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(BUILD_LIMITS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_LOCK_ADD_FEATURE) + 1,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("tunnel-peer-mtls-v1 is advertised and raised no floor", () => {
+  assertEquals(TUNNEL_PEER_MTLS_FEATURE, "tunnel-peer-mtls-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_PEER_MTLS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(BUILD_LIMITS_FEATURE) + 1,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("hosting-name-tls-v1 and acme-issue-dns-v1 are advertised, in that order, and raised no floor", () => {
+  assertEquals(HOSTING_NAME_TLS_FEATURE, "hosting-name-tls-v1");
+  assertEquals(ACME_ISSUE_DNS_FEATURE, "acme-issue-dns-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(HOSTING_NAME_TLS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(TUNNEL_PEER_MTLS_FEATURE) + 1,
+  );
+  assertEquals(
+    DAEMON_WIRE_FEATURES.indexOf(ACME_ISSUE_DNS_FEATURE),
+    DAEMON_WIRE_FEATURES.indexOf(HOSTING_NAME_TLS_FEATURE) + 1,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("compose-checkout-v1 is advertised and raised no floor", () => {
+  assertEquals(COMPOSE_CHECKOUT_FEATURE, "compose-checkout-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES.includes(COMPOSE_CHECKOUT_FEATURE),
+    true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

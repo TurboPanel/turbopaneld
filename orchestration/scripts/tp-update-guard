@@ -37,6 +37,8 @@ GUARD_PATH="$RUN_DIR/update-guard.json"
 # root-owned, so this is the only record the rollback decision is taken from:
 # the daemon owns RUN_DIR and STATE_DIR and could leave or keep a copy there.
 ROOT_RECORD="$INSTALL_ROOT/lib/update-guard-armed"
+# `--version` runs the binary being judged: never wait on it for long.
+VERSION_READ_TIMEOUT_SEC=10
 # How long after the deadline an armed record still counts. Past it, a record
 # a stopped timer left behind is dropped instead of acted on.
 ROOT_RECORD_MAX_LATE_SEC=3600
@@ -95,6 +97,13 @@ tp_write_file() (
   cd ..
   rmdir -- "$_wf_priv" 2>/dev/null || true
 )
+
+# The `--version` line of a binary, or nothing when it hangs or fails. A binary
+# that ignores SIGTERM is killed 2 s after the timeout.
+tp_binary_version_line() {
+  _vl_bin="$1"
+  timeout -k 2 "$VERSION_READ_TIMEOUT_SEC" "$_vl_bin" --version 2>/dev/null | head -1 || true
+}
 
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
@@ -250,23 +259,19 @@ fi
 _from_commit="$_target"
 _to_commit="$_previous_commit"
 if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.prev" ]; then
-  if _prev_out="$("$BIN_DIR/turbopaneld.prev" --version 2>/dev/null)"; then
-    _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
-  fi
+  _prev_out="$(tp_binary_version_line "$BIN_DIR/turbopaneld.prev")"
+  _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
 fi
 if [ -z "$_to_commit" ] && [ -f "$BIN_DIR/turbopaneld.js.prev" ]; then
-  if _prev_out="$("$BIN_DIR/turbopaneld.js.prev" --version 2>/dev/null)"; then
-    _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
-  fi
+  _prev_out="$(tp_binary_version_line "$BIN_DIR/turbopaneld.js.prev")"
+  _to_commit="$(tp_parse_daemon_commit_from_version "$_prev_out")"
 fi
 [ -n "$_to_commit" ] || _to_commit="unknown"
 
 # Move back only the build root recorded as the previous one when it armed.
 if [ -n "$_previous_commit" ] && [ -x "$BIN_DIR/turbopaneld.prev" ]; then
-  _prev_commit_now=""
-  if _prev_out="$("$BIN_DIR/turbopaneld.prev" --version 2>/dev/null)"; then
-    _prev_commit_now="$(tp_parse_daemon_commit_from_version "$_prev_out")"
-  fi
+  _prev_out="$(tp_binary_version_line "$BIN_DIR/turbopaneld.prev")"
+  _prev_commit_now="$(tp_parse_daemon_commit_from_version "$_prev_out")"
   if [ -n "$_prev_commit_now" ] && [ "$_prev_commit_now" != "$_previous_commit" ]; then
     tp_forget_armed
     tp_die "previous build is $_prev_commit_now, not the $_previous_commit recorded when the update was armed; not rolling back"

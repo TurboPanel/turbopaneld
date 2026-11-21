@@ -91,10 +91,9 @@ through `tp-host`, like "Operation not permitted".
 `command-outbox.ts` journals every accepted command under
 `<stateDir>/commands/inflight/<id>.json` (atomic temp file + rename): the
 accept time, the latest step plan (rewritten on a step change, otherwise at
-most every 30 s) and, once finished, the final `command-outcome`. With a
-control plane that advertises the feature the entry is removed only when its
-`command-outcome-ack` arrives; until then the outcome is sent again on every
-attach and every 30 s. Without the feature it is removed once sent, as before.
+most every 30 s) and, once finished, the final `command-outcome`. The
+entry is removed only when its `command-outcome-ack` arrives; until then the
+outcome is sent again on every attach and every 30 s.
 Kept results are paced: at most `OUTCOME_BURST_MAX` (20) per socket per 30 s
 window (the control plane closes a socket past 120 frames a minute), never
 sent twice on one socket between its open and its attach, and the rest go out
@@ -107,6 +106,43 @@ when either list is not empty, and a running deploy repeats its step plan every
 30 s. Transcript chunks the control plane has not taken are kept and resent in
 order (retry every 5 s, resync from the `nextSeq` of a `409`; see
 `../logs/sink.ts`).
+
+### Known commands on `hello` (`command-recovery-v2`)
+
+Listed in `hello.features` next to `command-recovery-v1` (which stays). A
+control plane that does not read it ignores the name and the field. Wire
+contract, field `commandState` on **every `hello`** (never on `heartbeat`;
+present even when `known` is empty):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `commandState.processStartId` | string (UUID) | Made once per daemon process; the same on every reconnect of that process, different after a restart |
+| `commandState.known` | string[] (at most 256 ids, each at most 64 characters) | Ids of commands this daemon accepted and still holds state for: running, finished with the outcome not yet confirmed (`command-outcome-ack`), and entries a previous process left in the on-disk journal. Read from disk before the socket opens, so the first hello after a restart is already complete |
+| `commandState.complete` | boolean | `true` when `known` lists every such id and the journal directory was read. `false` when the list was cut or the journal was unreadable; then a missing id proves nothing |
+
+Reading it: with `complete: true`, a `command-dispatch` the control plane sent
+and never saw acked, whose id is not in `known`, was never started by this
+daemon, so sending it again
+cannot run it twice, whatever its type. This holds because a command is journaled (file and directory flushed) before
+it runs, and a command that cannot be journaled (write failure, an id that is
+not safe as a file name) is refused with a failed outcome and never runs. An
+unconfirmed outcome dropped for the 64-entry cap leaves an id-only tombstone
+on disk, listed in `known` until 7 days after it was recorded; one past 7 days
+is removed. `*.tmp` files a crash left are deleted at startup. An id in `known` is held; its outcome
+arrives on its own, so it is never sent again. Limits the control plane must
+keep: only resend a command that is still non-terminal in its own records
+(an acknowledged outcome removes the id from `known`), only one younger than
+the 7-day unconfirmed retention, and skip a request written after the
+connection attached. With `complete: false`, or without the field, keep the
+v1 rule (safe-to-repeat types only). A restart changes `processStartId`.
+
+The connection recycle (2 h, jittered) waits for a quiet moment: when the age
+limit passes with a command running or an outcome unconfirmed it recycles at
+the next idle tick that is quiet, and in any case no later than 10 minutes
+past the limit (`MAX_CONNECTION_QUIET_WAIT_MS`). The daemon has no command
+queue: commands run concurrently, serialised only by per-resource locks, so
+the control plane's per-server lane is where a reconcile can hold up a newer
+user command.
 
 Outcomes are sized before they are journaled and sent: `error` keeps its
 last 4000 characters (the control plane caps it at 4096), and a successful
@@ -122,3 +158,15 @@ records the same failure itself.
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Command handlers** | `src/commands/AGENTS.md` | Daemon command implementations (`command-router.ts`); injected into `InstanceClient` from `src/entry/run.ts` so transport never imports handlers |
+
+## TurboFabric iptables calls wait for the lock
+
+`fabric.ts` `runHost` prepends `-w <XTABLES_LOCK_WAIT_SECONDS>` (the firewall
+fold's value, `src/firewall/run.ts`) to every `iptables` call except the
+`--version` probe, so a call that meets Docker's or the firewall apply's xtables
+lock waits instead of failing. `tp-host` already accepts `-w` and its argv
+checks are unchanged. Fabric rule changes touch only `TP-FORWARD` (and its jump
+off `DOCKER-USER` / `FORWARD`), which the firewall fold and the managed
+installer do not read, so they stay outside the daemon firewall lock
+(`src/firewall/lock.ts`). Test fakes see argv without the prefix through
+`src/testing/xtables-wait.ts`, which asserts it is there.

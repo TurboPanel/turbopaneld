@@ -19,6 +19,10 @@ import {
   removeFirewall,
   snapshotFirewallChains,
 } from "./apply.ts";
+import {
+  reconcileManagedPublicFirewall,
+  setManagedFirewallRunForTests,
+} from "../managed/firewall.ts";
 import { renderFirewall } from "./render.ts";
 import {
   FIREWALL_CONFIRM_WINDOW_SECONDS,
@@ -966,4 +970,72 @@ test("readSshdEffectivePorts fails open with a warning", async () => {
     (await readSshdEffectivePorts(empty.run)).warning!,
     "no port line",
   );
+});
+
+test("applyRenderedFirewall holds the firewall lock: a managed reconcile waits until the apply is done", async () => {
+  await withTempLayout(async (layout) => {
+    const rendered = renderFirewall({
+      payload: payload(),
+      sshPorts: [22],
+      includeForward: { 4: false, 6: false },
+    });
+    const events: string[] = [];
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => release = resolve);
+    let gated = false;
+    const run: FirewallRunFn = async (cmd) => {
+      events.push(`apply:${cmd}`);
+      if (!gated) {
+        gated = true;
+        await gate;
+      }
+      return ok();
+    };
+    setManagedFirewallRunForTests((_cmd, args) => {
+      events.push(`managed:${args.slice(2).join(" ")}`);
+      return Promise.resolve(
+        args[2] === "-C" || args[2] === "-N"
+          ? fail("Bad rule / Chain already exists.")
+          : ok(),
+      );
+    });
+    try {
+      const applying = applyRenderedFirewall(
+        rendered,
+        { 4: false, 6: false },
+        NFT_PROBE,
+        { run, layout },
+      );
+      const reconciling = reconcileManagedPublicFirewall(
+        {
+          managedId: "550e8400-e29b-41d4-a716-446655440000",
+          privateListener: {
+            address: "203.0.113.50",
+            port: 45001,
+            transport: "public",
+          },
+          replication: {
+            role: "primary",
+            username: "tp_repl",
+            peerAddresses: ["203.0.113.51"],
+          },
+          peers: [],
+        } as unknown as Parameters<typeof reconcileManagedPublicFirewall>[0],
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      assertEquals(events.some((e) => e.startsWith("managed:")), false);
+      release();
+      await applying;
+      await reconciling;
+      const firstManaged = events.findIndex((e) => e.startsWith("managed:"));
+      assertEquals(firstManaged > 0, true);
+      assertEquals(
+        events.slice(firstManaged).some((e) => e.startsWith("apply:")),
+        false,
+        "no apply call after the managed reconcile started",
+      );
+    } finally {
+      setManagedFirewallRunForTests(null);
+    }
+  });
 });

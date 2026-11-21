@@ -471,7 +471,7 @@ for (const series of SERIES) {
           "t",
         );
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });
@@ -612,7 +612,7 @@ for (const series of SERIES) {
           "failed restore must not drop post-backup objects",
         );
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });
@@ -765,7 +765,7 @@ for (const series of SERIES) {
           "tp_shop_owner",
         );
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });
@@ -973,7 +973,7 @@ for (const series of SERIES) {
           "postgres",
         );
       } finally {
-        await docker(["rm", "-f", name]);
+        await docker(["rm", "-f", "-v", name]);
       }
     },
   });

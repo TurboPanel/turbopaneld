@@ -16,11 +16,162 @@
  * development host whose user has full sudo.
  */
 
+import { dirname, isAbsolute, join } from "@std/path";
 import { emitBufferedLines, pumpLines } from "../logs/line-stream.ts";
+import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
+import { composeCheckoutDirsForFile } from "./compose-checkout-marker.ts";
+import {
+  COMPOSE_ENV_FILENAME,
+  COMPOSE_PREVIOUS_DIRNAME,
+  COMPOSE_STAGE_DIRNAME,
+} from "./compose-files.ts";
 
 const decoder = new TextDecoder();
 const SUDO_BIN = "/usr/bin/sudo";
 const DOCKER_BIN = "/usr/bin/docker";
+const ENV_BIN = "/usr/bin/env";
+
+function configuredRunDir(): string {
+  try {
+    return Deno.env.get("TURBOPANEL_RUN_DIR")?.trim() || PROD_RUN_DIR_DEFAULT;
+  } catch {
+    return PROD_RUN_DIR_DEFAULT; // a caller without env access
+  }
+}
+
+/**
+ * The Docker client's config folder for every call this module makes.
+ *
+ * The CLI (and its compose and buildx plugins) writes `<config>/` on first
+ * use, and with no `--config` it picks `$HOME/.docker`. The daemon's home is
+ * the state root, which a hardened host keeps `root:tp 0750`, so the mkdir
+ * failed there ("mkdir /var/lib/turbopanel/.docker: permission denied") and
+ * every Compose or image build with it. The daemon already owns its run
+ * folder (the control sockets live there), so the config goes in a folder of
+ * its own under it: tmpfs, `0700`, nothing for the state root's mode to
+ * decide. It is passed as the `--config` argument, which only the CLI and the
+ * plugin it runs see, and as `DOCKER_CONFIG`, which also reaches the helper
+ * processes a plugin starts on its own (`docker compose build` hands the build
+ * to the buildx plugin without forwarding `--config`, and that one then made
+ * `$HOME/.docker`). The `sudo` rungs below reset the environment, so they carry
+ * the variable through `env` instead.
+ */
+export function dockerConfigDir(runDir: string = configuredRunDir()): string {
+  return join(runDir, "docker-config");
+}
+
+let ensuredConfigDir: string | undefined;
+let configDirResolved = false;
+let warnedConfigDir = false;
+
+function warnConfigDirOnce(reason: string): void {
+  if (warnedConfigDir) return;
+  warnedConfigDir = true;
+  console.warn(
+    `docker config folder: ${reason}; docker uses its own default config`,
+  );
+}
+
+type ConfigDirStat = {
+  isDirectory: boolean;
+  isSymlink: boolean;
+  uid: number | null;
+  mode: number | null;
+};
+
+/** The folder is ours and private: a real directory (not a link), our uid, mode 0700. */
+function trustConfigDir(dir: string): string | undefined {
+  const lstat = ioOverride?.lstatSync ??
+    ((p: string): ConfigDirStat => Deno.lstatSync(p));
+  const myUid = ioOverride?.uid ?? Deno.uid();
+  const check = (): string | undefined => {
+    const info = lstat(dir);
+    if (info.isSymlink || !info.isDirectory) return "not a plain directory";
+    if (info.uid !== myUid) return "owned by another account";
+    if (((info.mode ?? 0) & 0o7777) !== 0o700) return "mode is not 0700";
+    return undefined;
+  };
+  try {
+    let problem = check();
+    // Only our own folder is worth fixing; a foreign or linked one is refused.
+    if (problem === "mode is not 0700") {
+      Deno.chmodSync(dir, 0o700);
+      problem = check();
+    }
+    return problem;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Create and vet the config folder once; `undefined` leaves Docker its own
+ * default. Docker runs plugins and credential helpers named in this folder as
+ * the daemon account, and other accounts share the run dir's group, so
+ * whatever is found at the path is trusted only when it is our own private
+ * directory. Otherwise a fresh unguessable folder is made beside it.
+ */
+function ensureDockerConfigDir(): string | undefined {
+  if (configDirResolved) return ensuredConfigDir;
+  configDirResolved = true;
+  const dir = ioOverride ? ioOverride.configDir : dockerConfigDir();
+  if (dir === undefined) return undefined;
+  let problem: string;
+  try {
+    Deno.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const found = trustConfigDir(dir);
+    if (found === undefined) {
+      ensuredConfigDir = dir;
+      return ensuredConfigDir;
+    }
+    problem = `${dir} is unusable (${found})`;
+  } catch (err) {
+    problem = `${dir} cannot be created (${
+      err instanceof Error ? err.message : String(err)
+    })`;
+  }
+  try {
+    const fresh = Deno.makeTempDirSync({
+      dir: join(dir, ".."),
+      prefix: "docker-config-",
+    });
+    const found = trustConfigDir(fresh);
+    if (found === undefined) {
+      warnConfigDirOnce(`${problem}, using ${fresh}`);
+      ensuredConfigDir = fresh;
+      return ensuredConfigDir;
+    }
+    problem += `; ${fresh} is unusable too (${found})`;
+  } catch (err) {
+    problem += `; no fallback folder (${
+      err instanceof Error ? err.message : String(err)
+    })`;
+  }
+  warnConfigDirOnce(problem);
+  return undefined;
+}
+
+/** `args` behind the global `--config <folder>` flag, when a trusted folder exists. */
+export function withDockerConfig(args: string[]): string[] {
+  const dir = ensureDockerConfigDir();
+  return dir === undefined ? args : ["--config", dir, ...args];
+}
+
+/**
+ * `DOCKER_CONFIG=<folder>` for a docker process, when a trusted folder exists.
+ * Every spawn of the docker client must pass this next to
+ * {@link withDockerConfig}: a Compose plugin child never sees `--config`.
+ */
+export function dockerConfigEnv(): Record<string, string> {
+  const dir = ensureDockerConfigDir();
+  return dir === undefined ? {} : { DOCKER_CONFIG: dir };
+}
+
+/** `env DOCKER_CONFIG=<folder>` words that put the variable back after `sudo` resets it. */
+function sudoEnvPrefix(): string[] {
+  const dir = ensureDockerConfigDir();
+  return dir === undefined ? [] : [ENV_BIN, `DOCKER_CONFIG=${dir}`];
+}
 
 export type DockerCliResult = {
   success: boolean;
@@ -34,10 +185,85 @@ export type RunDockerOptions = {
   input?: string;
 };
 
+/**
+ * What the raw runner takes: stdin, the environment added to the child's and
+ * the folder it starts in.
+ */
+export type RunRawOptions = RunDockerOptions & {
+  env?: Record<string, string>;
+  cwd?: string;
+};
+
+/**
+ * The folder a `docker compose -f <file> …` call runs from: the folder of its
+ * first compose file, which is also Compose's own project directory.
+ *
+ * Compose hands image builds to the builder's bake step, which refuses a build
+ * context outside the folder the process started in unless it was granted
+ * (`additional privileges requested: pass "--allow=fs.read=…"`). Build
+ * contexts are confined to the deployment directory (`compose-host-paths.ts`),
+ * which is where the live compose files sit, so starting there keeps every
+ * allowed context inside bake's working directory. Nothing is granted and the
+ * entitlement check stays on for anything else a build names. `undefined` for
+ * any call that is not a compose call with an absolute file path.
+ */
+export function composeWorkingDirectory(
+  args: readonly string[],
+): string | undefined {
+  if (args[0] !== "compose") return undefined;
+  const flag = args.indexOf("-f");
+  const file = flag === -1 ? undefined : args[flag + 1];
+  if (file === undefined || !isAbsolute(file)) return undefined;
+  return dirname(file);
+}
+
+/**
+ * What a call runs with: the argv and the folder it starts in.
+ *
+ * A deployment that has a repository checkout (`compose-checkout-marker.ts`)
+ * gets `--project-directory <folder of the repo's compose file>` right after
+ * `compose`, and starts in the checkout root, so a path written for the
+ * repository resolves as in a clone and every build context stays inside the
+ * builder's working folder. Any other call is untouched apart from the plain
+ * {@link composeWorkingDirectory}. A caller that already passes
+ * `--project-directory` keeps its own.
+ */
+async function composeCall(
+  args: readonly string[],
+): Promise<{ args: string[]; cwd?: string }> {
+  const plain = composeWorkingDirectory(args);
+  if (plain === undefined || args.includes("--project-directory")) {
+    return { args: [...args], ...(plain === undefined ? {} : { cwd: plain }) };
+  }
+  const file = args[args.indexOf("-f") + 1];
+  const dirs = await composeCheckoutDirsForFile(
+    file,
+    COMPOSE_STAGE_DIRNAME,
+    COMPOSE_PREVIOUS_DIRNAME,
+  );
+  if (dirs === null) return { args: [...args], cwd: plain };
+  // Compose reads `.env` from the project directory, which is now inside the
+  // checkout: name the one the daemon wrote beside the compiled file.
+  const envFile = join(plain, COMPOSE_ENV_FILENAME);
+  const hasEnv = await Deno.stat(envFile).then((s) => s.isFile, () => false);
+  return {
+    args: [
+      "compose",
+      "--project-directory",
+      dirs.projectDir,
+      ...(hasEnv && !args.includes("--env-file")
+        ? ["--env-file", envFile]
+        : []),
+      ...args.slice(1),
+    ],
+    cwd: dirs.root,
+  };
+}
+
 export type DockerCliRunRawFn = (
   command: string,
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ) => Promise<DockerCliResult>;
 
 /** Optional I/O override for host-free unit tests (never call real docker). */
@@ -49,13 +275,26 @@ export type DockerCliIo = {
    */
   dockerBin?: string;
   /**
+   * The `--config` folder to use. A test override leaves the flag off unless it
+   * names one, so nothing here touches the real `/run/turbopanel`.
+   */
+  configDir?: string;
+  /** Replaces `Deno.lstatSync` / `Deno.uid()` when vetting the config folder. */
+  lstatSync?: (path: string) => {
+    isDirectory: boolean;
+    isSymlink: boolean;
+    uid: number | null;
+    mode: number | null;
+  };
+  uid?: number;
+  /**
    * When set, {@link spawnDockerStreaming} uses this instead of
    * `Deno.Command.spawn` (binary dump path — never decode into a string).
    */
   spawnStreaming?: (
     bin: string,
     args: string[],
-    options?: SpawnDockerStreamingOptions,
+    options?: SpawnDockerStreamingOptions & { env?: Record<string, string> },
   ) => Promise<Deno.ChildProcess>;
 };
 
@@ -96,6 +335,9 @@ export async function dockerBinaryInstalled(): Promise<boolean> {
 function clearDockerInvocationCache(): void {
   cachedInvocation = undefined;
   cachedInvocationPromise = undefined;
+  ensuredConfigDir = undefined;
+  configDirResolved = false;
+  warnedConfigDir = false;
 }
 
 function isDockerSocketPermissionError(text: string): boolean {
@@ -190,12 +432,14 @@ function dockerResultFromChildOutput(
 async function runRawDefault(
   command: string,
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   try {
     const hasInput = options?.input !== undefined;
     const child = new Deno.Command(command, {
       args,
+      ...(options?.env === undefined ? {} : { env: options.env }),
+      ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
       stderr: "piped",
@@ -220,7 +464,7 @@ async function runRawDefault(
 async function runRaw(
   command: string,
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   const impl = ioOverride?.runRaw ?? runRawDefault;
   return await impl(command, args, options);
@@ -243,7 +487,7 @@ async function currentUsername(): Promise<string> {
  */
 async function runDockerWithFreshGroups(
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   const user = await currentUsername();
   return await runRaw(
@@ -253,6 +497,7 @@ async function runDockerWithFreshGroups(
       "-u",
       user,
       "--",
+      ...sudoEnvPrefix(),
       resolvedDockerBin(),
       ...args,
     ],
@@ -263,11 +508,11 @@ async function runDockerWithFreshGroups(
 /** Last-resort: passwordless root docker when the daemon user cannot open the socket. */
 async function runDockerAsRoot(
   args: string[],
-  options?: RunDockerOptions,
+  options?: RunRawOptions,
 ): Promise<DockerCliResult> {
   return await runRaw(
     SUDO_BIN,
-    ["-n", "--", resolvedDockerBin(), ...args],
+    ["-n", "--", ...sudoEnvPrefix(), resolvedDockerBin(), ...args],
     options,
   );
 }
@@ -317,10 +562,17 @@ function escalationBlocked(result: DockerCliResult): boolean {
  * argv. Do not pass secrets via environment — the sudo fallback would drop it.
  */
 export async function runDocker(
-  args: string[],
+  userArgs: string[],
   options?: RunDockerOptions,
 ): Promise<DockerCliResult> {
-  const direct = await runRaw(resolvedDockerBin(), args, options);
+  const call = await composeCall(userArgs);
+  const args = withDockerConfig(call.args);
+  const cwd = call.cwd === undefined ? {} : { cwd: call.cwd };
+  const direct = await runRaw(resolvedDockerBin(), args, {
+    ...options,
+    ...cwd,
+    env: dockerConfigEnv(),
+  });
   if (
     direct.success ||
     !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
@@ -328,13 +580,16 @@ export async function runDocker(
     return direct;
   }
 
-  const refreshed = await runDockerWithFreshGroups(args, options);
+  const refreshed = await runDockerWithFreshGroups(args, {
+    ...options,
+    ...cwd,
+  });
   // A non-blocked failure means the command actually ran via sudo and failed
   // on its own merits — return it verbatim instead of re-running as root and
   // masking the real error behind the direct socket-permission message.
   if (refreshed.success || !escalationBlocked(refreshed)) return refreshed;
 
-  const asRoot = await runDockerAsRoot(args, options);
+  const asRoot = await runDockerAsRoot(args, { ...options, ...cwd });
   if (asRoot.success || !escalationBlocked(asRoot)) return asRoot;
   // Every rung failed to reach the socket; report the original docker.sock error.
   return preferOriginalSocketError(direct, asRoot);
@@ -366,7 +621,10 @@ const PROBE_ARGS = ["version", "--format", "{{.Server.Version}}"];
 
 async function probeDockerInvocation(): Promise<DockerInvocation> {
   const dockerBin = resolvedDockerBin();
-  const direct = await runRaw(dockerBin, PROBE_ARGS);
+  const probeArgs = withDockerConfig(PROBE_ARGS);
+  const direct = await runRaw(dockerBin, probeArgs, {
+    env: dockerConfigEnv(),
+  });
   if (
     direct.success ||
     !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
@@ -379,8 +637,8 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
   // socket). Probing both keeps the streamed path's effective Docker access
   // identical to the buffered one.
   const user = await currentUsername();
-  const selfPrefix = ["-n", "-u", user, "--", dockerBin];
-  const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...PROBE_ARGS]);
+  const selfPrefix = ["-n", "-u", user, "--", ...sudoEnvPrefix(), dockerBin];
+  const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...probeArgs]);
   if (refreshed.success) return { bin: SUDO_BIN, prefixArgs: selfPrefix };
   // This process may not run sudo at all: keep the direct invocation so the
   // caller sees Docker's own socket error, not a Deno permission error.
@@ -388,8 +646,8 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
     return { bin: dockerBin, prefixArgs: [] };
   }
 
-  const rootPrefix = ["-n", "--", dockerBin];
-  const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...PROBE_ARGS]);
+  const rootPrefix = ["-n", "--", ...sudoEnvPrefix(), dockerBin];
+  const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...probeArgs]);
   if (asRoot.success) return { bin: SUDO_BIN, prefixArgs: rootPrefix };
 
   // Nothing reached the socket; keep the self-refresh invocation so the
@@ -422,6 +680,8 @@ export type SpawnDockerStreamingOptions = {
   stdout?: "piped" | "inherit";
   /** Kills the child when aborted (a bounded build, say). */
   signal?: AbortSignal;
+  /** The folder the child starts in (see {@link composeWorkingDirectory}). */
+  cwd?: string;
 };
 
 /**
@@ -436,16 +696,24 @@ export async function spawnDockerStreaming(
   options?: SpawnDockerStreamingOptions,
 ): Promise<Deno.ChildProcess> {
   const invocation = await resolveDockerInvocation();
-  const fullArgs = [...invocation.prefixArgs, ...args];
+  const fullArgs = [
+    ...invocation.prefixArgs,
+    ...(withDockerConfig(args)),
+  ];
   const spawnOverride = ioOverride?.spawnStreaming;
   if (spawnOverride) {
-    return await spawnOverride(invocation.bin, fullArgs, options);
+    return await spawnOverride(invocation.bin, fullArgs, {
+      ...options,
+      env: dockerConfigEnv(),
+    });
   }
   return new Deno.Command(invocation.bin, {
     args: fullArgs,
+    env: dockerConfigEnv(),
     stdin: options?.stdin ?? "null",
     stdout: options?.stdout ?? "piped",
     stderr: "piped",
+    ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options?.signal === undefined ? {} : { signal: options.signal }),
   }).spawn();
 }
@@ -502,9 +770,11 @@ export async function runDockerStreamed(
 ): Promise<DockerCliResult> {
   try {
     const hasInput = options?.input !== undefined;
-    const child = await spawnDockerStreaming(args, {
+    const call = await composeCall(args);
+    const child = await spawnDockerStreaming(call.args, {
       stdin: hasInput ? "piped" : "null",
       stdout: "piped",
+      ...(call.cwd === undefined ? {} : { cwd: call.cwd }),
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
     });
 

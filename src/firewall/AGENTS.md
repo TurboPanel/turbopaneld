@@ -151,3 +151,24 @@ apply does not rebuild it; a rule missing one source keeps the legacy chain.
 Proof: `../testing/firewall-fold-kernel-proof.ts` (container command in its
 header); the captured `iptables -S` is pinned by `fold.kernel.test.ts`. On a
 host it only happens once apply is on for that server.
+
+## One firewall lock, `-w` everywhere, unconfirmed never covers
+
+- `lock.ts` (`withFirewallLock`) serialises, inside the daemon, the ruleset
+  apply (`applyRenderedFirewall`), the confirm (`confirmPendingFirewall`, which
+  runs the fold), `removeFirewall`, the Docker re-hang and the legacy managed
+  installer (`../managed/firewall.ts`). It is not re-entrant: lock at the
+  exported entry points only, never from a function another locked entry calls.
+  The `turbopaneld firewall ...` CLI is a separate process and is not covered;
+  the coverage check therefore also re-reads the pending marker after reading
+  `TP-FWD`.
+- Every xtables call carries `-w <seconds>` (`XTABLES_LOCK_WAIT_SECONDS`,
+  `run.ts`), including the managed installer and the fabric code. Without it a
+  call that loses the lock to Docker fails: a flush that succeeds followed by an
+  append that does not leaves a chain open.
+- `isManagedListenerCovered` treats a pending marker, before or after the
+  `iptables -S` read, as not covered: unconfirmed rules may be rolled back, so
+  they never justify dropping the legacy chain.
+- Fabric (`TP-FORWARD`) is a separate chain that neither the fold nor the
+  managed installer reads, so its single-rule changes are not under this lock;
+  `-w` covers the xtables lock itself.

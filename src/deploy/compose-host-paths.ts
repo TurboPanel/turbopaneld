@@ -510,6 +510,14 @@ export type ConfinementOptions = {
   /** `environment.deploy` `hostLevelApproved`; absent on the wire is false. */
   hostLevelApproved: boolean;
   /**
+   * The repository checkout of a Git Compose project (`compose-checkout.ts`).
+   * Relative paths resolve against its project directory, and everything under
+   * its root counts as inside the deployment directory at its own place (it is
+   * not staged). A writable bind into it is refused: its folder goes away with
+   * the next commit, so anything a container wrote there would be lost.
+   */
+  checkout?: { root: string; projectDir: string };
+  /**
    * Writable bind sources (live paths) of the generation still running. Its
    * containers keep running until `compose up` replaces them, so a new source
    * under one of them could be swapped for a symlink in the meantime.
@@ -638,6 +646,17 @@ function resolvedPathRefusal(
     return `${label} resolves through a symlink to ${real}, outside the deployment directory`;
   }
   if (entry.kind !== "mount") return null;
+  // A symlink in the repository may point at `..`: the checkout is the
+  // author's, and the deployment directory around it holds the compiled
+  // compose file, the env file and the daemon's records.
+  if (
+    ctx.opts.checkout !== undefined &&
+    (real === ctx.realDir || dirname(real) === ctx.realDir)
+  ) {
+    return `${label} resolves to ${
+      real === ctx.realDir ? "the deployment directory itself" : "a file in it"
+    }, which holds the daemon's records, not the repository`;
+  }
   if (isWithin(real, ctx.realStage)) {
     return `${label} is the daemon's staging directory`;
   }
@@ -660,14 +679,28 @@ async function confineEntry(
       `${label} is interpolated, so where it points cannot be checked`,
     );
   }
+  const checkout = ctx.opts.checkout;
   const staged = normalize(
-    isAbsolute(entry.path) ? entry.path : resolve(ctx.stageDir, entry.path),
+    isAbsolute(entry.path)
+      ? entry.path
+      : resolve(checkout?.projectDir ?? ctx.stageDir, entry.path),
   );
+  const inCheckout = checkout !== undefined &&
+    isWithin(staged, normalize(checkout.root));
   const inOwnerTree = await ownerTreeOutcome(entry, label, staged, ctx);
   if (inOwnerTree) return inOwnerTree;
-  const hostLevel = hostLevelOutcome(entry, label, staged, ctx);
+  const hostLevel = inCheckout
+    ? undefined
+    : hostLevelOutcome(entry, label, staged, ctx);
   if (hostLevel) return hostLevel;
-  const live = join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
+  if (inCheckout && entry.kind === "mount" && !entry.readOnly) {
+    return finding(
+      `${label} is a writable bind inside the repository checkout, which is replaced by a new folder on every new commit and would lose what the container writes — use a named volume`,
+    );
+  }
+  const live = inCheckout
+    ? staged
+    : join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
   let real: string;
   try {
     real = await resolveExistingPrefix(live, ctx.realPath);

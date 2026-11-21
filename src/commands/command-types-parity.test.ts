@@ -276,31 +276,6 @@ test("environment.deploy rejects a Compose-invalid hostingIngressNetwork", () =>
   );
 });
 
-test("environment.deploy rejects the pre-rename traditionalWebSites key", () => {
-  // Unknown keys are ignored here, so without this guard an old control plane
-  // would parse zero sites: stale vhosts keep serving on loopback while hosting
-  // Caddy finds no loopback entry and routes the hostname to Traefik. That is a
-  // 502 with the old content still live, on a deploy that reported success.
-  assertThrows(
-    () =>
-      parseEnvironmentDeployPayload({
-        environmentId: "env-1",
-        projectId: "proj-1",
-        organizationId: "org-1",
-        projectName: "demo",
-        composeFiles: [{
-          filename: "compose.yaml",
-          role: "runtime",
-          content: "services: {}\n",
-        }],
-        hostings: [],
-        traditionalWebSites: [],
-      }),
-    TypeError,
-    "traditionalWebSites was renamed to sites",
-  );
-});
-
 test("environment.deploy rejects hostingIngress that is not traefik", () => {
   const serviceId = "00000000-0000-4000-8000-0000000000aa";
   assertThrows(
@@ -2737,6 +2712,7 @@ const VALID_MANAGED_INGRESS_RECONCILE = {
     {
       managedId: "00000000-0000-4000-8000-000000000001",
       engine: "postgres",
+      family: "pgsql",
       protocolPort: 5432,
       writerHostgroup: 0,
       readerHostgroup: 1,
@@ -2964,12 +2940,6 @@ test("managed.ingress.reconcile round-trips the explicit cluster family", () => 
       clusters: [{ ...base, engine: "mariadb", family: "mysql" }],
     }).clusters[0]?.family,
     "mysql",
-  );
-  // Absent on an older control plane: the daemon falls back to the engine.
-  assertEquals(
-    parseManagedIngressReconcilePayload(VALID_MANAGED_INGRESS_RECONCILE)
-      .clusters[0]?.family,
-    undefined,
   );
   assertThrows(
     () =>
@@ -3223,6 +3193,7 @@ const DEPLOY_BASE = {
 const SOURCE_ENTRY = {
   sourceId: "00000000-0000-4000-8000-000000000001",
   composeServiceName: "web",
+  releaseServiceId: "svc-web",
   provider: "gitlab",
   cloneUrl: "https://gitlab.test/acme/app.git",
   ref: "main",

@@ -4,7 +4,6 @@ import { emptyDirectoryUsageSnapshot } from "./directory-usage.ts";
 import { EventCollectorSet } from "./events/index.ts";
 import { EVENT_MAX_AGE_MS, LinuxMetricsCollector } from "./linux-collector.ts";
 import { PRESENCE_WINDOW_SAMPLES } from "./presence.ts";
-import { computeTopologyFingerprint } from "../topology/generation.ts";
 import { defaultSensorIo } from "./sensors/discovery.ts";
 import type { CollectorDeps } from "./types.ts";
 import { collectTopology } from "../topology/topology.ts";
@@ -16,11 +15,11 @@ import {
   writeCapabilityPlan,
 } from "./capability-plan-store.ts";
 import { computeSlotMapping } from "../../contracts/topology-slot-mapping.ts";
-import { EMPTY_TOPOLOGY_OVERRIDES } from "../../contracts/topology-types.ts";
-import type {
-  PhysicalSignalTopology,
-  TopologySnapshot,
+import {
+  EMPTY_TOPOLOGY_OVERRIDES,
+  type TopologySnapshot,
 } from "../../contracts/topology-types.ts";
+import type { PhysicalSignalTopology } from "../../contracts/topology-types.ts";
 import type { GpuAdapterSet } from "./gpu/adapter.ts";
 
 /**
@@ -29,6 +28,8 @@ import type { GpuAdapterSet } from "./gpu/adapter.ts";
  * Sonar typescript:S2187 only recognizes `test()` / `it()` / `describe()` and
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
+import type { CollectedTopology } from "../topology/topology.ts";
+
 const test = Deno.test.bind(Deno);
 
 function fixture(name: string): string {
@@ -45,10 +46,9 @@ function topologyFixtureRoot(name: string): string {
 
 /** One service block device (sda), one uplink NIC (eth0), one root filesystem. */
 function fullTopologySnapshot(
-  overrides: Partial<TopologySnapshot> = {},
-): TopologySnapshot {
+  overrides: Partial<CollectedTopology> = {},
+): CollectedTopology {
   return {
-    generation: 7,
     bootGeneration: 2,
     networks: [
       {
@@ -135,7 +135,7 @@ type RawFixtureMap = Partial<{
  */
 function makeDeps(
   raw: () => RawFixtureMap,
-  snapshot: TopologySnapshot,
+  snapshot: CollectedTopology,
   now: () => number,
   pageSizeBytes = 4096,
 ): CollectorDeps {
@@ -219,7 +219,6 @@ test("LinuxMetricsCollector assembles a full v5 sample across two ticks", async 
   assertEquals(first.sample.host.memory.usedBytes !== null, true);
   assertEquals(first.sample.host.storage.diskReadBytesPerSecond, null);
   assertEquals(first.sample.host.network.tcpRetransmitPercent, null);
-  assertEquals(first.sample.metadata.topologyGeneration, 7);
   assertEquals(first.sample.metadata.bootGeneration, 2);
   assertEquals(first.sample.networks.length, 1);
   assertEquals(first.sample.filesystems.length, 1);
@@ -348,7 +347,7 @@ test("LinuxMetricsCollector smoke test: a normal 1-NIC VM produces a logically c
   if (!result.supported) throw new TypeError("expected a supported sample");
 
   assertEquals(result.sample.type, "metrics");
-  assertEquals(result.sample.metadata.version, 6);
+  assertEquals(result.sample.metadata.version, 8);
   assertEquals(result.sample.networks.length, 1);
   assertEquals(result.sample.filesystems.length, 1);
   assertEquals(result.sample.blockDevices.length, 1);
@@ -403,77 +402,70 @@ test("LinuxMetricsCollector re-baselines (nulls once) on a boot generation chang
 });
 
 test("LinuxMetricsCollector: a real /dev/mapper/* (LVM) root, discovered through collectTopology(), still produces service block devices and non-null host disk aggregates", async () => {
-  const daemonStateDir = await Deno.makeTempDir();
-  try {
-    const diskstatsLvm1 = fixture("proc-diskstats-lvm.txt");
-    const diskstatsLvm2 = diskstatsLvm1.replace(
-      "dm-0 900 180 27000 360 450 540 63000 720",
-      "dm-0 1000 180 30000 400 550 540 77000 800",
-    );
+  const diskstatsLvm1 = fixture("proc-diskstats-lvm.txt");
+  const diskstatsLvm2 = diskstatsLvm1.replace(
+    "dm-0 900 180 27000 360 450 540 63000 720",
+    "dm-0 1000 180 30000 400 550 540 77000 800",
+  );
 
-    const snapshot = await collectTopology({
-      readProcFile: (path) => {
-        if (path === "/proc/net/dev") {
-          return "Inter-|   Receive\n face |bytes\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
-        }
-        // An LVM root: the mount source is a /dev/mapper/* symlink target,
-        // never a direct /dev/<name> — the actual production path this
-        // end-to-end test exercises (see mounts.ts's `backingDeviceNames`).
-        if (path === "/proc/mounts") {
-          return "/dev/mapper/vg0-root / ext4 rw,relatime 0 0\n";
-        }
-        if (path === "/proc/diskstats") return diskstatsLvm1;
-        return undefined;
-      },
-      statfs: () => ({ blocks: 1000, bfree: 500, bavail: 400, bsize: 4096 }),
-      resolveDockerDataRoot: () => Promise.resolve(null),
-      resolveHostingPath: () => Promise.reject(new Error("no hosting path")),
-      resolveFabricInterfaces: () => Promise.resolve([]),
-      io: defaultSensorIo(),
-      sysRoot: topologyFixtureRoot("block-graph-lvm"),
-      daemonStateDir,
-      resolveTopologyOverrides: () => Promise.resolve(EMPTY_TOPOLOGY_OVERRIDES),
-      resolveBootGeneration: () => Promise.resolve(0),
-      collectHardwareSignals: () => Promise.resolve([]),
-    });
+  const snapshot = await collectTopology({
+    readProcFile: (path) => {
+      if (path === "/proc/net/dev") {
+        return "Inter-|   Receive\n face |bytes\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n";
+      }
+      // An LVM root: the mount source is a /dev/mapper/* symlink target,
+      // never a direct /dev/<name> — the actual production path this
+      // end-to-end test exercises (see mounts.ts's `backingDeviceNames`).
+      if (path === "/proc/mounts") {
+        return "/dev/mapper/vg0-root / ext4 rw,relatime 0 0\n";
+      }
+      if (path === "/proc/diskstats") return diskstatsLvm1;
+      return undefined;
+    },
+    statfs: () => ({ blocks: 1000, bfree: 500, bavail: 400, bsize: 4096 }),
+    resolveDockerDataRoot: () => Promise.resolve(null),
+    resolveHostingPath: () => Promise.reject(new Error("no hosting path")),
+    resolveFabricInterfaces: () => Promise.resolve([]),
+    io: defaultSensorIo(),
+    sysRoot: topologyFixtureRoot("block-graph-lvm"),
+    resolveBootGeneration: () => Promise.resolve(0),
+    collectHardwareSignals: () => Promise.resolve([]),
+  });
 
-    const dm0 = snapshot.blockDevices.find((d) => d.kernelName === "dm-0");
-    if (!dm0) throw new TypeError("expected dm-0 in block topology");
-    assertEquals(dm0.isServiceDevice, true);
+  const dm0 = snapshot.blockDevices.find((d) => d.kernelName === "dm-0");
+  if (!dm0) throw new TypeError("expected dm-0 in block topology");
+  assertEquals(dm0.isServiceDevice, true);
 
-    let tick = 0;
-    let nowMs = 1_000_000;
-    const collector = new LinuxMetricsCollector(
-      makeDeps(
-        () => ({
-          "/proc/diskstats": tick === 0 ? diskstatsLvm1 : diskstatsLvm2,
-        }),
-        snapshot,
-        () => nowMs,
-      ),
-    );
+  let tick = 0;
+  let nowMs = 1_000_000;
+  const collector = new LinuxMetricsCollector(
+    makeDeps(
+      () => ({
+        "/proc/diskstats": tick === 0 ? diskstatsLvm1 : diskstatsLvm2,
+      }),
+      snapshot,
+      () => nowMs,
+    ),
+  );
 
-    await collector.collect({ sequence: 1, nowMs });
-    tick = 1;
-    nowMs += 60_000;
-    const second = await collector.collect({ sequence: 2, nowMs });
-    if (!second.supported) throw new TypeError("expected a supported sample");
+  await collector.collect({ sequence: 1, nowMs });
+  tick = 1;
+  nowMs += 60_000;
+  const second = await collector.collect({ sequence: 2, nowMs });
+  if (!second.supported) throw new TypeError("expected a supported sample");
 
-    assertEquals(
-      second.sample.blockDevices.some((d) => d.deviceId === dm0.deviceId),
-      true,
-    );
-    assertEquals(
-      second.sample.host.storage.diskReadBytesPerSecond,
-      (3000 * 512) / 60,
-    );
-    assertEquals(
-      second.sample.host.storage.diskWriteBytesPerSecond,
-      (14000 * 512) / 60,
-    );
-  } finally {
-    await Deno.remove(daemonStateDir, { recursive: true });
-  }
+  assertEquals(
+    second.sample.blockDevices.some((d) => d.deviceId === dm0.deviceId),
+    true,
+  );
+  assertEquals(
+    second.sample.host.storage.diskReadBytesPerSecond,
+    (3000 * 512) / 60,
+  );
+  assertEquals(
+    second.sample.host.storage.diskWriteBytesPerSecond,
+    (14000 * 512) / 60,
+  );
 });
 
 test("LinuxMetricsCollector populates ingressSources/databaseProxies/router when their adapters are wired, and leaves them empty when absent (default)", async () => {
@@ -918,7 +910,7 @@ const NULL_GPU_ADAPTERS: GpuAdapterSet = {
   },
 };
 
-function pageOrderMismatchSnapshot(): TopologySnapshot {
+function pageOrderMismatchSnapshot(): CollectedTopology {
   return fullTopologySnapshot({
     gpus: [
       {
@@ -1273,7 +1265,7 @@ test("LinuxMetricsCollector falls back to the nominal interval when the clock go
   assertEquals(second.sample.metadata.intervalSeconds, 60);
 });
 
-test("quiet GPUs are dropped from the sample but keep their slot in the generation's mapping", async () => {
+test("quiet GPUs are dropped from the sample but keep their slot in the full snapshot's mapping", async () => {
   const snapshot = fullTopologySnapshot();
   const plan = {
     ...PLATFORM_DEFAULT_METRICS_CAPABILITY_PLAN,
@@ -1294,15 +1286,6 @@ test("quiet GPUs are dropped from the sample but keep their slot in the generati
   }
   if (!last?.supported) throw new TypeError("expected a supported sample");
   assertEquals(last.sample.gpus.length, 0);
-  // The mapping truncation uses is the one the fingerprint (generation) covers.
-  const fingerprint = computeTopologyFingerprint(
-    { ...snapshot, generation: 0 } as never,
-    EMPTY_TOPOLOGY_OVERRIDES,
-  );
-  assertEquals(
-    fingerprint.slotMapping,
-    computeSlotMapping(snapshot, EMPTY_TOPOLOGY_OVERRIDES),
-  );
 });
 
 const GLUE_CONTAINERS = {
