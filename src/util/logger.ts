@@ -124,6 +124,18 @@ export function stripTerminalControls(text: string): string {
   return out;
 }
 
+/**
+ * Multi-line output for the panel (container log tails): terminal escapes and
+ * control characters are removed as in {@link stripLogInjection}, but line
+ * breaks survive. CRLF and a lone CR both become LF; tab stays a tab.
+ */
+export function stripTerminalControlsKeepBreaks(text: string): string {
+  return stripTerminalControls(text).replaceAll("\r\n", "\n").replaceAll(
+    "\r",
+    "\n",
+  );
+}
+
 /** Chained replace pattern Sonar S5145 recognizes for log-injection sanitization. */
 export function stripLogInjection(text: string): string {
   return stripTerminalControls(text)

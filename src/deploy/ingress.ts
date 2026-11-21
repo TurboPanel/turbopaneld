@@ -330,6 +330,7 @@ export class TcpUdpPortReservedError extends Error {
 export function caddyTraefikUpstream(hop: "http" | "https"): string {
   if (hop === "http") {
     return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTP_PORT} {
+  header_up Host {host}
   transport http {
     proxy_protocol v2
     keepalive off
@@ -338,7 +339,9 @@ export function caddyTraefikUpstream(hop: "http" | "https"): string {
 }`;
   }
   // Caddy rewrites Host to the upstream address on a TLS hop, and Traefik
-  // routes on the original hostname, so pass it through explicitly.
+  // routes on the original hostname, so pass it through explicitly. The plain
+  // hop sends it too: `{host}` is the name without a port, so the upstream
+  // always sees the bare public hostname.
   return `reverse_proxy ${TRAEFIK_LOOPBACK}:${TRAEFIK_HTTPS_PORT} {
   header_up Host {host}
   transport http {

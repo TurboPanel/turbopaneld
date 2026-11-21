@@ -143,6 +143,35 @@ test("collectContainerLogs clamps tail and redacts owned container output", asyn
   ]);
 });
 
+test("collectContainerLogs keeps line breaks, redacts secrets and strips escapes", async () => {
+  const redactor = createMutableTranscriptRedactor(["s3cret"]);
+  const text = await collectContainerLogs(
+    OWNED_ID,
+    { stateDir: "/var/lib/turbopanel" },
+    {
+      redactor,
+      listManifests: () => Promise.resolve(ownedManifests()),
+      runDocker: (args) => {
+        if (args[0] === "inspect") return Promise.resolve(ok(inspectStdout()));
+        return Promise.resolve(ok(
+          "2026-01-01T00:00:00Z [migrations] started\r\n" +
+            "2026-01-01T00:00:01Z \x1b[31mpassword=s3cret\x1b[0m\n" +
+            "2026-01-01T00:00:02Z col1\tcol2\x07\n" +
+            "2026-01-01T00:00:03Z 10%\r20%\n",
+        ));
+      },
+    },
+  );
+
+  assertEquals(
+    text,
+    "2026-01-01T00:00:00Z [migrations] started\n" +
+      "2026-01-01T00:00:01Z password=***\n" +
+      "2026-01-01T00:00:02Z col1\tcol2_\n" +
+      "2026-01-01T00:00:03Z 10%\n20%",
+  );
+});
+
 test("collectContainerLogs throws when inspect fails", async () => {
   await assertRejects(
     () =>
@@ -252,9 +281,9 @@ test("collectContainerLogs falls back to stdout/stderr when no streamed lines ar
     },
   );
 
-  // Newlines never become streamed lines; the fallback joins both buffers
-  // then the shared redactor turns control characters into underscores.
-  assertEquals(text, "___");
+  // Newlines never become streamed lines; the fallback joins both buffers and
+  // the line breaks survive.
+  assertEquals(text, "\n\n\n");
 });
 
 test("collectContainerLogs falls back to stdout alone when stderr is empty", async () => {
@@ -275,7 +304,7 @@ test("collectContainerLogs falls back to stdout alone when stderr is empty", asy
     },
   );
 
-  assertEquals(text, "_");
+  assertEquals(text, "\n");
 });
 
 test("collectContainerLogs falls back to stderr alone when stdout is empty", async () => {
@@ -296,7 +325,7 @@ test("collectContainerLogs falls back to stderr alone when stdout is empty", asy
     },
   );
 
-  assertEquals(text, "_");
+  assertEquals(text, "\n");
 });
 
 test("collectContainerLogs times out a hung docker inspect", async () => {
