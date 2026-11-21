@@ -164,15 +164,62 @@ export async function removeComposeCheckout(
 }
 
 /**
- * Remove every checkout tree but the current commit's. Called once a deploy
- * has brought the current one up: until then the previous generation's
- * containers still run from their own tree.
+ * A deploy that names no checkout stops following the repository: the current
+ * marker goes so the new compose file runs without a project directory, but
+ * the trees and the live marker stay for the containers that still run from
+ * them (and for a restore) until {@link pruneComposeCheckout} runs.
+ */
+export async function unfollowComposeCheckout(
+  deploymentDir: string,
+): Promise<void> {
+  await Deno.remove(join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME))
+    .catch((err) => {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    });
+}
+
+/**
+ * A deploy that failed before it published leaves the live compose file in
+ * place: make the live marker the current one again, so Compose calls for it
+ * still use the tree its containers run from.
+ */
+export async function restoreLiveComposeCheckoutMarker(
+  deploymentDir: string,
+): Promise<void> {
+  const live = join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME);
+  let text: string;
+  try {
+    text = await Deno.readTextFile(live);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return;
+    throw err;
+  }
+  if (parseComposeCheckoutMarker(text) === null) return;
+  await Deno.writeTextFile(
+    join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
+    text,
+    { mode: 0o640 },
+  );
+}
+
+/**
+ * Remove every checkout tree but the current commit's, or all of them when
+ * the deploy follows no repository. Called once a deploy has brought the
+ * current one up: until then the previous generation's containers still run
+ * from their own tree.
  */
 export async function pruneComposeCheckout(
   deploymentDir: string,
 ): Promise<void> {
   const marker = await readComposeCheckoutMarker(deploymentDir);
-  if (!marker) return;
+  if (!marker) {
+    await Deno.remove(join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME), {
+      recursive: true,
+    }).catch((err) => {
+      if (!(err instanceof Deno.errors.NotFound)) throw err;
+    });
+    return;
+  }
   const parent = join(deploymentDir, COMPOSE_CHECKOUT_DIRNAME);
   let names: string[];
   try {

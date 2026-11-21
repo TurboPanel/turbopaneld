@@ -28,11 +28,12 @@ import {
   type ComposeCheckoutDirs,
   pruneComposeCheckout,
   readComposeCheckoutDirs,
+  restoreLiveComposeCheckoutMarker,
+  unfollowComposeCheckout,
 } from "../deploy/compose-checkout-marker.ts";
 import {
   applyComposeCheckout,
   type ApplyComposeCheckoutDeps,
-  clearComposeCheckout,
 } from "../deploy/compose-checkout.ts";
 import {
   DeployCancelledError,
@@ -2299,8 +2300,8 @@ async function revertPublishedCompose(
 
 /**
  * Put the repository of a Git Compose project on the host before anything is
- * built or started, or drop the one an earlier deploy left when this deploy
- * names none. A hostings-only run touches neither: it builds and restarts
+ * built or started, or stop following the one an earlier deploy left when this
+ * deploy names none (its trees stay until the new version is up). A hostings-only run touches neither: it builds and restarts
  * nothing, and its payload carries no repository.
  */
 export async function applyDeployComposeCheckout(
@@ -2318,7 +2319,7 @@ export async function applyDeployComposeCheckout(
 ): Promise<void> {
   if (payload.hostingsOnly === true) return;
   if (!payload.composeCheckout) {
-    await clearComposeCheckout(deploymentDir);
+    await unfollowComposeCheckout(deploymentDir);
     return;
   }
   deps.logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
@@ -2792,6 +2793,8 @@ async function deployContainerServices(
     if (published && err instanceof DeployCancelledError) {
       await revertPublishedCompose(deploymentDir, hadPrevious);
     }
+    // Nothing was published: the live compose file still runs from its own tree.
+    if (!published) await restoreLiveComposeCheckoutMarker(deploymentDir);
     if (retiredEarlier.length > 0 && err instanceof Error) {
       err.message +=
         " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";

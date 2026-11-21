@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import {
   composeCheckoutDirs,
@@ -7,6 +7,8 @@ import {
   pruneComposeCheckout,
   readComposeCheckoutDirs,
   removeComposeCheckout,
+  restoreLiveComposeCheckoutMarker,
+  unfollowComposeCheckout,
   writeComposeCheckoutMarker,
 } from "./compose-checkout-marker.ts";
 
@@ -124,6 +126,34 @@ test("pruning keeps only the current commit's folder", async () => {
     await pruneComposeCheckout(dir);
     const left = await Array.fromAsync(Deno.readDir(parent), (e) => e.name);
     assertEquals(left, [MARKER.commitSha]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("unfollowing keeps the trees and the live marker; a failed deploy restores the marker; a prune without one removes the trees", async () => {
+  const dir = await Deno.makeTempDir({ prefix: "tp-checkout-marker-" });
+  try {
+    await Deno.mkdir(join(dir, "repo", MARKER.commitSha), { recursive: true });
+    await writeComposeCheckoutMarker(dir, MARKER);
+    await Deno.copyFile(join(dir, "repo.json"), join(dir, "repo.live.json"));
+    await unfollowComposeCheckout(dir);
+    await unfollowComposeCheckout(dir);
+    assertEquals(await readComposeCheckoutDirs(dir), null);
+    await restoreLiveComposeCheckoutMarker(dir);
+    assertEquals(
+      (await readComposeCheckoutDirs(dir))?.root,
+      join(dir, "repo", MARKER.commitSha),
+    );
+    await unfollowComposeCheckout(dir);
+    await pruneComposeCheckout(dir);
+    await assertRejects(() => Deno.stat(join(dir, "repo")));
+    // Nothing live to restore, and a garbled live marker is ignored.
+    await Deno.remove(join(dir, "repo.live.json"));
+    await restoreLiveComposeCheckoutMarker(dir);
+    await Deno.writeTextFile(join(dir, "repo.live.json"), "nope");
+    await restoreLiveComposeCheckoutMarker(dir);
+    assertEquals(await readComposeCheckoutDirs(dir), null);
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

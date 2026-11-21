@@ -1489,8 +1489,13 @@ strategy always builds; it builds every service with a `build` section, so the
 build-context check does not skip image-plus-build services here), and a rollback to an older commit rebuilds from that
 commit's tree. Folders of earlier commits are removed only after the deploy has
 brought the new generation up (`pruneComposeCheckout`); a failed deploy keeps
-them. A deploy without `composeCheckout`
-removes `repo/`, `repo.json` and `repo.live.json` (not a hostings-only run). A stop that keeps the
+them. A deploy without `composeCheckout` (a project that stopped following
+its repository, not a hostings-only run) removes only `repo.json` up front
+(`unfollowComposeCheckout`), so the new compose file runs without a project
+directory; `repo/` and the live marker stay for the old containers and for a
+restore, the publish keeps the live marker as `previous/repo.json`, and
+`pruneComposeCheckout` removes `repo/` once the new version is up. A deploy
+that fails before it publishes puts `repo.live.json` back as `repo.json`. A stop that keeps the
 directory removes them with the other daemon files. A failed sequential deploy
 that restores `previous/` (`restorePreviousDeployment`, and
 `revertPublishedCompose` for a cancel) puts `previous/repo.json` back as the

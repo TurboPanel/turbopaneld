@@ -33,7 +33,6 @@ import {
   composeCheckoutDirs,
   isCommitSha,
   readComposeCheckoutMarker,
-  removeComposeCheckout,
   writeComposeCheckoutMarker,
 } from "./compose-checkout-marker.ts";
 
@@ -202,11 +201,4 @@ export async function applyComposeCheckout(
   } finally {
     await removeIfPresent(scratch);
   }
-}
-
-/** A deploy whose payload carries no checkout leaves no tree from an earlier one. */
-export async function clearComposeCheckout(
-  deploymentDir: string,
-): Promise<void> {
-  await removeComposeCheckout(deploymentDir);
 }

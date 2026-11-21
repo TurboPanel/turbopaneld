@@ -304,3 +304,63 @@ test({
       assertEquals(await listing(repo), [SHA_A, SHA_B]);
     }),
 });
+
+/** The same project once it no longer names a repository. */
+const untracked = (): EnvironmentDeployPayload => {
+  const { composeCheckout: _gone, ...rest } = withEnvFile(SHA_B);
+  return {
+    ...rest,
+    composeFiles: [{
+      filename: RUNTIME_COMPOSE_FILENAME,
+      role: "runtime",
+      source: "inline",
+      content: "services:\n  web:\n    image: nginx:2\n",
+    }],
+  };
+};
+
+test({
+  name:
+    "a failed deploy that stops following the repository keeps the tree the old containers run from",
+  permissions: perm,
+  fn: () =>
+    withState(async (repo) => {
+      const deployments = join(repo, "..");
+      await deploy(withEnvFile(SHA_A), composeLikeDocker([]));
+      await assertRejects(
+        () =>
+          deploy(
+            { ...untracked(), deployStrategy: "sequential" },
+            composeLikeDocker([], "up"),
+          ),
+        Error,
+      );
+      assert((await Deno.stat(join(repo, SHA_A, "app.env"))).isFile);
+      // The restore put the old version, and its marker, back.
+      assertEquals(
+        (await readComposeCheckoutMarker(deployments))?.commitSha,
+        SHA_A,
+      );
+    }),
+});
+
+test({
+  name:
+    "a sequential deploy that stops following the repository still stops the old version from its tree, then drops the tree",
+  permissions: perm,
+  fn: () =>
+    withState(async (repo) => {
+      await deploy(withEnvFile(SHA_A), composeLikeDocker([]));
+      const calls: Array<{ args: string[]; projectDir: string | null }> = [];
+      await deploy(
+        { ...untracked(), deployStrategy: "sequential" },
+        composeLikeDocker(calls),
+      );
+      const stop = calls.find((c) => c.args.includes("stop"))!;
+      assert(stop.projectDir!.includes(SHA_A));
+      assertEquals(
+        await Deno.stat(repo).then(() => true, () => false),
+        false,
+      );
+    }),
+});

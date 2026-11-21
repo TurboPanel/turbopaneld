@@ -3,7 +3,10 @@ import { join } from "@std/path";
 import { createNoopCommandOutputSink } from "../logs/contracts.ts";
 import { parseEnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
 import type { CheckoutParams } from "../deploy/release/checkout.ts";
-import { readComposeCheckoutMarker } from "../deploy/compose-checkout-marker.ts";
+import {
+  pruneComposeCheckout,
+  readComposeCheckoutMarker,
+} from "../deploy/compose-checkout-marker.ts";
 import { applyDeployComposeCheckout } from "./deploy-environment.ts";
 
 /**
@@ -80,7 +83,7 @@ test("a deploy with composeCheckout puts the repository on the host", () =>
     );
   }));
 
-test("a deploy without composeCheckout drops an earlier checkout", () =>
+test("a deploy without composeCheckout stops following the checkout and keeps its tree until pruned", () =>
   inTempDeployment(async (dir) => {
     await applyDeployComposeCheckout(
       parseEnvironmentDeployPayload({ ...BASE, composeCheckout: CHECKOUT }),
@@ -93,6 +96,15 @@ test("a deploy without composeCheckout drops an earlier checkout", () =>
       deps(dir),
     );
     assertEquals(await readComposeCheckoutMarker(dir), null);
+    // The trees stay for the containers still running from them.
+    assertEquals(
+      await Deno.stat(join(dir, "repo", CHECKOUT.commitSha)).then(
+        () => true,
+        () => false,
+      ),
+      true,
+    );
+    await pruneComposeCheckout(dir);
     assertEquals(
       await Deno.stat(join(dir, "repo")).then(() => true, () => false),
       false,

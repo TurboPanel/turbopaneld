@@ -218,3 +218,27 @@ test("build contexts next to the compose file exist at the project directory", (
       }
     }
   }));
+
+test("a scratch folder on another file system fails with a message that says so", () =>
+  inTempDeployment(async (dir) => {
+    const rename = Deno.rename;
+    Deno.rename = () =>
+      Promise.reject(
+        Object.assign(new Error("cross-device"), { code: "EXDEV" }),
+      );
+    try {
+      await assertRejects(
+        () =>
+          applyComposeCheckout(dir, CHECKOUT, {
+            scratchDir: scratchFor(dir),
+            decryptSecrets: undefined,
+            checkoutFn: fakeClone({ "deploy/compose.yaml": "services: {}\n" }),
+          }),
+        Error,
+        "different file system",
+      );
+    } finally {
+      Deno.rename = rename;
+    }
+    assertEquals(await readComposeCheckoutMarker(dir), null);
+  }));
