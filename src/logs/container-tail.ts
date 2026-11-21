@@ -23,9 +23,13 @@ import {
 } from "../deploy/compose-files.ts";
 import { allProjects } from "../deploy/deployment-generations.ts";
 import { SAFE_MANAGED_ID_RE } from "../managed/engine-paths.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import {
+  sanitizeForLog,
+  stripTerminalControlsKeepBreaks,
+} from "../util/logger.ts";
 import {
   type MutableTranscriptRedactor,
+  redactCommandSummary,
   sharedSecretRedactor,
 } from "./redactor.ts";
 
@@ -242,5 +246,11 @@ export async function collectContainerLogs(
 
   const combined = combineLogOutput(lines, result);
   // Redact first so replacements cannot grow past the UTF-8 protocol cap.
-  return truncateLogs(redactor.redact(combined));
+  // Whole-text on purpose: the tail is multi-line and goes to the panel, so
+  // line breaks must survive (the per-line `redact` flattens them to `_`).
+  return truncateLogs(
+    stripTerminalControlsKeepBreaks(
+      redactCommandSummary(combined, redactor.secrets()),
+    ),
+  );
 }

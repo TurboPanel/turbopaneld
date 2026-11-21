@@ -9,6 +9,7 @@ import {
   logWarn,
   sanitizeForLog,
   stripLogInjection,
+  stripTerminalControlsKeepBreaks,
   writeLogLineOrDrop,
 } from "./logger.ts";
 
@@ -19,6 +20,13 @@ import {
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+
+test("stripTerminalControlsKeepBreaks keeps line breaks and strips escapes", () => {
+  assertEquals(
+    stripTerminalControlsKeepBreaks("a\r\nb\rc\td\x1b[31me\x07f\n"),
+    "a\nb\nc\tde_f\n",
+  );
+});
 
 test("stripLogInjection replaces control whitespace", () => {
   assertEquals(stripLogInjection("a\nb\rc\td"), "a_b_c_d");
