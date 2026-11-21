@@ -67,6 +67,7 @@ import {
   REDIS_PLAYBOOK,
   REQUIREMENTS_FILE,
   SET_HOSTNAME_PLAYBOOK,
+  SMB_TOOLS_PLAYBOOK,
   SOCKET_DIRS_PLAYBOOK,
   TIME_SYNC_APPLY_PLAYBOOK,
   UV_BIN,
@@ -461,6 +462,29 @@ export async function runSetHostname(
   }
   logInfo("orchestration", "set-hostname complete");
   return { summary: collector.build() };
+}
+
+/** Install `cifs-utils` so the host can mount SMB share volumes. */
+export async function runSmbToolsSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running smb-tools-setup playbook");
+  const collector = new AnsibleRunSummaryCollector();
+  const eventHandler: AnsibleEventHandler = (event) => {
+    collector.handleEvent(event);
+    onEvent?.(event);
+  };
+  try {
+    await runLocalPlaybook(SMB_TOOLS_PLAYBOOK, [], eventHandler);
+  } catch {
+    const summary = collector.build({ runFailed: true });
+    throw new Error(
+      summary.length > 0
+        ? `smb-tools-setup playbook failed: ${summary}`
+        : "smb-tools-setup playbook failed",
+    );
+  }
+  logInfo("orchestration", "smb-tools-setup complete");
 }
 
 export type TimeSyncApplyOpts = {

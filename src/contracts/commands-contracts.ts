@@ -1749,6 +1749,38 @@ export type EnvironmentDeployHostAccess = {
    * daemon then refuses such a context. Internal hosts are refused either way.
    */
   remoteBuildSourcesApproved?: boolean;
+  /**
+   * True only when the control plane allows this server's projects to mount
+   * SMB network shares (`cifs` / `smb3` volumes). Absent reads as `false`; the
+   * daemon then refuses such a volume like any other network filesystem.
+   * Requires the `network-shares-v1` wire feature.
+   */
+  allowNetworkShares?: boolean;
+  /**
+   * One entry per SMB share volume that needs a login. Each key names an entry
+   * of `variableMaterial` (sealed, looked up as
+   * `${composeServiceName ?? ""}::${key}`); the daemon adds them as
+   * `username=`, `password=` and `domain=` to the volume's mount options in
+   * the compose it runs, so no secret ever sits in the compose text the
+   * control plane sends. Values may not contain a comma or a line break.
+   * Requires the `network-shares-v1` wire feature.
+   */
+  networkShareCredentials?: EnvironmentDeployNetworkShareCredential[];
+};
+
+export type EnvironmentDeployNetworkShareCredential = {
+  /** Top-level Compose volume name the credentials belong to. */
+  volume: string;
+  /** `variableMaterial` key holding the share password. */
+  passwordKey: string;
+  /** `variableMaterial` key holding the user name, when it is sealed too. */
+  usernameKey?: string;
+  /** Plain (not secret) user name, when no `usernameKey` is given. */
+  username?: string;
+  /** Plain (not secret) domain or workgroup. */
+  domain?: string;
+  /** Service of the material entries; absent or null for project-level ones. */
+  composeServiceName?: string | null;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -7027,6 +7059,51 @@ function parseOptionalMaterialArray<T>(
   return value.map(parseEntry);
 }
 
+function parseNetworkShareCredential(
+  value: unknown,
+): EnvironmentDeployNetworkShareCredential {
+  if (!isRecord(value)) {
+    throw new TypeError(
+      "Invalid environment deploy networkShareCredentials entry",
+    );
+  }
+  const text = (field: string): string | undefined => {
+    const raw = value[field];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 256) {
+      throw new TypeError(
+        `networkShareCredentials ${field} must be a short string`,
+      );
+    }
+    return raw;
+  };
+  const service = value.composeServiceName;
+  if (
+    service !== undefined && service !== null && typeof service !== "string"
+  ) {
+    throw new TypeError(
+      "networkShareCredentials composeServiceName must be a string or null",
+    );
+  }
+  const entry: EnvironmentDeployNetworkShareCredential = {
+    volume: parseNonEmptyString(value, "volume"),
+    passwordKey: parseNonEmptyString(value, "passwordKey"),
+  };
+  const usernameKey = text("usernameKey");
+  const username = text("username");
+  const domain = text("domain");
+  if (usernameKey !== undefined && username !== undefined) {
+    throw new TypeError(
+      "networkShareCredentials takes usernameKey or username, not both",
+    );
+  }
+  if (usernameKey !== undefined) entry.usernameKey = usernameKey;
+  if (username !== undefined) entry.username = username;
+  if (domain !== undefined) entry.domain = domain;
+  if (service !== undefined) entry.composeServiceName = service;
+  return entry;
+}
+
 function parseOptionalBoolean(
   value: unknown,
   fieldName: string,
@@ -7674,6 +7751,15 @@ export function parseEnvironmentDeployPayload(
       remoteBuildSourcesApproved: parseOptionalBoolean(
         value.remoteBuildSourcesApproved,
         "remoteBuildSourcesApproved",
+      ),
+      allowNetworkShares: parseOptionalBoolean(
+        value.allowNetworkShares,
+        "allowNetworkShares",
+      ),
+      networkShareCredentials: parseOptionalMaterialArray(
+        value.networkShareCredentials,
+        "networkShareCredentials",
+        parseNetworkShareCredential,
       ),
       tlsMaterial,
       variableMaterial: parseOptionalMaterialArray(

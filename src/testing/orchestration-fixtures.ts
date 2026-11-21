@@ -240,6 +240,7 @@ export async function seedOrchestrationTree(
       "socket-dirs-setup.yml",
       "set-hostname.yml",
       "time-sync-apply.yml",
+      "smb-tools-setup.yml",
       "instance-build-toggle.yml",
     ] as const
   ) {
