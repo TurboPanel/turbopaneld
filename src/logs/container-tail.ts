@@ -27,6 +27,7 @@ import {
   sanitizeForLog,
   stripTerminalControlsKeepBreaks,
 } from "../util/logger.ts";
+import { truncateLogTail } from "./truncate.ts";
 import {
   type MutableTranscriptRedactor,
   redactCommandSummary,
@@ -44,11 +45,7 @@ type ListManifestsFn = (layout: {
 
 const DEFAULT_TAIL = 200;
 const MAX_TAIL = 2_000;
-/** Stay under the cell `MAX_DAEMON_WS_LOGS_CHARS` / UTF-8 frame wire cap. */
-const MAX_LOG_BYTES = 200 * 1024;
 const COLLECT_TIMEOUT_MS = 15_000;
-const utf8Encoder = new TextEncoder();
-const utf8Decoder = new TextDecoder();
 
 /** Docker ids and names: letters, digits, underscore, dot, hyphen. */
 const SAFE_CONTAINER_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
@@ -70,21 +67,6 @@ export type CollectContainerLogsDeps = {
 function clampTail(raw: number | undefined): number {
   const value = raw ?? DEFAULT_TAIL;
   return Math.min(Math.max(1, Math.floor(value)), MAX_TAIL);
-}
-
-/** Keep the tail of `text` within {@link MAX_LOG_BYTES} UTF-8 bytes. */
-function truncateLogs(text: string): string {
-  const encoded = utf8Encoder.encode(text);
-  if (encoded.byteLength <= MAX_LOG_BYTES) return text;
-  const slice = encoded.subarray(encoded.byteLength - MAX_LOG_BYTES);
-  let start = 0;
-  // Skip a leading continuation so the cut stays on a code-point boundary.
-  while (
-    start < slice.length && (slice[start]! & 0b1100_0000) === 0b1000_0000
-  ) {
-    start += 1;
-  }
-  return utf8Decoder.decode(slice.subarray(start));
 }
 
 function combineLogOutput(lines: string[], result: DockerCliResult): string {
@@ -248,7 +230,7 @@ export async function collectContainerLogs(
   // Redact first so replacements cannot grow past the UTF-8 protocol cap.
   // Whole-text on purpose: the tail is multi-line and goes to the panel, so
   // line breaks must survive (the per-line `redact` flattens them to `_`).
-  return truncateLogs(
+  return truncateLogTail(
     stripTerminalControlsKeepBreaks(
       redactCommandSummary(combined, redactor.secrets()),
     ),
