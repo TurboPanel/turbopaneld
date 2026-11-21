@@ -74,7 +74,7 @@ async function deployWithShare(
     if (args.includes("up")) {
       const dir = join(
         root,
-        "run",
+        "state",
         "deployments",
         "proj-shares",
         "envshares",

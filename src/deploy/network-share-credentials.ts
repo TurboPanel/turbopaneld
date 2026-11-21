@@ -4,10 +4,12 @@
  * The control plane never puts a share password in compose text. It sends the
  * login as sealed `variableMaterial` and names it in `networkShareCredentials`;
  * the daemon decrypts it, writes one `0600` file per share volume in its own
- * folder on the `/run` tmpfs (`<runDir>/deployments/<project>/<env>/smb`) and
- * adds `credentials=<that file>` to the volume's `o`. The folder is removed on
- * stop and rewritten on every deploy, with files of volumes that left the payload removed, so a login that left the
- * payload does not stay on disk.
+ * folder in the persistent state dir
+ * (`<stateDir>/deployments/<project>/<env>/smb`) and adds
+ * `credentials=<that file>` to the volume's `o`. The file lives on disk, not
+ * on the `/run` tmpfs, because Docker restarts containers after a reboot and
+ * the mount reads it again. The folder is removed on stop and every deploy
+ * rewrites it, removing files of volumes that left the payload.
  *
  * The file belongs to the daemon account (the daemon has no way to hand a file
  * to root); mode `0600` in a `0700` folder keeps every other host account out,
@@ -38,15 +40,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function shareCredentialsDirectory(
-  layout: { runDir: string },
+  layout: { stateDir: string },
   projectId: string,
   environmentId: string,
 ): string {
-  return join(layout.runDir, "deployments", projectId, environmentId, "smb");
+  return join(layout.stateDir, "deployments", projectId, environmentId, "smb");
 }
 
 export function removeShareCredentialsTree(
-  layout: { runDir: string },
+  layout: { stateDir: string },
   projectId: string,
   environmentId: string,
 ): Promise<void> {
@@ -94,7 +96,7 @@ function materialKey(
  * written. Returns volume name to file path.
  */
 export async function materializeShareCredentials(
-  layout: { runDir: string },
+  layout: { stateDir: string },
   projectId: string,
   environmentId: string,
   entries: readonly EnvironmentDeployNetworkShareCredential[],

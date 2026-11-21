@@ -34,17 +34,19 @@ function material(
 const decrypt = (envelopes: readonly string[]) =>
   Promise.resolve(envelopes.map((e) => e.replace(/^sealed:/, "")));
 
-async function withRunDir(fn: (layout: { runDir: string }) => Promise<void>) {
-  const runDir = await Deno.makeTempDir({ prefix: "tp-share-cred-" });
+async function withStateDir(
+  fn: (layout: { stateDir: string }) => Promise<void>,
+) {
+  const stateDir = await Deno.makeTempDir({ prefix: "tp-share-cred-" });
   try {
-    await fn({ runDir });
+    await fn({ stateDir });
   } finally {
-    await Deno.remove(runDir, { recursive: true });
+    await Deno.remove(stateDir, { recursive: true });
   }
 }
 
 test("the credentials file has the cifs lines and is private", async () => {
-  await withRunDir(async (layout) => {
+  await withStateDir(async (layout) => {
     const paths = await materializeShareCredentials(
       layout,
       "p1",
@@ -77,7 +79,7 @@ test("the credentials file has the cifs lines and is private", async () => {
 });
 
 test("a plain username needs no sealed key, and stale files are removed", async () => {
-  await withRunDir(async (layout) => {
+  await withStateDir(async (layout) => {
     const entry = { passwordKey: "PW", username: "svc" };
     await materializeShareCredentials(
       layout,
@@ -105,7 +107,7 @@ test("a plain username needs no sealed key, and stale files are removed", async 
 });
 
 test("a missing value, a line break or a bad volume name refuses before writing", async () => {
-  await withRunDir(async (layout) => {
+  await withStateDir(async (layout) => {
     const dir = shareCredentialsDirectory(layout, "p1", "e1");
     await assertRejects(
       () =>
@@ -164,7 +166,7 @@ test("a missing value, a line break or a bad volume name refuses before writing"
 });
 
 test("the secret never reaches an error message", async () => {
-  await withRunDir(async (layout) => {
+  await withStateDir(async (layout) => {
     const err = await assertRejects(() =>
       materializeShareCredentials(
         layout,
@@ -180,7 +182,7 @@ test("the secret never reaches an error message", async () => {
 });
 
 test("removing the tree takes the files and tolerates an absent folder", async () => {
-  await withRunDir(async (layout) => {
+  await withStateDir(async (layout) => {
     await removeShareCredentialsTree(layout, "p1", "e1");
     await materializeShareCredentials(
       layout,
