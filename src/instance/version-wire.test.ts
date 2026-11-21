@@ -38,6 +38,7 @@ import {
   MANAGED_REPLICA_FRESHNESS_FEATURE,
   MANAGED_SWITCHOVER_FINAL_POSITION_FEATURE,
   MIN_SUPPORTED_INSTANCE_VERSION,
+  NETWORK_SHARES_FEATURE,
   PANEL_IDENTITY_FEATURE,
   PANEL_SIGNED_FRAMES_FEATURE,
   parseSemver,
@@ -627,5 +628,11 @@ test("compose-checkout-v1 is advertised and raised no floor", () => {
     DAEMON_WIRE_FEATURES.includes(COMPOSE_CHECKOUT_FEATURE),
     true,
   );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("network-shares-v1 is advertised and raised no floor", () => {
+  assertEquals(NETWORK_SHARES_FEATURE, "network-shares-v1");
+  assertEquals(DAEMON_WIRE_FEATURES.includes(NETWORK_SHARES_FEATURE), true);
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

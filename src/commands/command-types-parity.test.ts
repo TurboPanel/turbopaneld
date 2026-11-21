@@ -1115,6 +1115,71 @@ test("environment.deploy rejects non-boolean hostLevelApproved", () => {
   );
 });
 
+test("environment.deploy round-trips allowNetworkShares", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...MINIMAL_DEPLOY,
+    allowNetworkShares: true,
+  });
+  assertEquals(payload.allowNetworkShares, true);
+});
+
+test("environment.deploy from an older control plane has no allowNetworkShares", () => {
+  const payload = parseEnvironmentDeployPayload(MINIMAL_DEPLOY);
+  assertEquals(payload.allowNetworkShares, undefined);
+});
+
+test("environment.deploy rejects non-boolean allowNetworkShares", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...MINIMAL_DEPLOY,
+        allowNetworkShares: "true",
+      }),
+    TypeError,
+    "allowNetworkShares must be a boolean",
+  );
+});
+
+test("environment.deploy round-trips networkShareCredentials", () => {
+  const entry = {
+    volume: "media",
+    passwordKey: "SHARE_SECRET_A",
+    usernameKey: "SHARE_SECRET_B",
+    domain: "CORP",
+    composeServiceName: null,
+  };
+  const payload = parseEnvironmentDeployPayload({
+    ...MINIMAL_DEPLOY,
+    networkShareCredentials: [entry],
+  });
+  assertEquals(payload.networkShareCredentials, [entry]);
+  assertEquals(
+    parseEnvironmentDeployPayload(MINIMAL_DEPLOY).networkShareCredentials,
+    undefined,
+  );
+});
+
+test("environment.deploy rejects a malformed networkShareCredentials entry", () => {
+  for (
+    const bad of [
+      "x",
+      [{ volume: "m" }],
+      [{ volume: "m", passwordKey: "" }],
+      [{ volume: "m", passwordKey: "k", usernameKey: "u", username: "n" }],
+      [{ volume: "m", passwordKey: "k", domain: 5 }],
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...MINIMAL_DEPLOY,
+          networkShareCredentials: bad,
+        }),
+      TypeError,
+    );
+  }
+});
+
 test("environment.deploy round-trips noCache", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",

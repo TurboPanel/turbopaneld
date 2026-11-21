@@ -93,6 +93,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
 import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
@@ -112,7 +113,23 @@ import {
   type CommandOutputSink,
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
+import { cachedPhpSiteKeySecret } from "../deploy/site/php-site-key.ts";
+import {
+  applyShareLoginsToCompose,
+  pruneStaleShareVolumes,
+  resolveShareLogins,
+  type ShareLogin,
+} from "../deploy/network-share-logins.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
+import {
+  assertNetworkSharesFinal,
+  describeNetworkShare,
+  hasNetworkShares,
+  NETWORK_SHARES_REFUSAL_NOTE,
+  networkShareVolumes,
+} from "../deploy/network-shares.ts";
+import { ensureSmbTools as defaultEnsureSmbTools } from "../deploy/smb-tools.ts";
+import { runSmbToolsSetup } from "../orchestration/ansible.ts";
 import { ensureBuildkitImageBuild } from "../deploy/release/image-build.ts";
 import { observeBuildSlot } from "../deploy/release/build-sandbox.ts";
 import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
@@ -456,6 +473,11 @@ export type EnvironmentDeployDeps = {
    * Ansible install on hermetic suite paths that still exercise compose.
    */
   ensureDocker?: () => Promise<void>;
+  /**
+   * Test seam — defaults to {@link defaultEnsureSmbTools} (installs
+   * `cifs-utils` through the privileged playbook when a share volume needs it).
+   */
+  ensureSmbTools?: (log: (line: string) => void) => Promise<void>;
   /** Test seam — defaults to {@link waitForHealthGate} (real polling and sleeps). */
   waitForHealth?: typeof waitForHealthGate;
   /**
@@ -1800,6 +1822,7 @@ type DeployContainerServicesInput = {
   runStreamed: RunDockerStreamedFn;
   logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
+  ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -2419,7 +2442,13 @@ async function buildBeforeInPlaceUp(
  */
 async function pruneAfterDeploy(
   input: DeployContainerServicesInput,
+  shareVolumeNames: ReadonlyMap<string, string>,
 ): Promise<void> {
+  await pruneStaleShareVolumes(
+    input.parsedPayload.projectName,
+    shareVolumeNames,
+    input.run,
+  );
   await pruneDeploySecrets(input.layout, input.parsedPayload);
   await pruneDeployConfigFiles(input.layout, input.parsedPayload);
   await pruneComposeCheckout(input.deploymentDir);
@@ -2435,6 +2464,63 @@ function composeCheckoutOptions(dirs: ComposeCheckoutDirs | null): {
 } {
   if (!dirs) return { root: {}, dirs: {} };
   return { root: { checkoutRoot: dirs.root }, dirs: { checkout: dirs } };
+}
+
+/**
+ * The SMB logins of a deploy, decrypted before anything is written. Logins
+ * without the server's permission refuse the deploy; they are added to the
+ * compose only after every policy check has judged the author's text.
+ */
+async function resolveDeployShareLogins(
+  payload: EnvironmentDeployPayload,
+  decryptSecrets: DeployContainerServicesInput["decryptSecrets"],
+): Promise<Map<string, ShareLogin>> {
+  const entries = payload.networkShareCredentials ?? [];
+  if (entries.length > 0 && payload.allowNetworkShares !== true) {
+    throw new Error(
+      `networkShareCredentials were sent, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+    );
+  }
+  return await resolveShareLogins(
+    entries,
+    payload.variableMaterial ?? [],
+    decryptSecrets,
+  );
+}
+
+/**
+ * SMB share volumes the policy accepted: the share password never reaches the
+ * transcript, then the mount helper is made ready before compose up needs it.
+ */
+async function prepareNetworkShares(
+  document: Record<string, unknown>,
+  logins: ReadonlyMap<string, ShareLogin>,
+  logSink: CommandOutputSink,
+  ensureSmbTools: DeployContainerServicesInput["ensureSmbToolsFn"],
+): Promise<void> {
+  if (!hasNetworkShares(document)) return;
+  const passwords = [...logins.values()].map((l) => l.password);
+  logSink.addSecrets(passwords);
+  rememberSecretPlaintexts(passwords);
+  for (const [name, spec] of networkShareVolumes(document)) {
+    logSink.onLine("stdout", describeNetworkShare(name, spec));
+  }
+  await ensureSmbTools((line) => logSink.onLine("stdout", line));
+}
+
+/** The logins into the staged compose; the key is read only when there are some. */
+async function applyDeployShareLogins(
+  yaml: string,
+  projectName: string,
+  logins: ReadonlyMap<string, ShareLogin>,
+  layout: LayoutPaths,
+) {
+  return await applyShareLoginsToCompose(
+    yaml,
+    projectName,
+    logins,
+    logins.size === 0 ? new Uint8Array() : await cachedPhpSiteKeySecret(layout),
+  );
 }
 
 /**
@@ -2502,6 +2588,13 @@ async function deployContainerServices(
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
+    // SMB logins are decrypted here but added to the compose only after every
+    // policy check below has judged the author's text (a login is never
+    // compose text from the control plane).
+    const shareLogins = await resolveDeployShareLogins(
+      parsedPayload,
+      decryptSecrets,
+    );
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
@@ -2516,6 +2609,7 @@ async function deployContainerServices(
     // plane's approval, and built images may not take platform image names.
     assertComposePolicy(resolved.document ?? {}, {
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
+      allowNetworkShares: parsedPayload.allowNetworkShares === true,
       platformNetworks: [
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
@@ -2588,6 +2682,17 @@ async function deployContainerServices(
       alwaysBuilds: deployAlwaysBuilds(parsedPayload),
     });
 
+    // SMB share volumes (the policy above already accepted them): the share
+    // password never reaches the transcript, then the mount helper is made
+    // ready before compose up needs it.
+    const shareDocument = resolved.document ?? {};
+    await prepareNetworkShares(
+      shareDocument,
+      shareLogins,
+      logSink,
+      input.ensureSmbToolsFn,
+    );
+
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],
       parsedPayload.principalMaterial,
@@ -2614,6 +2719,15 @@ async function deployContainerServices(
       layout,
       parsedPayload,
     );
+    // The judged compose gets its share logins last, in the staged file that
+    // is published (0640) and read by every later `compose up`.
+    const shareApplied = await applyDeployShareLogins(
+      yaml,
+      parsedPayload.projectName,
+      shareLogins,
+      layout,
+    );
+    yaml = shareApplied.yaml;
     await writeComposeFileSecure(stagedPath, yaml);
 
     const labeledServices = [...resolved.serviceNames].sort((a, b) =>
@@ -2654,6 +2768,21 @@ async function deployContainerServices(
     }
 
     await validateComposeConfig(parsedPayload.projectName, [stagedPath], run);
+    // Last look before anything starts: the compose that will run, read back
+    // as Compose resolves it, must still hold only shares the daemon accepts.
+    if (hasNetworkShares(shareDocument)) {
+      assertNetworkSharesFinal(
+        (await resolveComposeModel(
+          parsedPayload.projectName,
+          [stagedPath],
+          run,
+        )).document ?? {},
+        {
+          allowNetworkShares: parsedPayload.allowNetworkShares === true,
+          injectedLogins: shareApplied.injected,
+        },
+      );
+    }
 
     cancel?.throwIfCancelled("before the new version was published");
     const chain = await publishStagedRuntimeCompose(
@@ -2743,7 +2872,7 @@ async function deployContainerServices(
         deploymentDir,
         onLine,
       });
-      await pruneAfterDeploy(input);
+      await pruneAfterDeploy(input, shareApplied.volumeNames);
       return sequential;
     }
     if (serviceHooks.length > 0) {
@@ -2801,7 +2930,7 @@ async function deployContainerServices(
 
     // The new release is up and its hooks passed: only now may the files the
     // previous one needed (and this plan no longer lists) be removed.
-    await pruneAfterDeploy(input);
+    await pruneAfterDeploy(input, shareApplied.volumeNames);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
@@ -3007,6 +3136,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   currentPhase: () => string;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
+  ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -3044,6 +3174,12 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
     ensureDockerFn: deps?.ensureDocker ??
       (() => defaultEnsureDocker({ onEvent: dockerEvents })),
+    ensureSmbToolsFn: deps?.ensureSmbTools ??
+      ((log) =>
+        defaultEnsureSmbTools({
+          log,
+          runSetup: () => runSmbToolsSetup(),
+        })),
     ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
       ((networks: readonly ExternalDockerNetworkSpec[]) =>
         defaultEnsureExternalDockerNetworks(networks, run)),
@@ -3877,6 +4013,7 @@ async function deployEnvironmentHolding(
     runStreamed: runtime.runStreamed,
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    ensureSmbToolsFn: runtime.ensureSmbToolsFn,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
     ...(runtime.waitForHealth === undefined

@@ -18,6 +18,7 @@ import {
 } from "../deploy/compose-files.ts";
 import { projectsForCommand } from "../deploy/deployment-generations.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { removeProjectShareVolumes } from "../deploy/network-share-logins.ts";
 import { removeConfigTree } from "../deploy/config-files.ts";
 import { removeSecretTree } from "../deploy/secret-runtime.ts";
 import {
@@ -595,6 +596,12 @@ async function stopEnvironmentLocked(
       run,
       logSink,
     });
+
+  // A delete also lets go of the SMB share volumes of this project (they hold
+  // a mount, not data); best effort, never fails the stop.
+  if (dockerPresent && parsedPayload.removeDeploymentDir === true) {
+    await removeProjectShareVolumes(parsedPayload.projectName, run);
+  }
 
   const fabricNetworks = parsedPayload.fabricNetworks ?? [];
   if (fabricNetworks.length > 0 && dockerPresent) {

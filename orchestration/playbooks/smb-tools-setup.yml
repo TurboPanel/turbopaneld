@@ -1,0 +1,23 @@
+---
+# Install the SMB mount helper (cifs-utils, which ships mount.cifs) that
+# network share volumes need. Debian family only; idempotent. Invoked by the
+# daemon's environment.deploy when a compose volume has type cifs or smb3.
+- name: TurboPanel SMB tools
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Refuse hosts that are not Debian family
+      ansible.builtin.assert:
+        that: ansible_os_family == 'Debian'
+        fail_msg: >-
+          Network shares are only supported on Debian and Ubuntu hosts;
+          install cifs-utils by hand on this server.
+    - name: Install cifs-utils
+      ansible.builtin.apt:
+        lock_timeout: 300
+        name: cifs-utils
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
