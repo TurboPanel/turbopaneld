@@ -1,4 +1,5 @@
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
+import { decodeBase64Url } from "@std/encoding/base64url";
 import { it } from "@std/testing/bdd";
 import { join } from "@std/path";
 import type { MockWebSocket } from "../testing/index.ts";
@@ -27,6 +28,23 @@ import { waitFor } from "../testing/wait-for.ts";
 import { createTestPanel, type TestPanel } from "../testing/panel-signing.ts";
 import { splitSignature } from "./panel-identity-frames.ts";
 import { reportSigningInput } from "./report-signing.ts";
+import { loadOrCreateSealingKey } from "../crypto/sealing-key.ts";
+import {
+  engine,
+  EXEC_ID,
+  TENANT,
+  withFakeDocker,
+} from "../testing/fake-docker-exec.ts";
+import { sealShellKey } from "../shell/key.ts";
+import {
+  decodePlain,
+  DIR_BROWSER_TO_DAEMON,
+  DIR_DAEMON_TO_BROWSER,
+  encodeData,
+  FrameOpener,
+  FrameSealer,
+  importSessionKey,
+} from "../shell/frames.ts";
 
 wireCommandPorts();
 
@@ -57,6 +75,8 @@ type PinnedSession = {
   daemonKey: Awaited<ReturnType<typeof generateDaemonKeypair>>;
   sessionBodies: Record<string, unknown>[];
   sessionSignatures: (string | null)[];
+  /** The daemon's state dir, where its sealing key lives. */
+  stateDir: string;
 };
 
 /**
@@ -184,6 +204,7 @@ async function withPinnedClient(
           daemonKey,
           sessionBodies,
           sessionSignatures,
+          stateDir,
         });
       } finally {
         client.stop();
@@ -495,4 +516,205 @@ it({
         true,
       );
     }),
+});
+
+const SHELL_SID = "6f1a2b3c-4d5e-4f60-8a7b-9c0d1e2f3a4b";
+const SHELL_PERMISSIONS = {
+  env: true,
+  read: true,
+  write: true,
+  net: true,
+  sys: ["hostname", "networkInterfaces", "uid"],
+};
+
+function openFrameFields(keySealed: string): Record<string, unknown> & {
+  type: string;
+} {
+  return {
+    type: "shell-open",
+    sid: SHELL_SID,
+    kind: "container",
+    userId: "user-1",
+    userLabel: "Ada",
+    container: { id: "c1", user: "app" },
+    cols: 80,
+    rows: 24,
+    term: "xterm-256color",
+    keySealed,
+    idleSec: 600,
+    maxSec: 3600,
+    windowBytes: 65536,
+    maxFrameBytes: 16384,
+  };
+}
+
+it({
+  name:
+    "an unsigned shell-open is refused with 4403 and never reaches Docker; a binary frame for an unknown session is dropped",
+  permissions: SHELL_PERMISSIONS,
+  fn: () =>
+    withFakeDocker(
+      engine(TENANT),
+      (dockerSocket, seen) =>
+        withPinnedClient(async ({ socket, panel, nonce }) => {
+          Deno.env.set("TURBOPANEL_DOCKER_SOCKET", dockerSocket);
+          try {
+            socket.receive(
+              await panel.hello({
+                nonce,
+                sessionId: "sess-1",
+                iat: Math.floor(Date.now() / 1000),
+              }),
+            );
+            await waitFor(
+              "presence hello",
+              () => sentFrames(socket).some((frame) => frame.type === "hello"),
+            );
+            // Binary for a session that does not exist: dropped, socket stays.
+            socket.receiveBinary(new Uint8Array(80).fill(1));
+            socket.receiveBinary(new Uint8Array(3));
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            assertEquals(socket.readyState, 1);
+            assertEquals(socket.sentBinary.length, 0);
+
+            const closed = new Promise<CloseEvent>((resolve) =>
+              socket.addEventListener(
+                "close",
+                (event) => resolve(event as CloseEvent),
+              )
+            );
+            socket.receive(openFrameFields("AAAA"));
+            assertEquals((await closed).code, 4403);
+            assertEquals(seen.length, 0);
+          } finally {
+            Deno.env.delete("TURBOPANEL_DOCKER_SOCKET");
+          }
+        }),
+    ),
+});
+
+it({
+  name:
+    "a signed shell-open runs a terminal over the control socket: signed reports, sealed binary frames, a forged frame ends only the session",
+  permissions: SHELL_PERMISSIONS,
+  fn: () =>
+    withFakeDocker(
+      engine(TENANT),
+      (dockerSocket, seen) =>
+        withPinnedClient(
+          async ({ socket, panel, nonce, daemonKey, stateDir }) => {
+            Deno.env.set("TURBOPANEL_DOCKER_SOCKET", dockerSocket);
+            try {
+              const iat = () => Math.floor(Date.now() / 1000);
+              socket.receive(
+                await panel.hello({ nonce, sessionId: "sess-1", iat: iat() }),
+              );
+              await waitFor(
+                "presence hello",
+                () =>
+                  sentFrames(socket).some((frame) => frame.type === "hello"),
+              );
+              socket.receive(
+                await panel.frame({
+                  type: "version",
+                  features: ["signed-reports-v1"],
+                  at: new Date().toISOString(),
+                }, { sessionId: "sess-1", seq: 1, iat: iat() }),
+              );
+
+              const sessionKey = new Uint8Array(32).fill(7);
+              const sealing = await loadOrCreateSealingKey(
+                stateDir,
+                daemonKey.keyId,
+              );
+              const keySealed = await sealShellKey(
+                decodeBase64Url(sealing.pub),
+                SERVER.serverId,
+                SHELL_SID,
+                sessionKey,
+              );
+              socket.receive(
+                await panel.frame(openFrameFields(keySealed), {
+                  sessionId: "sess-1",
+                  seq: 2,
+                  iat: iat(),
+                }),
+              );
+              const report = (type: string) =>
+                socket.sentFrames.find((frame) =>
+                  frame.includes(`"type":"${type}"`)
+                );
+              await waitFor(
+                "shell-opened",
+                () => report("shell-opened") !== undefined,
+              );
+              const opened = splitSignature(report("shell-opened")!)!;
+              assertEquals(JSON.parse(opened.unsigned).sid, SHELL_SID);
+              assertEquals(
+                await verifyChallenge(
+                  daemonKey.publicJwk,
+                  reportSigningInput("shell-opened", opened.unsigned),
+                  opened.sig,
+                ),
+                true,
+              );
+              const exec = seen.find((req) => req.path.endsWith("/exec"))!;
+              assertEquals(JSON.parse(exec.body).User, "app");
+              assert(seen.some((req) => req.path === `/exec/${EXEC_ID}/start`));
+
+              // Browser input in, sealed output and an ACK out.
+              const key = await importSessionKey(sessionKey);
+              const toDaemon = new FrameSealer(
+                key,
+                SHELL_SID,
+                DIR_BROWSER_TO_DAEMON,
+              );
+              const fromDaemon = new FrameOpener(
+                key,
+                SHELL_SID,
+                DIR_DAEMON_TO_BROWSER,
+              );
+              socket.receiveBinary(
+                await toDaemon.seal(
+                  encodeData(new TextEncoder().encode("ls\n")),
+                ),
+              );
+              await waitFor(
+                "output and ack",
+                () => socket.sentBinary.length >= 2,
+              );
+              const seenPlain: string[] = [];
+              for (const frame of socket.sentBinary) {
+                const message = decodePlain(await fromDaemon.open(frame));
+                seenPlain.push(
+                  message.type === "data"
+                    ? new TextDecoder().decode(message.data)
+                    : message.type,
+                );
+              }
+              assert(seenPlain.includes("ack"), String(seenPlain));
+              assert(seenPlain.join("").includes("ready$ "), String(seenPlain));
+
+              // A forged frame does not close the control socket, only the session.
+              const forged = await toDaemon.seal(
+                encodeData(new Uint8Array([1])),
+              );
+              forged[forged.length - 1] ^= 1;
+              socket.receiveBinary(forged);
+              await waitFor(
+                "shell-closed",
+                () => report("shell-closed") !== undefined,
+              );
+              assertEquals(
+                JSON.parse(splitSignature(report("shell-closed")!)!.unsigned)
+                  .reason,
+                "error",
+              );
+              assertEquals(socket.readyState, 1);
+            } finally {
+              Deno.env.delete("TURBOPANEL_DOCKER_SOCKET");
+            }
+          },
+        ),
+    ),
 });

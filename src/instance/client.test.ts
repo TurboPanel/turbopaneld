@@ -932,6 +932,149 @@ it({
 });
 
 it({
+  name:
+    "InstanceClient answers a shell-open on a session that is not signed with an unverified shell-error",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken, enroll } = await prepareVerifiedAuth();
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL) => {
+        await Promise.resolve();
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          return new Response(JSON.stringify(enroll), {
+            status: 200,
+          });
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      const socket = await waitFor("presence websocket", () => sockets.at(0));
+      socket.open();
+      const hello = await waitFor(
+        "hello frame",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "hello"
+          ),
+      );
+      assertExists(hello);
+      const sid = "00000000-0000-4000-8000-000000000001";
+      socket.receive({
+        type: "shell-open",
+        sid,
+        kind: "container",
+        userId: "u1",
+        container: { id: "c1" },
+        cols: 80,
+        rows: 24,
+        keySealed: "x",
+        idleSec: 120,
+        maxSec: 3600,
+        windowBytes: 16384,
+        maxFrameBytes: 16384,
+      });
+      const refusal = await waitFor(
+        "shell-error frame",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "shell-error"
+          ),
+      );
+      assertEquals(refusal.code, "unverified");
+      assertEquals(refusal.sid, sid);
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
   name: "InstanceClient keeps websocket open without instance stale watchdog",
   permissions: {
     env: true,
