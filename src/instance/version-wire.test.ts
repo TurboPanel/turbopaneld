@@ -52,6 +52,7 @@ import {
   SITE_DB_URL_CA_FEATURE,
   SITE_ENGINE_NGINX_APACHE_FEATURE,
   SITE_PHP_LIFECYCLE_FEATURE,
+  TERMINAL_CONTAINER_FEATURE,
   TLS_CAPTURE_FEATURE,
   TUNNEL_CONNECTOR_FEATURE,
   TUNNEL_CONNECTOR_TOKEN_CHANGE_FEATURE,
@@ -626,6 +627,15 @@ test("compose-checkout-v1 is advertised and raised no floor", () => {
   assertEquals(
     DAEMON_WIRE_FEATURES.includes(COMPOSE_CHECKOUT_FEATURE),
     true,
+  );
+  assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
+});
+
+test("terminal-container-v1 is advertised last and raised no floor", () => {
+  assertEquals(TERMINAL_CONTAINER_FEATURE, "terminal-container-v1");
+  assertEquals(
+    DAEMON_WIRE_FEATURES[DAEMON_WIRE_FEATURES.length - 1],
+    TERMINAL_CONTAINER_FEATURE,
   );
   assertEquals(MIN_SUPPORTED_INSTANCE_VERSION, "0.1.22");
 });

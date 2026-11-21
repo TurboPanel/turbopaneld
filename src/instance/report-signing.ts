@@ -32,6 +32,9 @@ export const SIGNED_REPORT_TYPES: ReadonlySet<string> = new Set([
   "command-outcome",
   "fabric-peers-report",
   "managed-ha-event",
+  "shell-opened",
+  "shell-closed",
+  "shell-error",
 ]);
 
 /** Envelope members a signed report carries; a report may not use these names. */

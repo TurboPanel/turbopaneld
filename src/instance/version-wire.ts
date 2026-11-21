@@ -123,6 +123,7 @@ export const DAEMON_WIRE_FEATURES = [
   "acme-issue-dns-v1",
   "command-recovery-v2",
   "compose-checkout-v1",
+  "terminal-container-v1",
 ] as const;
 
 /**
@@ -858,3 +859,15 @@ export const TUNNEL_PEER_MTLS_FEATURE: DaemonWireFeature =
  */
 export const COMPOSE_CHECKOUT_FEATURE: DaemonWireFeature =
   "compose-checkout-v1";
+
+/**
+ * `terminal-container-v1`: the control plane may send `shell-open` and
+ * `shell-kill` on the signed session and relay binary terminal frames
+ * (`src/shell/frames.ts`) over the same socket. The daemon opens an
+ * interactive `docker exec` in a tenant container, answers with signed
+ * `shell-opened`, `shell-closed` and `shell-error` reports, and takes binary
+ * frames only for a live session, authenticated by that session's key. The
+ * control plane sends none of it to a daemon that does not list the feature.
+ */
+export const TERMINAL_CONTAINER_FEATURE: DaemonWireFeature =
+  "terminal-container-v1";

@@ -14,6 +14,9 @@ export class MockWebSocket extends EventTarget {
   readonly url: string;
   readonly options: unknown;
   readonly sentFrames: string[] = [];
+  /** Binary messages the code under test sent (never mixed into `sentFrames`). */
+  readonly sentBinary: Uint8Array[] = [];
+  binaryType = "blob";
 
   readyState = MockWebSocket.CONNECTING;
   onopen: ((event: Event) => void) | null = null;
@@ -27,11 +30,23 @@ export class MockWebSocket extends EventTarget {
     this.options = options;
   }
 
-  send(data: string): void {
+  send(data: string | ArrayBufferView | ArrayBuffer): void {
     if (this.readyState !== MockWebSocket.OPEN) {
       throw new Error("cannot send on a non-open mock socket");
     }
-    this.sentFrames.push(typeof data === "string" ? data : String(data));
+    if (typeof data === "string") {
+      this.sentFrames.push(data);
+    } else if (data instanceof ArrayBuffer) {
+      this.sentBinary.push(new Uint8Array(data.slice(0)));
+    } else if (ArrayBuffer.isView(data)) {
+      this.sentBinary.push(
+        new Uint8Array(
+          data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength),
+        ),
+      );
+    } else {
+      this.sentFrames.push(String(data));
+    }
   }
 
   close(code = 1000, reason = ""): void {
@@ -58,6 +73,18 @@ export class MockWebSocket extends EventTarget {
     this.dispatchEvent(
       new MessageEvent("message", {
         data: typeof message === "string" ? message : JSON.stringify(message),
+      }),
+    );
+  }
+
+  /** A binary message from the server, as an `arraybuffer` socket delivers it. */
+  receiveBinary(bytes: Uint8Array): void {
+    this.dispatchEvent(
+      new MessageEvent("message", {
+        data: bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ),
       }),
     );
   }

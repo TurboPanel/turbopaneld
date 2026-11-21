@@ -46,6 +46,7 @@ import {
   readPanelIdentityPin,
 } from "./panel-identity-pin.ts";
 import {
+  binaryFrameBytes,
   type PanelSigningKey,
   pinAccepts,
   type SessionBinding,
@@ -117,6 +118,9 @@ import {
   type PanelIdentityFetch,
   parsePanelIdentity,
 } from "./panel-identity-cache.ts";
+import { openDockerExec } from "../shell/docker-exec.ts";
+import { openShellKey } from "../shell/key.ts";
+import { type ShellReport, ShellSessionMux } from "../shell/mux.ts";
 import {
   createSealingContext,
   createSealingRegistration,
@@ -258,6 +262,7 @@ import type {
   DaemonMessage,
   DevHostActionMessage,
   InstanceHostnameWireEntry,
+  ShellOpenMessage,
   UpdateProgressStage,
 } from "../contracts/cell-messages.ts";
 
@@ -625,6 +630,8 @@ export class InstanceClient {
   #tokenKeyId: string | undefined;
   /** The daemon key (enrolled key id + private JWK) that signs requests and the attach proof. */
   #daemonSigningKey: { keyId: string; privateJwk: JsonWebKey } | undefined;
+  #sealingContext: ReturnType<typeof createSealingContext> | undefined;
+  #shellMux: ShellSessionMux | undefined;
   #sealingRegistration: ReturnType<typeof createSealingRegistration> | null =
     null;
   #forceEnrollPending = false;
@@ -2016,6 +2023,7 @@ export class InstanceClient {
       serverId,
       serverKeyId: keyFile.keyId,
     });
+    this.#sealingContext = sealing;
     this.#sealingRegistration = createSealingRegistration({
       register: () =>
         registerSealingKey({
@@ -2146,6 +2154,53 @@ export class InstanceClient {
     await this.#openDaemonWebSocket(jwt, identity.serverId);
   }
 
+  /** The terminal multiplexer, made on first use; its keys come from the current sealing key. */
+  #shell(): ShellSessionMux {
+    this.#shellMux ??= new ShellSessionMux({
+      openKey: async (keySealed, sid) => {
+        const sealing = this.#sealingContext;
+        const serverId = this.#tokenServerId;
+        if (!sealing || !serverId) throw new Error("sealing key unavailable");
+        const { privateRaw } = await sealing.key();
+        return await openShellKey(privateRaw, serverId, sid, keySealed);
+      },
+      openContainer: (request) => openDockerExec(request),
+      sendBinary: (frame) => this.#sendShellBinary(frame),
+      sendReport: (report) => this.#sendShellReport(report),
+    });
+    return this.#shellMux;
+  }
+
+  /**
+   * Only a verified signed session may open a terminal: the session key is
+   * sealed with HPKE base mode, which does not say who sealed it, so the
+   * signature on the frame that carries it is what makes it the control
+   * plane's.
+   */
+  #openShell(message: ShellOpenMessage): void {
+    if (!this.#signedSession?.verified) {
+      logWarn("shell", "refused shell-open: the session is not signed");
+      return;
+    }
+    this.#shell().open(message).catch((err) =>
+      logWarn("shell", "shell-open failed:", sanitizeForLog(err))
+    );
+  }
+
+  #sendShellBinary(frame: Uint8Array): boolean {
+    const ws = this.#ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(frame as BufferSource);
+    return true;
+  }
+
+  #sendShellReport(report: ShellReport): boolean {
+    const ws = this.#ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(report));
+    return true;
+  }
+
   /** Presence, observers, reporters and the after-connect pulls, for one session. */
   #startSessionWork(
     ws: WebSocket,
@@ -2153,6 +2208,7 @@ export class InstanceClient {
     panelPin?: SignedPinReport,
   ): void {
     this.#idlePresence?.attach(ws, { attachProof, panelPin });
+    this.#shellMux?.flushReports();
     this.#ensureHaObserver();
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
@@ -2270,6 +2326,7 @@ export class InstanceClient {
       })
       : null;
     const ws = this.#newWebSocket(jwt, upgradeSignature);
+    ws.binaryType = "arraybuffer";
     this.#ws = ws;
     let sessionRegistered = false;
     this.#ensureIdlePresence(serverId);
@@ -2375,6 +2432,13 @@ export class InstanceClient {
       // frames; only the current socket may drive the daemon.
       if (this.#ws !== ws) return;
       this.#idlePresence?.noteInboundActivity();
+      // Terminal frames are binary and authenticate under their session key,
+      // not the signed envelope; text frames stay on the signed path below.
+      const binary = binaryFrameBytes(event.data);
+      if (binary) {
+        if (!signed || signed.verified) this.#shellMux?.handleBinary(binary);
+        return;
+      }
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
@@ -2414,6 +2478,8 @@ export class InstanceClient {
       }
       if (this.#ws !== undefined && this.#ws !== ws) return;
       this.#ws = undefined;
+      // Terminal sessions live on this socket and end with it.
+      this.#shellMux?.onSocketLost();
       this.#peerFeatures = [];
       this.#peerFeaturesKnown = false;
       this.#idlePresence?.detach();
@@ -2816,6 +2882,12 @@ export class InstanceClient {
         break;
       case "echo":
         this.#echoMessage(message, ws);
+        break;
+      case "shell-open":
+        this.#openShell(message);
+        break;
+      case "shell-kill":
+        this.#shell().kill(message);
         break;
       case "command-dispatch": {
         const dispatch = this.#resolveCommandDispatch();

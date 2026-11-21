@@ -1170,6 +1170,33 @@ key files kept, never re-enrolls). No hello within 30 s is a plain timeout.
 The hello's `heartbeatSeconds` wins over the unsigned `version` advice.
 An unpinned server keeps the unsigned session exactly as before.
 
+### Binary frames (the one exemption) and web terminals (`terminal-container-v1`)
+
+The socket carries one kind of frame that is not a signed text envelope:
+binary frames of a web terminal session (`src/shell/`). The text rules above
+are unchanged, so an unsigned or out-of-sequence TEXT frame still closes 4403.
+A binary frame is accepted only for the session it names, under that session's
+own AES-256-GCM key and a strict per-direction counter (`src/shell/frames.ts`):
+a frame for an unknown session, or one that is too short or too long, is
+dropped without closing the socket, and one that fails to authenticate ends
+only its own session. Binary frames never reach the JSON handlers; `onmessage`
+hands them to the multiplexer (`binaryFrameBytes` in `panel-identity-frames.ts`
+is the only reader), and only on a socket whose session is verified (or an
+unpinned one).
+
+The session key arrives in a signed `shell-open` (`keySealed`, HPKE base mode
+to the daemon's sealing key, `aad` = server id, `info` = `turbopanel shell key
+v1` + sid). Base mode does not say who sealed it, so `shell-open` is refused on
+a session that is not verified; the signature on the frame is what makes the
+key the control plane's. `shell-opened`, `shell-closed` and `shell-error` are
+signed reports (`SIGNED_REPORT_TYPES`) and wait in a small in-memory queue
+while the socket is down. Losing the socket kills every terminal session and
+queues `shell-closed` with reason `daemon-restart`. Before any exec the
+container is inspected here and refused when it is a platform container or has
+no tenant labels, whatever the Docker gate does (`src/shell/docker-exec.ts`).
+`frames.vectors.json` is shared with the control plane's codec; change both
+together.
+
 ## Daemon-signed requests and the attach proof
 
 On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):

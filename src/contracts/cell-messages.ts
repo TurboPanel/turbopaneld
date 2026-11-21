@@ -750,6 +750,90 @@ export type AcmeProofForwardReportMessage = {
   at: string;
 };
 
+/**
+ * Control plane to daemon (feature `terminal-container-v1`): open one web
+ * terminal session. `keySealed` is the session's AES-256-GCM key sealed to
+ * this daemon's sealing key: base64url of the HPKE encapsulated key (32
+ * bytes) followed by the ciphertext, with `aad` = the server id and `info` =
+ * "turbopanel shell key v1" followed by `sid` (lower-case UUID text). `userId`
+ * is the stable id the per-user session limit counts; `userLabel` is for
+ * logs only. Twin of the control plane's `ShellOpenMessage`.
+ */
+export type ShellOpenMessage = {
+  type: "shell-open";
+  sid: string;
+  kind: "container" | "host";
+  userId: string;
+  userLabel: string;
+  container?: { id: string; user?: string };
+  cols: number;
+  rows: number;
+  term: "xterm-256color";
+  keySealed: string;
+  idleSec: number;
+  maxSec: number;
+  windowBytes: number;
+  maxFrameBytes: number;
+  /** Host sessions only; not used by `terminal-container-v1`. */
+  rootGrant?: string;
+};
+
+/** Control plane to daemon: end one session (`sid`) or all of them (`all`). */
+export type ShellKillMessage = {
+  type: "shell-kill";
+  sid?: string;
+  all?: true;
+  reason: "revoked" | "switch-off" | "admin" | "expired";
+};
+
+/** Daemon to control plane (signed report): the session is open. */
+export type ShellOpenedReport = {
+  type: "shell-opened";
+  sid: string;
+  shell: string;
+  user: string;
+  at: string;
+};
+
+export type ShellCloseReason =
+  | "exit"
+  | "idle"
+  | "max"
+  | "kill"
+  | "client"
+  | "error"
+  | "daemon-restart";
+
+/** Daemon to control plane (signed report): the session ended. */
+export type ShellClosedReport = {
+  type: "shell-closed";
+  sid: string;
+  reason: ShellCloseReason;
+  exitCode?: number;
+  durationMs: number;
+  bytesIn: number;
+  bytesOut: number;
+  at: string;
+};
+
+export type ShellErrorCode =
+  | "container_not_found"
+  | "container_not_owned"
+  | "gate_denied"
+  | "no_shell"
+  | "helper_unavailable"
+  | "grant_invalid"
+  | "limit"
+  | "key_invalid";
+
+/** Daemon to control plane (signed report): the session could not be opened. */
+export type ShellErrorReport = {
+  type: "shell-error";
+  sid: string;
+  code: ShellErrorCode;
+  at: string;
+};
+
 export type DaemonMessage =
   | { type: "echo"; payload: unknown; at: string }
   | CellAttachVersionMessage
@@ -1145,6 +1229,11 @@ export type DaemonMessage =
   | BackupCopyReportMessage
   | BackupCopyReportResultMessage
   | CommandOutcomeAckMessage
+  | ShellOpenMessage
+  | ShellKillMessage
+  | ShellOpenedReport
+  | ShellClosedReport
+  | ShellErrorReport
   | {
     type: "public-urls-update";
     id: string;
