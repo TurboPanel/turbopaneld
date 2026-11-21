@@ -1,5 +1,10 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import type { DockerCliResult } from "../deploy/docker-cli.ts";
+import {
+  createMutableTranscriptRedactor,
+  rememberSecretPlaintexts,
+  resetSharedSecretRedactorForTests,
+} from "../logs/redactor.ts";
 import { collectManagedLogs } from "./logs.ts";
 
 /**
@@ -84,16 +89,54 @@ test("collectManagedLogs floors a missing or non-positive tail at 1", async () =
   assertEquals(tails, ["1", "1", "200"]);
 });
 
-test("collectManagedLogs truncates oversized stdout to the last 256 KiB", async () => {
-  const chunk = "x".repeat(300 * 1024);
+test("collectManagedLogs truncates oversized multibyte stdout by UTF-8 bytes", async () => {
+  const euro = "\u20ac";
+  const payload = `HEAD-DROP\n${euro.repeat(80_000)}\nTAIL-KEEP`;
   const text = await collectManagedLogs(
     "managed_logs_2",
     undefined,
-    () => Promise.resolve(ok(chunk)),
+    () => Promise.resolve(ok(payload)),
   );
 
-  assertEquals(text.length, 256 * 1024);
-  assertEquals(text, chunk.slice(chunk.length - 256 * 1024));
+  assertEquals(new TextEncoder().encode(text).byteLength <= 200 * 1024, true);
+  assertEquals(text.includes("HEAD-DROP"), false);
+  assertEquals(text.endsWith("\nTAIL-KEEP"), true);
+  assertEquals(text.includes("\uFFFD"), false);
+});
+
+test("collectManagedLogs redacts secrets, strips escapes and keeps line breaks", async () => {
+  const redactor = createMutableTranscriptRedactor(["s3cret"]);
+  const text = await collectManagedLogs(
+    "managed_logs_redact",
+    undefined,
+    () =>
+      Promise.resolve(ok(
+        "db  | started\r\n" +
+          "db  | \x1b[31mpassword=s3cret\x1b[0m\n" +
+          "db  | col1\tcol2\x07\n",
+      )),
+    redactor,
+  );
+
+  assertEquals(
+    text,
+    "db  | started\ndb  | password=***\ndb  | col1\tcol2_\n",
+  );
+});
+
+test("collectManagedLogs redacts values in the process-wide deny-set", async () => {
+  resetSharedSecretRedactorForTests();
+  try {
+    rememberSecretPlaintexts(["shared-secret-value"]);
+    const text = await collectManagedLogs(
+      "managed_logs_shared",
+      undefined,
+      () => Promise.resolve(ok("a shared-secret-value b\nsecond\n")),
+    );
+    assertEquals(text, "a *** b\nsecond\n");
+  } finally {
+    resetSharedSecretRedactorForTests();
+  }
 });
 
 test("collectManagedLogs throws when compose logs fails", async () => {
