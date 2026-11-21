@@ -1143,8 +1143,8 @@ test("environment.deploy rejects non-boolean allowNetworkShares", () => {
 test("environment.deploy round-trips networkShareCredentials", () => {
   const entry = {
     volume: "media",
-    passwordKey: "SMB_PW",
-    usernameKey: "SMB_USER",
+    passwordKey: "SHARE_SECRET_A",
+    usernameKey: "SHARE_SECRET_B",
     domain: "CORP",
     composeServiceName: null,
   };

@@ -214,11 +214,11 @@ const LOGIN = {
   allowNetworkShares: true,
   networkShareCredentials: [{
     volume: "media",
-    passwordKey: "SMB_PW",
+    passwordKey: "SHARE_SECRET_A",
     username: "svc",
   }],
   variableMaterial: [{
-    key: "SMB_PW",
+    key: "SHARE_SECRET_A",
     composeServiceName: null,
     forBuild: false,
     forRuntime: true,

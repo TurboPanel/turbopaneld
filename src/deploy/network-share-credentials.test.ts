@@ -51,11 +51,11 @@ test("the credentials file has the cifs lines and is private", async () => {
       "e1",
       [{
         volume: "media",
-        passwordKey: "SMB_PASSWORD",
-        usernameKey: "SMB_USER",
+        passwordKey: "SHARE_SECRET_A",
+        usernameKey: "SHARE_SECRET_B",
         domain: "CORP",
       }],
-      [material("SMB_PASSWORD", "p,w d"), material("SMB_USER", "svc")],
+      [material("SHARE_SECRET_A", "p,w d"), material("SHARE_SECRET_B", "svc")],
       decrypt,
     );
     const path = paths.get("media")!;
