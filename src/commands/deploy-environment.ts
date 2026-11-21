@@ -2264,6 +2264,24 @@ async function prepareSequentialDeploy(
 }
 
 /**
+ * What a failed deploy puts back: a cancel after publish reverts the published
+ * files; a failure before publish leaves the live compose file running from
+ * its own checkout tree, so its marker is restored.
+ */
+async function undoFailedPublish(
+  deploymentDir: string,
+  published: boolean,
+  hadPrevious: boolean,
+  err: unknown,
+): Promise<void> {
+  if (!published) {
+    await restoreLiveComposeCheckoutMarker(deploymentDir);
+  } else if (err instanceof DeployCancelledError) {
+    await revertPublishedCompose(deploymentDir, hadPrevious);
+  }
+}
+
+/**
  * Undo {@link publishStagedRuntimeCompose} for a deploy cancelled before it
  * started anything: put the previous version's files back as the live ones, or
  * (a first deploy has none) remove what was published. Never throws: the
@@ -2790,11 +2808,7 @@ async function deployContainerServices(
       composePaths: chain,
     };
   } catch (err) {
-    if (published && err instanceof DeployCancelledError) {
-      await revertPublishedCompose(deploymentDir, hadPrevious);
-    }
-    // Nothing was published: the live compose file still runs from its own tree.
-    if (!published) await restoreLiveComposeCheckoutMarker(deploymentDir);
+    await undoFailedPublish(deploymentDir, published, hadPrevious, err);
     if (retiredEarlier.length > 0 && err instanceof Error) {
       err.message +=
         " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
