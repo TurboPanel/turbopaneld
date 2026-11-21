@@ -2270,14 +2270,13 @@ async function prepareSequentialDeploy(
  */
 async function undoFailedPublish(
   deploymentDir: string,
-  published: boolean,
-  hadPrevious: boolean,
+  published: { hadPrevious: boolean } | null,
   err: unknown,
 ): Promise<void> {
   if (!published) {
     await restoreLiveComposeCheckoutMarker(deploymentDir);
   } else if (err instanceof DeployCancelledError) {
-    await revertPublishedCompose(deploymentDir, hadPrevious);
+    await revertPublishedCompose(deploymentDir, published.hadPrevious);
   }
 }
 
@@ -2808,7 +2807,11 @@ async function deployContainerServices(
       composePaths: chain,
     };
   } catch (err) {
-    await undoFailedPublish(deploymentDir, published, hadPrevious, err);
+    await undoFailedPublish(
+      deploymentDir,
+      published ? { hadPrevious } : null,
+      err,
+    );
     if (retiredEarlier.length > 0 && err instanceof Error) {
       err.message +=
         " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
