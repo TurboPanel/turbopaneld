@@ -1197,6 +1197,16 @@ no tenant labels, whatever the Docker gate does (`src/shell/docker-exec.ts`).
 `frames.vectors.json` is shared with the control plane's codec; change both
 together.
 
+Flow control is enforced here, not trusted: an ACK for more bytes than are
+outstanding ends the session with `error`, and the exec stream is not read
+while the control socket's send buffer is over 1 MiB (one budget for every
+session on the socket). Ending a session also ends the exec in the container
+(a detached `kill -HUP`, then `-KILL`, found by a per-session env token), since
+closing the stream alone can leave the shell running. Docker calls have
+deadlines and an open that hangs frees its slot. A `shell-open` that cannot be
+served is answered with a `shell-error`: `unverified` (session not verified),
+`duplicate_sid` (the sid is live), `limit`, and the rest.
+
 ## Daemon-signed requests and the attach proof
 
 On a pinned server the daemon proves its own key too (`src/crypto/keys.ts`):

@@ -29,11 +29,22 @@ export const SHELL_EXEC_CMD: readonly string[] = [
 export const SHELL_EXEC_ENV: readonly string[] = ["TERM=xterm-256color"];
 
 const USER_RE = /^[a-z_][a-z0-9_-]{0,31}$|^\d+(:\d+)?$/;
+const CONTAINER_ID_RE = /^[a-f0-9]{12,128}$/;
 const CONTAINER_REF_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MANAGED_ENGINE_LABEL = "tp.managed.engine";
 const PLATFORM_ROLES = new Set(["turbopanel", "ingress"]);
+/** Env var that marks a terminal exec so it can be found again to be ended. */
+const TOKEN_VAR = "TP_SHELL_TOKEN";
 const MAX_HEAD_BYTES = 32 * 1024;
 const MAX_BODY_BYTES = 1024 * 1024;
+/** Every request-and-answer call to the engine gives up after this. */
+export const execTimeouts = {
+  call: 10_000,
+  /** A resize runs inside the frame chain, so it waits less. */
+  resize: 3_000,
+};
+const KILL_WAIT_POLLS = 20;
+const KILL_WAIT_MS = 100;
 const EXIT_POLLS = 10;
 const EXIT_POLL_MS = 100;
 
@@ -217,14 +228,41 @@ function requestBytes(
   return textEncoder.encode(`${lines.join("\r\n")}\r\n\r\n${payload}`);
 }
 
+/**
+ * Closes the connection when the deadline passes, so a read or write stuck on
+ * a silent engine fails instead of hanging. Returns the stop function and
+ * whether it fired.
+ */
+function deadline(
+  conn: Deno.Conn,
+  ms: number,
+): { stop(): void; fired(): boolean } {
+  let fired = false;
+  const id = setTimeout(() => {
+    fired = true;
+    try {
+      conn.close();
+    } catch {
+      // Already closed.
+    }
+  }, ms);
+  return { stop: () => clearTimeout(id), fired: () => fired };
+}
+
+function timedOut(): DockerExecError {
+  return new DockerExecError("helper_unavailable", "the engine timed out");
+}
+
 /** One short request on its own connection (`Connection: close`). */
 async function call(
   socketPath: string,
   method: string,
   path: string,
   body?: unknown,
+  timeoutMs = execTimeouts.call,
 ): Promise<{ status: number; json: unknown; text: string }> {
   const conn = await Deno.connect({ transport: "unix", path: socketPath });
+  const limit = deadline(conn, timeoutMs);
   try {
     await writeAll(
       conn,
@@ -244,7 +282,10 @@ async function call(
       json = null;
     }
     return { status: reply.status, json, text };
+  } catch (err) {
+    throw limit.fired() ? timedOut() : err;
   } finally {
+    limit.stop();
     try {
       conn.close();
     } catch {
@@ -280,11 +321,15 @@ function failFor(status: number, text: string): DockerExecError {
   return new DockerExecError("helper_unavailable", `docker answered ${status}`);
 }
 
-/** Inspect and refuse: missing, not running, platform, or without tenant labels. */
+/**
+ * Inspect and refuse: missing, not running, platform, or without tenant
+ * labels. Returns the engine's own `Id` of the container, which is what the
+ * exec is then created on (the requested name could be re-pointed meanwhile).
+ */
 export async function checkContainer(
   socketPath: string,
   containerId: string,
-): Promise<void> {
+): Promise<string> {
   const reply = await call(
     socketPath,
     "GET",
@@ -305,6 +350,10 @@ export async function checkContainer(
       "container is not running",
     );
   }
+  if (typeof doc.Id !== "string" || !CONTAINER_ID_RE.test(doc.Id)) {
+    throw new DockerExecError("helper_unavailable", "no container id");
+  }
+  return doc.Id;
 }
 
 export interface OpenExecOptions {
@@ -328,18 +377,19 @@ export async function openDockerExec(
     throw new DockerExecError("container_not_owned", "bad user");
   }
   const socketPath = options.socketPath ?? resolveDockerSocket();
-  await checkContainer(socketPath, containerId);
+  const id = await checkContainer(socketPath, containerId);
+  const token = crypto.randomUUID();
   const created = await call(
     socketPath,
     "POST",
-    `/containers/${encodeURIComponent(containerId)}/exec`,
+    `/containers/${id}/exec`,
     {
       AttachStdin: true,
       AttachStdout: true,
       AttachStderr: true,
       Tty: true,
       ...(user === "" ? {} : { User: user }),
-      Env: [...SHELL_EXEC_ENV],
+      Env: [...SHELL_EXEC_ENV, `${TOKEN_VAR}=${token}`],
       Cmd: [...SHELL_EXEC_CMD],
     },
   );
@@ -351,7 +401,14 @@ export async function openDockerExec(
     throw new DockerExecError("helper_unavailable", "bad exec id");
   }
   const stream = await startExec(socketPath, execId);
-  const transport = new DockerExecTransport(socketPath, execId, stream);
+  const transport = new DockerExecTransport(
+    socketPath,
+    execId,
+    id,
+    token,
+    user,
+    stream,
+  );
   await transport.resize(options.cols, options.rows).catch(() => undefined);
   return transport;
 }
@@ -361,6 +418,7 @@ async function startExec(
   execId: string,
 ): Promise<{ conn: Deno.Conn; rest: Uint8Array }> {
   const conn = await Deno.connect({ transport: "unix", path: socketPath });
+  const limit = deadline(conn, execTimeouts.call);
   try {
     await writeAll(
       conn,
@@ -378,14 +436,16 @@ async function startExec(
       );
       throw failFor(head.status, textDecoder.decode(body));
     }
+    limit.stop();
     return { conn, rest };
   } catch (err) {
+    limit.stop();
     try {
       conn.close();
     } catch {
       // Already closed.
     }
-    throw err;
+    throw limit.fired() ? timedOut() : err;
   }
 }
 
@@ -393,18 +453,30 @@ class DockerExecTransport implements ShellTransport {
   readonly shell = "/bin/sh";
   readonly #socketPath: string;
   readonly #execId: string;
+  readonly #containerId: string;
+  readonly #token: string;
+  readonly #user: string;
   readonly #conn: Deno.Conn;
   #pending: Uint8Array;
   #closed = false;
+  #exited = false;
+  /** Settles when the shell is known to be gone (tests wait on it). */
+  terminated: Promise<void> = Promise.resolve();
   readonly #chunk = new Uint8Array(16 * 1024);
 
   constructor(
     socketPath: string,
     execId: string,
+    containerId: string,
+    token: string,
+    user: string,
     stream: { conn: Deno.Conn; rest: Uint8Array },
   ) {
     this.#socketPath = socketPath;
     this.#execId = execId;
+    this.#containerId = containerId;
+    this.#token = token;
+    this.#user = user;
     this.#conn = stream.conn;
     this.#pending = stream.rest;
   }
@@ -417,6 +489,7 @@ class DockerExecTransport implements ShellTransport {
     }
     try {
       const n = await this.#conn.read(this.#chunk);
+      if (n === null) this.#exited = !this.#closed;
       return n === null ? null : this.#chunk.slice(0, n);
     } catch (err) {
       if (this.#closed) return null;
@@ -433,6 +506,8 @@ class DockerExecTransport implements ShellTransport {
       this.#socketPath,
       "POST",
       `/exec/${this.#execId}/resize?h=${rows}&w=${cols}`,
+      undefined,
+      execTimeouts.resize,
     );
     if (reply.status >= 300) throw failFor(reply.status, reply.text);
   }
@@ -457,6 +532,10 @@ class DockerExecTransport implements ShellTransport {
     return await this.#pollExit(attempt + 1);
   }
 
+  /**
+   * Drop the stream and, unless the shell already exited, end it: closing the
+   * hijacked connection alone can leave the shell running in the container.
+   */
   close(): void {
     if (this.#closed) return;
     this.#closed = true;
@@ -465,5 +544,65 @@ class DockerExecTransport implements ShellTransport {
     } catch {
       // Already closed.
     }
+    if (!this.#exited) this.terminated = this.#terminate();
+  }
+
+  /** `kill -HUP`, then `-KILL` when the exec still runs after a short wait. */
+  async #terminate(): Promise<void> {
+    try {
+      await this.#killExec("HUP");
+      if (await this.#waitGone()) return;
+      await this.#killExec("KILL");
+    } catch {
+      // The container may be gone; nothing is left to end.
+    }
+  }
+
+  async #waitGone(): Promise<boolean> {
+    for (let i = 0; i < KILL_WAIT_POLLS; i++) {
+      const reply = await call(
+        this.#socketPath,
+        "GET",
+        `/exec/${this.#execId}/json`,
+      );
+      if (reply.status !== 200 || asRecord(reply.json).Running === false) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, KILL_WAIT_MS));
+    }
+    return false;
+  }
+
+  /**
+   * One detached exec that signals every process whose environment carries
+   * this session's token. The token (not the exec's Pid, which the engine
+   * reports in the host's pid namespace) finds the shell and its children
+   * inside the container.
+   */
+  async #killExec(signal: "HUP" | "KILL"): Promise<void> {
+    const script = "for e in /proc/[0-9]*/environ; do " +
+      `if grep -qa "${TOKEN_VAR}=${this.#token}" "$e" 2>/dev/null; then ` +
+      "p=${e#/proc/}; kill -" + signal + ' "${p%/environ}" 2>/dev/null; ' +
+      "fi; done";
+    const created = await call(
+      this.#socketPath,
+      "POST",
+      `/containers/${this.#containerId}/exec`,
+      {
+        AttachStdin: false,
+        AttachStdout: false,
+        AttachStderr: false,
+        Tty: false,
+        ...(this.#user === "" ? {} : { User: this.#user }),
+        Cmd: ["/bin/sh", "-c", script],
+      },
+    );
+    const id = asRecord(created.json).Id;
+    if (created.status !== 201 || typeof id !== "string") return;
+    if (!/^[a-f0-9]{16,128}$/.test(id)) return;
+    await call(this.#socketPath, "POST", `/exec/${id}/start`, {
+      Detach: true,
+      Tty: false,
+    });
   }
 }

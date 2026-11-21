@@ -2167,6 +2167,7 @@ export class InstanceClient {
       openContainer: (request) => openDockerExec(request),
       sendBinary: (frame) => this.#sendShellBinary(frame),
       sendReport: (report) => this.#sendShellReport(report),
+      bufferedAmount: () => this.#ws?.bufferedAmount ?? 0,
     });
     return this.#shellMux;
   }
@@ -2180,6 +2181,7 @@ export class InstanceClient {
   #openShell(message: ShellOpenMessage): void {
     if (!this.#signedSession?.verified) {
       logWarn("shell", "refused shell-open: the session is not signed");
+      this.#shell().reject(message, "unverified");
       return;
     }
     this.#shell().open(message).catch((err) =>

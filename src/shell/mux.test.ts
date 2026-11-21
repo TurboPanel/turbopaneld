@@ -24,10 +24,13 @@ import {
   MAX_HOST_SECONDS,
   MAX_SESSIONS_PER_SERVER,
   MAX_SESSIONS_PER_USER,
+  MAX_SOCKET_BUFFERED_BYTES,
   type MuxTimers,
+  OPEN_TIMEOUT_MS,
   parseShellOpen,
   type ShellReport,
   ShellSessionMux,
+  SOCKET_POLL_MS,
 } from "./mux.ts";
 
 const test = Deno.test.bind(Deno);
@@ -70,6 +73,8 @@ class FakeTransport implements ShellTransport {
   writes: Uint8Array[] = [];
   resizes: [number, number][] = [];
   closed = false;
+  /** When set, `write` waits for it. */
+  holdWrite: Promise<void> | undefined;
   exit: number | undefined = 0;
   #queue: (Uint8Array | null)[] = [];
   #wake: (() => void) | undefined;
@@ -86,9 +91,9 @@ class FakeTransport implements ShellTransport {
     }
     return this.#queue.shift()!;
   }
-  write(data: Uint8Array): Promise<void> {
+  async write(data: Uint8Array): Promise<void> {
+    await this.holdWrite;
     this.writes.push(data);
-    return Promise.resolve();
   }
   resize(cols: number, rows: number): Promise<void> {
     this.resizes.push([cols, rows]);
@@ -152,7 +157,7 @@ async function rig(
   const transports: FakeTransport[] = [];
   const frames: Uint8Array[] = [];
   const reports: ShellReport[] = [];
-  const state = { up: true };
+  const state = { up: true, buffered: 0 };
   const mux = new ShellSessionMux({
     openKey: over.openKey ?? (() => Promise.resolve(KEY)),
     openContainer: over.openContainer ?? (() => {
@@ -177,6 +182,7 @@ async function rig(
       if (state.up) reports.push(r);
       return state.up;
     },
+    bufferedAmount: () => state.buffered,
     timers,
   });
   const key = await importSessionKey(KEY);
@@ -512,4 +518,175 @@ test("socket loss kills every session; the closes queue and flush in order once 
   const closed = r.reports.filter((x) => x.type === "shell-closed");
   assertEquals(closed.map((x) => x.sid), [a.sid, b.sid]);
   assert(closed.every((x) => x.reason === "daemon-restart"));
+});
+
+test("an ACK for more than is outstanding ends the session with error", async () => {
+  const r = await rig();
+  const msg = message({ windowBytes: 16 * 1024 });
+  const t = await r.start(msg);
+  t.push(bytes(100));
+  await until("sent", () => r.frames.length >= 0 && t.reads >= 2);
+  r.mux.handleBinary(await r.toDaemon(msg.sid, encodeAck(101)));
+  await until("closed", () => r.closedReasons().length === 1);
+  assertEquals(r.closedReasons(), ["error"]);
+  assertEquals(r.mux.size, 0);
+  assert(t.closed);
+});
+
+test("an ACK of 0xFFFFFFFF on a fresh session ends it, and honest ACKs still work", async () => {
+  const r = await rig();
+  const bad = message();
+  await r.start(bad);
+  r.mux.handleBinary(await r.toDaemon(bad.sid, encodeAck(0xFFFFFFFF)));
+  await until("closed", () => r.closedReasons().length === 1);
+  assertEquals(r.closedReasons(), ["error"]);
+  const good = message({ windowBytes: 16 * 1024 });
+  const t = await r.start(good);
+  t.push(bytes(10));
+  await until("read", () => t.reads >= 2);
+  r.mux.handleBinary(await r.toDaemon(good.sid, encodeAck(10)));
+  r.mux.handleBinary(await r.toDaemon(good.sid, encodeAck(0)));
+  await settle();
+  assertEquals(r.closedReasons(), ["error"], "exact and zero ACKs are fine");
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+});
+
+test("reading pauses while the socket's send buffer is over the cap, shared by every session", async () => {
+  const r = await rig();
+  const a = message({ windowBytes: 1024 * 1024 });
+  const b = message({ windowBytes: 1024 * 1024 });
+  const ta = await r.start(a);
+  const tb = await r.start(b);
+  await until("both reading", () => ta.reads >= 1 && tb.reads >= 1);
+  r.state.buffered = MAX_SOCKET_BUFFERED_BYTES + 1;
+  ta.push(bytes(10));
+  tb.push(bytes(10));
+  for (let i = 0; i < 5; i++) {
+    r.timers.advance(SOCKET_POLL_MS);
+    await settle();
+  }
+  assertEquals(
+    ta.reads,
+    1,
+    "session a is not read again while the socket is backed up",
+  );
+  assertEquals(tb.reads, 1, "session b is not read either");
+  r.state.buffered = 0;
+  r.timers.advance(SOCKET_POLL_MS);
+  await until("resumed", () => ta.reads >= 2 && tb.reads >= 2);
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+});
+
+test("a session that ends while the socket is backed up does not hang", async () => {
+  const r = await rig();
+  const msg = message();
+  const t = await r.start(msg);
+  r.state.buffered = MAX_SOCKET_BUFFERED_BYTES * 2;
+  t.push(bytes(5));
+  await settle();
+  assertEquals(t.reads, 1, "the pump is waiting on the socket");
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+  r.timers.advance(SOCKET_POLL_MS);
+  await until("closed", () => r.closedReasons().length === 1);
+  assertEquals(r.mux.size, 0);
+});
+
+test("after end, a stdin write that was in flight neither acks nor re-arms idle", async () => {
+  const r = await rig();
+  const msg = message({ idleSec: 120 });
+  const t = await r.start(msg);
+  let release!: () => void;
+  t.holdWrite = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  r.mux.handleBinary(await r.toDaemon(msg.sid, encodeData(bytes(4))));
+  await settle();
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+  await until("closed", () => r.closedReasons().length === 1);
+  await settle();
+  const before = r.frames.length;
+  release();
+  await settle();
+  r.timers.advance(10 * 60_000);
+  await settle();
+  assertEquals(r.frames.length, before, "no ACK frame after the CLOSE");
+  assertEquals(r.closedReasons(), ["kill"], "no second close, no idle fire");
+});
+
+test("a read that returns after end sends no DATA after CLOSE", async () => {
+  const t = new FakeTransport();
+  let calls = 0;
+  let release!: (chunk: Uint8Array) => void;
+  t.read = () => {
+    calls += 1;
+    if (calls === 1) return Promise.resolve(bytes(3));
+    return new Promise<Uint8Array | null>((resolve) => {
+      release = resolve;
+    });
+  };
+  const r = await rig({ openContainer: () => Promise.resolve(t) });
+  const msg = message();
+  void r.mux.open(msg).catch(() => undefined);
+  await until("second read pending", () => calls >= 2);
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+  await until("closed", () => r.closedReasons().length === 1);
+  release(bytes(9));
+  r.timers.advance(1000);
+  await settle();
+  const got = await r.fromDaemon(msg.sid);
+  const last = got[got.length - 1];
+  assertEquals(last, { type: "close", reason: CLOSE_REASONS.kill });
+  const data = got.filter((m) => m.type === "data");
+  assertEquals(data.length, 1, "only the bytes read before the end are sent");
+});
+
+test("a stuck open times out as helper_unavailable and frees the slot", async () => {
+  let resolveLate!: (t: ShellTransport) => void;
+  let asked = false;
+  const late = new FakeTransport();
+  const r = await rig({
+    openContainer: () =>
+      new Promise<ShellTransport>((resolve) => {
+        asked = true;
+        resolveLate = resolve;
+      }),
+  });
+  const msg = message();
+  void r.mux.open(msg).catch(() => undefined);
+  await until("opening", () => asked && r.mux.size === 1);
+  r.timers.advance(OPEN_TIMEOUT_MS);
+  await until("error report", () => r.reports.length === 1);
+  const rep = r.reports[0];
+  assertEquals(rep.type, "shell-error");
+  if (rep.type === "shell-error") assertEquals(rep.code, "helper_unavailable");
+  assertEquals(r.mux.size, 0, "the limit slot is free again");
+  resolveLate(late);
+  await until("late stream closed", () => late.closed);
+});
+
+test("a second open with a live sid is answered with shell-error and leaves the first alone", async () => {
+  const r = await rig();
+  const msg = message();
+  const t = await r.start(msg);
+  void r.mux.open({ ...msg }).catch(() => undefined);
+  await until("dup error", () => r.reports.length === 2);
+  const rep = r.reports[1];
+  assertEquals(rep.type, "shell-error");
+  if (rep.type === "shell-error") assertEquals(rep.code, "duplicate_sid");
+  assertEquals(r.mux.size, 1);
+  assert(!t.closed);
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+});
+
+test("reject answers an open that cannot be served with the given code", async () => {
+  const r = await rig();
+  const msg = message();
+  r.mux.reject(msg, "unverified");
+  assertEquals(r.reports.length, 1);
+  const rep = r.reports[0];
+  assertEquals(rep.type, "shell-error");
+  if (rep.type === "shell-error") {
+    assertEquals(rep.code, "unverified");
+    assertEquals(rep.sid, msg.sid);
+  }
 });

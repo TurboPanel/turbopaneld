@@ -67,6 +67,14 @@ export const IDLE_NOTICE_LEAD_MS = 60_000;
 /** Frames kept for a session that is still opening; more are dropped. */
 export const MAX_QUEUED_FRAMES = 64;
 export const MAX_QUEUED_REPORTS = 64;
+/**
+ * Output stops being read while this many bytes wait in the control socket's
+ * send buffer (one budget for every session on the socket).
+ */
+export const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
+export const SOCKET_POLL_MS = 25;
+/** Opening the stream (inspect, create, start) gives up after this. */
+export const OPEN_TIMEOUT_MS = 20_000;
 
 export interface MuxTimers {
   now(): number;
@@ -102,6 +110,8 @@ export interface ShellMuxDeps {
   sendBinary(frame: Uint8Array): boolean;
   /** One report to the control socket (signed by the session); false when it is not open. */
   sendReport(report: ShellReport): boolean;
+  /** Bytes queued in the control socket's send buffer; absent counts as 0. */
+  bufferedAmount?(): number;
   timers?: MuxTimers;
 }
 
@@ -295,7 +305,34 @@ class ShellSession {
     await this.#pump(transport);
   }
 
+  /** The stream, or a `helper_unavailable` error when it takes too long. */
   #openTransport(): Promise<ShellTransport> {
+    return new Promise<ShellTransport>((resolve, reject) => {
+      let late = false;
+      const timer = this.#timers.setTimeout(() => {
+        late = true;
+        reject(new DockerExecError("helper_unavailable", "open timed out"));
+      }, OPEN_TIMEOUT_MS);
+      let opening: Promise<ShellTransport>;
+      try {
+        opening = this.#startTransport();
+      } catch (err) {
+        this.#timers.clearTimeout(timer);
+        reject(err);
+        return;
+      }
+      opening.then((transport) => {
+        this.#timers.clearTimeout(timer);
+        if (late) transport.close();
+        else resolve(transport);
+      }, (err) => {
+        this.#timers.clearTimeout(timer);
+        if (!late) reject(err);
+      });
+    });
+  }
+
+  #startTransport(): Promise<ShellTransport> {
     const request = this.#request;
     const asked = {
       containerId: request.containerId,
@@ -368,7 +405,10 @@ class ShellSession {
         }
         return;
       case "ack":
-        this.#unacked = Math.max(0, this.#unacked - message.bytes);
+        // The browser can only have received what was sent; more is a
+        // forged window, which would let output flood the socket.
+        if (message.bytes > this.#unacked) return this.end("error");
+        this.#unacked -= message.bytes;
         this.#wakeWindow();
         return;
       case "close":
@@ -388,6 +428,7 @@ class ShellSession {
     } catch {
       return this.end("error");
     }
+    if (this.#ended) return;
     this.#bytesIn += data.length;
     this.#lastStdinAt = this.#timers.now();
     this.#noticeSent = false;
@@ -399,6 +440,7 @@ class ShellSession {
     try {
       while (!this.#ended) {
         await this.#waitForWindow();
+        await this.#waitForSocket();
         if (this.#ended) return;
         const chunk = await transport.read();
         if (chunk === null) break;
@@ -421,6 +463,15 @@ class ShellSession {
     return await this.#waitForWindow();
   }
 
+  /** Pause reading while the control socket's send buffer is over its cap. */
+  async #waitForSocket(): Promise<void> {
+    if (this.#ended || !this.#mux.socketBusy()) return;
+    await new Promise<void>((resolve) => {
+      this.#timers.setTimeout(resolve, SOCKET_POLL_MS);
+    });
+    return await this.#waitForSocket();
+  }
+
   #wakeWindow(): void {
     const waiter = this.#windowWaiter;
     this.#windowWaiter = undefined;
@@ -428,6 +479,8 @@ class ShellSession {
   }
 
   #queueOutput(chunk: Uint8Array): void {
+    // A read that was in flight when the session ended: no DATA after CLOSE.
+    if (this.#ended) return;
     this.#outChunks.push(chunk);
     this.#outSize += chunk.length;
     this.#unacked += chunk.length;
@@ -468,6 +521,7 @@ class ShellSession {
   }
 
   #armIdle(): void {
+    if (this.#ended) return;
     if (this.#idleTimer !== undefined) {
       this.#timers.clearTimeout(this.#idleTimer);
     }
@@ -572,12 +626,24 @@ export class ShellSessionMux {
       }
       return;
     }
-    if (this.#sessions.has(request.sid)) return;
+    if (this.#sessions.has(request.sid)) {
+      return this.#error(request.sid, "duplicate_sid");
+    }
     const limit = this.#limitFor(request);
     if (limit) return this.#error(request.sid, limit);
     const session = new ShellSession(request, this, this.#deps);
     this.#sessions.set(request.sid, session);
     await session.start();
+  }
+
+  /** Answer a `shell-open` that cannot be served at all (for example an unsigned session). */
+  reject(message: ShellOpenMessage, code: ShellErrorCode): void {
+    if (isSid(message?.sid)) this.#error(message.sid.toLowerCase(), code);
+  }
+
+  /** True while the control socket's send buffer is over the shared cap. */
+  socketBusy(): boolean {
+    return (this.#deps.bufferedAmount?.() ?? 0) > MAX_SOCKET_BUFFERED_BYTES;
   }
 
   #error(sid: string, code: ShellErrorCode): void {

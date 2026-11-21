@@ -17,6 +17,8 @@ export class MockWebSocket extends EventTarget {
   /** Binary messages the code under test sent (never mixed into `sentFrames`). */
   readonly sentBinary: Uint8Array[] = [];
   binaryType = "blob";
+  /** Settable by tests to model a backed-up send buffer. */
+  bufferedAmount = 0;
 
   readyState = MockWebSocket.CONNECTING;
   onopen: ((event: Event) => void) | null = null;

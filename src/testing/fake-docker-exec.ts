@@ -11,6 +11,7 @@ import { LABEL_PROJECT, LABEL_SERVICE_ID } from "../deploy/labels.ts";
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 export const EXEC_ID = "ab".repeat(32);
+export const CONTAINER_ID = "cd".repeat(32);
 export const TENANT = { [LABEL_PROJECT]: "p1", [LABEL_SERVICE_ID]: "s1" };
 
 export type Seen = {
@@ -21,7 +22,7 @@ export type Seen = {
 };
 export type Answer = { status: number; body?: unknown; raw?: string };
 
-/** A fake engine on a Unix socket; `answer` picks the reply, the upgrade echoes stdin. */
+/** A fake engine on a Unix socket (status 0 never answers); `answer` picks the reply, the upgrade echoes stdin. */
 export async function withFakeDocker(
   answer: (seen: Seen) => Answer,
   fn: (socketPath: string, seen: Seen[], streams: Deno.Conn[]) => Promise<void>,
@@ -64,6 +65,11 @@ export async function withFakeDocker(
     const req = { method, path: target, headers, body };
     seen.push(req);
     const reply = answer(req);
+    if (reply.status === 0) {
+      // Never answers: the caller's deadline has to end the call.
+      while ((await conn.read(chunk)) !== null) { /* drain */ }
+      return;
+    }
     if (reply.status === 101) {
       await conn.write(enc.encode(
         "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nready$ ",
@@ -107,13 +113,21 @@ export function engine(
     if (req.method === "GET" && req.path.startsWith("/containers/")) {
       return extra.inspect ?? {
         status: 200,
-        body: { State: { Running: running }, Config: { Labels: labels } },
+        body: {
+          Id: CONTAINER_ID,
+          State: { Running: running },
+          Config: { Labels: labels },
+        },
       };
     }
     if (req.path.endsWith("/exec")) {
       return extra.create ?? { status: 201, body: { Id: EXEC_ID } };
     }
-    if (req.path.endsWith("/start")) return extra.start ?? { status: 101 };
+    if (req.path.endsWith("/start")) {
+      // A detached start (the kill exec) is a plain 200.
+      if (req.body.includes('"Detach":true')) return { status: 200 };
+      return extra.start ?? { status: 101 };
+    }
     if (req.path.includes("/resize")) return extra.resize ?? { status: 200 };
     if (req.path.endsWith("/json")) {
       return extra.exec ??

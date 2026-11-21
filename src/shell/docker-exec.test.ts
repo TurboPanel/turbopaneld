@@ -6,6 +6,7 @@ import {
 } from "../../orchestration/roles/docker-gate/files/platform.ts";
 import { LABEL_ROLE, LABEL_SYSTEM_COMPONENT } from "../deploy/labels.ts";
 import {
+  CONTAINER_ID,
   engine,
   EXEC_ID,
   TENANT,
@@ -13,6 +14,7 @@ import {
 } from "../testing/fake-docker-exec.ts";
 import {
   DockerExecError,
+  execTimeouts,
   hasTenantLabels,
   isPlatformLabelled,
   isValidContainerRef,
@@ -32,15 +34,19 @@ test("the exec body is fixed: tty, fixed Cmd, TERM, never Privileged, user only 
   await withFakeDocker(engine(TENANT), async (socketPath, seen) => {
     const t = await openDockerExec({ ...OPEN, user: "app", socketPath });
     t.close();
-    const create = seen.find((s) => s.path === "/containers/c1/exec")!;
+    const create = seen.find((s) =>
+      s.path === `/containers/${CONTAINER_ID}/exec`
+    )!;
     const body = JSON.parse(create.body);
+    const token = body.Env.find((e: string) => e.startsWith("TP_SHELL_TOKEN="));
+    assert(token, "the exec carries its own token");
     assertEquals(body, {
       AttachStdin: true,
       AttachStdout: true,
       AttachStderr: true,
       Tty: true,
       User: "app",
-      Env: [...SHELL_EXEC_ENV],
+      Env: [...SHELL_EXEC_ENV, token],
       Cmd: [...SHELL_EXEC_CMD],
     });
     assert(!("Privileged" in body));
@@ -192,4 +198,124 @@ test("the platform refusal is at least as strict as the gate's classification", 
   assert(!isPlatformLabelled(TENANT));
   assert(hasTenantLabels(TENANT));
   assert(!hasTenantLabels({ [LABEL_ROLE]: "web" }));
+});
+
+test("the exec is created on the inspected Id, not the requested name", async () => {
+  await withFakeDocker(engine(TENANT), async (socketPath, seen) => {
+    (await openDockerExec({ ...OPEN, socketPath })).close();
+    const creates = seen.filter((s) => s.path.endsWith("/exec"));
+    assert(creates.length > 0);
+    for (const c of creates) {
+      assertEquals(c.path, `/containers/${CONTAINER_ID}/exec`);
+    }
+    assert(!seen.some((s) => s.path === "/containers/c1/exec"));
+  });
+  // An inspect answer without an Id is not usable.
+  await withFakeDocker(
+    engine(TENANT, {
+      inspect: {
+        status: 200,
+        body: { State: { Running: true }, Config: { Labels: TENANT } },
+      },
+    }),
+    async (socketPath) => {
+      const err = await assertRejects(
+        () => openDockerExec({ ...OPEN, socketPath }),
+        DockerExecError,
+      );
+      assertEquals((err as DockerExecError).code, "helper_unavailable");
+    },
+  );
+});
+
+function killScripts(seen: { method: string; path: string; body: string }[]) {
+  return seen
+    .filter((s) =>
+      s.method === "POST" && s.path === `/containers/${CONTAINER_ID}/exec` &&
+      s.body.includes('"Detach"') === false &&
+      JSON.parse(s.body).AttachStdout === false
+    )
+    .map((s) => JSON.parse(s.body).Cmd[2] as string);
+}
+
+test("close ends the shell: a detached HUP exec keyed on the session token", async () => {
+  await withFakeDocker(engine(TENANT), async (socketPath, seen) => {
+    const t = await openDockerExec({ ...OPEN, user: "app", socketPath });
+    const token = JSON.parse(
+      seen.find((s) => s.path.endsWith("/exec"))!.body,
+    ).Env.find((e: string) => e.startsWith("TP_SHELL_TOKEN="));
+    t.close();
+    await (t as unknown as { terminated: Promise<void> }).terminated;
+    const scripts = killScripts(seen);
+    assertEquals(scripts.length, 1, "the exec ended on HUP, no KILL needed");
+    assert(scripts[0].includes("kill -HUP"));
+    assert(scripts[0].includes(token));
+    const kill = seen.filter((s) => s.path.endsWith("/exec")).at(-1)!;
+    assertEquals(JSON.parse(kill.body).User, "app");
+    assert(
+      seen.some((s) =>
+        s.path === `/exec/${EXEC_ID}/start` && s.body.includes('"Detach":true')
+      ),
+    );
+  });
+});
+
+test("an exec that outlives the HUP gets a KILL", async () => {
+  let polls = 0;
+  const base = engine(TENANT);
+  await withFakeDocker((req) => {
+    if (req.method === "GET" && req.path === `/exec/${EXEC_ID}/json`) {
+      polls += 1;
+      return { status: 200, body: { Running: true } };
+    }
+    return base(req);
+  }, async (socketPath, seen) => {
+    const t = await openDockerExec({ ...OPEN, socketPath });
+    t.close();
+    await (t as unknown as { terminated: Promise<void> }).terminated;
+    const scripts = killScripts(seen);
+    assertEquals(scripts.length, 2);
+    assert(scripts[0].includes("kill -HUP"));
+    assert(scripts[1].includes("kill -KILL"));
+    assert(polls > 0);
+  });
+});
+
+test("a shell that exited on its own is not killed on close", async () => {
+  await withFakeDocker(engine(TENANT), async (socketPath, seen, streams) => {
+    const t = await openDockerExec({ ...OPEN, socketPath });
+    await t.read();
+    streams[0].close();
+    assertEquals(await t.read(), null);
+    t.close();
+    await (t as unknown as { terminated: Promise<void> }).terminated;
+    assertEquals(killScripts(seen).length, 0);
+  });
+});
+
+test("a silent engine times out as helper_unavailable and leaves no connection open", async () => {
+  const was = execTimeouts.call;
+  execTimeouts.call = 80;
+  try {
+    for (const stall of ["/containers/", "/exec"] as const) {
+      const base = engine(TENANT);
+      await withFakeDocker((req) => {
+        if (stall === "/containers/" && req.path.startsWith("/containers/")) {
+          return { status: 0 };
+        }
+        if (stall === "/exec" && req.path.endsWith("/exec")) {
+          return { status: 0 };
+        }
+        return base(req);
+      }, async (socketPath) => {
+        const err = await assertRejects(
+          () => openDockerExec({ ...OPEN, socketPath }),
+          DockerExecError,
+        );
+        assertEquals((err as DockerExecError).code, "helper_unavailable");
+      });
+    }
+  } finally {
+    execTimeouts.call = was;
+  }
 });

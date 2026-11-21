@@ -824,7 +824,11 @@ export type ShellErrorCode =
   | "helper_unavailable"
   | "grant_invalid"
   | "limit"
-  | "key_invalid";
+  | "key_invalid"
+  /** The control session is not signed and verified, so no terminal opens. */
+  | "unverified"
+  /** A terminal with this `sid` is already running. */
+  | "duplicate_sid";
 
 /** Daemon to control plane (signed report): the session could not be opened. */
 export type ShellErrorReport = {
