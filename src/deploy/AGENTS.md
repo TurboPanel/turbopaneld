@@ -1448,8 +1448,8 @@ Layout of `deployments/<project>/<env>/`:
   daemon state directory (`compose-checkout-scratch/<env>`, `0700`), outside
   the deployment directory and apart from the per-service release scratch, so a
   bind that reaches the deployment directory never reaches the clone
-  credential. The finished tree is renamed into place (copied when the
-  scratch folder is on another file system).
+  credential. The finished tree is renamed into place, so the scratch folder
+  and the deployments must share a file system (an `EXDEV` says so).
 - `repo.json`: the marker (current commit, clone URL, compose path). It also
   tells `docker-cli.ts` what to do for every Compose call.
 - `repo.live.json`: the marker of the compose file that is live. A deploy

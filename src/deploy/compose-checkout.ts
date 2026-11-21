@@ -91,32 +91,22 @@ async function isFile(path: string): Promise<boolean> {
 }
 
 /**
- * Move `from` to `to`: one rename, or (the scratch folder sits on another file
- * system than the deployments, `EXDEV`) a copy that keeps modes and links.
+ * Move `from` to `to` with one rename. The scratch folder is under the daemon
+ * state directory and the deployments under the state directory: when an
+ * override puts them on different file systems the rename fails (`EXDEV`),
+ * and the error says what to change rather than copying a tree that may hold
+ * links.
  */
 async function moveTree(from: string, to: string): Promise<void> {
   try {
     await Deno.rename(from, to);
-    return;
   } catch (err) {
-    if (
-      !(err instanceof Error) || (err as { code?: string }).code !== "EXDEV"
-    ) {
-      throw err;
+    if ((err as { code?: string }).code === "EXDEV") {
+      throw new Error(
+        "the checkout scratch folder (under the daemon state directory) is on a different file system than the deployments (under the state directory); put both on one",
+      );
     }
-  }
-  await Deno.mkdir(to, { recursive: true });
-  const { success, stderr } = await new Deno.Command("/usr/bin/cp", {
-    args: ["-a", "--", `${from}/.`, to],
-    stdout: "null",
-    stderr: "piped",
-  }).output();
-  if (!success) {
-    throw new Error(
-      `could not copy the checkout into place: ${
-        new TextDecoder().decode(stderr).trim()
-      }`,
-    );
+    throw err;
   }
 }
 
