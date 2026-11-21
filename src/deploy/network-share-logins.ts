@@ -225,6 +225,41 @@ function escapeForCompose(value: string): string {
   return value.replaceAll("$", "$$$$");
 }
 
+type PlannedShareVolume = {
+  name: string;
+  spec: Record<string, unknown>;
+  opts: Record<string, unknown>;
+  device: string;
+  tokens: string[];
+  final: string[];
+};
+
+/** One share volume with its login folded into `o`; nothing is written yet. */
+function planShareVolume(
+  volumes: Record<string, unknown>,
+  name: string,
+  login: ShareLogin,
+): PlannedShareVolume {
+  const spec = volumes[name];
+  if (!isRecord(spec) || !isRecord(spec.driver_opts)) {
+    throw new Error(
+      `networkShareCredentials names volume ${name}, which is not a share volume`,
+    );
+  }
+  const opts = { ...spec.driver_opts };
+  const kept = typeof opts.o === "string"
+    ? splitMountOptions(opts.o).filter((token) => {
+      const key = token.split("=")[0].trim().toLowerCase();
+      return token.trim() !== "" && !LOGIN_OPTION_KEYS.has(key);
+    })
+    : [];
+  const tokens = loginTokens(login);
+  const final = [...kept, ...tokens];
+  opts.o = final.map(escapeForCompose).join(",");
+  const device = typeof opts.device === "string" ? opts.device : "";
+  return { name, spec, opts, device, tokens, final };
+}
+
 /**
  * Give each named share volume its login in `o` (replacing any
  * `username=`/`domain=`/`credentials=` the author wrote) and a Docker volume
@@ -246,34 +281,24 @@ export async function applyShareLoginsToCompose(
     throw new Error("networkShareCredentials names volumes the compose lacks");
   }
   const volumes = { ...doc.volumes };
-  for (const [name, login] of logins) {
-    const spec = volumes[name];
-    if (!isRecord(spec) || !isRecord(spec.driver_opts)) {
-      throw new Error(
-        `networkShareCredentials names volume ${name}, which is not a share volume`,
-      );
-    }
-    const opts = { ...spec.driver_opts };
-    const kept = typeof opts.o === "string"
-      ? splitMountOptions(opts.o).filter((token) => {
-        const key = token.split("=")[0].trim().toLowerCase();
-        return token.trim() !== "" && !LOGIN_OPTION_KEYS.has(key);
-      })
-      : [];
-    const tokens = loginTokens(login);
-    const final = [...kept, ...tokens];
-    opts.o = final.map(escapeForCompose).join(",");
-    const fp = await fingerprint(secret, [
-      projectName,
-      name,
-      typeof opts.device === "string" ? opts.device : "",
-      ...final,
-    ]);
-    const volumeName = `${projectName}_${name}_${fp}`;
-    volumes[name] = { ...spec, name: volumeName, driver_opts: opts };
-    injected.set(name, tokens);
-    volumeNames.set(name, volumeName);
-  }
+  const planned = [...logins].map(([name, login]) =>
+    planShareVolume(volumes, name, login)
+  );
+  const prints = await Promise.all(
+    planned.map((plan) =>
+      fingerprint(secret, [projectName, plan.name, plan.device, ...plan.final])
+    ),
+  );
+  planned.forEach((plan, i) => {
+    const volumeName = `${projectName}_${plan.name}_${prints[i]}`;
+    volumes[plan.name] = {
+      ...plan.spec,
+      name: volumeName,
+      driver_opts: plan.opts,
+    };
+    injected.set(plan.name, plan.tokens);
+    volumeNames.set(plan.name, volumeName);
+  });
   return {
     yaml: stringify({ ...doc, volumes }, { lineWidth: 0 }),
     injected,
@@ -310,29 +335,39 @@ export async function pruneStaleShareVolumes(
   current: ReadonlyMap<string, string>,
   run: RunDocker,
 ): Promise<string[]> {
-  const removed: string[] = [];
-  for (const [volume, keep] of current) {
-    const shape = shareVolumeShape(projectName, volume);
-    const listed = await run([
-      "volume",
-      "ls",
-      "-q",
-      "--filter",
-      `label=com.docker.compose.project=${projectName}`,
-      "--filter",
-      `label=com.docker.compose.volume=${volume}`,
-    ]);
-    if (!listed.success) continue;
-    const stale = listed.stdout.split("\n").map((l) => l.trim())
-      .filter((name) => name !== keep && shape.test(name));
-    const results = await Promise.all(
-      stale.map(async (name) =>
-        (await run(["volume", "rm", name])).success ? name : null
-      ),
-    );
-    removed.push(...results.filter((name): name is string => name !== null));
-  }
-  return removed;
+  const perVolume = await Promise.all(
+    [...current].map(([volume, keep]) =>
+      pruneVolume(projectName, volume, keep, run)
+    ),
+  );
+  return perVolume.flat();
+}
+
+async function pruneVolume(
+  projectName: string,
+  volume: string,
+  keep: string,
+  run: RunDocker,
+): Promise<string[]> {
+  const shape = shareVolumeShape(projectName, volume);
+  const listed = await run([
+    "volume",
+    "ls",
+    "-q",
+    "--filter",
+    `label=com.docker.compose.project=${projectName}`,
+    "--filter",
+    `label=com.docker.compose.volume=${volume}`,
+  ]);
+  if (!listed.success) return [];
+  const stale = listed.stdout.split("\n").map((l) => l.trim())
+    .filter((name) => name !== keep && shape.test(name));
+  const results = await Promise.all(
+    stale.map(async (name) =>
+      (await run(["volume", "rm", name])).success ? name : null
+    ),
+  );
+  return results.filter((name): name is string => name !== null);
 }
 
 /**

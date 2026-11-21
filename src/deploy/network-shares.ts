@@ -126,7 +126,8 @@ export function describeNetworkShare(
   const o = typeof driverOpts.o === "string"
     ? redactMountOptions(driverOpts.o)
     : "";
-  return `Network share volume ${name}: ${device}${o === "" ? "" : ` (${o})`}`;
+  const shown = o === "" ? "" : ` (${o})`;
+  return `Network share volume ${name}: ${device}${shown}`;
 }
 
 // --- host -------------------------------------------------------------------
