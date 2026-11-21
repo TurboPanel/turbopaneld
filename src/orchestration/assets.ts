@@ -303,6 +303,12 @@ export const SET_HOSTNAME_PLAYBOOK = join(
   "playbooks",
   "set-hostname.yml",
 );
+/** Installs `cifs-utils` (mount.cifs) for SMB network share volumes. */
+export const SMB_TOOLS_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "smb-tools-setup.yml",
+);
 export const TIME_SYNC_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

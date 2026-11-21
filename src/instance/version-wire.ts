@@ -123,6 +123,7 @@ export const DAEMON_WIRE_FEATURES = [
   "acme-issue-dns-v1",
   "command-recovery-v2",
   "compose-checkout-v1",
+  "network-shares-v1",
 ] as const;
 
 /**
@@ -858,3 +859,13 @@ export const TUNNEL_PEER_MTLS_FEATURE: DaemonWireFeature =
  */
 export const COMPOSE_CHECKOUT_FEATURE: DaemonWireFeature =
   "compose-checkout-v1";
+
+/**
+ * `network-shares-v1`: `environment.deploy` may carry `allowNetworkShares`.
+ * When it is true the daemon accepts Compose volumes of type `cifs` / `smb3`
+ * that pass its checks (a public share address, allowlisted mount options) and
+ * installs the SMB mount tools (`cifs-utils`) on a Debian-family host before
+ * compose up. The control plane sends the field only to a daemon that lists
+ * this feature; an older daemon would ignore it and refuse the volume.
+ */
+export const NETWORK_SHARES_FEATURE: DaemonWireFeature = "network-shares-v1";

@@ -1115,6 +1115,31 @@ test("environment.deploy rejects non-boolean hostLevelApproved", () => {
   );
 });
 
+test("environment.deploy round-trips allowNetworkShares", () => {
+  const payload = parseEnvironmentDeployPayload({
+    ...MINIMAL_DEPLOY,
+    allowNetworkShares: true,
+  });
+  assertEquals(payload.allowNetworkShares, true);
+});
+
+test("environment.deploy from an older control plane has no allowNetworkShares", () => {
+  const payload = parseEnvironmentDeployPayload(MINIMAL_DEPLOY);
+  assertEquals(payload.allowNetworkShares, undefined);
+});
+
+test("environment.deploy rejects non-boolean allowNetworkShares", () => {
+  assertThrows(
+    () =>
+      parseEnvironmentDeployPayload({
+        ...MINIMAL_DEPLOY,
+        allowNetworkShares: "true",
+      }),
+    TypeError,
+    "allowNetworkShares must be a boolean",
+  );
+});
+
 test("environment.deploy round-trips noCache", () => {
   const payload = parseEnvironmentDeployPayload({
     environmentId: "env-1",

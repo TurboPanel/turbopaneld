@@ -11,6 +11,11 @@
  */
 
 import { isBindStyleVolume, isSafeTmpfsVolume } from "./compose-host-paths.ts";
+import {
+  isNetworkShareVolume,
+  NETWORK_SHARES_REFUSAL_NOTE,
+  networkShareFindings,
+} from "./network-shares.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -154,15 +159,40 @@ function imageShadowFindings(
     );
 }
 
-function volumeFindings(volumes: unknown): string[] {
+type VolumeFindingOptions = {
+  /** Host-level approval waives every volume rule except the share checks. */
+  approved: boolean;
+  allowNetworkShares: boolean;
+  deploymentDir?: string;
+};
+
+function volumeFindings(
+  volumes: unknown,
+  opts: VolumeFindingOptions,
+): string[] {
   if (!isRecord(volumes)) return [];
   const found: string[] = [];
   for (const [name, spec] of Object.entries(volumes)) {
     if (!isRecord(spec) || !isRecord(spec.driver_opts)) continue;
-    const opts = spec.driver_opts;
-    if (Object.keys(opts).length === 0) continue;
+    const driverOpts = spec.driver_opts;
+    if (Object.keys(driverOpts).length === 0) continue;
+    // An SMB share is judged first and on its own rules (never as a bind),
+    // and only when the control plane allowed shares for this server.
+    if (opts.allowNetworkShares && isNetworkShareVolume(spec)) {
+      found.push(...networkShareFindings(name, spec, opts));
+      continue;
+    }
+    if (opts.approved) continue;
     // A bind-style mount is a host path: the path checks confine it.
-    if (isBindStyleVolume(opts) || isSafeTmpfsVolume(opts)) continue;
+    if (isBindStyleVolume(driverOpts) || isSafeTmpfsVolume(driverOpts)) {
+      continue;
+    }
+    if (isNetworkShareVolume(spec)) {
+      found.push(
+        `volume ${name} mounts an SMB network share, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+      );
+      continue;
+    }
     found.push(
       `volume ${name} mounts something other than plain Docker storage (overlay, network and other filesystem types can reach host paths; only a sized tmpfs is allowed without host-level approval)`,
     );
@@ -295,6 +325,10 @@ function networkFindings(networks: unknown): string[] {
 
 export type ComposePolicyOptions = {
   hostLevelApproved?: boolean;
+  /** `environment.deploy` `allowNetworkShares`: SMB share volumes may be mounted. */
+  allowNetworkShares?: boolean;
+  /** Live deployment directory: the only place a share's `credentials=` file may be. */
+  deploymentDir?: string;
   platformNetworks?: readonly string[];
   /** The helper ports this deploy opens to an account; each exempts its one publish. */
   helperReach?: readonly HelperReachPublish[];
@@ -329,10 +363,12 @@ export function collectComposePolicyFindings(
     // Joining the hosting-ingress or managed network by hand is never
     // approved: the daemon attaches those itself.
     ...platformNetworkFindings(document.networks, opts.platformNetworks ?? []),
-    ...(approved ? [] : [
-      ...volumeFindings(document.volumes),
-      ...networkFindings(document.networks),
-    ]),
+    ...volumeFindings(document.volumes, {
+      approved,
+      allowNetworkShares: opts.allowNetworkShares === true,
+      deploymentDir: opts.deploymentDir,
+    }),
+    ...(approved ? [] : networkFindings(document.networks)),
   ];
 }
 

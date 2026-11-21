@@ -1506,3 +1506,13 @@ marker, so the restored compose file runs against its own commit's tree, which
 is still there because pruning follows a successful up; the newer commit's tree
 stays until the next prune. The project directory is read from the marker, not
 from the restored manifest.
+
+## Network shares (`network-shares-v1`)
+
+`environment.deploy` may carry `allowNetworkShares: true` (optional boolean, next to `hostLevelApproved`). The control plane sends it only to a daemon that lists `network-shares-v1`, and only when the organization allows SMB shares for the server.
+
+- **Policy** (`network-shares.ts`, called from `volumeFindings` in `compose-final-policy.ts`, on the resolved model). With the flag, a top-level volume whose driver is `local` or absent and whose `driver_opts.type` is `cifs` or `smb3` is judged on its own rules, never as a bind: `device` must be `//host/share[/path]`; the host may not be loopback, link-local, unspecified, multicast, `localhost` or a metadata address (numeric tricks such as `127.1` or `0x7f.1` are refused); `driver_opts` may hold only `type`, `device` and `o`; every `o` option must be on the allowlist (`SAFE_OPTIONS`, value forms checked). `suid`, `dev`, `exec`, SMB1 and anything unknown are refused by name; `credentials=` must be an absolute path inside the deployment directory (checked lexically); `addr=` goes through the host check. Shares are checked even under `hostLevelApproved`. Without the flag the refusal says network shares must be allowed for this server, and `hostLevelApproved` alone behaves as before.
+- **Redaction.** `password=` (also `pass=`, `pwd=`) values join the transcript deny-set (`logSink.addSecrets`, `rememberSecretPlaintexts`) before anything is logged, and the share is logged only through `describeNetworkShare`, which replaces the value. A doubled comma inside a password is part of it (the splitter follows mount.cifs).
+- **Mount helper** (`smb-tools.ts`). Before compose up, when the final model has a share volume and `mount.cifs` is missing, `ensureSmbTools` logs "Installing SMB tools (cifs-utils)" and runs the `smb-tools-setup.yml` playbook through `tp-orchestrate`. Nothing runs when the helper exists; Debian and Ubuntu (apt) only, any other distro fails the deploy with a plain message, as does a failed install. Test seam: `EnvironmentDeployDeps.ensureSmbTools`.
+- **Known gaps.** `credentials=` is not realpath-checked; a host name that resolves to an internal address at mount time is not caught; the install is a log line, not a progress-plan step.
+

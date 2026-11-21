@@ -1749,6 +1749,13 @@ export type EnvironmentDeployHostAccess = {
    * daemon then refuses such a context. Internal hosts are refused either way.
    */
   remoteBuildSourcesApproved?: boolean;
+  /**
+   * True only when the control plane allows this server's projects to mount
+   * SMB network shares (`cifs` / `smb3` volumes). Absent reads as `false`; the
+   * daemon then refuses such a volume like any other network filesystem.
+   * Requires the `network-shares-v1` wire feature.
+   */
+  allowNetworkShares?: boolean;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -7674,6 +7681,10 @@ export function parseEnvironmentDeployPayload(
       remoteBuildSourcesApproved: parseOptionalBoolean(
         value.remoteBuildSourcesApproved,
         "remoteBuildSourcesApproved",
+      ),
+      allowNetworkShares: parseOptionalBoolean(
+        value.allowNetworkShares,
+        "allowNetworkShares",
       ),
       tlsMaterial,
       variableMaterial: parseOptionalMaterialArray(

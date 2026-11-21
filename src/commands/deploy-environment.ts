@@ -93,6 +93,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
 import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
@@ -113,6 +114,14 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
+import {
+  describeNetworkShare,
+  hasNetworkShares,
+  networkSharePasswords,
+  networkShareVolumes,
+} from "../deploy/network-shares.ts";
+import { ensureSmbTools as defaultEnsureSmbTools } from "../deploy/smb-tools.ts";
+import { runSmbToolsSetup } from "../orchestration/ansible.ts";
 import { ensureBuildkitImageBuild } from "../deploy/release/image-build.ts";
 import { observeBuildSlot } from "../deploy/release/build-sandbox.ts";
 import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
@@ -456,6 +465,11 @@ export type EnvironmentDeployDeps = {
    * Ansible install on hermetic suite paths that still exercise compose.
    */
   ensureDocker?: () => Promise<void>;
+  /**
+   * Test seam — defaults to {@link defaultEnsureSmbTools} (installs
+   * `cifs-utils` through the privileged playbook when a share volume needs it).
+   */
+  ensureSmbTools?: (log: (line: string) => void) => Promise<void>;
   /** Test seam — defaults to {@link waitForHealthGate} (real polling and sleeps). */
   waitForHealth?: typeof waitForHealthGate;
   /**
@@ -1800,6 +1814,7 @@ type DeployContainerServicesInput = {
   runStreamed: RunDockerStreamedFn;
   logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
+  ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -2516,6 +2531,8 @@ async function deployContainerServices(
     // plane's approval, and built images may not take platform image names.
     assertComposePolicy(resolved.document ?? {}, {
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
+      allowNetworkShares: parsedPayload.allowNetworkShares === true,
+      deploymentDir,
       platformNetworks: [
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
@@ -2587,6 +2604,20 @@ async function deployContainerServices(
       services: composeServices(resolved.document),
       alwaysBuilds: deployAlwaysBuilds(parsedPayload),
     });
+
+    // SMB share volumes (the policy above already accepted them): the share
+    // password never reaches the transcript, then the mount helper is made
+    // ready before compose up needs it.
+    const shareDocument = resolved.document ?? {};
+    if (hasNetworkShares(shareDocument)) {
+      const sharePasswords = networkSharePasswords(shareDocument);
+      logSink.addSecrets(sharePasswords);
+      rememberSecretPlaintexts(sharePasswords);
+      for (const [name, spec] of networkShareVolumes(shareDocument)) {
+        logSink.onLine("stdout", describeNetworkShare(name, spec));
+      }
+      await input.ensureSmbToolsFn((line) => logSink.onLine("stdout", line));
+    }
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(
       parsedPayload.storageMaterial ?? [],
@@ -3007,6 +3038,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   currentPhase: () => string;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
+  ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -3044,6 +3076,12 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
     ensureDockerFn: deps?.ensureDocker ??
       (() => defaultEnsureDocker({ onEvent: dockerEvents })),
+    ensureSmbToolsFn: deps?.ensureSmbTools ??
+      ((log) =>
+        defaultEnsureSmbTools({
+          log,
+          runSetup: () => runSmbToolsSetup(),
+        })),
     ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
       ((networks: readonly ExternalDockerNetworkSpec[]) =>
         defaultEnsureExternalDockerNetworks(networks, run)),
@@ -3877,6 +3915,7 @@ async function deployEnvironmentHolding(
     runStreamed: runtime.runStreamed,
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    ensureSmbToolsFn: runtime.ensureSmbToolsFn,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
     ...(runtime.waitForHealth === undefined
