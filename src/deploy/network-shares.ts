@@ -16,12 +16,17 @@
  * `${VAR}` interpolation has already happened; a value that still holds `$` is
  * an escaped literal and fails the shape checks like any other odd value.
  *
+ * Compose text from the control plane never carries a login: `password=`,
+ * `pass=`, `pwd=` and `credentials=` are refused (the kernel cifs client
+ * ignores `credentials=` anyway). The daemon adds `username=`, `password=` and
+ * `domain=` itself from sealed material (see `network-share-logins.ts`) after
+ * the compose is judged, and the final check accepts exactly those tokens.
+ *
  * Findings never repeat an option's value: they name the option or the host.
  * {@link redactMountOptions} masks `password=` for every line the daemon
  * writes about a share.
  */
 
-import { isAbsolute, normalize } from "@std/path";
 import { ipScope } from "./compose-build-policy.ts";
 import { REDACTED } from "../logs/redactor.ts";
 
@@ -98,17 +103,6 @@ export function splitMountOptions(o: string): string[] {
   return tokens;
 }
 
-/** The `password=` values of an `o` string (the literal text, doubled commas undone). */
-export function mountOptionPasswords(o: string): string[] {
-  const out: string[] = [];
-  for (const token of splitMountOptions(o)) {
-    const trimmed = token.trimStart();
-    const key = PASSWORD_KEYS.find((k) => trimmed.toLowerCase().startsWith(k));
-    if (key !== undefined) out.push(trimmed.slice(key.length));
-  }
-  return out;
-}
-
 /** An `o` string with every password value replaced, safe to log. */
 export function redactMountOptions(o: string): string {
   return splitMountOptions(o).map((token) => {
@@ -118,19 +112,6 @@ export function redactMountOptions(o: string): string {
       ? token
       : `${trimmed.slice(0, key.length)}${REDACTED}`;
   }).join(",");
-}
-
-/** Every SMB password of the resolved model, for the transcript deny-set. */
-export function networkSharePasswords(
-  document: Record<string, unknown>,
-): string[] {
-  return networkShareVolumes(document).flatMap(([, spec]) => {
-    const driverOpts = spec.driver_opts;
-    const o = isRecord(driverOpts) && typeof driverOpts.o === "string"
-      ? driverOpts.o
-      : "";
-    return mountOptionPasswords(o);
-  });
 }
 
 /** One redacted line naming a share, for the deploy log. */
@@ -153,6 +134,8 @@ export function describeNetworkShare(
 const HOSTNAME =
   /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\.?$/;
 const DOTTED_QUAD = /^(?:0|[1-9]\d{0,2})(?:\.(?:0|[1-9]\d{0,2})){3}$/;
+/** The default bridge's gateway: containers reach the host's own services there. */
+const DOCKER_BRIDGE_GATEWAY = "172.17.0.1";
 const LOCAL_NAMES = new Set([
   "localhost",
   "localhost.localdomain",
@@ -173,6 +156,9 @@ export function shareHostRefusal(raw: string): string | null {
     return "is not a valid host name or address";
   }
   const name = host.toLowerCase().replace(/\.$/, "");
+  if (name === DOCKER_BRIDGE_GATEWAY) {
+    return "is the Docker bridge gateway (this server itself)";
+  }
   if (LOCAL_NAMES.has(name) || name.endsWith(".localhost")) {
     return "is this server itself (localhost)";
   }
@@ -283,7 +269,6 @@ const VALUE_OPTIONS: Readonly<Record<string, Pattern>> = {
 /** The options an `o` string may hold, for the refusal text. */
 export const SAFE_OPTIONS: readonly string[] = [
   ...Object.keys(VALUE_OPTIONS),
-  "credentials",
   "addr",
   ...FLAG_OPTIONS,
 ].sort();
@@ -295,26 +280,6 @@ function optionKey(token: string): { key: string; value?: string } {
     key: trimmed.slice(0, eq).trim().toLowerCase(),
     value: trimmed.slice(eq + 1),
   };
-}
-
-/**
- * `credentials=` may only name the file the daemon wrote for this volume
- * (an exact path, never a pattern), and never one holding a comma.
- */
-function credentialsRefusal(
-  value: string,
-  expected: string | undefined,
-): string | null {
-  if (expected === undefined) {
-    return "is not allowed here: the control plane supplies share credentials";
-  }
-  if (value.includes(",") || expected.includes(",")) {
-    return "must not contain a comma";
-  }
-  return normalize(value) === normalize(expected) && isAbsolute(value) &&
-      !value.split("/").includes("..")
-    ? null
-    : "must be the credentials file the daemon wrote for this volume";
 }
 
 const SECRET_OPTION_KEYS: ReadonlySet<string> = new Set([
@@ -330,23 +295,17 @@ const NEVER_OPTIONS: ReadonlySet<string> = new Set([
   "remount",
 ]);
 
-function optionRefusal(
-  token: string,
-  credentialsPath: string | undefined,
-): string | null {
+function optionRefusal(token: string): string | null {
   const { key, value } = optionKey(token);
   if (key === "") return "an empty option";
   if (SECRET_OPTION_KEYS.has(key)) {
-    return `option "${key}" is not allowed in compose text (the control plane supplies share credentials as a sealed file)`;
+    return `option "${key}" is not allowed in compose text (the control plane supplies share logins as sealed material)`;
+  }
+  if (key === "credentials" || key === "cred") {
+    return `option "${key}" is not allowed (the kernel cifs client ignores it; the control plane supplies share logins as sealed material)`;
   }
   if (NEVER_OPTIONS.has(key)) {
     return `option "${key}" is never allowed on a network share`;
-  }
-  if (key === "credentials") {
-    const why = value === undefined
-      ? "needs a value"
-      : credentialsRefusal(value, credentialsPath);
-    return why === null ? null : `option "credentials" ${why}`;
   }
   if (key === "addr") {
     const why = value === undefined ? "needs a value" : shareHostRefusal(value);
@@ -371,8 +330,12 @@ function optionRefusal(
 // --- one volume -------------------------------------------------------------
 
 export type NetworkShareContext = {
-  /** The one credentials file the daemon wrote for this volume, if any. */
-  credentialsPath?: string;
+  /**
+   * The exact `username=`, `password=` and `domain=` tokens the daemon added
+   * for this volume's login. Only those tokens are exempt from the refusals;
+   * set by the final check, never when judging compose text.
+   */
+  injectedTokens?: readonly string[];
 };
 
 /** Findings for one SMB volume; empty when it may be mounted. */
@@ -413,9 +376,18 @@ export function networkShareFindings(
   if (opts.o !== undefined && typeof opts.o !== "string") {
     found.push(`${prefix} o must be a string of mount options`);
   } else if (typeof opts.o === "string") {
+    const pending = [...(ctx.injectedTokens ?? [])];
     for (const token of splitMountOptions(opts.o)) {
-      const why = optionRefusal(token, ctx.credentialsPath);
+      const at = pending.indexOf(token);
+      if (at >= 0) {
+        pending.splice(at, 1);
+        continue;
+      }
+      const why = optionRefusal(token);
       if (why !== null) found.push(`${prefix} ${why}`);
+    }
+    if (pending.length > 0) {
+      found.push(`${prefix} the share login is missing from its options`);
     }
   }
   return found;
@@ -423,14 +395,15 @@ export function networkShareFindings(
 
 /**
  * The last check before compose starts, on the final resolved model: every
- * share volume must pass {@link networkShareFindings} (with only the
- * credentials file the daemon wrote for it) and the server must allow shares.
+ * share volume must pass {@link networkShareFindings} (with only the login
+ * tokens the daemon added for it) and the server must allow shares.
  */
 export function assertNetworkSharesFinal(
   document: Record<string, unknown>,
   opts: {
     allowNetworkShares: boolean;
-    shareCredentialsPaths?: ReadonlyMap<string, string>;
+    /** Volume to the login tokens the daemon injected into its `o`. */
+    injectedLogins?: ReadonlyMap<string, readonly string[]>;
   },
 ): void {
   const found: string[] = [];
@@ -441,7 +414,7 @@ export function assertNetworkSharesFinal(
     }
     found.push(
       ...networkShareFindings(name, spec, {
-        credentialsPath: opts.shareCredentialsPaths?.get(name),
+        injectedTokens: opts.injectedLogins?.get(name),
       }),
     );
   }

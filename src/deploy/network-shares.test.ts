@@ -4,21 +4,17 @@ import {
   assertNetworkSharesFinal,
   describeNetworkShare,
   hasNetworkShares,
-  mountOptionPasswords,
-  networkSharePasswords,
   redactMountOptions,
   shareHostRefusal,
   splitMountOptions,
 } from "./network-shares.ts";
 import { collectComposePolicyFindings } from "./compose-final-policy.ts";
+import { loginTokens } from "./network-share-logins.ts";
 
 const test = Deno.test.bind(Deno);
 
-const CRED = "/run/tp/deployments/p1/e1/smb/media.cred";
-const ALLOW = {
-  allowNetworkShares: true,
-  shareCredentialsPaths: new Map([["media", CRED]]),
-};
+const ALLOW = { allowNetworkShares: true };
+const LOGIN = loginTokens({ username: "svc", password: "s3cret" });
 
 function doc(
   opts: Record<string, unknown>,
@@ -78,8 +74,8 @@ test("without the flag a share is refused and says why", () => {
   );
 });
 
-test("without the flag, host-level approval keeps today's behaviour", () => {
-  assertEquals(findings(GOOD, { hostLevelApproved: true }), []);
+test("without the flag, host-level approval does not allow a share", () => {
+  assertEquals(findings(GOOD, { hostLevelApproved: true }).length, 1);
 });
 
 test("other volume types keep the generic refusal", () => {
@@ -98,6 +94,7 @@ test("hosts that are this server or metadata are refused by name", () => {
       "LOCALHOST",
       "foo.localhost",
       "127.0.0.1",
+      "172.17.0.1",
       "127.1",
       "2130706433",
       "0x7f.0.0.1",
@@ -153,8 +150,7 @@ test("each unsafe option is refused by name and never echoes its value", () => {
       "addr=127.0.0.1",
       "credentials=/etc/shadow",
       "credentials=relative/path",
-      `credentials=${CRED}/../../../../../etc/shadow`,
-      "credentials=/run/tp/deployments/p1/e1/smb/other.cred",
+      "cred=/run/tp/deployments/p1/e1/smb/other.cred",
       "password=",
       "pass=x",
       "pwd=x",
@@ -174,27 +170,32 @@ test("each unsafe option is refused by name and never echoes its value", () => {
   assertEquals(secret.length, 2);
 });
 
-test("credentials is allowed only as the exact file the daemon wrote", () => {
-  assertEquals(findings({ ...GOOD, o: `credentials=${CRED},ro` }), []);
-  // No file was written for this volume: any credentials= is refused.
+test("credentials= is refused in every form (the kernel ignores it)", () => {
+  for (const o of ["credentials=/etc/shadow", "CREDENTIALS=/x", "cred=/x"]) {
+    const found = findings({ ...GOOD, o });
+    assertEquals(found.length, 1, o);
+    assertStringIncludes(found[0], "ignores it");
+  }
+});
+
+test("a host-level approval never turns shares on", () => {
+  const approved = collectComposePolicyFindings(doc(GOOD), {
+    hostLevelApproved: true,
+  });
+  assertEquals(approved.length, 1);
+  assertStringIncludes(approved[0], "network shares must be allowed");
   assertEquals(
-    findings({ ...GOOD, o: `credentials=${CRED}` }, {
+    collectComposePolicyFindings(doc(GOOD), {
+      hostLevelApproved: true,
       allowNetworkShares: true,
-    }).length,
-    1,
+    }),
+    [],
   );
 });
 
 test("a comma in an option value never survives the checks", () => {
-  // `,,` is an empty option, and a comma in the credentials path is refused.
+  // `,,` is an empty option.
   assertEquals(findings({ ...GOOD, o: "username=a,,ro" }).length, 1);
-  assertEquals(
-    findings({ ...GOOD, o: "credentials=/run/a,b/x.cred" }, {
-      allowNetworkShares: true,
-      shareCredentialsPaths: new Map([["media", "/run/a,b/x.cred"]]),
-    }).length > 0,
-    true,
-  );
   assertEquals(
     findings({ ...GOOD, device: "//files.example.net/a,b" }).length,
     1,
@@ -208,6 +209,48 @@ test("the final check refuses what the first judge would", () => {
     () => assertNetworkSharesFinal(ok, { allowNetworkShares: false }),
     Error,
     "network shares must be allowed",
+  );
+  const withLogin = {
+    volumes: {
+      media: {
+        driver_opts: {
+          type: "cifs",
+          device: GOOD.device,
+          o: ["ro", ...LOGIN].join(","),
+        },
+      },
+    },
+  };
+  // Only the exact tokens the daemon injected are exempt.
+  assertEquals(
+    assertNetworkSharesFinal(withLogin, {
+      allowNetworkShares: true,
+      injectedLogins: new Map([["media", LOGIN]]),
+    }),
+    undefined,
+  );
+  assertThrows(
+    () => assertNetworkSharesFinal(withLogin, ALLOW),
+    Error,
+    "password",
+  );
+  assertThrows(
+    () =>
+      assertNetworkSharesFinal(withLogin, {
+        allowNetworkShares: true,
+        injectedLogins: new Map([["media", LOGIN.slice(0, 1)]]),
+      }),
+    Error,
+    "password",
+  );
+  assertThrows(
+    () =>
+      assertNetworkSharesFinal(ok, {
+        allowNetworkShares: true,
+        injectedLogins: new Map([["media", LOGIN]]),
+      }),
+    Error,
+    "login is missing",
   );
   const bad = {
     volumes: {
@@ -243,7 +286,6 @@ test("the option splitter keeps a doubled comma inside a password", () => {
     "ro",
   ]);
   assertEquals(splitMountOptions(""), [""]);
-  assertEquals(mountOptionPasswords("username=a,password=p,,w,ro"), ["p,w"]);
 });
 
 test("redaction hides the password value in every spelling", () => {
@@ -266,9 +308,6 @@ test("redaction hides the password value in every spelling", () => {
   assertEquals(line.includes("hunter2"), false);
   assertEquals(line.includes("tail"), false);
   assertStringIncludes(line, "//files.example.net/m");
-  assertEquals(networkSharePasswords({ volumes: { media: spec } }), [
-    "hunter2,tail",
-  ]);
 });
 
 test("hasNetworkShares sees only cifs and smb3 volumes", () => {

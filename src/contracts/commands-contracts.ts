@@ -1759,9 +1759,11 @@ export type EnvironmentDeployHostAccess = {
   /**
    * One entry per SMB share volume that needs a login. Each key names an entry
    * of `variableMaterial` (sealed, looked up as
-   * `${composeServiceName ?? ""}::${key}`); the daemon writes a root-only
-   * cifs credentials file from them and points the volume at it, so no secret
-   * ever sits in compose text. Requires the `network-shares-v1` wire feature.
+   * `${composeServiceName ?? ""}::${key}`); the daemon adds them as
+   * `username=`, `password=` and `domain=` to the volume's mount options in
+   * the compose it runs, so no secret ever sits in the compose text the
+   * control plane sends. Values may not contain a comma or a line break.
+   * Requires the `network-shares-v1` wire feature.
    */
   networkShareCredentials?: EnvironmentDeployNetworkShareCredential[];
 };

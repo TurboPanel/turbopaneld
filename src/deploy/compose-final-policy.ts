@@ -163,7 +163,6 @@ type VolumeFindingOptions = {
   /** Host-level approval waives every volume rule except the share checks. */
   approved: boolean;
   allowNetworkShares: boolean;
-  shareCredentialsPaths?: ReadonlyMap<string, string>;
 };
 
 function volumeFindings(
@@ -176,23 +175,20 @@ function volumeFindings(
     if (!isRecord(spec) || !isRecord(spec.driver_opts)) continue;
     const driverOpts = spec.driver_opts;
     if (Object.keys(driverOpts).length === 0) continue;
-    // An SMB share is judged first and on its own rules (never as a bind),
-    // and only when the control plane allowed shares for this server.
-    if (opts.allowNetworkShares && isNetworkShareVolume(spec)) {
-      found.push(...networkShareFindings(name, spec, {
-        credentialsPath: opts.shareCredentialsPaths?.get(name),
-      }));
+    // An SMB share is judged first and on its own rules (never as a bind).
+    // Shares are off unless the control plane allowed them for this server;
+    // host-level approval never turns them on.
+    if (isNetworkShareVolume(spec)) {
+      found.push(
+        ...(opts.allowNetworkShares ? networkShareFindings(name, spec, {}) : [
+          `volume ${name} mounts an SMB network share, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+        ]),
+      );
       continue;
     }
     if (opts.approved) continue;
     // A bind-style mount is a host path: the path checks confine it.
     if (isBindStyleVolume(driverOpts) || isSafeTmpfsVolume(driverOpts)) {
-      continue;
-    }
-    if (isNetworkShareVolume(spec)) {
-      found.push(
-        `volume ${name} mounts an SMB network share, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
-      );
       continue;
     }
     found.push(
@@ -329,9 +325,6 @@ export type ComposePolicyOptions = {
   hostLevelApproved?: boolean;
   /** `environment.deploy` `allowNetworkShares`: SMB share volumes may be mounted. */
   allowNetworkShares?: boolean;
-  /** Live deployment directory: the only place a share's `credentials=` file may be. */
-  /** Volume name to the credentials file the daemon wrote for it. */
-  shareCredentialsPaths?: ReadonlyMap<string, string>;
   platformNetworks?: readonly string[];
   /** The helper ports this deploy opens to an account; each exempts its one publish. */
   helperReach?: readonly HelperReachPublish[];
@@ -369,7 +362,6 @@ export function collectComposePolicyFindings(
     ...volumeFindings(document.volumes, {
       approved,
       allowNetworkShares: opts.allowNetworkShares === true,
-      shareCredentialsPaths: opts.shareCredentialsPaths,
     }),
     ...(approved ? [] : networkFindings(document.networks)),
   ];

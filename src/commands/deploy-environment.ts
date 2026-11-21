@@ -114,16 +114,16 @@ import {
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
 import {
-  applyShareCredentialsToCompose,
-  materializeShareCredentials,
-} from "../deploy/network-share-credentials.ts";
+  applyShareLoginsToCompose,
+  pruneStaleShareVolumes,
+  resolveShareLogins,
+} from "../deploy/network-share-logins.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
   assertNetworkSharesFinal,
   describeNetworkShare,
   hasNetworkShares,
   NETWORK_SHARES_REFUSAL_NOTE,
-  networkSharePasswords,
   networkShareVolumes,
 } from "../deploy/network-shares.ts";
 import { ensureSmbTools as defaultEnsureSmbTools } from "../deploy/smb-tools.ts";
@@ -2440,7 +2440,13 @@ async function buildBeforeInPlaceUp(
  */
 async function pruneAfterDeploy(
   input: DeployContainerServicesInput,
+  shareVolumeNames: ReadonlyMap<string, string>,
 ): Promise<void> {
+  await pruneStaleShareVolumes(
+    input.parsedPayload.projectName,
+    shareVolumeNames,
+    input.run,
+  );
   await pruneDeploySecrets(input.layout, input.parsedPayload);
   await pruneDeployConfigFiles(input.layout, input.parsedPayload);
   await pruneComposeCheckout(input.deploymentDir);
@@ -2523,8 +2529,9 @@ async function deployContainerServices(
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
-    // SMB logins go to a root-only credentials file and `credentials=` is
-    // added to each share volume before the compose is judged.
+    // SMB logins are decrypted here but added to the compose only after every
+    // policy check below has judged the author's text (a login is never
+    // compose text from the control plane).
     if (
       (parsedPayload.networkShareCredentials?.length ?? 0) > 0 &&
       parsedPayload.allowNetworkShares !== true
@@ -2533,18 +2540,11 @@ async function deployContainerServices(
         `networkShareCredentials were sent, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
       );
     }
-    const shareCredentials = await materializeShareCredentials(
-      layout,
-      parsedPayload.projectId,
-      parsedPayload.environmentId,
+    const shareLogins = await resolveShareLogins(
       parsedPayload.networkShareCredentials ?? [],
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
-    if (shareCredentials.size > 0) {
-      yaml = applyShareCredentialsToCompose(yaml, shareCredentials);
-      await writeComposeFileSecure(stagedPath, yaml);
-    }
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
@@ -2560,7 +2560,6 @@ async function deployContainerServices(
     assertComposePolicy(resolved.document ?? {}, {
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
       allowNetworkShares: parsedPayload.allowNetworkShares === true,
-      shareCredentialsPaths: shareCredentials,
       platformNetworks: [
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
@@ -2638,7 +2637,7 @@ async function deployContainerServices(
     // ready before compose up needs it.
     const shareDocument = resolved.document ?? {};
     if (hasNetworkShares(shareDocument)) {
-      const sharePasswords = networkSharePasswords(shareDocument);
+      const sharePasswords = [...shareLogins.values()].map((l) => l.password);
       logSink.addSecrets(sharePasswords);
       rememberSecretPlaintexts(sharePasswords);
       for (const [name, spec] of networkShareVolumes(shareDocument)) {
@@ -2673,6 +2672,14 @@ async function deployContainerServices(
       layout,
       parsedPayload,
     );
+    // The judged compose gets its share logins last, in the staged file that
+    // is published (0600) and read by every later `compose up`.
+    const shareApplied = await applyShareLoginsToCompose(
+      yaml,
+      parsedPayload.projectName,
+      shareLogins,
+    );
+    yaml = shareApplied.yaml;
     await writeComposeFileSecure(stagedPath, yaml);
 
     const labeledServices = [...resolved.serviceNames].sort((a, b) =>
@@ -2724,7 +2731,7 @@ async function deployContainerServices(
         )).document ?? {},
         {
           allowNetworkShares: parsedPayload.allowNetworkShares === true,
-          shareCredentialsPaths: shareCredentials,
+          injectedLogins: shareApplied.injected,
         },
       );
     }
@@ -2817,7 +2824,7 @@ async function deployContainerServices(
         deploymentDir,
         onLine,
       });
-      await pruneAfterDeploy(input);
+      await pruneAfterDeploy(input, shareApplied.volumeNames);
       return sequential;
     }
     if (serviceHooks.length > 0) {
@@ -2875,7 +2882,7 @@ async function deployContainerServices(
 
     // The new release is up and its hooks passed: only now may the files the
     // previous one needed (and this plan no longer lists) be removed.
-    await pruneAfterDeploy(input);
+    await pruneAfterDeploy(input, shareApplied.volumeNames);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
