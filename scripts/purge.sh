@@ -1672,6 +1672,7 @@ tp_inventory_folders() {
   # The Docker gate's socket directory and Deno transpile cache. Its state
   # folder and the hosting Caddy's sit inside /var/lib/turbopanel and go with it.
   tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-gate ""
+  tp_add_existing "$TP_TMP/inv.folders_remove" /run/turbopanel-phpfpm ""
   tp_add_existing "$TP_TMP/inv.folders_remove" /var/cache/turbopanel ""
   for _ifo_path in $TP_CONFIG_DIRS $TP_STATE_DIRS $TP_LOG_DIRS; do
     tp_add_existing "$TP_TMP/inv.folders_keep" "$_ifo_path" ""
@@ -2849,6 +2850,7 @@ tp_remove_folders_and_shell() {
   tp_safe_rm_tree /tmp/turbopanel-ansible
   tp_safe_rm_tree /tmp/turbopanel-orchestrate
   tp_safe_rm_tree /run/turbopanel-gate
+  tp_safe_rm_tree /run/turbopanel-phpfpm
   tp_safe_rm_tree /var/cache/turbopanel
   tp_safe_rm_tree /root/.ansible
   tp_safe_rm_tree /.ansible
@@ -4288,7 +4290,7 @@ TP_LEGACY_SHELL_RC_NEEDLE='/opt/turbopanel/runtimes/deno/.install/env'
 # folder configured elsewhere in daemon.env; those are listed as kept.
 # Root's update records (lib/installed-build, lib/update-guard-armed) go with
 # /opt/turbopanel.
-TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /var/cache/turbopanel /var/lib/turbopanel-build"
+TP_OWNED_TREES="/opt/turbopanel /etc/turbopanel /etc/ssh/turbopanel /var/lib/turbopanel /var/log/turbopanel /run/turbopanel /var/run/turbopanel /backup /srv/users /tmp/turbopanel-ansible /tmp/turbopanel-orchestrate /root/.ansible /.ansible /var/lib/docker /var/lib/containerd /etc/docker /var/lib/turbopanel-purge /run/turbopanel-gate /run/turbopanel-phpfpm /var/cache/turbopanel /var/lib/turbopanel-build"
 # Where systemd keeps the stamp files of persistent timers (outside the owned
 # trees; only stamp-turbopanel-*.timer is ever removed from it).
 TP_TIMER_STAMP_DIR=/var/lib/systemd/timers

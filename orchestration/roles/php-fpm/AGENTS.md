@@ -99,7 +99,7 @@ FHS layout:
 | ---- | ----- | ---- | ------- |
 | `/etc/turbopanel/php/` | `root:tpapache` | `0750` | `php-fpm.conf`, `conf.d/99-turbopanel.ini`, per-site `pools/*.conf` |
 | `/var/log/turbopanel/php/` | `tpapache:tpapache` | `0750` | `php-fpm.log` / `php-error.log` |
-| `/run/turbopanel/php/` | `tpapache:tp` | `0750` | pidfile + unix sockets |
+| `/run/turbopanel-phpfpm/` and `<series>/` | `root:tp` | `0750` | pidfile + unix sockets |
 
 Driven by **`turbopanel-php-fpm@.service`**. The FPM master, its bootstrap pool,
 and the FHS config/log dirs are owned by **tpapache** (provisioned by
@@ -107,13 +107,23 @@ and the FHS config/log dirs are owned by **tpapache** (provisioned by
 which is why `site-nginx-apply.yml` provisions the `apache` identity before
 including this role. **Per-site** pools override that: workers run as the site
 principal, and the listen socket is owned by whichever engine consumes it
-(`tpapache` for an Apache site, `tpnginx` for an nginx one). `/run/turbopanel/php/`
-is therefore grouped to **`tp`**, not `tpapache` — `tp` is the shared group every
-engine account joins (`web-service-user`), so `0750` is traversable by both
-engines with no world bit. The master runs as root and creates the sockets;
-access control is on the sockets themselves (`0660`, per-engine owner). The
-unit's `ExecStartPre=/usr/bin/install -d` recreates this directory on every
-start and must stay in step with the role task.
+(`tpapache` for an Apache site, `tpnginx` for an nginx one). The run tree is
+`/run/turbopanel-phpfpm/` (`PHP_FPM_RUN_DIR` in `src/paths/layout.ts`,
+`php_fpm_run_dir` in the role), **not** under `/run/turbopanel`: that folder is
+the daemon account's (`tp:tp` `3770`), so `tp` could rename a folder in it and
+put its own tree there, while the root master writes the pidfile and chowns each
+socket by path (both follow symlinks). The tree is `root:tp` `0750` at both
+levels, so the daemon cannot rename, replace or write anything above the
+sockets; it is grouped to **`tp`**, not `tpapache`, because `tp` is the shared
+group every engine account joins (`web-service-user`), so `0750` is traversable
+by both engines with no world bit. The master runs as root and creates the
+sockets; access control is on the sockets themselves (`0660`, per-engine
+owner). tp-host pins a pool's `listen` to `/run/turbopanel-phpfpm/<series>/`.
+The unit's `ExecStartPre=/usr/bin/install -d` lines recreate both folders on
+every start (`/run` is tmpfs) and must stay in step with the role tasks.
+
+`tasks/converge-run-tree.yml` moves a host updated in place to that tree (the
+boot converge enters it; see the file header for the order and the rollback).
 
 Both `site-nginx-apply` (nginx) and `site-apache-apply` include
 this role when the daemon passes `turbopanel_php_fpm_install: true` (that

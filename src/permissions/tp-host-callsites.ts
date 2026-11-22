@@ -285,6 +285,7 @@ const WORKER_TEXT = workerUnitContent({
 // One per-site PHP runtime of alice's, as `php-runtime.ts` renders it.
 const PHP_APPLY = "src/deploy/site/php-runtime-apply.ts|";
 const WALLS = "src/deploy/site/apache-walls-repair.ts|";
+const RUN_TREE = "src/deploy/site/php-run-tree-check.ts|";
 const PHP_ID = "shop-0a1b2c3d4e5f-fcgi84";
 const PHP_FPM_ID = "shop-0a1b2c3d4e5f-fpm84";
 const PHP_UNIT = `turbopanel-php-${PHP_ID}`;
@@ -525,6 +526,18 @@ const SITES: CallSite[] = [
   tpHost(`${WALLS}sudoText(io,["cat","--",guardPath])`, {
     argv: ["cat", "--", `${PHP_CONF_DIR}/site-guard.php`],
     setup: file(`${PHP_CONF_DIR}/site-guard.php`),
+  }),
+  tpHost(`${RUN_TREE}["-n",...args]`, {
+    argv: ["cat", "--", `${CONF}/php/8.4/pools/tp-env1-www.conf`],
+    setup: file(`${CONF}/php/8.4/pools/tp-env1-www.conf`),
+  }),
+  tpHost(`${RUN_TREE}sudoText(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/php/8.4/pools`],
+    setup: dir(`${CONF}/php/8.4/pools`),
+  }),
+  tpHost(`${RUN_TREE}sudoText(io,["cat","--",join(dir,name)])`, {
+    argv: ["cat", "--", `${CONF}/php/8.4/pools/tp-env1-www.conf`],
+    setup: file(`${CONF}/php/8.4/pools/tp-env1-www.conf`),
   }),
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],

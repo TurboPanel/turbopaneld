@@ -95,6 +95,13 @@
       ansible.builtin.import_role:
         name: turbopanel-user
         tasks_from: vendor-locks.yml
+    # An update never reaches the php-fpm role's install tasks, so the shared
+    # masters' pidfile and sockets move to the root-owned run tree here, as
+    # root, before the daemon takes any command. A no-op once moved.
+    - name: Move the php-fpm run tree to the root-owned folder
+      ansible.builtin.import_role:
+        name: php-fpm
+        tasks_from: converge-run-tree.yml
     - name: Give the cache unit its retry settings
       ansible.builtin.import_role:
         name: redis

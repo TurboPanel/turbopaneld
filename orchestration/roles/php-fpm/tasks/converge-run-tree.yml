@@ -1,0 +1,272 @@
+---
+# Moves a host updated in place to the root-owned php-fpm run tree. A fresh
+# install already has it (main.yml, series.yml); an update never reaches those,
+# so the daemon's boot converge enters this file alone (import_role with
+# tasks_from, see playbooks/daemon-converge.yml). It runs as root, before the
+# daemon takes any command: boot-converge-gate.ts holds every control-plane
+# command (deploys included) until the converge, retries included, has
+# finished, so no deploy writes a pool or vhost meanwhile.
+#
+# What moves: the unit template (role-owned, no account in it, so it is
+# re-rendered) and the socket prefix in every series' php-fpm.conf, in the
+# pools (the bootstrap pool too) and in the Caddy, nginx and Apache vhosts. The
+# prefix is the only thing that differs from what a fresh install writes. The
+# configs and pools are NOT re-rendered: their owner and group are whatever
+# the install gave them (`tpapache`, or `tpols` on an OpenLiteSpeed-only host),
+# and a replace keeps both. Order, so the
+# old setup keeps working until the new one is proven:
+#   1. back everything up; 2. write the new files; 3. test EVERY engine config
+#   (nothing has been restarted yet); 4. only then restart the masters that
+#   were running and reload the engines that are.
+# Any failure puts the backups back (rescue), so a failed run leaves the host
+# as it was. It is a no-op once nothing names the old folder.
+#
+# The old prefix keeps its trailing slash in every match: the folder itself is
+# the daemon's own `<run>/php` tree, which nothing else shares.
+- name: Check for the php-fpm unit template
+  ansible.builtin.stat:
+    path: /etc/systemd/system/turbopanel-php-fpm@.service
+  register: _tp_unit
+
+- name: List the installed php-fpm series
+  ansible.builtin.find:
+    paths: "{{ turbopanel_config_dir }}/php"
+    file_type: directory
+    use_regex: true
+    patterns: '^[0-9]{1,2}\.[0-9]{1,2}$'
+  register: _tp_series
+  when: _tp_unit.stat.exists
+
+# Every file that may name the old socket folder: the per-site pools (not the
+# per-site php units' own folders), each series' php-fpm.conf, and the three
+# engines' vhosts.
+- name: Find the pool and vhost files that name the old socket folder
+  ansible.builtin.find:
+    paths: >-
+      {{
+        (_tp_series.files | map(attribute='path') | list)
+        + (_tp_series.files | map(attribute='path') | map('regex_replace', '$', '/pools') | list)
+        + [
+          turbopanel_config_dir ~ '/site-caddy/sites',
+          turbopanel_config_dir ~ '/nginx/sites',
+          turbopanel_config_dir ~ '/apache/sites',
+        ]
+      }}
+    file_type: file
+    use_regex: true
+    patterns: '.*\.conf$'
+    contains: '{{ turbopanel_run_dir }}/php/'
+  register: _tp_stale
+  when: _tp_unit.stat.exists
+
+- name: Read the installed php-fpm unit template
+  ansible.builtin.slurp:
+    src: /etc/systemd/system/turbopanel-php-fpm@.service
+  register: _tp_unit_text
+  when: _tp_unit.stat.exists
+
+- name: Decide whether the run tree needs moving
+  ansible.builtin.set_fact:
+    _tp_series_names: "{{ _tp_series.files | map(attribute='path') | map('basename') | sort }}"
+    _tp_stale_files: "{{ _tp_stale.files | map(attribute='path') | sort }}"
+    _tp_move: >-
+      {{
+        (_tp_stale.files | length > 0)
+        or (php_fpm_run_dir not in (_tp_unit_text.content | b64decode))
+      }}
+  when: _tp_unit.stat.exists
+
+- name: Move the php-fpm run tree
+  when: _tp_unit.stat.exists and _tp_move | bool
+  block:
+    - name: Note which masters run now
+      ansible.builtin.command: "systemctl is-active turbopanel-php-fpm@{{ item }}"
+      loop: "{{ _tp_series_names }}"
+      register: _tp_masters
+      changed_when: false
+      failed_when: false
+
+    - name: Note which engines run now
+      ansible.builtin.command: "systemctl is-active {{ item }}"
+      loop: [turbopanel-site-caddy, turbopanel-nginx, turbopanel-apache]
+      register: _tp_engines
+      changed_when: false
+      failed_when: false
+
+    # A root-made temp file: the folders the files live in are not root's, so
+    # the archive must not sit in one of them.
+    - name: Make the backup file
+      ansible.builtin.tempfile:
+        state: file
+        prefix: tp-php-run-tree-
+      register: _tp_backup
+
+    - name: Back up every file this move can change
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['tar', '-C', '/', '-cpf', _tp_backup.path, '--ignore-failed-read']
+            + (
+              ['etc/systemd/system/turbopanel-php-fpm@.service']
+              + _tp_stale_files
+              | map('regex_replace', '^/', '')
+              | list
+            )
+          }}
+      changed_when: true
+
+    - name: Install the php-fpm unit template
+      ansible.builtin.template:
+        src: turbopanel-php-fpm@.service.j2
+        dest: /etc/systemd/system/turbopanel-php-fpm@.service
+        owner: root
+        group: root
+        mode: "0640"
+
+    - name: Ensure the PHP runtime directory root
+      ansible.builtin.file:
+        path: "{{ php_fpm_run_dir }}"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+
+    - name: Ensure each series' PHP runtime directory
+      ansible.builtin.file:
+        path: "{{ php_fpm_run_dir }}/{{ item }}"
+        state: directory
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+      loop: "{{ _tp_series_names }}"
+
+    - name: Point the pools and vhosts at the new socket folder
+      ansible.builtin.replace:
+        path: "{{ item }}"
+        regexp: '{{ turbopanel_run_dir }}/php/'
+        replace: "{{ php_fpm_run_dir }}/"
+      loop: "{{ _tp_stale_files }}"
+
+    # Every engine, tested against the new files, before any master or engine
+    # is restarted. Same accounts and commands as the daemon's own config tests
+    # (engine-driver.ts): sudoers pins them, and root never parses these files.
+    - name: Test each series' php-fpm config
+      ansible.builtin.command: "/usr/sbin/php-fpm{{ item }} --fpm-config {{ turbopanel_config_dir }}/php/{{ item }}/php-fpm.conf --test"
+      loop: "{{ _tp_series_names }}"
+      changed_when: false
+
+    - name: Test the site Caddy config
+      ansible.builtin.command:
+        argv:
+          - "{{ turbopanel_vendor_dir }}/caddy/current/caddy"
+          - validate
+          - --adapter
+          - caddyfile
+          - --config
+          - "{{ turbopanel_config_dir }}/site-caddy/Caddyfile"
+      become: true
+      become_user: tpcaddysite
+      when: _tp_engines.results[0].stdout == 'active'
+      changed_when: false
+
+    - name: Test the nginx config
+      ansible.builtin.command:
+        argv:
+          - "{{ turbopanel_vendor_dir }}/nginx/current/sbin/nginx"
+          - -t
+          - -c
+          - "{{ turbopanel_config_dir }}/nginx/nginx.conf"
+      become: true
+      become_user: tpnginx
+      when: _tp_engines.results[1].stdout == 'active'
+      changed_when: false
+
+    - name: Test the Apache config
+      ansible.builtin.command:
+        argv:
+          - "{{ turbopanel_vendor_dir }}/apache/current/bin/httpd"
+          - -t
+          - -f
+          - "{{ turbopanel_config_dir }}/apache/httpd.conf"
+      become: true
+      become_user: tpapache
+      when: _tp_engines.results[2].stdout == 'active'
+      changed_when: false
+
+    - name: Reload systemd for the new unit template
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    # A restart, not a reload: the unit's PIDFile and the master's pidfile and
+    # sockets changed. Only a master that was running, so one stopped on
+    # purpose stays stopped.
+    - name: Restart the php-fpm masters that were running
+      ansible.builtin.systemd:
+        name: "turbopanel-php-fpm@{{ item.item }}"
+        state: restarted
+      loop: "{{ _tp_masters.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stdout == 'active'
+      register: _tp_restarted
+
+    - name: Reload the engines that were running
+      ansible.builtin.systemd:
+        name: "{{ item.item }}"
+        state: reloaded
+      loop: "{{ _tp_engines.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: item.stdout == 'active'
+      register: _tp_reloaded
+
+    - name: Remove the backup file
+      ansible.builtin.file:
+        path: "{{ _tp_backup.path }}"
+        state: absent
+
+  rescue:
+    # Put the old files back, then bring the masters that were running back on
+    # them (they may already have been restarted onto the new folder), and fail
+    # the converge so the failure is visible.
+    - name: Put the backed-up files back
+      ansible.builtin.command: "tar -C / -xpf {{ _tp_backup.path }}"
+      when: _tp_backup is defined and _tp_backup.path is defined
+      changed_when: true
+
+    - name: Reload systemd after putting the unit template back
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    # Exactly what the block restarted or reloaded (a skipped item is one that
+    # was not running), masters first so the engines find their sockets. A
+    # failure before any restart, a config test for one, restarts nothing.
+    - name: Restart the masters the move restarted, on the old files
+      ansible.builtin.systemd:
+        name: "turbopanel-php-fpm@{{ item.item.item }}"
+        state: restarted
+      loop: "{{ (_tp_restarted | default({'results': []})).results | rejectattr('skipped', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+      failed_when: false
+
+    - name: Reload the engines the move reloaded, on the old files
+      ansible.builtin.systemd:
+        name: "{{ item.item.item }}"
+        state: reloaded
+      loop: "{{ (_tp_reloaded | default({'results': []})).results | rejectattr('skipped', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item.item }}"
+      failed_when: false
+
+    - name: Remove the backup file
+      ansible.builtin.file:
+        path: "{{ _tp_backup.path }}"
+        state: absent
+      when: _tp_backup is defined and _tp_backup.path is defined
+
+    - name: Fail the move
+      ansible.builtin.fail:
+        msg: >-
+          The php-fpm run tree move failed and the previous files were put
+          back; the hosts PHP keeps running as before. See the task above.

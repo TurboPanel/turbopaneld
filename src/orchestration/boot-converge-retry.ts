@@ -5,7 +5,7 @@
  * and keeps the outcome where the rest of the daemon can read it.
  */
 
-import { trackBootConverge } from "./boot-converge-gate.ts";
+import { commandsDrained, trackBootConverge } from "./boot-converge-gate.ts";
 
 /** Pauses before retry 1..N; the list length is the retry budget (about 33 minutes in all). */
 export const BOOT_CONVERGE_RETRY_DELAYS_MS: readonly number[] = [
@@ -80,7 +80,10 @@ export async function retryBootConverge(
     opts.log(
       `retrying the boot converge (attempt ${i + 1} of ${delays.length})`,
     );
-    const run = opts.attempt().catch(() => false);
+    // The gate closes at once, so new commands wait; commands that were let
+    // through during the pause finish first, so none overlaps the converge
+    // (the php-fpm run tree move rewrites pools and vhosts as root).
+    const run = commandsDrained().then(() => opts.attempt()).catch(() => false);
     trackBootConverge(run);
     const ok = await run;
     if (ok && opts.signal.aborted) return false;

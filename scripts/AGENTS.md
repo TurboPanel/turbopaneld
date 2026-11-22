@@ -126,7 +126,8 @@ left over while a container cgroup still held them. The summary's unit diff
 also skips names `tp_unit_present` already treats as gone. Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also
-removes `/var/cache/turbopanel` (the Docker gate's cache, in `TP_OWNED_TREES`;
+removes `/run/turbopanel-phpfpm` (the php-fpm masters' pidfile and socket tree, in `TP_OWNED_TREES`),
+`/var/cache/turbopanel` (the Docker gate's cache, in `TP_OWNED_TREES`;
 the hosting Caddy's and the gate's state folders sit inside `/var/lib/turbopanel`),
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf`, and the `tpgatebuild` group
 (`TP_OTHER_GROUPS`, matched by exact name because its gid is outside the

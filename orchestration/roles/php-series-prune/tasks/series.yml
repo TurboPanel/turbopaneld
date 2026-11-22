@@ -86,5 +86,5 @@
   loop:
     - "{{ turbopanel_config_dir }}/php/{{ php_prune_series }}"
     - "{{ turbopanel_log_dir }}/php/{{ php_prune_series }}"
-    - "{{ turbopanel_run_dir }}/php/{{ php_prune_series }}"
+    - "{{ php_fpm_run_dir }}/{{ php_prune_series }}"
     - "{{ turbopanel_vendor_dir }}/lsphp/{{ php_prune_series }}"

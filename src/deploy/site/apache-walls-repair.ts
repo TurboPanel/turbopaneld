@@ -352,7 +352,7 @@ type SiteOutcome = "repaired" | "current" | "needs-redeploy";
  * of `tp-<environment>-<service>.conf` (both parts may hold dashes). A key
  * nobody holds costs nothing, and only this repair takes more than one.
  */
-function lockKeysFor(
+export function lockKeysFor(
   file: string,
   record: PhpRuntimeRecord | undefined,
 ): string[] {
@@ -367,7 +367,10 @@ function lockKeysFor(
   return keys;
 }
 
-function withLocks<T>(keys: string[], run: () => Promise<T>): Promise<T> {
+export function withLocks<T>(
+  keys: string[],
+  run: () => Promise<T>,
+): Promise<T> {
   return keys.reduceRight<() => Promise<T>>(
     (inner, key) => () => withKeyedLock(key, inner),
     run,

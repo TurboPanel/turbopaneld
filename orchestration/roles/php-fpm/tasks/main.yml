@@ -101,13 +101,15 @@
     daemon_reload: true
   when: _php_fpm_unit.changed # noqa: no-handler
 
-# Parent of the per-series socket directories. Grouped to `tp` so every engine
-# account can traverse to its own series' sockets.
+# Parent of the per-series socket directories, at the top of /run so only root
+# can rename or replace it. Root-owned and grouped to `tp` so every engine
+# account (all members of `tp`) can traverse to its own series' sockets while
+# the daemon account cannot write here.
 - name: Ensure the PHP runtime directory root
   ansible.builtin.file:
-    path: "{{ turbopanel_run_dir }}/php"
+    path: "{{ php_fpm_run_dir }}"
     state: directory
-    owner: "{{ php_fpm_service_user }}"
+    owner: root
     group: "{{ turbopanel_group }}"
     mode: "0750"
 

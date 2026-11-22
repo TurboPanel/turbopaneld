@@ -51,6 +51,19 @@ Docker Compose. The daemon:
    or shared-pool vhost gets the unset lines only; a shared-pool one has no
    single runtime to key and is also logged as needing a redeploy.
 
+   **Socket paths on hosts an update reaches.** The shared php-fpm masters keep
+   their pidfile and sockets under `PHP_FPM_RUN_DIR`, a root-owned folder, and
+   nothing creates the old `<runDir>/php/<series>/` any more, so a pool or vhost
+   still naming it would fail to bind after a reboot. The move is done as root by
+   the php-fpm role (`tasks/converge-run-tree.yml`, entered from
+   `daemon-converge.yml`), not by the daemon: it re-renders the unit and swaps the old prefix for the new
+   one in each series' `php-fpm.conf`, the pools (the bootstrap pool too) and the Caddy, nginx and Apache vhosts, tests every engine
+   before restarting any master, and restores its backups on any failure. Deploys
+   cannot overlap it (`bootConvergeSettled`; a converge retry also waits for
+   running commands, `commandsDrained`). `site/php-run-tree-check.ts`
+   (started from `entry/run.ts`) is read-only: it warns when the unit or a pool
+   or vhost still names the old folder, and writes nothing.
+
    **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
    socket path is no boundary. Every Apache PHP runtime therefore has a site
    key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
@@ -168,7 +181,7 @@ Docker Compose. The daemon:
    ```
    /etc/turbopanel/php/<series>/{php-fpm.conf,pools/,conf.d/}
    /var/log/turbopanel/php/<series>/
-   /run/turbopanel/php/<series>/{php-fpm.pid,<poolId>.sock}
+   /run/turbopanel-phpfpm/<series>/{php-fpm.pid,<poolId>.sock}
    ```
 
    A site on 8.3 therefore never touches the 8.4 master serving everything

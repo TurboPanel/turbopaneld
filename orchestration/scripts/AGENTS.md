@@ -68,7 +68,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     workers run as a site owner with its own group (`tp_principal_own_group`)
     or as one web server account (`ENGINE_USERS`) with the group of that
     name, and the socket belongs to one web server account, owner and group
-    the same; `listen` is exactly `<run>/php/<series>/<pool>.sock` (the
+    the same; `listen` is exactly `/run/turbopanel-phpfpm/<series>/<pool>.sock` (the
     pool file's own series) and `listen.mode` is `0660`, because the root
     master removes, binds and re-owns whatever path is named there. Never
     root, `tp`, another account's group, a system group (`disk`, `shadow`,

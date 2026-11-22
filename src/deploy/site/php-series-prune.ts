@@ -35,7 +35,9 @@ export type PhpSeriesUsageInput = Readonly<{
 
 const SERIES_RE = /^\d\.\d{1,2}$/;
 const RUNTIME_SERIES_RE = /-(?:fcgi|fpm|lsd)(\d)(\d{1,2})$/;
-const POOL_SOCKET_RE = /\/php\/(\d\.\d{1,2})\//g;
+// `/turbopanel-phpfpm/<series>/` is the pool socket tree; `/php/<series>/` still
+// covers a vhost written before the tree moved out of the daemon's run folder.
+const POOL_SOCKET_RE = /\/(?:turbopanel-phpfpm|php)\/(\d\.\d{1,2})\//g;
 const LSPHP_RE = /\/lsphp\/(\d\.\d{1,2})\//g;
 
 /** `8.4` for a runtime id ending `-fpm84`; `null` for anything else. */

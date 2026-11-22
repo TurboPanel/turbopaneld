@@ -73,6 +73,9 @@ R_CONFIG="$P/etc/turbopanel"
 R_STATE="$P/var/lib/turbopanel"
 R_LOG="$P/var/log/turbopanel"
 R_RUN="$P/run/turbopanel"
+# The shared php-fpm masters' pidfile and socket tree: root's, at the top of /run,
+# never inside the daemon's R_RUN (tp could rename a folder there).
+R_PHPFPM_RUN="$P/run/turbopanel-phpfpm"
 R_PRINCIPALS="$P/srv/users"
 R_SSHKEYS="$P/etc/ssh/turbopanel"
 # A native app's variables as systemd reads them (EnvironmentFile=): copies
@@ -1230,7 +1233,7 @@ tp_sysctl_dropin_ok() {
 # with the group of the same name; its socket belongs to one web server account
 # (owner and group the same). Never root, the daemon account, another
 # principal's group or a system group such as disk, shadow or docker. The
-# socket is exactly <run>/php/<series>/<pool>.sock, the series that of the
+# socket is exactly <php run>/<series>/<pool>.sock, the series that of the
 # pool file's own folder, mode 0660: the root master removes whatever is at
 # that path, binds there and re-owns it, so no other path may be named.
 # FILE is the staged copy, DEST the pool file it will become.
@@ -1239,7 +1242,7 @@ tp_phppool_ok() {
   _pp_series="${2#"$R_CONFIG"/php/}"
   _pp_series="${_pp_series%%/*}"
   tp_php_series_ok "$_pp_series" || { echo "tp-host: php-fpm pool: not in a series pools folder" >&2; return 1; }
-  _pp_accounts="$(LC_ALL=C awk -v sockdir="${R_RUN#"$P"}/php/$_pp_series" '
+  _pp_accounts="$(LC_ALL=C awk -v sockdir="${R_PHPFPM_RUN#"$P"}/$_pp_series" '
     function fail(msg) { print "tp-host: php-fpm pool: " msg > "/dev/stderr"; bad = 1; exit 1 }
     # php-fpm reads values as INI, where these words become 1 or nothing.
     function iniword(v) { return v ~ /^(yes|no|on|off|true|false|none|null)$/ }
