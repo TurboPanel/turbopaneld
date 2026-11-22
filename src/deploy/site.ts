@@ -68,7 +68,11 @@ import {
   isAllowedExtension,
   unsupportedPhpSeriesMessage,
 } from "../runtime/registry.ts";
-import { principalHomePath, serviceTree } from "../paths/layout.ts";
+import {
+  PHP_FPM_RUN_DIR,
+  principalHomePath,
+  serviceTree,
+} from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
 import {
   currentReleaseDirExists,
@@ -1010,7 +1014,7 @@ export function phpFpmPoolId(
 }
 
 /**
- * `<runDir>/php/<series>/<poolId>.sock`.
+ * `<PHP_FPM_RUN_DIR>/<series>/<poolId>.sock`.
  *
  * Series-scoped because a php-fpm master is one binary: co-installed series run
  * as separate `turbopanel-php-fpm@<series>` instances, each owning its own pool
@@ -1019,14 +1023,12 @@ export function phpFpmPoolId(
  * change-detection notices and reloads only that engine.
  */
 export function phpFpmSocketPath(
-  layout: LayoutPaths,
   series: string,
   environmentId: string,
   composeServiceName: string,
 ): string {
   return join(
-    layout.runDir,
-    "php",
+    PHP_FPM_RUN_DIR,
     series,
     `${phpFpmPoolId(environmentId, composeServiceName)}.sock`,
   );
@@ -3579,7 +3581,6 @@ async function applySitePhpBackend(
     };
   }
   const socket = phpFpmSocketPath(
-    layout,
     series,
     environmentId,
     site.composeServiceName,

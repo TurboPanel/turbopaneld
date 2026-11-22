@@ -3,7 +3,7 @@
 ; (written by the daemon site apply path).
 
 [global]
-pid = {{ turbopanel_run_dir }}/php/{{ php_fpm_series_item }}/php-fpm.pid
+pid = {{ php_fpm_run_dir }}/{{ php_fpm_series_item }}/php-fpm.pid
 error_log = {{ turbopanel_log_dir }}/php/{{ php_fpm_series_item }}/php-fpm.log
 syslog.facility = daemon
 syslog.ident = turbopanel-php-fpm-{{ php_fpm_series_item }}

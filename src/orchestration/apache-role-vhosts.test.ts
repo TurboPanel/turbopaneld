@@ -48,7 +48,7 @@ Listen 127.0.0.1:18081
   </Directory>
   DirectoryIndex index.php index.html
   <FilesMatch \.php$>
-    SetHandler "proxy:unix:/run/turbopanel/php/8.4/tp-env-phpapp.sock|fcgi://localhost/"
+    SetHandler "proxy:unix:/run/turbopanel-phpfpm/8.4/tp-env-phpapp.sock|fcgi://localhost/"
   </FilesMatch>
   SetEnv APP_ENV "production"
   SetEnv EMPTY ""

@@ -1185,7 +1185,11 @@ test("the Docker gate folders are owned trees and are removed with the other fol
   const trees = extractConstant(source, "TP_OWNED_TREES") ?? "";
   const remove = extractFunction(source, "tp_remove_folders_and_shell") ?? "";
   // The gate's state folder sits inside /var/lib/turbopanel and goes with it.
-  for (const dir of ["/run/turbopanel-gate", "/var/cache/turbopanel"]) {
+  for (const dir of [
+    "/run/turbopanel-gate",
+    "/run/turbopanel-phpfpm",
+    "/var/cache/turbopanel",
+  ]) {
     assertStringIncludes(trees, dir);
     assertStringIncludes(remove, `tp_safe_rm_tree ${dir}`);
   }

@@ -5,7 +5,7 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { dirname, join } from "@std/path";
-import { resolveLayout } from "../paths/layout.ts";
+import { PHP_FPM_RUN_DIR, resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
   applySites,
@@ -1580,7 +1580,7 @@ test("applySites caddy+php installs php-fpm and reloads it before Caddy", async 
     );
     assertStringIncludes(
       conf,
-      `php_fastcgi unix/${layout.runDir}/php/8.4/tp-envcaddyphp-wp.sock`,
+      `php_fastcgi unix/${PHP_FPM_RUN_DIR}/8.4/tp-envcaddyphp-wp.sock`,
     );
 
     // php-fpm reloads first so the socket exists when `caddy validate` runs.
@@ -1629,18 +1629,18 @@ test("applySites runs two PHP series side by side", async () => {
     const legacyPool = await Deno.readTextFile(
       join(layout.configDir, "php", "8.3", "pools", "tp-envmulti-legacy.conf"),
     );
-    assertStringIncludes(legacyPool, `${layout.runDir}/php/8.3/`);
+    assertStringIncludes(legacyPool, `${PHP_FPM_RUN_DIR}/8.3/`);
     const modernPool = await Deno.readTextFile(
       join(layout.configDir, "php", "8.4", "pools", "tp-envmulti-modern.conf"),
     );
-    assertStringIncludes(modernPool, `${layout.runDir}/php/8.4/`);
+    assertStringIncludes(modernPool, `${PHP_FPM_RUN_DIR}/8.4/`);
 
     const nginxConf = await Deno.readTextFile(
       join(layout.configDir, "nginx", "sites", "tp-envmulti-modern.conf"),
     );
     assertStringIncludes(
       nginxConf,
-      `fastcgi_pass unix:${layout.runDir}/php/8.4/tp-envmulti-modern.sock;`,
+      `fastcgi_pass unix:${PHP_FPM_RUN_DIR}/8.4/tp-envmulti-modern.sock;`,
     );
 
     // One systemd instance per series — a master is one binary.
@@ -1728,7 +1728,7 @@ test("applySites nginx+php vendors php-fpm and writes its pool", async () => {
     );
     assertStringIncludes(
       conf,
-      `fastcgi_pass unix:${layout.runDir}/php/8.4/tp-envnginxphp-phpsite.sock;`,
+      `fastcgi_pass unix:${PHP_FPM_RUN_DIR}/8.4/tp-envnginxphp-phpsite.sock;`,
     );
 
     // php-fpm is installed from sury, so its config test must exec the apt

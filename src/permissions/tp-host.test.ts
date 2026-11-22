@@ -3487,7 +3487,7 @@ test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist",
       ["listen.group", add(PHP_SITE, "listen.group = tpnginx")],
       [
         "a socket in /run/turbopanel",
-        line("listen = ", `listen = /run/turbopanel/php/8.4/${PHP_SITE}.sock`),
+        line("listen = ", `listen = /run/turbopanel-phpfpm/8.4/${PHP_SITE}.sock`),
       ],
       ["a TCP listener", line("listen = ", "listen = 127.0.0.1:9000")],
       [
@@ -5321,7 +5321,7 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
         "env1",
         { ...base, php: { version: "8.4" } },
         "/srv/root",
-        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
       ),
       phpFpmPoolConfig(
         "env1",
@@ -5338,7 +5338,7 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
           },
         },
         "/var/lib/turbopanel/sites/env1/phpapp/public",
-        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
         {
           openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
           releaseSymlinkSwap: true,
@@ -5621,7 +5621,7 @@ test("a php-fpm series folder and its pools folder stay root's: no verb re-owns,
         php: { version: "8.4" },
       },
       "/srv/root",
-      "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+      "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
     );
     await refused(host, [
       "install",
@@ -5665,7 +5665,7 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
       listenPort: 18081,
       php: { version: "8.4" },
     };
-    const socket = "/run/turbopanel/php/8.4/tp-env1-phpapp.sock";
+    const socket = "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock";
     const engine = phpFpmPoolConfig("env1", site, "/srv/root", socket);
     const owned = phpFpmPoolConfig(
       "env1",
@@ -5722,10 +5722,12 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
       // The socket is the pool's own, in its series folder, mode 0660.
       ...[
         "/etc/turbopanel/system/postgres-backup.sh",
-        "/run/turbopanel/php/8.3/tp-env1-phpapp.sock",
-        "/run/turbopanel/php/8.4/tp-env1-other.sock",
-        "/run/turbopanel/php/8.4/../tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.3/tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.4/tp-env1-other.sock",
+        "/run/turbopanel-phpfpm/8.4/../tp-env1-phpapp.sock",
         "/run/turbopanel/tp-env1-phpapp.sock",
+        // The daemon-owned run folder is no place for a root-bound socket.
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
         "127.0.0.1:9000",
       ].map((path) => owned.replace(`listen = ${socket}`, `listen = ${path}`)),
       owned.replace(`listen = ${socket}\n`, ""),
@@ -5741,7 +5743,7 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
         owned.replace("listen.owner = tpnginx", `listen.owner = ${word}`),
       ]),
       // A good pool followed by a bad one.
-      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel/php/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
+      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel-phpfpm/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
       engine.replace("listen.group = tpnginx\n", ""),
     ];
     for (const content of hostile) {

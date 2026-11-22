@@ -94,7 +94,13 @@ php_fpm_service_group: tpapache
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
-turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+
+# The master's pidfile and every pool socket live under this folder, a sibling
+# of /run/turbopanel and not inside it: /run/turbopanel is the daemon account's
+# (it could rename a folder in it), while the master runs as root and writes
+# the pidfile and chowns each socket by path. Keep in step with `PHP_FPM_RUN_DIR`
+# in src/paths/layout.ts and `R_PHPFPM_RUN` in orchestration/scripts/tp-host.
+php_fpm_run_dir: "/run/turbopanel-phpfpm"
 
 # The PHP package manager site builds use (tasks/composer.yml). Bump the version
 # and the digest together; the digest is the publisher's own .sha256sum for that

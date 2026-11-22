@@ -168,7 +168,7 @@ Docker Compose. The daemon:
    ```
    /etc/turbopanel/php/<series>/{php-fpm.conf,pools/,conf.d/}
    /var/log/turbopanel/php/<series>/
-   /run/turbopanel/php/<series>/{php-fpm.pid,<poolId>.sock}
+   /run/turbopanel-phpfpm/<series>/{php-fpm.pid,<poolId>.sock}
    ```
 
    A site on 8.3 therefore never touches the 8.4 master serving everything

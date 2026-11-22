@@ -39,7 +39,7 @@ import {
   APACHE_OVERRIDE_CLASSES,
   apacheOverrideListLine,
 } from "./site/apache-overrides.ts";
-import { resolveLayout } from "../paths/layout.ts";
+import { PHP_FPM_RUN_DIR, resolveLayout } from "../paths/layout.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 
 async function makeTestLayout(): Promise<
@@ -108,7 +108,7 @@ test("caddySiteConfig binds the docker bridge when asked", () => {
 });
 
 test("caddySiteConfig hands PHP to the site's own fpm socket", () => {
-  const socket = "/run/turbopanel/php/tp-env-phpapp.sock";
+  const socket = "/run/turbopanel-phpfpm/tp-env-phpapp.sock";
   const conf = caddySiteConfig(
     {
       composeServiceName: "phpapp",
@@ -142,7 +142,7 @@ test("caddySiteConfig drops a webEnv value Caddy would reinterpret", () => {
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
     null,
-    { phpFpmSocket: "/run/turbopanel/php/tp-env-phpapp.sock" },
+    { phpFpmSocket: "/run/turbopanel-phpfpm/tp-env-phpapp.sock" },
   );
   assertStringIncludes(conf, 'env SAFE "ok"');
   assertEquals(conf.includes("EVIL"), false);
@@ -360,7 +360,7 @@ test("apacheSiteConfig refuses a PHP site with no fpm socket", () => {
 });
 
 test("apacheSiteConfig listens on loopback and proxies PHP to php-fpm", () => {
-  const socket = "/run/turbopanel/php/tp-env-phpapp.sock";
+  const socket = "/run/turbopanel-phpfpm/tp-env-phpapp.sock";
   const conf = apacheSiteConfig(
     {
       composeServiceName: "phpapp",
@@ -508,7 +508,7 @@ test("phpFpmPoolConfig applies pool tuning and drops ondemand-only keys", () => 
     "env1",
     { ...base, php: { version: "8.4" } },
     "/srv/root",
-    "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+    "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
   );
   assertStringIncludes(defaults, "pm = ondemand");
   assertStringIncludes(defaults, "pm.process_idle_timeout = 30s");
@@ -520,7 +520,7 @@ test("phpFpmPoolConfig applies pool tuning and drops ondemand-only keys", () => 
       php: { version: "8.4", pool: { pm: "static", "pm.max_children": "8" } },
     },
     "/srv/root",
-    "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+    "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
   );
   assertStringIncludes(tuned, "pm = static");
   assertStringIncludes(tuned, "pm.max_children = 8");
@@ -543,12 +543,12 @@ test("phpFpmPoolConfig emits per-site socket and admin values", () => {
       },
     },
     "/var/lib/turbopanel/sites/env1/phpapp/public",
-    "/run/turbopanel/php/tp-env1-phpapp.sock",
+    "/run/turbopanel-phpfpm/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "[tp-env1-phpapp]");
   assertStringIncludes(
     conf,
-    "listen = /run/turbopanel/php/tp-env1-phpapp.sock",
+    "listen = /run/turbopanel-phpfpm/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = tpapache");
   assertStringIncludes(
@@ -574,7 +574,7 @@ test("phpFpmPoolConfig runs workers as assigned principal", () => {
       },
     },
     "/var/lib/turbopanel/sites/env1/phpapp/public",
-    "/run/turbopanel/php/tp-env1-phpapp.sock",
+    "/run/turbopanel-phpfpm/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = site_user");
   assertStringIncludes(conf, "group = site_user");
@@ -637,22 +637,17 @@ test("siteDir nests under stateDir/sites", async () => {
   }
 });
 
-test("phpFpmPoolId and phpFpmSocketPath are stable under layout.runDir", async () => {
-  const { layout, cleanup } = await makeTestLayout();
-  try {
-    assertEquals(phpFpmPoolId("env1", "app"), "tp-env1-app");
-    // Series-scoped: co-installed masters each own their own socket dir.
-    assertEquals(
-      phpFpmSocketPath(layout, "8.4", "env1", "app"),
-      `${layout.runDir}/php/8.4/tp-env1-app.sock`,
-    );
-    assertEquals(
-      phpFpmSocketPath(layout, "8.3", "env1", "app"),
-      `${layout.runDir}/php/8.3/tp-env1-app.sock`,
-    );
-  } finally {
-    await cleanup();
-  }
+test("phpFpmPoolId and phpFpmSocketPath are stable under PHP_FPM_RUN_DIR", () => {
+  assertEquals(phpFpmPoolId("env1", "app"), "tp-env1-app");
+  // Series-scoped: co-installed masters each own their own socket dir.
+  assertEquals(
+    phpFpmSocketPath("8.4", "env1", "app"),
+    `${PHP_FPM_RUN_DIR}/8.4/tp-env1-app.sock`,
+  );
+  assertEquals(
+    phpFpmSocketPath("8.3", "env1", "app"),
+    `${PHP_FPM_RUN_DIR}/8.3/tp-env1-app.sock`,
+  );
 });
 
 test("formatHostingEnvFile sorts keys and renders what a shell and systemd read back", () => {
@@ -901,7 +896,7 @@ test("siteSnippet with http upstream proxies to nginx listen port", () => {
 });
 
 test("nginxSiteConfig hands .php to this site's own php-fpm socket", () => {
-  const socket = "/run/turbopanel/php/8.4/tp-env-phpapp.sock";
+  const socket = "/run/turbopanel-phpfpm/8.4/tp-env-phpapp.sock";
   const conf = nginxSiteConfig(
     {
       composeServiceName: "phpapp",
@@ -940,7 +935,7 @@ test("nginxSiteConfig inlines fastcgi params when no vendored file is named", ()
     },
     "/var/lib/turbopanel/sites/env/phpapp/public",
     null,
-    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-phpapp.sock" },
+    { phpFpmSocket: "/run/turbopanel-phpfpm/8.4/tp-env-phpapp.sock" },
   );
   assertStringIncludes(conf, "fastcgi_param REQUEST_METHOD $request_method;");
   if (conf.includes("include ")) {
@@ -991,7 +986,7 @@ test("phpFpmPoolConfig owns the listen socket with the serving engine", () => {
       php: { version: "8.4" },
     },
     "/var/lib/turbopanel/sites/env1/phpapp/public",
-    "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+    "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
   );
   assertStringIncludes(conf, "user = tpnginx");
   assertStringIncludes(conf, "listen.owner = tpnginx");
@@ -1372,7 +1367,7 @@ function nginxPhpWith(webEnv?: Record<string, string>): string {
     { ...NGINX_PHP_SITE, ...(webEnv ? { webEnv } : {}) },
     "/srv/users/alice/sites/app/current/public",
     null,
-    { phpFpmSocket: "/run/turbopanel/php/8.4/tp-env-app.sock" },
+    { phpFpmSocket: "/run/turbopanel-phpfpm/8.4/tp-env-app.sock" },
   );
 }
 
@@ -1632,11 +1627,11 @@ test("nginx serves the shared folder from an alias location and refuses PHP in i
   } as const;
   const docroot = "/srv/users/alice/production/services/web/current/public";
   const plain = nginxSiteConfig(site, docroot, null, {
-    phpFpmSocket: "/run/turbopanel/php/8.4/tp.sock",
+    phpFpmSocket: "/run/turbopanel-phpfpm/8.4/tp.sock",
   });
   assertEquals(plain.includes("alias "), false);
   const conf = nginxSiteConfig(site, docroot, null, {
-    phpFpmSocket: "/run/turbopanel/php/8.4/tp.sock",
+    phpFpmSocket: "/run/turbopanel-phpfpm/8.4/tp.sock",
     releaseBacked: true,
     frameworkAliases: LARAVEL_ALIAS,
   });
