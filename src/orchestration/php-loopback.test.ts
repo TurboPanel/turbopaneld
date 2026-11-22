@@ -786,9 +786,22 @@ test("native app ports: only the app bands and the check copy range are dropped;
       "19799",
       "32768",
       "41234",
+      "44999",
+      "46000",
       "60999",
     ]);
-    for (const port of ["22", "443", "8443", "19080", "33001"]) {
+    for (
+      const port of [
+        "22",
+        "443",
+        "8443",
+        "19080",
+        "33001",
+        "33002",
+        "45000",
+        "45999",
+      ]
+    ) {
       assertStringIncludes(
         rendered.stderr,
         `not dropping inbound port ${port} of`,
@@ -807,6 +820,11 @@ test("native app ports: only the app bands and the check copy range are dropped;
     "turbopanel-app-p8443.service": appUnit("bob", "8443"),
     "turbopanel-app-p19080.service": appUnit("bob", "19080"),
     "turbopanel-app-p33001.service": appUnit("bob", "33001"),
+    "turbopanel-app-p33002.service": appUnit("bob", "33002"),
+    "turbopanel-app-p45000.service": appUnit("bob", "45000"),
+    "turbopanel-app-p45999.service": appUnit("bob", "45999"),
+    "turbopanel-app-ok8.service": appUnit("bob", "44999"),
+    "turbopanel-app-ok9.service": appUnit("bob", "46000"),
     "turbopanel-app-low.service": appUnit("bob", "18079"),
     "turbopanel-app-mid.service": appUnit("bob", "19000"),
     "turbopanel-app-high.service": appUnit("bob", "61000"),

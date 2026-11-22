@@ -3619,12 +3619,28 @@ test("a check copy that will not stop keeps its unit and marker; lifecycle stop 
   }
 });
 
-test("the default port pick skips the control plane's band", () => {
-  // The managed private range is skipped too.
-  const offered = [18_080, 19_799, 18_500, 45_000, 45_999, 40_001];
-  assertEquals(pickPortDefault(() => offered.shift() ?? 0), 40_001);
-  assertThrows(() => pickPortDefault(() => 45_500), Error, "45000-45999");
-  assertThrows(() => pickPortDefault(() => 18_100), Error, "18080-19799");
+test("the default port pick only takes ports the host wall drops", () => {
+  const offered = [
+    18_080,
+    19_799,
+    18_500,
+    33_001,
+    33_002,
+    45_000,
+    45_999,
+    61_000,
+    32_767,
+    1_024,
+    32_768,
+  ];
+  assertEquals(pickPortDefault(() => offered.shift() ?? 0), 32_768);
+  for (const ok of [32_768, 33_000, 33_003, 44_999, 46_000, 60_999]) {
+    assertEquals(pickPortDefault(() => ok), ok);
+  }
+  for (const bad of [33_001, 33_002, 45_000, 45_500, 45_999, 61_000, 32_767]) {
+    assertThrows(() => pickPortDefault(() => bad), Error, "inbound wall");
+  }
+  assertThrows(() => pickPortDefault(() => 18_100), Error, "20 tries");
 });
 
 test("the account walls are reloaded once the units are on disk, before any app starts, and after removal", async () => {

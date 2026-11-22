@@ -326,20 +326,32 @@ function freeLoopbackPort(): number {
 }
 
 /**
- * A free loopback port outside the control plane's band and the managed
- * private range (the host's inbound port wall for apps, `lib/tp-php-loopback`,
- * only takes the ports a check copy can really be given).
+ * True when root's inbound port wall drops this port. Keep in step with
+ * `app_port_dropable` in `orchestration/scripts/tp-php-loopback`: any other
+ * port is skipped there with a warning, which would leave a check copy
+ * reachable from outside.
+ */
+function appPortDropable(port: number): boolean {
+  if (port >= 18_080 && port <= 18_999) return true;
+  if (port >= 19_100 && port <= 19_799) return true;
+  if (port < 32_768 || port > 60_999) return false;
+  if (port === 33_001 || port === 33_002) return false;
+  return port < MANAGED_PRIVATE_PORT_MIN || port > MANAGED_PRIVATE_PORT_MAX;
+}
+
+/**
+ * A free loopback port outside the control plane's band that root's inbound
+ * port wall (`lib/tp-php-loopback`) will drop. A port it would not drop fails
+ * closed: it is never used, and the pick is retried.
  */
 export function pickPortDefault(pick: () => number = freeLoopbackPort): number {
   for (let attempt = 0; attempt < PORT_PICK_ATTEMPTS; attempt++) {
     const port = pick();
     const inBand = port >= ALLOCATED_PORT_MIN && port <= ALLOCATED_PORT_MAX;
-    const managed = port >= MANAGED_PRIVATE_PORT_MIN &&
-      port <= MANAGED_PRIVATE_PORT_MAX;
-    if (!inBand && !managed) return port;
+    if (!inBand && appPortDropable(port)) return port;
   }
   throw new Error(
-    `the kernel offered only ports in ${ALLOCATED_PORT_MIN}-${ALLOCATED_PORT_MAX} or ${MANAGED_PRIVATE_PORT_MIN}-${MANAGED_PRIVATE_PORT_MAX}`,
+    `no free port the host's inbound wall drops after ${PORT_PICK_ATTEMPTS} tries (32768-60999 except 33001, 33002 and ${MANAGED_PRIVATE_PORT_MIN}-${MANAGED_PRIVATE_PORT_MAX})`,
   );
 }
 
