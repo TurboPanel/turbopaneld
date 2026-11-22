@@ -72,7 +72,10 @@ test("the unit recreates the run tree as root:tp 0750, parent first, and writes 
   ]);
   assertStringIncludes(unit, "PIDFile={{ php_fpm_run_dir }}/%i/php-fpm.pid");
   assertStringIncludes(unit, "--pid {{ php_fpm_run_dir }}/%i/php-fpm.pid");
-  assert(!unit.includes("turbopanel_run_dir"), "nothing under the daemon's run");
+  assert(
+    !unit.includes("turbopanel_run_dir"),
+    "nothing under the daemon's run",
+  );
 });
 
 test("the master config and the bootstrap pool use the root-owned tree", async () => {
