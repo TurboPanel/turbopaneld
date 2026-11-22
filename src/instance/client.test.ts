@@ -3736,6 +3736,9 @@ it({
 
         restoreDiskPreflight = installClientTestHooks({
           assertUpdateDiskPreflight: () => Promise.resolve(),
+          // No host docker: the attach-time addressing sync would otherwise
+          // run on its own and outlive the test body.
+          syncHostDockerNetworking: () => Promise.resolve("unchanged"),
           resolveUpdate: () =>
             Promise.reject(new MalformedManifestError("signature invalid")),
         });
@@ -3953,6 +3956,20 @@ it({
           assertEquals(networkFrame?.ok, false);
           assertEquals(networkFrame?.error, "no targets");
           await waitFor(
+            "metrics-capabilities-result",
+            () =>
+              lastFrameOfType(socket, "metrics-capabilities-result")
+                ? true
+                : undefined,
+          );
+          await waitFor(
+            "fan-out command outcome",
+            () =>
+              framesOfType(socket, "command-outcome").some((f) =>
+                (f as { id?: string }).id === "cmd-1"
+              ) || undefined,
+          );
+          await waitFor(
             "fabric-paths-result",
             () =>
               lastFrameOfType(socket, "fabric-paths-result") ? true : undefined,
@@ -4008,6 +4025,9 @@ it({
           assertEquals(sendThrew, true);
         } finally {
           client.stop();
+          // The command journal writes on its own queue; let it finish before
+          // the layout is removed.
+          await settleCommandJournalWrites();
           restoreDiskPreflight?.();
           for (const [key, value] of Object.entries(layoutPrior)) {
             if (value === undefined) Deno.env.delete(key);
