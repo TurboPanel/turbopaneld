@@ -212,14 +212,38 @@ export function revokeStoredRowsSql(
   ].join("\n");
 }
 
-/** The open connection ids of the account (one `KILL` each); never this session's. */
+/**
+ * The login's database-level rights as one comparable text: per grant row its
+ * host, schema and every privilege flag, in a fixed order. Read before and
+ * after an apply, a difference means the login's rights changed, in either
+ * direction.
+ */
+export function snapshotLoginGrantsSql(
+  quoting: GrantQuoting,
+  username: string,
+): string {
+  const flags = [...DATABASE_PRIVILEGES, ...(quoting.extraPrivileges ?? [])]
+    .map(([, column]) => column);
+  return `SELECT HEX(Host), HEX(Db), CONCAT_WS('', ${
+    [...flags, "Grant_priv"].join(", ")
+  }) FROM mysql.db WHERE User = ${
+    quoting.quoteLiteral(username)
+  } ORDER BY Host, Db;`;
+}
+
+/**
+ * The open connection ids of the account (one `KILL` each); never this
+ * session's. The processlist `USER` column has a case- and trailing-space-
+ * insensitive collation, so `APP` would match `App` and `app `; both sides
+ * are compared as bytes to keep it to the one account.
+ */
 export function listLoginConnectionsSql(
   quoting: GrantQuoting,
   username: string,
 ): string {
-  return `SELECT ID FROM ${quoting.processlistTable} WHERE USER = ${
+  return `SELECT ID FROM ${quoting.processlistTable} WHERE CAST(USER AS BINARY) = CAST(${
     quoting.quoteLiteral(username)
-  } AND ID <> CONNECTION_ID();`;
+  } AS BINARY) AND ID <> CONNECTION_ID();`;
 }
 
 /**
@@ -453,6 +477,7 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
     rows: readonly StoredGrantRow[],
   ) => string;
   listConnectionsSql: (username: string) => string;
+  snapshotGrantsSql: (username: string) => string;
 } {
   return {
     listGrantRowsSql: (username) => listDatabaseGrantRowsSql(quoting, username),
@@ -460,6 +485,7 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
       revokeStoredRowsSql(quoting, username, rows),
     listConnectionsSql: (username) =>
       listLoginConnectionsSql(quoting, username),
+    snapshotGrantsSql: (username) => snapshotLoginGrantsSql(quoting, username),
     grantBackupSql: (username, host = defaultHost) =>
       grantBackupOnAllSql(quoting, username, host),
     grantDatabaseSql: (database, username, privilege, host = defaultHost) =>

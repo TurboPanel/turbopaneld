@@ -125,6 +125,7 @@ export const {
   listGrantRowsSql,
   revokeRowsSql,
   listConnectionsSql,
+  snapshotGrantsSql,
 } = grantSqlFor(
   {
     quoteIdentifier,

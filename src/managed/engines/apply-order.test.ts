@@ -167,3 +167,33 @@ for (const [name, engine] of engines) {
     assertEquals(maxInFlight(), 1);
   });
 }
+
+for (
+  const [name, engine] of engines.filter(([engineName]) =>
+    engineName !== "postgres"
+  )
+) {
+  test(`${name} dropUsers ends the dropped login's open sessions`, async () => {
+    const calls: string[] = [];
+    const ctx: ManagedEngineContext = {
+      containerId: "c1",
+      composeServiceName: "svc",
+      rootUsername: "root",
+      defaultDatabase: "appdb",
+      exec: (argv, input) => {
+        const q = argv.at(-1) ?? "";
+        if (input) calls.push(input.includes("DROP USER") ? "DROP" : input);
+        if (/KILL CONNECTION/.test(input ?? "")) calls.push(input!.trim());
+        return Promise.resolve({
+          success: true,
+          stdout: /processlist/i.test(q) ? "77\n" : "",
+          stderr: "",
+        });
+      },
+    };
+    await engine.dropUsers!(ctx, ["gone_user"]);
+    const drop = calls.indexOf("DROP");
+    const kill = calls.findIndex((c) => c.includes("KILL CONNECTION 77"));
+    assertEquals(drop >= 0 && kill > drop, true, calls.join("|"));
+  });
+}
