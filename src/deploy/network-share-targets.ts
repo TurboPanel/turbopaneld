@@ -112,6 +112,12 @@ function parseCidr(raw: string): Cidr | null {
   const bits = Number(raw.slice(slash + 1));
   if (bytes === null || !Number.isInteger(bits) || bits < 0) return null;
   if (bits > bytes.length * 8) return null;
+  // A mapped range (`::ffff:a.b.c.0/120`) is the IPv4 range it delivers to,
+  // matching how addresses are normalized; a wider prefix stays IPv6.
+  const mapped = normalizeBytes(bytes);
+  if (mapped.length === 4 && bits >= 96) {
+    return { bytes: mapped, bits: bits - 96 };
+  }
   return { bytes, bits };
 }
 

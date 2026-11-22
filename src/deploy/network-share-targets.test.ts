@@ -443,3 +443,113 @@ test("sec=krb5 is refused with a host name and allowed with an IP", async () => 
   );
   assertEquals(ntlm.get("media"), "198.51.100.7");
 });
+
+test("a mapped IPv6 form of a pool, network or builtin address is denied as a literal and as a DNS answer", async () => {
+  const d = deps({
+    "pool.example.net": { AAAA: ["::ffff:10.200.1.1"] },
+    "loop.example.net": { AAAA: ["::ffff:127.0.0.1"] },
+    "meta.example.net": { AAAA: ["::ffff:169.254.169.254"] },
+    "net.example.net": { AAAA: ["::ffff:172.29.4.9"] },
+    "gw.example.net": { AAAA: ["::ffff:172.17.0.1"] },
+  });
+  for (
+    const device of [
+      "//[::ffff:10.200.1.1]/s",
+      "//[::ffff:0ac8:0101]/s",
+      "//[::ffff:127.0.0.1]/s",
+      "//[::ffff:169.254.169.254]/s",
+      "//[::ffff:172.29.4.9]/s",
+      "//[::ffff:172.17.0.1]/s",
+      "//[::ffff:192.0.2.50]/s",
+      "//pool.example.net/s",
+      "//loop.example.net/s",
+      "//meta.example.net/s",
+      "//net.example.net/s",
+      "//gw.example.net/s",
+    ]
+  ) {
+    assertStringIncludes(await refusal(device, d), "refused");
+  }
+  resetShareDenySet();
+  const pins = await checkShareTargets(
+    shareDoc("//[::ffff:198.51.100.7]/s"),
+    d,
+  );
+  assertEquals(pins.get("media"), "::ffff:198.51.100.7");
+});
+
+test("a pool or network written in mapped IPv6 form denies its IPv4 addresses", async () => {
+  const d = deps({}, {
+    listDockerNetworks: () =>
+      Promise.resolve([{
+        Id: "m",
+        Name: "mapped",
+        IPAM: {
+          Config: [{
+            Subnet: "::ffff:10.88.0.0/120",
+            Gateway: "::ffff:10.88.0.1",
+          }],
+        },
+      }]),
+    dockerPools: () => Promise.resolve([{ Base: "::ffff:10.77.0.0/112" }]),
+  });
+  for (const bad of ["10.88.0.200", "10.77.5.5", "10.88.0.1"]) {
+    assertStringIncludes(await refusal(`//${bad}/s`, d), "refused");
+    assertStringIncludes(await refusal(`//[::ffff:${bad}]/s`, d), "refused");
+  }
+});
+
+test("an IPv6-only pool keeps the IPv4 and IPv6 builtin denials", async () => {
+  const d = deps({}, {
+    listDockerNetworks: () => Promise.resolve([]),
+    hostAddresses: () => [],
+    dockerPools: () => Promise.resolve([{ Base: "fd10::/48" }]),
+  });
+  for (
+    const bad of [
+      "127.0.0.1",
+      "127.9.9.9",
+      "169.254.1.1",
+      "169.254.169.254",
+      "172.17.5.5",
+      "192.168.1.1",
+      "[::1]",
+      "[fe80::1]",
+      "[fd10::5]",
+      "[fd00:ec2::254]",
+      "[::ffff:127.0.0.1]",
+      "[::ffff:172.20.0.5]",
+    ]
+  ) {
+    assertStringIncludes(await refusal(`//${bad}/s`, d), "refused");
+  }
+  resetShareDenySet();
+  const pins = await checkShareTargets(shareDoc("//198.51.100.7/s"), d);
+  assertEquals(pins.get("media"), "198.51.100.7");
+});
+
+test("a mapped range is an IPv4 range only from /96 on", async () => {
+  const pools = (...bases: string[]) =>
+    deps({}, {
+      listDockerNetworks: () => Promise.resolve([]),
+      hostAddresses: () => [],
+      dockerPools: () => Promise.resolve(bases.map((Base) => ({ Base }))),
+    });
+  // /96 maps the whole IPv4 space: every IPv4 address is denied.
+  const all = pools("::ffff:0.0.0.0/96");
+  for (const bad of ["198.51.100.7", "203.0.113.9", "[::ffff:198.51.100.7]"]) {
+    assertStringIncludes(await refusal(`//${bad}/s`, all), "address pool");
+  }
+  // /95 is wider than the mapped block, so it stays an IPv6 range and does
+  // not match a normalized IPv4 address.
+  resetShareDenySet();
+  const wide = pools("::ffff:0.0.0.0/95");
+  const pins = await checkShareTargets(shareDoc("//198.51.100.7/s"), wide);
+  assertEquals(pins.get("media"), "198.51.100.7");
+  // /128 matches exactly one address.
+  const one = pools("::ffff:198.51.100.7/128");
+  assertStringIncludes(await refusal("//198.51.100.7/s", one), "address pool");
+  resetShareDenySet();
+  const other = await checkShareTargets(shareDoc("//198.51.100.8/s"), one);
+  assertEquals(other.get("media"), "198.51.100.8");
+});
