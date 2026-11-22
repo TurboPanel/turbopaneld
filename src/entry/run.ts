@@ -27,6 +27,10 @@ import {
   hostApacheWallsRepairIo,
   repairApacheWalls,
 } from "../deploy/site/apache-walls-repair.ts";
+import {
+  hostPhpRunTreeRepairIo,
+  repairPhpRunTree,
+} from "../deploy/site/php-run-tree-repair.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
@@ -166,6 +170,11 @@ export type DaemonRunIo = {
    * (once per daemon version); runs in the background.
    */
   repairApacheWalls?: () => Promise<unknown>;
+  /**
+   * The one-time move of an updated host's PHP sockets to the root-owned run
+   * tree (once per daemon version); runs in the background, before the walls.
+   */
+  repairPhpRunTree?: () => Promise<unknown>;
   /** Start containers a restore stopped before the daemon died. */
   recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
@@ -559,10 +568,22 @@ async function afterOrchestration(
   // After the runtimes are back: restart what still runs a PHP build older
   // than the installed one, in the background, and keep watching.
   (io.armPhpPatchRestarts ?? (() => armPhpPatchRestarts(resolveLayout())))();
-  // Also in the background: add the Apache walls to the sites an update left
-  // as they were (once per daemon version; a failure is only ever reported).
-  (io.repairApacheWalls ??
-    (() => repairApacheWalls(hostApacheWallsRepairIo(resolveLayout()))))()
+  // Also in the background, one after the other (both rewrite vhosts): move the
+  // sites an update left on the old PHP socket folder to the new one, then add
+  // the Apache walls. Each runs once per daemon version and is only reported.
+  (io.repairPhpRunTree ??
+    (() => repairPhpRunTree(hostPhpRunTreeRepairIo(resolveLayout()))))()
+    .catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "PHP run tree repair failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    })
+    .then(() =>
+      (io.repairApacheWalls ??
+        (() => repairApacheWalls(hostApacheWallsRepairIo(resolveLayout()))))()
+    )
     .catch((err) => {
       (io.logWarn ?? logWarn)(
         "deploy",

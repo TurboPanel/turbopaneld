@@ -36,6 +36,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   wallSyncs: number;
   phpPatchArms: number;
   wallsRepairs: number;
+  runTreeRepairs: number;
   stackHeals: number;
   instanceStops: number;
   sentinelStops: number;
@@ -52,6 +53,7 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let wallSyncs = 0;
   let phpPatchArms = 0;
   let wallsRepairs = 0;
+  let runTreeRepairs = 0;
   let stackHeals = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
@@ -126,6 +128,10 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     armPhpPatchRestarts: () => {
       phpPatchArms += 1;
     },
+    repairPhpRunTree: () => {
+      runTreeRepairs += 1;
+      return Promise.resolve();
+    },
     repairApacheWalls: () => {
       wallsRepairs += 1;
       return Promise.resolve();
@@ -172,6 +178,9 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get phpPatchArms() {
       return phpPatchArms;
     },
+    get runTreeRepairs() {
+      return runTreeRepairs;
+    },
     get wallsRepairs() {
       return wallsRepairs;
     },
@@ -202,6 +211,7 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   // The wall is reloaded at start even when orchestration never becomes ready.
   assertEquals(stub.wallSyncs, 1);
   assertEquals(stub.phpPatchArms, 0);
+  assertEquals(stub.runTreeRepairs, 0);
   assertEquals(stub.wallsRepairs, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
@@ -232,7 +242,9 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   assertEquals(stub.wallSyncs >= 1, true);
   // The patch restarts are armed once the runtimes are back.
   assertEquals(stub.phpPatchArms, 1);
-  // The Apache walls repair starts with them, in the background.
+  // The PHP run tree move and then the Apache walls repair start with them,
+  // in the background.
+  assertEquals(stub.runTreeRepairs, 1);
   assertEquals(stub.wallsRepairs, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);
   assertEquals(stub.dockerCloses, 1);

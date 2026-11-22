@@ -759,10 +759,12 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
 ];
 
 /**
- * Folders directly under `/run`, one per unit (a unit's `RuntimeDirectory=`).
- * They stay at the top of `/run` on purpose: the folder is created and removed
- * with the unit, and the short path keeps a socket inside the 108-byte limit.
- * Each is tmpfs, so nothing here survives a reboot.
+ * Folders directly under `/run`, one per unit. Most are a unit's
+ * `RuntimeDirectory=`; `turbopanel-phpfpm` is not: the php-fpm unit template
+ * creates it with `ExecStartPre`, root-owned, because several series share it.
+ * They stay at the top of `/run` on purpose: only root can rename one, and the
+ * short path keeps a socket inside the 108-byte limit. Each is tmpfs, so
+ * nothing here survives a reboot.
  */
 export const RUN_FOLDER_UNITS: readonly string[] = [
   "turbopanel-nginx",

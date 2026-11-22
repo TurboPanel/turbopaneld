@@ -3486,7 +3486,7 @@ test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist",
       ["listen.owner", add(PHP_SITE, "listen.owner = tpnginx")],
       ["listen.group", add(PHP_SITE, "listen.group = tpnginx")],
       [
-        "a socket in /run/turbopanel",
+        "a socket in the shared php-fpm run tree",
         line(
           "listen = ",
           `listen = /run/turbopanel-phpfpm/8.4/${PHP_SITE}.sock`,

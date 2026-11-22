@@ -51,6 +51,19 @@ Docker Compose. The daemon:
    or shared-pool vhost gets the unset lines only; a shared-pool one has no
    single runtime to key and is also logged as needing a redeploy.
 
+   **Socket paths on hosts an update reaches.** The shared php-fpm masters keep
+   their pidfile and sockets under `PHP_FPM_RUN_DIR`, a root-owned folder, and
+   nothing creates the old `<runDir>/php/<series>/` any more, so a pool or vhost
+   still naming it would fail to bind after a reboot. `site/php-run-tree-repair.ts`
+   (started from `entry/run.ts`, before the walls repair, since both rewrite
+   vhosts) swaps the old folder prefix for the new one in the
+   `turbopanel-php-fpm@.service` template (`PIDFile`, `--pid`, the root-owned
+   `install -d` lines; `--pid` beats the stale `pid =` of the role-owned
+   `php-fpm.conf`, which the daemon cannot write), then in each series' pool
+   files (master restarted), then in the Caddy, nginx and Apache vhosts (each
+   engine tested and reloaded). No old-path fallback is kept. Same marker and
+   rollback rules as the walls repair, in `.php-run-tree-repair.json`.
+
    **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
    socket path is no boundary. Every Apache PHP runtime therefore has a site
    key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
