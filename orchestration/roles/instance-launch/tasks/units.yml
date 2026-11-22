@@ -33,6 +33,31 @@
     turbopanel_amqp_url: >-
       amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
 
+# The database and queue passwords go in a root-only EnvironmentFile, never
+# into a unit (units are readable through `systemctl cat` and `show`). The
+# template module writes it through a temporary file and renames it, so it is
+# never half-written, and no_log keeps the values out of the task output.
+- name: Ensure instance config directory exists for the secrets file
+  ansible.builtin.file:
+    path: "{{ turbopanel_instance_runtime_secrets | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ turbopanel_group }}"
+    mode: "0750"
+
+- name: Install instance runtime secrets file (root-only)
+  when: turbopanel_pg_password is defined or turbopanel_amqp_url is defined
+  ansible.builtin.template:
+    src: instance-runtime-secrets.env.j2
+    dest: "{{ turbopanel_instance_runtime_secrets }}"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify:
+    - Reload systemd for instance units
+    - Restart turbopanel instance
+
 # Compiled-mode contract: the unit puts {{ turbopanel_duckdb_lib_dir }} on
 # LD_LIBRARY_PATH so the self-extracted duckdb.node addon can dlopen its
 # companion libduckdb.so. instance-build stages it; converging a compiled

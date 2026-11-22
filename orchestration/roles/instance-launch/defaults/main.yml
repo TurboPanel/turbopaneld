@@ -31,6 +31,10 @@ turbopanel_config_dir: /etc/turbopanel
 # Secret-bearing runtime env lives under the config dir — never in the git checkout.
 turbopanel_instance_runtime_env: "{{ turbopanel_config_dir }}/instance/runtime.env"
 turbopanel_instance_runtime_dev_vars: "{{ turbopanel_config_dir }}/instance/runtime.dev-vars"
+# Database and queue passwords for the instance unit. root-only (0600): systemd
+# reads it as root before it drops to the instance user, so the values never
+# appear in the unit text, `systemctl cat` or the journal.
+turbopanel_instance_runtime_secrets: "{{ turbopanel_config_dir }}/instance/runtime.secrets.env"
 # Opt-in via extra-var; ordinary converges must never rotate the instance secret keyring.
 turbopanel_instance_secret_rotate: false
 # Opt-in off-host root-secret backup; empty (default) skips it entirely. Set

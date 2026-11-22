@@ -715,9 +715,9 @@ Before the helper runs, the daemon refuses a target below
 `MIN_SUPPORTED_INSTANCE_VERSION`. A missing target version is not a refusal.
 After a successful install the daemon runs the new binary's `migrate` verb.
 `tp-orchestrate migrate` takes no arguments and reads
-`Environment=TURBOPANEL_DATABASE_URL` from `turbopanel-instance.service` (the
-URL the unit already uses). Managed `instance-deno.env` does not contain that
-URL. Then the daemon restarts `turbopanel-instance` and
+`TURBOPANEL_DATABASE_URL` from the root-only `runtime.secrets.env` (0600, the
+file the unit loads with `EnvironmentFile=`; the unit text itself carries no
+password). Managed `instance-deno.env` does not contain that URL. Then the daemon restarts `turbopanel-instance` and
 reloads `turbopanel-caddy` (`ExecReload`) so `:8443` keeps serving the
 updating page. Caddy is restarted only when its binary changed. A failed
 migration keeps the dump and rolls back through `instance-rollback.yml`.

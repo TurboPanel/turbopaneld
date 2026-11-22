@@ -1064,16 +1064,17 @@ tp_verb_update_colocated() {
   exit "$_rc"
 }
 
-# The instance unit's Environment= line is the Postgres URL. runtime.env does
-# not carry it on a managed host, and this verb refuses caller-supplied
-# credentials (no arguments, and any inherited URL is discarded).
+# The Postgres URL is in the instance's root-only secrets file (the unit does
+# not carry it), which this verb reads as root. runtime.env does not carry it
+# on a managed host, and this verb refuses caller-supplied credentials (no
+# arguments, and any inherited URL is discarded).
 tp_verb_migrate() {
   [ $# -eq 0 ] || tp_die "migrate takes no arguments"
   unset TURBOPANEL_DATABASE_URL
-  _unit="/etc/systemd/system/turbopanel-instance.service"
-  [ -f "$_unit" ] || tp_die "missing $_unit"
-  _url="$(sed -n 's/^Environment="\{0,1\}TURBOPANEL_DATABASE_URL=//p' "$_unit" | head -1 | tr -d '\r' | sed 's/"$//')"
-  [ -n "$_url" ] || tp_die "TURBOPANEL_DATABASE_URL is missing from $_unit"
+  _secrets="/etc/turbopanel/instance/runtime.secrets.env"
+  [ -f "$_secrets" ] || tp_die "missing $_secrets"
+  _url="$(sed -n 's/^TURBOPANEL_DATABASE_URL=//p' "$_secrets" | tail -1 | tr -d '\r')"
+  [ -n "$_url" ] || tp_die "TURBOPANEL_DATABASE_URL is missing from $_secrets"
   _bin="/opt/turbopanel/bin/turbopanel"
   [ -x "$_bin" ] || tp_die "missing $_bin"
   timeout 120 env TURBOPANEL_DATABASE_URL="$_url" "$_bin" migrate
