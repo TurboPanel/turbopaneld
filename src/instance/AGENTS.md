@@ -713,7 +713,7 @@ reconcile (`control-plane update is not supported on a development host; the
 co-located control plane is source-run — use the dev console converge path`).
 Before the helper runs, the daemon refuses a target below
 `MIN_SUPPORTED_INSTANCE_VERSION`. A missing target version is not a refusal.
-After a successful install the daemon runs the new binary's `migrate` verb.
+After a successful install the daemon first writes the password files (`instance-secrets-refresh.yml`, warn-only), then runs the new binary's `migrate` verb.
 `tp-orchestrate migrate` takes no arguments and reads
 `TURBOPANEL_DATABASE_URL` from the root-only `runtime.secrets.env` (0600, the
 file the unit loads with `EnvironmentFile=`; the unit text itself carries no

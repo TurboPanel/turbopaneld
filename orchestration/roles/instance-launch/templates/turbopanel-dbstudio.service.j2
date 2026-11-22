@@ -19,7 +19,7 @@ Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
 Environment=TURBOPANEL_DRIZZLE_STUDIO_PORT={{ drizzle_studio_port | default(4983) }}
 Environment=TURBOPANEL_DRIZZLE_STUDIO_HOST=127.0.0.1
 {% if turbopanel_pg_password is defined %}
-EnvironmentFile={{ turbopanel_instance_runtime_secrets }}
+EnvironmentFile={{ turbopanel_dbstudio_secrets }}
 {% endif %}
 StandardOutput=append:{{ instance_log_dir }}/dbstudio.log
 StandardError=append:{{ instance_log_dir }}/dbstudio.err.log

@@ -35,6 +35,8 @@ turbopanel_instance_runtime_dev_vars: "{{ turbopanel_config_dir }}/instance/runt
 # reads it as root before it drops to the instance user, so the values never
 # appear in the unit text, `systemctl cat` or the journal.
 turbopanel_instance_runtime_secrets: "{{ turbopanel_config_dir }}/instance/runtime.secrets.env"
+# Drizzle Studio gets only the database URL, in its own root-only file.
+turbopanel_dbstudio_secrets: "{{ turbopanel_config_dir }}/instance/dbstudio.secrets.env"
 # Opt-in via extra-var; ordinary converges must never rotate the instance secret keyring.
 turbopanel_instance_secret_rotate: false
 # Opt-in off-host root-secret backup; empty (default) skips it entirely. Set

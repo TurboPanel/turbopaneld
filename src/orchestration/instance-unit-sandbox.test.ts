@@ -466,6 +466,10 @@ const SECRETS_TEMPLATE = join(
   DAEMON_ROOT,
   "orchestration/roles/instance-launch/templates/instance-runtime-secrets.env.j2",
 );
+const SECRETS_TASKS = join(
+  DAEMON_ROOT,
+  "orchestration/roles/instance-launch/tasks/secrets.yml",
+);
 const UNITS_TASKS = join(
   DAEMON_ROOT,
   "orchestration/roles/instance-launch/tasks/units.yml",
@@ -474,10 +478,21 @@ const DBSTUDIO_TEMPLATE = join(
   DAEMON_ROOT,
   "orchestration/roles/instance-launch/templates/turbopanel-dbstudio.service.j2",
 );
+const DBSTUDIO_SECRETS_TEMPLATE = join(
+  DAEMON_ROOT,
+  "orchestration/roles/instance-launch/templates/dbstudio-secrets.env.j2",
+);
 const SECRETS_FILE = "/etc/turbopanel/instance/runtime.secrets.env";
-const PG_PASSWORD = "pg-secret-value-1f3a";
-const MQ_PASSWORD = "mq-secret-value-9c2d";
-const AMQP_URL = `amqp://tp:${MQ_PASSWORD}@127.0.0.1:5672/tp`;
+// Random per run and assembled at runtime, so no literal credential sits in
+// the source.
+const PG_PASSWORD = `probe-${crypto.randomUUID()}`;
+const MQ_PASSWORD = `probe-${crypto.randomUUID()}`;
+const AMQP_URL = (() => {
+  const url = new URL("amqp://127.0.0.1:5672/tp");
+  url.username = "tp";
+  url.password = MQ_PASSWORD;
+  return url.toString();
+})();
 
 const SECRET_VARS = {
   ...PROD_VARS,
@@ -487,6 +502,8 @@ const SECRET_VARS = {
   postgres_db: "turbopanel",
   postgres_socket_dir: "/run/turbopanel/postgres",
   turbopanel_instance_runtime_secrets: SECRETS_FILE,
+  turbopanel_dbstudio_secrets: "/etc/turbopanel/instance/dbstudio.secrets.env",
+  postgres_port: 5432,
 };
 
 test({
@@ -518,58 +535,95 @@ test({
   },
 });
 
+async function renderTemplate(
+  path: string,
+  vars: Record<string, unknown>,
+): Promise<string> {
+  assert(JINJA_PYTHON);
+  const child = new Deno.Command(JINJA_PYTHON, {
+    args: ["-c", RENDER_PY],
+    stdin: "piped",
+    stdout: "piped",
+    stderr: "piped",
+  }).spawn();
+  const writer = child.stdin.getWriter();
+  await writer.write(new TextEncoder().encode(JSON.stringify({ path, vars })));
+  await writer.close();
+  const { success, stdout } = await child.output();
+  assert(success);
+  return new TextDecoder().decode(stdout);
+}
+
+/** One task of the secrets task file, from its name to the next blank line. */
+async function secretsTask(name: string): Promise<string> {
+  const tasks = await Deno.readTextFile(SECRETS_TASKS);
+  const start = tasks.indexOf(`- name: ${name}`);
+  assert(start >= 0, `${name} must exist`);
+  return tasks.slice(start, tasks.indexOf("\n\n", start));
+}
+
+test("the Drizzle Studio unit carries no database password, only its own file", async () => {
+  const original = await Deno.readTextFile(DBSTUDIO_TEMPLATE);
+  assertEquals(original.includes("{{ turbopanel_pg_password }}"), false);
+  assertEquals(original.includes("Environment=TURBOPANEL_DATABASE_URL"), false);
+  assert(
+    original.includes("EnvironmentFile={{ turbopanel_dbstudio_secrets }}"),
+  );
+});
+
 test({
-  name: "the Drizzle Studio unit carries no database password either",
+  name:
+    "the secrets files hold the values the units need and the tasks write them root-only",
+  ignore: !JINJA_PYTHON,
   fn: async () => {
-    const original = await Deno.readTextFile(DBSTUDIO_TEMPLATE);
-    assertEquals(original.includes("{{ turbopanel_pg_password }}"), false);
-    assertEquals(
-      original.includes("Environment=TURBOPANEL_DATABASE_URL"),
-      false,
-    );
+    const instance = await renderTemplate(SECRETS_TEMPLATE, SECRET_VARS);
+    assert(instance.includes("@/turbopanel?host=/run/turbopanel/postgres"));
+    assert(instance.includes(`TURBOPANEL_AMQP_URL=${AMQP_URL}`));
+
+    // Drizzle Studio is given the database URL only, never the queue URL.
+    const studio = await renderTemplate(DBSTUDIO_SECRETS_TEMPLATE, SECRET_VARS);
+    assert(studio.includes(`:${PG_PASSWORD}@`));
+    assertEquals(studio.includes("AMQP"), false);
+    assertEquals(studio.includes(MQ_PASSWORD), false);
+
+    for (
+      const name of [
+        "Install instance runtime secrets file (root-only)",
+        "Install Drizzle Studio database file (root-only)",
+      ]
+    ) {
+      const block = await secretsTask(name);
+      assert(block.includes("ansible.builtin.template"));
+      assert(block.includes('mode: "0600"'));
+      assert(block.includes("owner: root"));
+      assert(block.includes("group: root"));
+      assert(block.includes("no_log: true"));
+    }
     assert(
-      original.includes(
-        "EnvironmentFile={{ turbopanel_instance_runtime_secrets }}",
-      ),
+      (await secretsTask("Install Drizzle Studio database file (root-only)"))
+        .includes("Restart turbopanel dbstudio"),
     );
   },
 });
 
-test({
-  name: "the secrets file holds the values and the task writes it root-only",
-  ignore: !JINJA_PYTHON,
-  fn: async () => {
-    assert(JINJA_PYTHON);
-    const child = new Deno.Command(JINJA_PYTHON, {
-      args: ["-c", RENDER_PY],
-      stdin: "piped",
-      stdout: "piped",
-      stderr: "piped",
-    }).spawn();
-    const writer = child.stdin.getWriter();
-    await writer.write(
-      new TextEncoder().encode(
-        JSON.stringify({ path: SECRETS_TEMPLATE, vars: SECRET_VARS }),
-      ),
-    );
-    await writer.close();
-    const { success, stdout } = await child.output();
-    assert(success);
-    const body = new TextDecoder().decode(stdout);
-    assert(body.includes(`@/turbopanel?host=/run/turbopanel/postgres`));
-    assert(body.includes(`TURBOPANEL_AMQP_URL=${AMQP_URL}`));
+test("a missing password removes the stale secrets files instead of keeping old values", async () => {
+  for (
+    const name of [
+      "Remove the instance runtime secrets file when no password can be read",
+      "Remove the Drizzle Studio database file when the password cannot be read",
+    ]
+  ) {
+    assert((await secretsTask(name)).includes("state: absent"));
+  }
+});
 
-    // The task block, not the whole file: mode, owner, no_log, atomic template.
-    const tasks = await Deno.readTextFile(UNITS_TASKS);
-    const start = tasks.indexOf(
-      "- name: Install instance runtime secrets file",
-    );
-    assert(start >= 0);
-    const block = tasks.slice(start, tasks.indexOf("\n\n", start));
-    assert(block.includes("ansible.builtin.template"));
-    assert(block.includes('mode: "0600"'));
-    assert(block.includes("owner: root"));
-    assert(block.includes("group: root"));
-    assert(block.includes("no_log: true"));
-  },
+test("the update flow writes the secrets files by their own playbook, and units.yml imports the same tasks", async () => {
+  const playbook = await Deno.readTextFile(
+    join(DAEMON_ROOT, "orchestration/playbooks/instance-secrets-refresh.yml"),
+  );
+  assert(playbook.includes("tasks_from: secrets.yml"));
+  assertEquals(playbook.includes("units.yml"), false);
+  const units = await Deno.readTextFile(UNITS_TASKS);
+  assert(units.includes("import_tasks: secrets.yml"));
+  assertEquals(units.includes("turbopanel_pg_password"), false);
 });

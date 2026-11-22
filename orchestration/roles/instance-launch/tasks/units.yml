@@ -2,61 +2,12 @@
 # Unit templates only: the instance, Caddy and ACME issuer systemd units.
 # Imported by main.yml and run alone (tasks_from: units.yml) by the update
 # flow's instance-units-refresh.yml. Nothing here may render the Caddyfile or
-# touch hostnames, certificates, secrets, migrations or service state: a
-# caller that passes no TLS extra-vars must never be able to downgrade a host.
-- name: Read postgres password for systemd units
-  ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/postgres/.pgpass"
-  register: _launch_pgpass
-  failed_when: false
-
-- name: Set postgres password for systemd units
-  ansible.builtin.set_fact:
-    turbopanel_pg_password: "{{ _launch_pgpass.content | b64decode | trim }}"
-  when:
-    - _launch_pgpass.content is defined
-    - (_launch_pgpass.content | b64decode | trim | length) > 0
-
-- name: Read RabbitMQ password for systemd units
-  when: (turbopanel_instance_runtime | default('deno')) == 'deno'
-  ansible.builtin.slurp:
-    src: "{{ turbopanel_config_dir }}/rabbitmq/.rabbitmq_pass"
-  register: _launch_rabbitmq_pass
-  failed_when: false
-
-- name: Set RabbitMQ URL for systemd units
-  when:
-    - (turbopanel_instance_runtime | default('deno')) == 'deno'
-    - _launch_rabbitmq_pass.content is defined
-    - (_launch_rabbitmq_pass.content | b64decode | trim | length) > 0
-  ansible.builtin.set_fact:
-    turbopanel_amqp_url: >-
-      amqp://{{ rabbitmq_user }}:{{ _launch_rabbitmq_pass.content | b64decode | trim }}@127.0.0.1:{{ rabbitmq_amqp_port }}{{ rabbitmq_vhost }}
-
-# The database and queue passwords go in a root-only EnvironmentFile, never
-# into a unit (units are readable through `systemctl cat` and `show`). The
-# template module writes it through a temporary file and renames it, so it is
-# never half-written, and no_log keeps the values out of the task output.
-- name: Ensure instance config directory exists for the secrets file
-  ansible.builtin.file:
-    path: "{{ turbopanel_instance_runtime_secrets | dirname }}"
-    state: directory
-    owner: root
-    group: "{{ turbopanel_group }}"
-    mode: "0750"
-
-- name: Install instance runtime secrets file (root-only)
-  when: turbopanel_pg_password is defined or turbopanel_amqp_url is defined
-  ansible.builtin.template:
-    src: instance-runtime-secrets.env.j2
-    dest: "{{ turbopanel_instance_runtime_secrets }}"
-    owner: root
-    group: root
-    mode: "0600"
-  no_log: true
-  notify:
-    - Reload systemd for instance units
-    - Restart turbopanel instance
+# touch hostnames, certificates, migrations or service state: a caller that
+# passes no TLS extra-vars must never be able to downgrade a host. The only
+# secrets written are the database and queue passwords the units load
+# (secrets.yml, which the update flow also runs by itself before migrating).
+- name: Read the database and queue passwords and write their root-only files
+  ansible.builtin.import_tasks: secrets.yml
 
 # Compiled-mode contract: the unit puts {{ turbopanel_duckdb_lib_dir }} on
 # LD_LIBRARY_PATH so the self-extracted duckdb.node addon can dlopen its

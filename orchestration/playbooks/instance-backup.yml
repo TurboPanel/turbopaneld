@@ -83,6 +83,7 @@
             --exclude=etc/turbopanel/instance/.instance_secrets \
             --exclude=etc/turbopanel/instance/runtime.dev-vars \
             --exclude=etc/turbopanel/instance/runtime.secrets.env \
+            --exclude=etc/turbopanel/instance/dbstudio.secrets.env \
             etc/turbopanel
           chown root:"{{ turbopanel_group }}" "$archive"
           chmod 0640 "$archive"

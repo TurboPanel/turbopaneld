@@ -1639,6 +1639,18 @@ async function refreshBrokerConfig(
  * caller performs next (the playbook itself restarts nothing), and never
  * blocks the update: a failed render is a warning, the old unit keeps working.
  */
+async function refreshControlPlaneSecrets(
+  run: NonNullable<InstanceUpdateHooks["run"]>,
+  installRoot: string,
+): Promise<void> {
+  await runPlaybookWarnOnly(
+    run,
+    "instance-secrets-refresh.yml",
+    installRoot,
+    "password file refresh failed, the migration may not find its database URL:",
+  );
+}
+
 async function refreshControlPlaneUnits(
   run: NonNullable<InstanceUpdateHooks["run"]>,
   installRoot: string,
@@ -1770,6 +1782,9 @@ export async function executeInstanceUpdateReconcile(options: {
     rollbackBase,
   });
 
+  // The migration reads its database URL from the root-only password file,
+  // which a host updated in place may not have yet: write it first.
+  await refreshControlPlaneSecrets(run, layout.home);
   const migrate = hooks.migrate ??
     (() => defaultInstanceMigrate(run, report));
   await migrateControlPlaneOrRollback(migrate, rollbackBase);
