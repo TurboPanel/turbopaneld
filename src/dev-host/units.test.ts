@@ -111,3 +111,28 @@ test("no database URL anywhere is null", async () => {
     null,
   );
 });
+
+test("an environment file the account cannot read is read through sudo cat", async () => {
+  const path = "/nonexistent-dir/runtime.secrets.env";
+  const calls: RecordedCall[] = [];
+  const run = fakeRun(calls, {
+    answer: (program) =>
+      program === "systemctl"
+        ? {
+          code: 0,
+          stdout: `EnvironmentFiles=${path}\n`,
+          stderr: "",
+        }
+        : {
+          code: 0,
+          stdout: "TURBOPANEL_DATABASE_URL=postgres://s@h/db\n",
+          stderr: "",
+        },
+  });
+  assertEquals(
+    await readInstanceDatabaseUrl(run, "turbopanel-instance"),
+    "postgres://s@h/db",
+  );
+  const sudo = calls.find((c) => c.program === "sudo");
+  assertEquals(sudo?.args.slice(-2), ["cat", path]);
+});

@@ -755,6 +755,22 @@ fails there instead of passing and leaving the instance to refuse later.
 `TimeoutStartSec=20min` leaves room for the backup. Production, compiled, static-UI and Workers units get none of it
 (pinned in `src/orchestration/instance-unit-sandbox.test.ts`).
 
+### instance-launch passwords files
+
+The database and queue passwords never appear in a unit (`systemctl cat` and
+`show` expose unit text). `instance-launch` `tasks/secrets.yml` writes
+`/etc/turbopanel/instance/runtime.secrets.env` (`TURBOPANEL_DATABASE_URL` and
+`TURBOPANEL_AMQP_URL`, for the instance unit) and
+`/etc/turbopanel/instance/dbstudio.secrets.env` (the database URL only, for
+Drizzle Studio), both `root:root` `0600` through the template module (atomic)
+with `no_log`. A file whose password cannot be read is removed, not left
+stale. The units load them with `EnvironmentFile=`, which systemd reads as
+root. `units.yml` imports `secrets.yml`; the update flow also runs it alone
+through `instance-secrets-refresh.yml` BEFORE `tp-orchestrate migrate`, which
+reads the URL from the instance file, so a host updated in place has the file
+when it migrates. The pre-update `/etc/turbopanel` archive excludes both.
+Pinned in `src/orchestration/instance-unit-sandbox.test.ts`.
+
 ### instance-launch secret keyring
 
 The `instance-launch` role persists the control-plane root secret keyring under

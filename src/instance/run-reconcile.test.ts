@@ -1721,6 +1721,59 @@ test("executeInstanceUpdateReconcile re-renders the units once, after the swap a
   assertEquals(order.filter((name) => name === "restart").length, 1);
 });
 
+test("executeInstanceUpdateReconcile writes the password files before the migration reads them", async () => {
+  // A host updated in place has no runtime.secrets.env yet: the migration
+  // reads its database URL from it, so the file must exist first.
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const order: string[] = [];
+  const base = managedUpdateHooks(calls);
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: {
+      ...base,
+      run: (bin, args, onStage) => {
+        order.push(
+          args.includes("update-instance") ? "update-instance" : args.at(-1) ??
+            "",
+        );
+        return base.run!(bin, args, onStage);
+      },
+      migrate: () => {
+        order.push("migrate");
+        return base.migrate!();
+      },
+    },
+  });
+  const secretsAt = order.indexOf("instance-secrets-refresh.yml");
+  assertEquals(secretsAt > order.indexOf("update-instance"), true);
+  assertEquals(secretsAt >= 0 && secretsAt < order.indexOf("migrate"), true);
+  assertEquals(
+    order.filter((name) => name === "instance-secrets-refresh.yml").length,
+    1,
+  );
+});
+
+test("executeInstanceUpdateReconcile warns and carries on when the password file refresh fails", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const base = managedUpdateHooks(calls);
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    onStage: (stage) => stages.push(stage),
+    hooks: {
+      ...base,
+      run: (bin, args, onStage) => {
+        if (args.at(-1) === "instance-secrets-refresh.yml") {
+          calls.push({ bin, args });
+          return Promise.resolve({ code: 2, stdout: "", stderr: "boom" });
+        }
+        return base.run!(bin, args, onStage);
+      },
+    },
+  });
+  assertEquals(stages.at(-1), "done");
+});
+
 test("executeInstanceUpdateReconcile warns and carries on when the unit refresh fails", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
   const base = managedUpdateHooks(calls);

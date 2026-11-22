@@ -2796,6 +2796,10 @@ test("the pre-update snapshot keeps the root secret out of the archive that sits
     tar.includes("--exclude=etc/turbopanel/instance/runtime.dev-vars"),
     "runtime.dev-vars (carries TURBOPANEL_SECRETS) is excluded",
   );
+  assert(
+    tar.includes("--exclude=etc/turbopanel/instance/runtime.secrets.env"),
+    "runtime.secrets.env (database and queue passwords) is excluded",
+  );
   // The exclusions must come before the path they filter.
   assert(
     tar.indexOf("--exclude=") < tar.indexOf("etc/turbopanel\n"),

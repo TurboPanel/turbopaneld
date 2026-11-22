@@ -446,7 +446,7 @@ tp_valid_extra_var() {
 # A playbook shipped in the tree but missing from this list is refused, so a
 # new play the daemon runs through the helper must be added here
 # (src/orchestration/tp-orchestrate.test.ts checks the list against the daemon).
-TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml cache-runtime-apply.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml engine-prune.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml php-series-prune.yml postgres-setup.yml proxysql-setup.yml queue-config-refresh.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml smb-tools-setup.yml socket-dirs-setup.yml time-sync-apply.yml"
+TP_PLAYBOOK_ALLOWLIST="buildkit-setup.yml cache-runtime-apply.yml caddy-setup.yml daemon-converge.yml daemon-logs-setup.yml daemon-systemd-setup.yml deno-app-runtime-apply.yml docker-setup.yml engine-prune.yml instance-backup.yml instance-build-toggle.yml instance-certs-apply.yml instance-launch-only.yml instance-rollback.yml instance-secrets-refresh.yml instance-units-refresh.yml localhost-test.yml node-app-runtime-apply.yml orchestrator-setup.yml php-series-prune.yml postgres-setup.yml proxysql-setup.yml queue-config-refresh.yml rabbitmq-setup.yml redis-setup.yml set-hostname.yml site-apache-apply.yml site-caddy-apply.yml site-nginx-apply.yml site-openlitespeed-apply.yml smb-tools-setup.yml socket-dirs-setup.yml time-sync-apply.yml"
 
 # Resolve the caller's playbook argument into $_resolved, or die. It is a bare
 # basename, or the daemon's absolute constant (<orchestration>/playbooks/<name>),
@@ -1064,16 +1064,17 @@ tp_verb_update_colocated() {
   exit "$_rc"
 }
 
-# The instance unit's Environment= line is the Postgres URL. runtime.env does
-# not carry it on a managed host, and this verb refuses caller-supplied
-# credentials (no arguments, and any inherited URL is discarded).
+# The Postgres URL is in the instance's root-only secrets file (the unit does
+# not carry it), which this verb reads as root. runtime.env does not carry it
+# on a managed host, and this verb refuses caller-supplied credentials (no
+# arguments, and any inherited URL is discarded).
 tp_verb_migrate() {
   [ $# -eq 0 ] || tp_die "migrate takes no arguments"
   unset TURBOPANEL_DATABASE_URL
-  _unit="/etc/systemd/system/turbopanel-instance.service"
-  [ -f "$_unit" ] || tp_die "missing $_unit"
-  _url="$(sed -n 's/^Environment="\{0,1\}TURBOPANEL_DATABASE_URL=//p' "$_unit" | head -1 | tr -d '\r' | sed 's/"$//')"
-  [ -n "$_url" ] || tp_die "TURBOPANEL_DATABASE_URL is missing from $_unit"
+  _secrets="/etc/turbopanel/instance/runtime.secrets.env"
+  [ -f "$_secrets" ] || tp_die "missing $_secrets"
+  _url="$(sed -n 's/^TURBOPANEL_DATABASE_URL=//p' "$_secrets" | tail -1 | tr -d '\r')"
+  [ -n "$_url" ] || tp_die "TURBOPANEL_DATABASE_URL is missing from $_secrets"
   _bin="/opt/turbopanel/bin/turbopanel"
   [ -x "$_bin" ] || tp_die "missing $_bin"
   timeout 120 env TURBOPANEL_DATABASE_URL="$_url" "$_bin" migrate
