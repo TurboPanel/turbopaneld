@@ -65,7 +65,8 @@ export type ShareDenySet = {
 export const RESOLVE_TIMEOUT_MS = 5_000;
 
 /** Covers dockerd's built-in IPv6 pool, a daemon-derived /48 inside it. */
-const BUILT_IN_POOLS_V6: readonly string[] = ["fd00::/8"];
+const ULA_FIRST_GROUP = "fd00";
+const BUILT_IN_POOLS_V6: readonly string[] = [`${ULA_FIRST_GROUP}::/8`];
 
 /**
  * What dockerd hands out when no `default-address-pools` is configured
