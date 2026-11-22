@@ -35,6 +35,7 @@ import {
 } from "../deploy/compose-ps.ts";
 import {
   createStreamedRunner,
+  dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
@@ -53,6 +54,7 @@ import {
 import { applyNativeAppLifecycle } from "../deploy/native/apply-native-apps.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { workerLifecycle } from "../deploy/site/workers.ts";
+import { phpLifecycle } from "../deploy/site/php-lifecycle.ts";
 import { runHostCommand } from "../deploy/systemd-unit-set.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -79,9 +81,23 @@ export type EnvironmentLifecycleHandlerDeps = {
   logSink?: CommandOutputSink;
   decryptSecrets?: DecryptSecretsFn;
   rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
-  /** Test seam: the host runner for worker units. */
+  /** Test seam: the host runner for worker and PHP units. */
   runHost?: RunFn;
+  /** Test seam: defaults to a `/usr/bin/docker` probe when `runDocker` is not injected. */
+  dockerInstalled?: () => Promise<boolean>;
 };
+
+/**
+ * A host without Docker (site-only: native PHP and native apps) has no
+ * containers to act on, so Docker steps are skipped. An injected `runDocker`
+ * means "Docker is there".
+ */
+async function dockerAvailableForLifecycle(
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<boolean> {
+  if (deps?.dockerInstalled) return await deps.dockerInstalled();
+  return deps?.runDocker !== undefined || await dockerBinaryInstalled();
+}
 
 function assertSafeLifecycleIdentifiers(
   payload: EnvironmentLifecyclePayload,
@@ -284,56 +300,65 @@ async function lifecycleLocked(
     deps,
   );
 
-  // A stack still running under an earlier, project-wide name (the recorded
-  // names do not include this command's). Compose acts on a whole project and
-  // sibling environments shared that name, so only this environment's own
-  // containers are touched, and no compose command runs on the old name.
-  const earlier = manifest === null ? [] : await earlierRecordedProjects(
-    deploymentDir,
-    parsedPayload.projectName,
-  );
-  if (earlier.length > 0) {
-    await actOnEarlierContainers(earlier, run, {
-      environmentId: parsedPayload.environmentId,
+  const dockerPresent = await dockerAvailableForLifecycle(deps);
+  let earlier: string[] = [];
+  if (dockerPresent) {
+    // A stack still running under an earlier, project-wide name (the recorded
+    // names do not include this command's). Compose acts on a whole project and
+    // sibling environments shared that name, so only this environment's own
+    // containers are touched, and no compose command runs on the old name.
+    earlier = manifest === null ? [] : await earlierRecordedProjects(
       deploymentDir,
-    }, parsedPayload.action);
-  } else {
-    // start / restart act on the live generation; stop on every generation.
-    const projects = projectsForCommand(
-      manifest,
       parsedPayload.projectName,
-      parsedPayload.action === "stop" ? "all" : "live",
     );
-    await forEachSequential(projects, async (projectName) => {
-      const result = await runStreamed([
-        ...composeFileArgs(projectName, composePaths),
-        parsedPayload.action,
-      ], {
-        onLine: (event) => logSink.onLine(event.stream, event.line),
+    if (earlier.length > 0) {
+      await actOnEarlierContainers(earlier, run, {
+        environmentId: parsedPayload.environmentId,
+        deploymentDir,
+      }, parsedPayload.action);
+    } else {
+      // start / restart act on the live generation; stop on every generation.
+      const projects = projectsForCommand(
+        manifest,
+        parsedPayload.projectName,
+        parsedPayload.action === "stop" ? "all" : "live",
+      );
+      await forEachSequential(projects, async (projectName) => {
+        const result = await runStreamed([
+          ...composeFileArgs(projectName, composePaths),
+          parsedPayload.action,
+        ], {
+          onLine: (event) => logSink.onLine(event.stream, event.line),
+        });
+        if (!result.success) {
+          // Redact before sanitizing: the deny-set matches raw plaintext, and
+          // sanitizeForLog would otherwise rewrite the newlines a multiline
+          // secret (a PEM body) is matched on.
+          throw new Error(
+            sanitizeForLog(
+              logSink.redactSummary(result.stderr) ||
+                `compose ${parsedPayload.action} failed`,
+            ),
+          );
+        }
       });
-      if (!result.success) {
-        // Redact before sanitizing: the deny-set matches raw plaintext, and
-        // sanitizeForLog would otherwise rewrite the newlines a multiline
-        // secret (a PEM body) is matched on.
-        throw new Error(
-          sanitizeForLog(
-            logSink.redactSummary(result.stderr) ||
-              `compose ${parsedPayload.action} failed`,
-          ),
-        );
-      }
-    });
-  }
+    }
 
-  // Best-effort parity with managed.lifecycle: keep per-service Traefik in
-  // step so stopped stacks do not leave published ports listening with no
-  // backend. Read-only w.r.t. claim files.
-  await applyIngressLifecycle(
-    layout,
-    parsedPayload.environmentId,
-    parsedPayload.action,
-    run,
-  );
+    // Best-effort parity with managed.lifecycle: keep per-service Traefik in
+    // step so stopped stacks do not leave published ports listening with no
+    // backend. Read-only w.r.t. claim files.
+    await applyIngressLifecycle(
+      layout,
+      parsedPayload.environmentId,
+      parsedPayload.action,
+      run,
+    );
+  } else {
+    logInfo(
+      "commands",
+      `environment.lifecycle Docker not installed; skipping compose ${parsedPayload.action} project=${parsedPayload.projectName} env=${parsedPayload.environmentId}`,
+    );
+  }
 
   // Native app units follow the same action. Best-effort per unit for the same
   // reason ingress is: one wedged unit must not fail the whole lifecycle
@@ -379,9 +404,26 @@ async function lifecycleLocked(
     );
   }
 
+  // A site's native PHP (per-site runtimes, the shared pool) follows the
+  // action as well. Last of the host steps, and it fails the command: a
+  // restart that left PHP on its old build must not report success.
+  const phpUnits = await phpLifecycle(
+    { run: deps?.runHost ?? runHostCommand, layout },
+    parsedPayload.environmentId,
+    parsedPayload.action,
+  );
+  if (phpUnits.length > 0) {
+    logInfo(
+      "commands",
+      `environment.lifecycle ${parsedPayload.action} php units=${
+        phpUnits.join(",")
+      }`,
+    );
+  }
+
   // No container listing for an earlier-named stack: Compose would list the
   // whole shared project, siblings included.
-  const containers = earlier.length > 0
+  const containers = earlier.length > 0 || !dockerPresent
     ? undefined
     : await collectAllLifecycleContainers(
       projectsForCommand(manifest, parsedPayload.projectName, "live"),
