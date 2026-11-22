@@ -34,6 +34,11 @@ function deps(answers: Answers, extra: ShareTargetDeps = {}): ShareTargetDeps {
   return {
     hostAddresses: () => ["192.0.2.50", "::1"],
     listDockerNetworks: () => Promise.resolve([BRIDGE, OTHER]),
+    networkingState: () =>
+      Promise.resolve({
+        addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+        defaultBridgeCidr: null,
+      }),
     resolveDns: (name, type) => {
       const answer = answers[name];
       if (answer?.fail) return Promise.reject(answer.fail);
@@ -168,7 +173,7 @@ test("a check right after a restart is not empty", async () => {
   const set = await getShareDenySet(deps({}));
   assertEquals(set.addresses.has("192.0.2.50"), true);
   assertEquals(set.addresses.has("172.17.0.1"), true);
-  assertEquals(set.cidrs.length, 3);
+  assertEquals(set.cidrs.length, 4);
 });
 
 test("when the deny set cannot be built the check is denied, and not cached", async () => {
@@ -239,21 +244,24 @@ test("pinning writes the checked address and drops any other addr", () => {
     out.volumes.media.driver_opts.o,
     "username=svc,vers=3.1.1,addr=198.51.100.7",
   );
-  assertEquals(out.volumes.media.driver_opts.device, "//files.example.net/s");
+  assertEquals(out.volumes.media.driver_opts.device, "//198.51.100.7/s");
   assertEquals(pinShareAddresses(yaml, resolved, new Map()), yaml);
 });
 
 test("the final check refuses an unpinned, changed or denied address", async () => {
   const pins = new Map([["media", "198.51.100.7"]]);
-  const good = shareDoc("//files.example.net/s", "addr=198.51.100.7");
+  const good = shareDoc("//198.51.100.7/s", "addr=198.51.100.7");
   resetShareDenySet();
   await assertShareAddressesPinned(good, pins, deps({}));
   for (
     const bad of [
-      shareDoc("//files.example.net/s"),
-      shareDoc("//files.example.net/s", "addr=198.51.100.8"),
-      shareDoc("//files.example.net/s", "addr=172.29.4.1"),
-      shareDoc("//files.example.net/s", "addr=198.51.100.7,addr=10.0.0.1"),
+      shareDoc("//198.51.100.7/s"),
+      shareDoc("//198.51.100.7/s", "addr=198.51.100.8"),
+      shareDoc("//172.29.4.1/s", "addr=172.29.4.1"),
+      shareDoc("//198.51.100.7/s", "addr=198.51.100.7,addr=10.0.0.1"),
+      // the device still names a host: the kernel would resolve it again
+      shareDoc("//files.example.net/s", "addr=198.51.100.7"),
+      shareDoc("//198.51.100.8/s", "addr=198.51.100.7"),
     ]
   ) {
     await assertRejects(
@@ -262,4 +270,158 @@ test("the final check refuses an unpinned, changed or denied address", async () 
       "network share volumes refused before start",
     );
   }
+});
+
+test("the pinned device and addr are both the checked address", () => {
+  const yaml = "services:\n  web:\n    image: alpine\nvolumes:\n  media: {}\n";
+  const v6 = parse(
+    pinShareAddresses(
+      yaml,
+      shareDoc("//files.example.net/s/sub"),
+      new Map([["media", "2001:db8::7"]]),
+    ),
+  ) as { volumes: { media: { driver_opts: Record<string, string> } } };
+  assertEquals(v6.volumes.media.driver_opts.device, "//[2001:db8::7]/s/sub");
+  assertEquals(v6.volumes.media.driver_opts.o, "addr=2001:db8::7");
+});
+
+function withNetworks(
+  networks: Record<string, unknown>,
+  device = "//10.99.0.1/s",
+): Record<string, unknown> {
+  return { ...shareDoc(device), networks };
+}
+
+test("a network the compose declares itself is denied before it exists", async () => {
+  resetShareDenySet();
+  const declared = withNetworks({
+    mine: {
+      ipam: { config: [{ subnet: "10.99.0.0/24", gateway: "10.99.0.1" }] },
+    },
+  });
+  const gateway = await assertRejects(() =>
+    checkShareTargets(declared, deps({}))
+  );
+  assertStringIncludes((gateway as Error).message, "this server itself");
+  const member = await assertRejects(() =>
+    checkShareTargets(
+      withNetworks(
+        declared.networks as Record<string, unknown>,
+        "//10.99.0.77/s",
+      ),
+      deps({}),
+    )
+  );
+  assertStringIncludes((member as Error).message, "Docker network");
+  const pinned = await assertRejects(() =>
+    assertShareAddressesPinned(
+      withNetworks(
+        { mine: { ipam: { config: [{ subnet: "10.99.0.0/24" }] } } },
+        "//10.99.0.9/s",
+      ),
+      new Map([["media", "10.99.0.9"]]),
+      deps({}),
+    )
+  );
+  assertStringIncludes((pinned as Error).message, "refused before start");
+  // not remembered for the next deploy
+  const pins = await checkShareTargets(shareDoc("//10.99.0.9/s"), deps({}));
+  assertEquals(pins.get("media"), "10.99.0.9");
+});
+
+test("the persisted default-address-pools and bip are denied", async () => {
+  const pool = await refusal("//10.200.7.9/s", deps({}));
+  assertStringIncludes(pool, "Docker network");
+  const bip = await refusal(
+    "//10.55.0.1/s",
+    deps({}, {
+      networkingState: () =>
+        Promise.resolve({
+          addressPools: [{ base: "10.200.0.0/16", size: 24 }],
+          defaultBridgeCidr: "10.55.0.1/24",
+        }),
+    }),
+  );
+  assertStringIncludes(bip, "this server itself");
+  const bipMember = await refusal(
+    "//10.55.0.200/s",
+    deps({}, {
+      networkingState: () =>
+        Promise.resolve({
+          addressPools: [],
+          defaultBridgeCidr: "10.55.0.1/24",
+        }),
+    }),
+  );
+  assertStringIncludes(bipMember, "Docker network");
+});
+
+test("without a persisted pool Docker's default pool is denied", async () => {
+  const msg = await refusal(
+    "//172.18.0.1/s",
+    deps({}, { networkingState: () => Promise.resolve(null) }),
+  );
+  assertStringIncludes(msg, "172.18.0.1");
+});
+
+test("a macvlan network denies its gateway, not its parent LAN", async () => {
+  const lan = {
+    Id: "m",
+    Name: "lan",
+    Driver: "macvlan",
+    IPAM: { Config: [{ Subnet: "10.20.30.0/24", Gateway: "10.20.30.1" }] },
+  };
+  const d = deps({}, {
+    listDockerNetworks: () => Promise.resolve([BRIDGE, lan]),
+  });
+  const gateway = await refusal("//10.20.30.1/s", d);
+  assertStringIncludes(gateway, "this server itself");
+  resetShareDenySet();
+  const pins = await checkShareTargets(shareDoc("//10.20.30.40/s"), d);
+  assertEquals(pins.get("media"), "10.20.30.40");
+  // the same for a macvlan the compose declares
+  const declared = await checkShareTargets(
+    withNetworks({
+      lan: {
+        driver: "ipvlan",
+        ipam: { config: [{ subnet: "10.30.0.0/24", gateway: "10.30.0.1" }] },
+      },
+    }, "//10.30.0.40/s"),
+    d,
+  );
+  assertEquals(declared.get("media"), "10.30.0.40");
+});
+
+test("a name that does not answer in time is denied with a reason", async () => {
+  const msg = await refusal("//slow.example.net/s", {
+    ...deps({}),
+    resolveDns: () =>
+      Promise.reject(
+        new DOMException("The signal timed out", "TimeoutError"),
+      ),
+  });
+  assertStringIncludes(msg, "no answer within 5 seconds");
+});
+
+test("sec=krb5 is refused with a host name and allowed with an IP", async () => {
+  const answers = { "files.example.net": { A: ["198.51.100.7"] } };
+  for (const sec of ["krb5", "krb5i"]) {
+    const msg = await refusal(
+      "//files.example.net/s",
+      deps(answers),
+      `sec=${sec}`,
+    );
+    assertStringIncludes(msg, "sec=krb5");
+  }
+  resetShareDenySet();
+  const pins = await checkShareTargets(
+    shareDoc("//198.51.100.7/s", "sec=krb5"),
+    deps(answers),
+  );
+  assertEquals(pins.get("media"), "198.51.100.7");
+  const ntlm = await checkShareTargets(
+    shareDoc("//files.example.net/s", "sec=ntlmssp"),
+    deps(answers),
+  );
+  assertEquals(ntlm.get("media"), "198.51.100.7");
 });

@@ -8,13 +8,25 @@
  *   refused when ANY answer is internal (loopback, link-local, unspecified,
  *   multicast, a metadata address), one of this server's own addresses, or
  *   inside any Docker network's subnet or gateway;
- * - a name that does not resolve is refused: the daemon cannot judge it;
- * - the checked address is written into the volume's `o` as `addr=<ip>`.
- *   Docker's local driver and the kernel then dial that address and never
- *   resolve the name again, so the name cannot be re-pointed (DNS rebinding)
- *   between this check and any later mount (container start, reboot);
+ * - a name that does not resolve, or does not answer within
+ *   {@link RESOLVE_TIMEOUT_MS}, is refused: the daemon cannot judge it. Only
+ *   DNS is asked (`Deno.resolveDns` skips /etc/hosts), so a name known only
+ *   from /etc/hosts or mDNS (`.local`) is refused: use DNS or an IP;
+ * - the checked address replaces the host in the staged compose twice: as
+ *   `addr=<ip>` in the volume's `o` and as the host of the `device`
+ *   (`//<ip>/share`). The kernel cifs client re-resolves a device host name on
+ *   every reconnect, so rewriting `addr` alone would leave a name a hostile
+ *   server could re-point after dropping the connection. With the device
+ *   host an IP, no name is left to resolve for the life of the volume;
+ * - `sec=krb5` and `sec=krb5i` need the host name (service principal), so
+ *   they are refused with a host name rather than weakened;
  * - the deny set is built before the first check, cached for a short time and
- *   rebuilt after that; when it cannot be built the check fails closed.
+ *   rebuilt after that; when it cannot be built the check fails closed. It
+ *   holds this server's addresses, every existing Docker network, the
+ *   persisted dockerd `default-address-pools` / `bip` (or Docker's own default
+ *   pool when none) and, per deploy, the networks the compose itself declares
+ *   (they do not exist yet when the check runs). A macvlan or ipvlan network
+ *   sits on the LAN: only its gateway is denied, not its parent subnet.
  *
  * Private (RFC 1918) addresses stay allowed: shares live on the LAN. Only the
  * server itself and its Docker networks are refused.
@@ -24,6 +36,7 @@ import { parse, stringify } from "yaml";
 import { DockerClient, resolveDockerSocket } from "../docker/client.ts";
 import type { DockerNetworkSummary } from "../docker/client.ts";
 import { ipBytes, ipScope } from "./compose-build-policy.ts";
+import type { DockerNetworkingDescriptor } from "./docker-networking-state.ts";
 import {
   networkShareVolumes,
   optionKey,
@@ -36,6 +49,8 @@ export type ShareTargetDeps = {
   resolveDns?: (name: string, type: "A" | "AAAA") => Promise<string[]>;
   hostAddresses?: () => string[];
   listDockerNetworks?: () => Promise<DockerNetworkSummary[]>;
+  /** The persisted dockerd address plan; `null` when none was applied. */
+  networkingState?: () => Promise<DockerNetworkingDescriptor | null>;
   now?: () => number;
 };
 
@@ -46,6 +61,15 @@ export type ShareDenySet = {
   addresses: ReadonlySet<string>;
   cidrs: readonly Cidr[];
 };
+
+/** How long a DNS answer is waited for. */
+export const RESOLVE_TIMEOUT_MS = 5_000;
+
+/** Docker's own pool when no `default-address-pools` is configured. */
+const DOCKER_DEFAULT_POOL = "172.16.0.0/12"; // NOSONAR typescript:S1313 - Docker default address pool
+
+/** Networks that sit on the host's LAN: their subnet is not Docker's. */
+const LAN_DRIVERS: ReadonlySet<string> = new Set(["macvlan", "ipvlan"]);
 
 /** How long a built deny set is reused. Short: networks come and go. */
 export const DENY_SET_TTL_MS = 10_000;
@@ -128,29 +152,83 @@ async function defaultListNetworks(): Promise<DockerNetworkSummary[]> {
   }
 }
 
-function addNetwork(
-  network: DockerNetworkSummary,
-  addresses: Set<string>,
-  cidrs: Cidr[],
+/** Deny one network's gateway, and its subnet unless it is a LAN network. */
+function addPlan(
+  driver: string | undefined,
+  plan: ReadonlyArray<{ Subnet?: unknown; Gateway?: unknown }>,
+  deny: { addresses: Set<string>; cidrs: Cidr[] },
 ): void {
-  for (const entry of network.IPAM?.Config ?? []) {
-    const gateway = entry.Gateway ? addressKey(entry.Gateway) : null;
-    if (gateway !== null) addresses.add(gateway);
-    const cidr = entry.Subnet ? parseCidr(entry.Subnet) : null;
-    if (cidr !== null) cidrs.push(cidr);
+  const onLan = LAN_DRIVERS.has(driver ?? "");
+  for (const entry of plan) {
+    const gateway = typeof entry.Gateway === "string"
+      ? addressKey(entry.Gateway)
+      : null;
+    if (gateway !== null) deny.addresses.add(gateway);
+    const cidr = typeof entry.Subnet === "string"
+      ? parseCidr(entry.Subnet)
+      : null;
+    if (cidr !== null && !onLan) deny.cidrs.push(cidr);
   }
 }
 
+/** The persisted `default-address-pools` and `bip` (Docker's pool when none). */
+async function addAddressPlan(
+  deny: { addresses: Set<string>; cidrs: Cidr[] },
+  deps: ShareTargetDeps,
+): Promise<void> {
+  const state = deps.networkingState === undefined
+    ? null
+    : await deps.networkingState();
+  const pools = state?.addressPools ?? [];
+  const plans: Array<{ Subnet?: string; Gateway?: string }> = pools.map((
+    pool,
+  ) => ({ Subnet: pool.base }));
+  if (pools.length === 0) plans.push({ Subnet: DOCKER_DEFAULT_POOL });
+  const bip = state?.defaultBridgeCidr;
+  if (bip) {
+    plans.push({ Subnet: bip, Gateway: bip.slice(0, bip.lastIndexOf("/")) });
+  }
+  addPlan(undefined, plans, deny);
+}
+
 async function buildDenySet(deps: ShareTargetDeps): Promise<ShareDenySet> {
-  const addresses = new Set<string>();
-  const cidrs: Cidr[] = [];
+  const deny = { addresses: new Set<string>(), cidrs: [] as Cidr[] };
   for (const own of (deps.hostAddresses ?? defaultHostAddresses)()) {
     const key = addressKey(own);
-    if (key !== null) addresses.add(key);
+    if (key !== null) deny.addresses.add(key);
   }
   const networks = await (deps.listDockerNetworks ?? defaultListNetworks)();
-  for (const network of networks) addNetwork(network, addresses, cidrs);
-  return { addresses, cidrs };
+  for (const network of networks) {
+    addPlan(network.Driver, network.IPAM?.Config ?? [], deny);
+  }
+  await addAddressPlan(deny, deps);
+  return deny;
+}
+
+/** The deny set plus the networks the compose itself declares. */
+function withDeclaredNetworks(
+  base: ShareDenySet,
+  document: Record<string, unknown>,
+): ShareDenySet {
+  const deny = { addresses: new Set(base.addresses), cidrs: [...base.cidrs] };
+  const networks = isRecord(document.networks) ? document.networks : {};
+  for (const network of Object.values(networks)) {
+    if (!isRecord(network)) continue;
+    const ipam = isRecord(network.ipam) ? network.ipam : {};
+    const config = Array.isArray(ipam.config) ? ipam.config : [];
+    const driver = typeof network.driver === "string"
+      ? network.driver
+      : undefined;
+    addPlan(
+      driver,
+      config.filter(isRecord).map((c) => ({
+        Subnet: c.subnet,
+        Gateway: c.gateway,
+      })),
+      deny,
+    );
+  }
+  return deny;
 }
 
 /**
@@ -187,6 +265,9 @@ async function lookup(
   } catch (error) {
     // No record of this type is an empty answer; any other failure is not.
     if (error instanceof Deno.errors.NotFound) return [];
+    if (error instanceof DOMException && error.name === "TimeoutError") {
+      throw new Error(`no answer within ${RESOLVE_TIMEOUT_MS / 1000} seconds`);
+    }
     throw error;
   }
 }
@@ -195,7 +276,9 @@ function defaultResolveDns(
   name: string,
   type: "A" | "AAAA",
 ): Promise<string[]> {
-  return Deno.resolveDns(name, type);
+  return Deno.resolveDns(name, type, {
+    signal: AbortSignal.timeout(RESOLVE_TIMEOUT_MS),
+  });
 }
 
 /** Every A and AAAA answer for a host; an IP literal answers itself. */
@@ -236,6 +319,35 @@ function dialedHost(spec: Record<string, unknown>): ShareTarget {
   return parsed.refusal === undefined
     ? { host: parsed.host }
     : { refusal: parsed.refusal };
+}
+
+function bareHost(host: string): string {
+  return host.replace(/^\[|\]$/g, "");
+}
+
+/**
+ * `sec=krb5` / `sec=krb5i` build the service principal from the host name, so
+ * they cannot work against the pinned IP the daemon rewrites the share to. They
+ * are refused with a host name (an IP literal needs no pin and is fine).
+ */
+function kerberosNeedsName(spec: Record<string, unknown>): string | null {
+  const opts = isRecord(spec.driver_opts) ? spec.driver_opts : {};
+  const o = typeof opts.o === "string" ? opts.o : "";
+  const kerberos = splitMountOptions(o).map(optionKey).some((k) =>
+    k.key === "sec" && /^krb5i?$/.test(k.value?.trim() ?? "")
+  );
+  if (!kerberos) return null;
+  const device = parseShareDevice(
+    typeof opts.device === "string" ? opts.device : "",
+  );
+  const target = dialedHost(spec);
+  const hosts = [device, target].flatMap((t) =>
+    t.refusal === undefined ? [t.host] : []
+  );
+  const named = hosts.find((h) => ipBytes(bareHost(h)) === null);
+  return named === undefined
+    ? null
+    : `share host "${named}" is a name, and sec=krb5 needs the name for its ticket while the daemon pins the share to the address it checked; use an IP literal host or another sec value`;
 }
 
 type Judged = { address: string; refusal?: undefined } | {
@@ -294,14 +406,16 @@ export async function checkShareTargets(
   const shares = networkShareVolumes(document);
   const pins = new Map<string, string>();
   if (shares.length === 0) return pins;
-  const deny = await loadDenySet(deps);
+  const deny = withDeclaredNetworks(await loadDenySet(deps), document);
   const found: string[] = [];
   const judgedAll = await Promise.all(
     shares.map(async ([name, spec]): Promise<[string, Judged]> => {
       const target = dialedHost(spec);
-      const judged = target.refusal === undefined
-        ? await judgeHost(target.host, deny, deps)
-        : { refusal: target.refusal };
+      const named = kerberosNeedsName(spec);
+      let judged: Judged;
+      if (target.refusal !== undefined) judged = { refusal: target.refusal };
+      else if (named !== null) judged = { refusal: named };
+      else judged = await judgeHost(target.host, deny, deps);
       return [name, judged];
     }),
   );
@@ -337,17 +451,30 @@ function pinnedOptions(
   const kept = splitMountOptions(o).filter((token) =>
     token.trim() !== "" && optionKey(token).key !== "addr"
   );
-  const pinned = { ...opts, o: [...kept, `addr=${address}`].join(",") };
+  const pinned = {
+    ...opts,
+    ...(opts.device === undefined
+      ? {}
+      : { device: pinnedDevice(opts.device, address) }),
+    o: [...kept, `addr=${address}`].join(","),
+  };
   return Object.fromEntries(
     Object.entries(pinned).map(([k, v]) => [k, escapeValue(v)]),
   );
 }
 
+/** The share's device with its host replaced by the checked address. */
+function pinnedDevice(device: unknown, address: string): unknown {
+  if (typeof device !== "string") return device;
+  const host = address.includes(":") ? `[${address}]` : address;
+  return device.replace(/^\/\/(\[[^\]/]*\]|[^/]+)/, `//${host}`);
+}
+
 /**
- * The staged compose with `addr=<checked ip>` in each pinned share's options,
- * built from the resolved model so interpolated options are covered. The
- * device keeps its host name (the kernel uses it only as the share's UNC
- * name once `addr` is set).
+ * The staged compose with the checked ip in each pinned share, as `addr=<ip>`
+ * in its options and as the host of its `device` in each pinned share's options,
+ * built from the resolved model so interpolated options are covered. Both
+ * are needed: the kernel re-resolves a device host name on reconnect.
  */
 export function pinShareAddresses(
   yaml: string,
@@ -385,6 +512,13 @@ function pinnedRefusal(
   const hasAddr = typeof opts.o === "string" &&
     splitMountOptions(opts.o).some((t) => optionKey(t).key === "addr");
   if (!hasAddr) return "is not pinned to a checked address";
+  const device = parseShareDevice(
+    typeof opts.device === "string" ? opts.device : "",
+  );
+  if (device.refusal !== undefined) return "is not pinned to a checked address";
+  if (bareHost(device.host) !== target.host) {
+    return "has a device host that is not its addr";
+  }
   const denial = addressDenial(target.host, deny);
   if (denial !== null) return denial;
   return target.host === expected ? null : "is not the checked address";
@@ -392,8 +526,8 @@ function pinnedRefusal(
 
 /**
  * The last look, on the final resolved model: every share must carry exactly
- * the one `addr` the daemon pinned, and that address must still pass the deny
- * set. Anything else (an unpinned share, a second `addr`, a changed one) is
+ * the one `addr` the daemon pinned, the device host must be that same address,
+ * and it must still pass the deny set. Anything else (an unpinned share, a second `addr`, a changed one) is
  * refused, so a path that skipped the pin cannot start.
  */
 export async function assertShareAddressesPinned(
@@ -403,7 +537,7 @@ export async function assertShareAddressesPinned(
 ): Promise<void> {
   const shares = networkShareVolumes(document);
   if (shares.length === 0) return;
-  const deny = await loadDenySet(deps);
+  const deny = withDeclaredNetworks(await loadDenySet(deps), document);
   const found: string[] = [];
   for (const [name, spec] of shares) {
     const why = pinnedRefusal(spec, pins.get(name), deny);

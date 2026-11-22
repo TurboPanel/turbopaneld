@@ -69,6 +69,7 @@ export interface ContainerInspect {
 export interface DockerNetworkSummary {
   Id: string;
   Name: string;
+  Driver?: string;
   IPAM?: {
     Config?: Array<{ Subnet?: string; Gateway?: string }> | null;
   } | null;

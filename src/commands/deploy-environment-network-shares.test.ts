@@ -37,7 +37,7 @@ function shareVolume(extra: Record<string, unknown> = {}) {
       driver: "local",
       driver_opts: {
         type: "cifs",
-        device: "//files.example.net/media",
+        device: "//192.0.2.10/media",
         o: "username=svc,vers=3.1.1,addr=192.0.2.10",
         ...extra,
       },
@@ -188,7 +188,7 @@ test("an allowed share installs the helper before compose up and never logs the 
   assertEquals(r.error, null);
   assertEquals(r.order, ["smb", "up"]);
   const text = r.lines.join("\n");
-  assertStringIncludes(text, "//files.example.net/media");
+  assertStringIncludes(text, "//192.0.2.10/media");
   assertEquals(text.includes(SECRET), false);
 });
 
@@ -403,6 +403,6 @@ test("an allowed share is published pinned to the address that was checked", asy
   );
   assertEquals(
     doc.volumes.media.driver_opts.device,
-    "//files.example.net/media",
+    "//192.0.2.10/media",
   );
 });
