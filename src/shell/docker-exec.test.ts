@@ -352,8 +352,8 @@ test("the kill script ends a real shell and its children", async () => {
   const shell = new Deno.Command("/bin/sh", {
     args: [
       "-c",
-      // A child and a grandchild; print their pids, then wait on them.
-      "sleep 300 & echo $!; sh -c 'sleep 301 & echo $!; wait' & wait",
+      // A child, a nested shell and its child; print their pids, then wait.
+      "sleep 300 & echo $!; sh -c 'echo $$; sleep 301 & echo $!; wait' & wait",
     ],
     env: { [SHELL_TOKEN_VAR]: token },
     stdout: "piped",
@@ -362,7 +362,7 @@ test("the kill script ends a real shell and its children", async () => {
   const pids: number[] = [shell.pid];
   const reader = shell.stdout.getReader();
   let text = "";
-  while (pids.length < 3) {
+  while (pids.length < 4) {
     const { value, done } = await reader.read();
     if (done) break;
     text += dec.decode(value);
@@ -372,7 +372,7 @@ test("the kill script ends a real shell and its children", async () => {
     }
   }
   try {
-    assertEquals(pids.length, 3, "the shell reported both children");
+    assertEquals(pids.length, 4, "the shell reported its descendants");
     for (const pid of pids) assert(await pidAlive(pid), `${pid} runs`);
     for (const signal of ["HUP", "KILL"] as const) {
       const out = await new Deno.Command("/bin/sh", {
@@ -390,6 +390,7 @@ test("the kill script ends a real shell and its children", async () => {
     );
   } finally {
     for (const pid of pids) {
+      if (!(await pidAlive(pid))) continue;
       try {
         Deno.kill(pid, "SIGKILL");
       } catch {

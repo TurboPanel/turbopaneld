@@ -311,7 +311,8 @@ test("the shell is not read past the window until the browser acknowledges", asy
 test("idle: a notice a minute before, then close; input resets the clock", async () => {
   const r = await rig();
   const msg = message({ idleSec: 120, maxSec: 3600 });
-  await r.attach(msg, await r.start(msg));
+  const t = await r.start(msg);
+  await r.attach(msg, t);
   r.timers.advance(60_000);
   await until("notice", () => r.frames.length === 1);
   const [notice] = await r.fromDaemon(msg.sid);
@@ -326,7 +327,7 @@ test("idle: a notice a minute before, then close; input resets the clock", async
   r.timers.advance(20_000);
   await until("closed", () => r.closedReasons().length === 1);
   assertEquals(r.closedReasons(), ["idle"]);
-  await settle();
+  await until("transport closed", () => t.closed);
   const tail = await r.fromDaemon(msg.sid);
   const last = tail[tail.length - 1];
   assertEquals(last, { type: "close", reason: CLOSE_REASONS.idle });
@@ -534,12 +535,12 @@ test("an ACK for more than is outstanding ends the session with error", async ()
   const msg = message({ windowBytes: 16 * 1024 });
   const t = await r.start(msg);
   t.push(bytes(100));
-  await until("sent", () => r.frames.length >= 0 && t.reads >= 2);
+  await until("read", () => t.reads >= 2);
   r.mux.handleBinary(await r.toDaemon(msg.sid, encodeAck(101)));
   await until("closed", () => r.closedReasons().length === 1);
   assertEquals(r.closedReasons(), ["error"]);
   assertEquals(r.mux.size, 0);
-  assert(t.closed);
+  await until("transport closed", () => t.closed);
 });
 
 test("an ACK of 0xFFFFFFFF on a fresh session ends it, and honest ACKs still work", async () => {
@@ -612,7 +613,8 @@ test("after end, a stdin write that was in flight neither acks nor re-arms idle"
   await settle();
   r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
   await until("closed", () => r.closedReasons().length === 1);
-  await settle();
+  // A kill closes the stream at once; the CLOSE frame is sealed after that.
+  await until("close frame", () => r.frames.length === 1);
   const before = r.frames.length;
   release();
   await settle();
@@ -712,7 +714,6 @@ test("a session the browser never attaches to ends after the attach window", asy
   assertEquals(r.closedReasons(), ["idle"]);
   await until("transport closed", () => t.closed);
   assertEquals(r.mux.size, 0, "the session slot is free");
-  await settle();
   const tail = await r.fromDaemon(msg.sid);
   assertEquals(tail[tail.length - 1], {
     type: "close",
