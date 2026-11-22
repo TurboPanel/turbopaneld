@@ -111,3 +111,95 @@ test("tp-host pins a pool's socket to the root-owned tree, not the daemon's run 
   assertStringIncludes(host, 'sockdir="${R_PHPFPM_RUN#"$P"}/$_pp_series"');
   assert(!host.includes('${R_RUN#"$P"}/php/'));
 });
+
+type Play = {
+  name?: string;
+  block?: Play[];
+  rescue?: Play[];
+  "ansible.builtin.replace"?: { regexp: string; replace: string };
+  "ansible.builtin.find"?: { contains?: string };
+  when?: string;
+} & Record<string, unknown>;
+
+async function converge(): Promise<{ main: Play; names: string[] }> {
+  const plays = parse(
+    await read("php-fpm/tasks/converge-run-tree.yml"),
+  ) as Play[];
+  const main = plays.find((p) => p.name === "Move the php-fpm run tree");
+  assert(main?.block && main.rescue, "a block with a rescue");
+  return { main, names: main.block.map((p) => p.name ?? "") };
+}
+
+test("the boot converge moves the run tree, as root, before any deploy", async () => {
+  const playbook = await Deno.readTextFile(
+    join(DAEMON_ROOT, "orchestration/playbooks/daemon-converge.yml"),
+  );
+  assertStringIncludes(playbook, "name: php-fpm");
+  assertStringIncludes(playbook, "tasks_from: converge-run-tree.yml");
+  // Deploys cannot overlap it: commands wait for every converge run.
+  const gate = await Deno.readTextFile(
+    join(DAEMON_ROOT, "src/commands/command-router.ts"),
+  );
+  assertStringIncludes(gate, "await bootConvergeSettled();");
+});
+
+test("the converge rewrites the old socket prefix, trailing slash kept, to the new tree", async () => {
+  const { main } = await converge();
+  const tasks = parse(
+    await read("php-fpm/tasks/converge-run-tree.yml"),
+  ) as Play[];
+  const find = tasks.find((p) => p["ansible.builtin.find"]?.contains);
+  assertEquals(
+    find?.["ansible.builtin.find"]?.contains,
+    "{{ turbopanel_run_dir }}/php/",
+  );
+  const replace = main.block?.find((p) => p["ansible.builtin.replace"])
+    ?.["ansible.builtin.replace"];
+  assertEquals(replace?.regexp, "{{ turbopanel_run_dir }}/php/");
+  assertEquals(replace?.replace, "{{ php_fpm_run_dir }}/");
+  // What a pool or vhost says before and after.
+  const old =
+    "listen = /run/turbopanel/php/8.4/tp-e1-shop.sock\nfastcgi_pass unix:/run/turbopanel/php/8.4/tp-e1-shop.sock;\n";
+  const moved = old.replaceAll("/run/turbopanel/php/", `${PHP_FPM_RUN_DIR}/`);
+  assertEquals(
+    moved,
+    `listen = ${PHP_FPM_RUN_DIR}/8.4/tp-e1-shop.sock\nfastcgi_pass unix:${PHP_FPM_RUN_DIR}/8.4/tp-e1-shop.sock;\n`,
+  );
+});
+
+test("every engine config is tested before any master or engine is restarted", async () => {
+  const { names } = await converge();
+  const at = (needle: string) => names.findIndex((n) => n.includes(needle));
+  const tests = ["php-fpm config", "site Caddy", "nginx config", "Apache"]
+    .map((n) =>
+      at(`Test ${n.startsWith("php") ? "each series' " + n : "the " + n}`)
+    );
+  for (const i of tests) assert(i >= 0, `test task ${i}`);
+  const firstRestart = at("Restart the php-fpm masters");
+  assert(firstRestart > Math.max(...tests), "restart after every test");
+  assert(at("Reload the engines") > firstRestart);
+  assert(at("Re-render each series' php-fpm main config") < Math.min(...tests));
+  assert(at("Point the pools and vhosts") < Math.min(...tests));
+  assert(at("Back up every file") < at("Install the php-fpm unit template"));
+});
+
+test("a failed move restores the backups, restarts only what ran, and fails", async () => {
+  const { main } = await converge();
+  const rescue = (main.rescue ?? []).map((p) => p.name ?? "");
+  assertEquals(rescue, [
+    "Put the backed-up files back",
+    "Reload systemd after putting the unit template back",
+    "Restart the masters that were running, on the old files",
+    "Remove the backup file",
+    "Fail the move",
+  ]);
+  // A master stopped on purpose is never started, here or in the happy path.
+  for (
+    const play of [
+      ...(main.block ?? []),
+      ...(main.rescue ?? []),
+    ].filter((p) => (p.name ?? "").startsWith("Restart the"))
+  ) {
+    assertStringIncludes(String(play.when), "== 'active'");
+  }
+});

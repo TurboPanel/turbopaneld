@@ -122,6 +122,9 @@ owner). tp-host pins a pool's `listen` to `/run/turbopanel-phpfpm/<series>/`.
 The unit's `ExecStartPre=/usr/bin/install -d` lines recreate both folders on
 every start (`/run` is tmpfs) and must stay in step with the role tasks.
 
+`tasks/converge-run-tree.yml` moves a host updated in place to that tree (the
+boot converge enters it; see the file header for the order and the rollback).
+
 Both `site-nginx-apply` (nginx) and `site-apache-apply` include
 this role when the daemon passes `turbopanel_php_fpm_install: true` (that
 engine has a site with `web.php` hints). Daemon TypeScript writes per-site pools

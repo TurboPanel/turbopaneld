@@ -101,6 +101,9 @@ turbopanel_state_dir: "/var/lib/turbopanel"  # noqa: var-naming[no-role-prefix]
 # the pidfile and chowns each socket by path. Keep in step with `PHP_FPM_RUN_DIR`
 # in src/paths/layout.ts and `R_PHPFPM_RUN` in orchestration/scripts/tp-host.
 php_fpm_run_dir: "/run/turbopanel-phpfpm"
+# The daemon-owned run folder the sockets used to live in (`<it>/php/<series>/`);
+# only converge-run-tree.yml reads it, to find files an update left behind.
+turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
 
 # The PHP package manager site builds use (tasks/composer.yml). Bump the version
 # and the digest together; the digest is the publisher's own .sha256sum for that

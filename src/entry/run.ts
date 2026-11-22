@@ -28,9 +28,9 @@ import {
   repairApacheWalls,
 } from "../deploy/site/apache-walls-repair.ts";
 import {
-  hostPhpRunTreeRepairIo,
-  repairPhpRunTree,
-} from "../deploy/site/php-run-tree-repair.ts";
+  checkPhpRunTree,
+  hostPhpRunTreeCheckIo,
+} from "../deploy/site/php-run-tree-check.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
@@ -171,10 +171,10 @@ export type DaemonRunIo = {
    */
   repairApacheWalls?: () => Promise<unknown>;
   /**
-   * The one-time move of an updated host's PHP sockets to the root-owned run
-   * tree (once per daemon version); runs in the background, before the walls.
+   * The read-only warning for a host whose PHP sockets did not move to the
+   * root-owned run tree; runs in the background, before the walls.
    */
-  repairPhpRunTree?: () => Promise<unknown>;
+  checkPhpRunTree?: () => Promise<unknown>;
   /** Start containers a restore stopped before the daemon died. */
   recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
@@ -568,15 +568,14 @@ async function afterOrchestration(
   // After the runtimes are back: restart what still runs a PHP build older
   // than the installed one, in the background, and keep watching.
   (io.armPhpPatchRestarts ?? (() => armPhpPatchRestarts(resolveLayout())))();
-  // Also in the background, one after the other (both rewrite vhosts): move the
-  // sites an update left on the old PHP socket folder to the new one, then add
-  // the Apache walls. Each runs once per daemon version and is only reported.
-  (io.repairPhpRunTree ??
-    (() => repairPhpRunTree(hostPhpRunTreeRepairIo(resolveLayout()))))()
+  // Also in the background: warn when the converge left PHP on the old socket
+  // folder (read-only), then add the Apache walls once per daemon version.
+  (io.checkPhpRunTree ??
+    (() => checkPhpRunTree(hostPhpRunTreeCheckIo(resolveLayout()))))()
     .catch((err) => {
       (io.logWarn ?? logWarn)(
         "deploy",
-        "PHP run tree repair failed:",
+        "PHP run tree check failed:",
         err instanceof Error ? err.message : String(err),
       );
     })

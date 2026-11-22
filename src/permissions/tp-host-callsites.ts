@@ -285,7 +285,7 @@ const WORKER_TEXT = workerUnitContent({
 // One per-site PHP runtime of alice's, as `php-runtime.ts` renders it.
 const PHP_APPLY = "src/deploy/site/php-runtime-apply.ts|";
 const WALLS = "src/deploy/site/apache-walls-repair.ts|";
-const RUN_TREE = "src/deploy/site/php-run-tree-repair.ts|";
+const RUN_TREE = "src/deploy/site/php-run-tree-check.ts|";
 const PHP_ID = "shop-0a1b2c3d4e5f-fcgi84";
 const PHP_FPM_ID = "shop-0a1b2c3d4e5f-fpm84";
 const PHP_UNIT = `turbopanel-php-${PHP_ID}`;
