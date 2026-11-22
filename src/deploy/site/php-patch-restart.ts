@@ -64,6 +64,11 @@ export type PhpSharedSiteRecord = {
   version?: string;
 };
 
+const RUNTIME_MODES: ReadonlySet<string> = new Set([
+  "fastcgi",
+  "fpm",
+  "lsphp-detached",
+]);
 const SERIES_RE = /^\d{1,3}\.\d{1,3}$/;
 const RECORD_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ENVIRONMENT_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -228,7 +233,7 @@ function isRecord(value: unknown): value is PhpRuntimeRecord {
   const r = value as Record<string, unknown>;
   return typeof r.id === "string" && RECORD_ID_RE.test(r.id) &&
     typeof r.series === "string" && SERIES_RE.test(r.series) &&
-    typeof r.mode === "string" &&
+    typeof r.mode === "string" && RUNTIME_MODES.has(r.mode) &&
     typeof r.environmentId === "string" &&
     ENVIRONMENT_ID_RE.test(r.environmentId) &&
     typeof r.composeServiceName === "string" &&

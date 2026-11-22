@@ -636,7 +636,11 @@ root-owned `0550` by design:
   deploy). A worker the payload no longer names is disabled, stopped and
   removed; `environment.stop` removes every worker and command unit before the
   sites (and so before the variables copy); `environment.lifecycle` starts,
-  stops or restarts the instances. After installing or removing either unit
+  stops or restarts the instances, and likewise the environment's per-site PHP
+  runtimes (`php-lifecycle.ts`: a restart also reloads the shared php-fpm
+  master of each shared-pool series; a stop never touches the shared master).
+  On a host without Docker the compose and ingress steps are skipped, so a
+  native-only environment needs no Docker to start, stop or restart. After installing or removing either unit
   family the daemon runs `tp-host php-loopback-sync`; the loopback rules cover
   the whole principal uid band, so no unit file is needed for a user to be
   walled. tp-host pins the unit lines (`tp_site_lifecycle_ok`): exactly one
