@@ -19,6 +19,7 @@ import {
   type PlainMessage,
 } from "./frames.ts";
 import {
+  ATTACH_TIMEOUT_MS,
   COALESCE_BYTES,
   MAX_CONTAINER_SECONDS,
   MAX_HOST_SECONDS,
@@ -230,6 +231,12 @@ async function rig(
       }
       return out;
     },
+    /** The browser connects: one authenticated frame (a resize) reaches the session. */
+    async attach(msg: ShellOpenMessage, t: FakeTransport): Promise<void> {
+      const before = t.resizes.length;
+      this.mux.handleBinary(await this.toDaemon(msg.sid, encodeResize(80, 24)));
+      await until("attached", () => t.resizes.length > before);
+    },
     closedReasons(): ShellCloseReason[] {
       return reports.flatMap((r) =>
         r.type === "shell-closed" ? [r.reason] : []
@@ -304,7 +311,8 @@ test("the shell is not read past the window until the browser acknowledges", asy
 test("idle: a notice a minute before, then close; input resets the clock", async () => {
   const r = await rig();
   const msg = message({ idleSec: 120, maxSec: 3600 });
-  await r.start(msg);
+  const t = await r.start(msg);
+  await r.attach(msg, t);
   r.timers.advance(60_000);
   await until("notice", () => r.frames.length === 1);
   const [notice] = await r.fromDaemon(msg.sid);
@@ -319,6 +327,7 @@ test("idle: a notice a minute before, then close; input resets the clock", async
   r.timers.advance(20_000);
   await until("closed", () => r.closedReasons().length === 1);
   assertEquals(r.closedReasons(), ["idle"]);
+  await until("transport closed", () => t.closed);
   const tail = await r.fromDaemon(msg.sid);
   const last = tail[tail.length - 1];
   assertEquals(last, { type: "close", reason: CLOSE_REASONS.idle });
@@ -329,6 +338,7 @@ test("max duration ends the session", async () => {
   const r = await rig();
   const msg = message({ idleSec: 3600, maxSec: 60 });
   const t = await r.start(msg);
+  await r.attach(msg, t);
   r.timers.advance(60_000);
   await until("closed", () => r.closedReasons().length === 1);
   assertEquals(r.closedReasons(), ["max"]);
@@ -525,12 +535,12 @@ test("an ACK for more than is outstanding ends the session with error", async ()
   const msg = message({ windowBytes: 16 * 1024 });
   const t = await r.start(msg);
   t.push(bytes(100));
-  await until("sent", () => r.frames.length >= 0 && t.reads >= 2);
+  await until("read", () => t.reads >= 2);
   r.mux.handleBinary(await r.toDaemon(msg.sid, encodeAck(101)));
   await until("closed", () => r.closedReasons().length === 1);
   assertEquals(r.closedReasons(), ["error"]);
   assertEquals(r.mux.size, 0);
-  assert(t.closed);
+  await until("transport closed", () => t.closed);
 });
 
 test("an ACK of 0xFFFFFFFF on a fresh session ends it, and honest ACKs still work", async () => {
@@ -603,7 +613,8 @@ test("after end, a stdin write that was in flight neither acks nor re-arms idle"
   await settle();
   r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
   await until("closed", () => r.closedReasons().length === 1);
-  await settle();
+  // A kill closes the stream at once; the CLOSE frame is sealed after that.
+  await until("close frame", () => r.frames.length === 1);
   const before = r.frames.length;
   release();
   await settle();
@@ -689,4 +700,60 @@ test("reject answers an open that cannot be served with the given code", async (
     assertEquals(rep.code, "unverified");
     assertEquals(rep.sid, msg.sid);
   }
+});
+
+test("a session the browser never attaches to ends after the attach window", async () => {
+  const r = await rig();
+  const msg = message({ idleSec: 3600, maxSec: 3600 });
+  const t = await r.start(msg);
+  r.timers.advance(ATTACH_TIMEOUT_MS - 1);
+  await settle();
+  assertEquals(r.closedReasons(), []);
+  r.timers.advance(1);
+  await until("closed", () => r.closedReasons().length === 1);
+  assertEquals(r.closedReasons(), ["idle"]);
+  await until("transport closed", () => t.closed);
+  assertEquals(r.mux.size, 0, "the session slot is free");
+  const tail = await r.fromDaemon(msg.sid);
+  assertEquals(tail[tail.length - 1], {
+    type: "close",
+    reason: CLOSE_REASONS.idle,
+  });
+});
+
+test("an authenticated browser frame stops the attach clock", async () => {
+  const r = await rig();
+  const msg = message({ idleSec: 3600, maxSec: 3600 });
+  await r.attach(msg, await r.start(msg));
+  r.timers.advance(ATTACH_TIMEOUT_MS * 2);
+  await settle();
+  assertEquals(r.closedReasons(), []);
+  assertEquals(r.mux.size, 1);
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
+});
+
+test("an output ACK is applied while a stdin write is stuck", async () => {
+  const r = await rig();
+  const msg = message({ windowBytes: 16 * 1024 });
+  const t = await r.start(msg);
+  await r.attach(msg, t);
+  t.push(bytes(8 * 1024));
+  t.push(bytes(8 * 1024));
+  t.push(bytes(8 * 1024));
+  await until("two reads", () => t.reads >= 2);
+  await settle();
+  assertEquals(t.reads, 2, "a full window stops the read loop");
+  let release!: () => void;
+  t.holdWrite = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  r.mux.handleBinary(await r.toDaemon(msg.sid, encodeData(bytes(4))));
+  r.mux.handleBinary(await r.toDaemon(msg.sid, encodeData(bytes(5))));
+  r.mux.handleBinary(await r.toDaemon(msg.sid, encodeAck(16 * 1024)));
+  await until("resumed while stdin is stuck", () => t.reads >= 3);
+  assertEquals(t.writes.length, 0, "stdin is still blocked");
+  release();
+  await until("both writes", () => t.writes.length === 2);
+  assertEquals(t.writes.map((w) => w.length), [4, 5], "stdin order is kept");
+  r.mux.kill({ type: "shell-kill", all: true, reason: "admin" });
 });

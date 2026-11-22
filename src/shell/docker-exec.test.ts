@@ -22,6 +22,8 @@ import {
   openDockerExec,
   SHELL_EXEC_CMD,
   SHELL_EXEC_ENV,
+  SHELL_TOKEN_VAR,
+  shellKillScript,
 } from "./docker-exec.ts";
 
 const test = Deno.test.bind(Deno);
@@ -317,5 +319,85 @@ test("a silent engine times out as helper_unavailable and leaves no connection o
     }
   } finally {
     execTimeouts.call = was;
+  }
+});
+
+async function pidAlive(pid: number): Promise<boolean> {
+  try {
+    // A zombie is dead; it only waits to be reaped.
+    const stat = await Deno.readTextFile(`/proc/${pid}/stat`);
+    return !stat.slice(stat.lastIndexOf(")") + 2).startsWith("Z");
+  } catch {
+    return false;
+  }
+}
+
+async function waitGone(pids: number[]): Promise<number[]> {
+  for (let i = 0; i < 50; i++) {
+    const alive: number[] = [];
+    for (const pid of pids) if (await pidAlive(pid)) alive.push(pid);
+    if (alive.length === 0) return alive;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  const alive: number[] = [];
+  for (const pid of pids) if (await pidAlive(pid)) alive.push(pid);
+  return alive;
+}
+
+// Runs the real kill script against a real shell. Known limit, not fixed: a
+// process started with `env -i` drops the token from its environment, so the
+// script cannot find it and it survives the kill.
+test("the kill script ends a real shell and its children", async () => {
+  const token = crypto.randomUUID();
+  const shell = new Deno.Command("/bin/sh", {
+    args: [
+      "-c",
+      // A child, a nested shell and its child; print their pids, then wait.
+      "sleep 300 & echo $!; sh -c 'echo $$; sleep 301 & echo $!; wait' & wait",
+    ],
+    env: { [SHELL_TOKEN_VAR]: token },
+    stdout: "piped",
+    stderr: "null",
+  }).spawn();
+  const pids: number[] = [shell.pid];
+  const reader = shell.stdout.getReader();
+  let text = "";
+  while (pids.length < 4) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += dec.decode(value);
+    pids.length = 1;
+    for (const line of text.split("\n")) {
+      if (/^\d+$/.test(line)) pids.push(Number(line));
+    }
+  }
+  try {
+    assertEquals(pids.length, 4, "the shell reported its descendants");
+    for (const pid of pids) assert(await pidAlive(pid), `${pid} runs`);
+    for (const signal of ["HUP", "KILL"] as const) {
+      const out = await new Deno.Command("/bin/sh", {
+        args: ["-c", shellKillScript(token, signal)],
+        stdout: "null",
+        stderr: "null",
+      }).output();
+      assert(out.success);
+      if ((await waitGone(pids)).length === 0) break;
+    }
+    assertEquals(
+      await waitGone(pids),
+      [],
+      "the shell and its children are gone",
+    );
+  } finally {
+    for (const pid of pids) {
+      if (!(await pidAlive(pid))) continue;
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    await reader.cancel().catch(() => undefined);
+    await shell.status.catch(() => undefined);
   }
 });

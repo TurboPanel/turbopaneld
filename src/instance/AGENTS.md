@@ -1205,7 +1205,7 @@ while the control socket's send buffer is over 1 MiB (one budget for every
 session on the socket). Ending a session also ends the exec in the container
 (a detached `kill -HUP`, then `-KILL`, found by a per-session env token), since
 closing the stream alone can leave the shell running. Docker calls have
-deadlines and an open that hangs frees its slot. A `shell-open` that cannot be
+deadlines and an open that hangs frees its slot. A session whose browser never sends an authenticated frame within 60 s of `shell-opened` ends with close reason `idle` (`ATTACH_TIMEOUT_MS`). Output ACKs are applied as soon as they open and never wait behind stdin writes; stdin, resize and close keep their order. A `shell-open` that cannot be
 served is answered with a `shell-error`: `unverified` (session not verified),
 `duplicate_sid` (the sid is live), `limit`, and the rest.
 

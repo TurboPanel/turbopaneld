@@ -449,6 +449,21 @@ async function startExec(
   }
 }
 
+/**
+ * The `sh -c` script that signals every process whose environment carries
+ * the token. A process that replaced its environment (for example `env -i`)
+ * no longer carries it and is not found.
+ */
+export function shellKillScript(token: string, signal: "HUP" | "KILL"): string {
+  return "for e in /proc/[0-9]*/environ; do " +
+    `if grep -qa "${TOKEN_VAR}=${token}" "$e" 2>/dev/null; then ` +
+    "p=${e#/proc/}; kill -" + signal + ' "${p%/environ}" 2>/dev/null; ' +
+    "fi; done";
+}
+
+/** The environment variable a terminal exec carries, for tests that start a real shell. */
+export const SHELL_TOKEN_VAR = TOKEN_VAR;
+
 class DockerExecTransport implements ShellTransport {
   readonly shell = "/bin/sh";
   readonly #socketPath: string;
@@ -580,10 +595,7 @@ class DockerExecTransport implements ShellTransport {
    * inside the container.
    */
   async #killExec(signal: "HUP" | "KILL"): Promise<void> {
-    const script = "for e in /proc/[0-9]*/environ; do " +
-      `if grep -qa "${TOKEN_VAR}=${this.#token}" "$e" 2>/dev/null; then ` +
-      "p=${e#/proc/}; kill -" + signal + ' "${p%/environ}" 2>/dev/null; ' +
-      "fi; done";
+    const script = shellKillScript(this.#token, signal);
     const created = await call(
       this.#socketPath,
       "POST",
