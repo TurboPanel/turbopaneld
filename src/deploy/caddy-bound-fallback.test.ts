@@ -1,5 +1,6 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
+import { waitFor } from "../testing/wait-for.ts";
 import {
   freePort,
   pinnedCaddy,
@@ -40,6 +41,8 @@ async function get(
   const out = await new Deno.Command("curl", {
     args: [
       "-sk",
+      "--max-time",
+      "20",
       "-w",
       "\n%{http_code}",
       "--connect-to",
@@ -58,8 +61,9 @@ type Probe = readonly ["http" | "https", string, string];
 /**
  * Run Caddy over the given site blocks and the catch-all they call for, and
  * ask each probe (scheme, address, Host) once the listeners are up. The first
- * HTTPS handshake can come before the internal certificate is made, so a
- * refused handshake is asked again for up to ten seconds.
+ * HTTPS handshake can come before the internal certificate is made, and a
+ * second bound address can open after the first, so a probe with no answer
+ * yet is asked again until a generous ceiling.
  */
 async function ask(
   siteTexts: readonly string[],
@@ -68,7 +72,9 @@ async function ask(
 ): Promise<Answer[]> {
   const root = await Deno.makeTempDir({ prefix: "tp-bound-fallback-" });
   const httpPort = freePort();
-  const httpsPort = freePort();
+  let httpsPort = freePort();
+  // Two draws can land on one port; Caddy would refuse to bind both.
+  while (httpsPort === httpPort) httpsPort = freePort();
   const fallback = hostingFallbackSnippet(
     false,
     false,
@@ -100,11 +106,15 @@ ${fallback}`,
     const answers: Answer[] = [];
     for (const [scheme, address, host] of probes) {
       const port = scheme === "http" ? httpPort : httpsPort;
-      let answer = await get(scheme, address, port, host);
-      for (let i = 0; answer.status === 0 && i < 100; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-        answer = await get(scheme, address, port, host);
-      }
+      let answer: Answer = { status: 0, body: "" };
+      await waitFor(
+        `${scheme}://${address} to answer for ${host}`,
+        async () => {
+          answer = await get(scheme, address, port, host);
+          return answer.status !== 0;
+        },
+        { timeoutMs: 60_000, intervalMs: 100 },
+      );
       answers.push(answer);
     }
     return answers;

@@ -8,6 +8,7 @@
 
 import { assert } from "@std/assert";
 import { dirname, join } from "@std/path";
+import { waitFor } from "./wait-for.ts";
 
 export const INSTANCE_LAUNCH_ROLES = new URL(
   "../../orchestration/roles/",
@@ -99,6 +100,9 @@ export interface RunningCaddy {
   stop: () => Promise<void>;
 }
 
+/** How long a freshly started Caddy gets to answer, on a slow shared runner. */
+const CADDY_START_CEILING_MS = 60_000;
+
 /** Run `caddy` on `config` and wait until `base` answers. */
 export async function startPanelCaddy(
   caddy: string,
@@ -112,23 +116,47 @@ export async function startPanelCaddy(
     stdout: "null",
     stderr: "piped",
   }).spawn();
+  // Read stderr as it comes: a full pipe would block Caddy, and its text says
+  // why it did not come up (a port taken, a config refused).
+  let log = "";
+  const decoder = new TextDecoder();
+  const reading = (async () => {
+    for await (const chunk of child.stderr) {
+      log += decoder.decode(chunk, { stream: true });
+    }
+  })().catch(() => undefined);
+  let exited: Deno.CommandStatus | undefined;
+  const finished = child.status.then((status) => {
+    exited = status;
+  });
   const stop = async () => {
-    child.kill("SIGTERM");
-    await child.stderr.cancel();
-    await child.status;
+    if (exited === undefined) child.kill("SIGTERM");
+    await finished;
+    await reading;
   };
   const base = `http://127.0.0.1:${port}`;
-  let up = false;
-  for (let i = 0; i < 100 && !up; i++) {
-    try {
-      await (await fetch(`${base}/`, { redirect: "manual" })).body?.cancel();
-      up = true;
-    } catch {
-      await new Promise((r) => setTimeout(r, 50));
-    }
+  let reason = "";
+  try {
+    await waitFor("caddy to answer", async () => {
+      if (exited !== undefined) {
+        reason = `caddy exited with ${exited.code}`;
+        return true;
+      }
+      try {
+        await (await fetch(`${base}/`, { redirect: "manual" })).body?.cancel();
+        return true;
+      } catch {
+        return false;
+      }
+    }, { timeoutMs: CADDY_START_CEILING_MS, intervalMs: 50 });
+  } catch (err) {
+    await stop();
+    throw new Error(`${err instanceof Error ? err.message : err}\n${log}`);
   }
-  if (!up) await stop();
-  assert(up, "caddy came up");
+  if (reason) {
+    await stop();
+    throw new Error(`${reason}\n${log}`);
+  }
   return { base, stop };
 }
 
