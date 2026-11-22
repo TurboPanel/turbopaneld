@@ -762,24 +762,34 @@ tp_instance_bootstrap_curl() {
   printf '%s' "curl -sSL"
 }
 
+# The last line of curl's captured stderr in $1, single line and short.
+tp_curl_reason() {
+  [ -s "$1" ] || return 0
+  tail -n 1 "$1" | tr -d '\r' | cut -c1-200
+}
+
 tp_fetch_uploaded_trust() {
   _trust_leg="$(tp_bootstrap_leg)"
   _curl_base="$(tp_instance_bootstrap_curl)"
   _trust_tmp="$(mktemp)"
+  _trust_err="$(mktemp)"
+  _trust_err2="$(mktemp)"
+  # curl's stderr is kept out of sight; only the stored-issuer failure shows
+  # its reason (one line), the quiet paths below say it in plain words.
   # shellcheck disable=SC2086
-  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>/dev/null)
+  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>"$_trust_err")
   if [ "$_trust_code" = 000 ] && [ "$_trust_leg" = stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
     # The stored issuer does not verify the control plane any more. Ask
     # again over the public roots (a control plane now behind a public
     # edge): what comes back is checked against this host's list and must
     # still sign the presented certificate before it is stored.
     _trust_leg=system
-    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>/dev/null)
+    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>"$_trust_err2")
   fi
   case "$_trust_code" in
     200)
       if ! tp_install_verified_uploaded_trust "$_trust_tmp" "$_trust_leg"; then
-        rm -f "$_trust_tmp"
+        rm -f "$_trust_tmp" "$_trust_err" "$_trust_err2"
         return 1
       fi
       ;;
@@ -799,8 +809,13 @@ tp_fetch_uploaded_trust() {
       # replaced from an unverified (-k) fetch: an on-path attacker would
       # pick the replacement. Keep it and stop.
       if [ -f "$UPLOADED_TRUST_PATH" ]; then
-        rm -f "$_trust_tmp"
-        tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
+        _trust_reason="$(tp_curl_reason "$_trust_err")"
+        _trust_reason2="$(tp_curl_reason "$_trust_err2")"
+        rm -f "$_trust_tmp" "$_trust_err" "$_trust_err2"
+        if [ -n "$_trust_reason2" ]; then
+          _trust_reason="${_trust_reason:+${_trust_reason}; }over the public roots: ${_trust_reason2}"
+        fi
+        tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH"))${_trust_reason:+ (${_trust_reason})} — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
         return 1
       fi
       # Nothing stored, and the fetch could not verify the control plane
@@ -810,14 +825,14 @@ tp_fetch_uploaded_trust() {
       if tp_system_roots_validate_leaf 2>/dev/null; then
         tp_print_step "–" "No private issuer needed: the control plane uses a publicly trusted certificate"
       else
-        tp_print_step "~" "Could not fetch a private uploaded issuer: the control plane's certificate did not verify against the Platform CA. The trust check below decides whether the install can go on"
+        tp_print_step "~" "Could not fetch a private uploaded issuer (the control plane did not answer or did not verify against the Platform CA). The trust check below decides whether the install can go on"
       fi
       ;;
     *)
       tp_print_step "~" "Could not download private uploaded issuer (HTTP ${_trust_code}) — keeping existing issuer if present"
       ;;
   esac
-  rm -f "$_trust_tmp"
+  rm -f "$_trust_tmp" "$_trust_err" "$_trust_err2"
   return 0
 }
 

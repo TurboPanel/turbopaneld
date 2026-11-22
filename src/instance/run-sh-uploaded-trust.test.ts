@@ -261,6 +261,7 @@ test("stale uploaded issuer and a failed trust fetch do not anchor insecure boot
     "tp_instance_bootstrap_curl",
     "tp_curl_http_code",
     "tp_system_roots_validate_leaf",
+    "tp_curl_reason",
     "tp_install_verified_uploaded_trust",
     "tp_fetch_uploaded_trust",
   ].map((name) => extractShellFunction(source, name)).join("\n");
@@ -378,6 +379,7 @@ async function fetchUploadedTrust(vars: string[]) {
     "tp_bootstrap_leg",
     "tp_instance_bootstrap_curl",
     "tp_system_roots_validate_leaf",
+    "tp_curl_reason",
     "tp_fetch_uploaded_trust",
   ].map((name) => extractShellFunction(source, name)).join("\n");
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-trust-leg-" });
@@ -449,6 +451,12 @@ test("a stored issuer that verifies nothing over either leg is kept and stops th
   const out = await fetchUploadedTrust(["SYSTEM_CODE=000"]);
   assertEquals(out.status === 0, false);
   assertStringIncludes(out.stderr, "keeping it");
+  // The cause stays visible on this path, on one line.
+  assertStringIncludes(out.stderr, "SSL certificate problem");
+  assertEquals(
+    out.stderr.split("\n").filter((l) => l.startsWith("ERR")).length,
+    1,
+  );
 });
 
 test("a fresh install behind a public edge, with only the new CA stored, makes no second issuer request", async () => {
