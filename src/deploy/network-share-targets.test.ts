@@ -486,14 +486,14 @@ test("a pool or network written in mapped IPv6 form denies its IPv4 addresses", 
         Name: "mapped",
         IPAM: {
           Config: [{
-            Subnet: "::ffff:172.30.8.0/120",
-            Gateway: "::ffff:172.30.8.1",
+            Subnet: "::ffff:10.88.0.0/120",
+            Gateway: "::ffff:10.88.0.1",
           }],
         },
       }]),
     dockerPools: () => Promise.resolve([{ Base: "::ffff:10.77.0.0/112" }]),
   });
-  for (const bad of ["172.30.8.200", "10.77.5.5", "172.30.8.1"]) {
+  for (const bad of ["10.88.0.200", "10.77.5.5", "10.88.0.1"]) {
     assertStringIncludes(await refusal(`//${bad}/s`, d), "refused");
     assertStringIncludes(await refusal(`//[::ffff:${bad}]/s`, d), "refused");
   }
@@ -526,4 +526,30 @@ test("an IPv6-only pool keeps the IPv4 and IPv6 builtin denials", async () => {
   resetShareDenySet();
   const pins = await checkShareTargets(shareDoc("//198.51.100.7/s"), d);
   assertEquals(pins.get("media"), "198.51.100.7");
+});
+
+test("a mapped range is an IPv4 range only from /96 on", async () => {
+  const pools = (...bases: string[]) =>
+    deps({}, {
+      listDockerNetworks: () => Promise.resolve([]),
+      hostAddresses: () => [],
+      dockerPools: () => Promise.resolve(bases.map((Base) => ({ Base }))),
+    });
+  // /96 maps the whole IPv4 space: every IPv4 address is denied.
+  const all = pools("::ffff:0.0.0.0/96");
+  for (const bad of ["198.51.100.7", "203.0.113.9", "[::ffff:198.51.100.7]"]) {
+    assertStringIncludes(await refusal(`//${bad}/s`, all), "address pool");
+  }
+  // /95 is wider than the mapped block, so it stays an IPv6 range and does
+  // not match a normalized IPv4 address.
+  resetShareDenySet();
+  const wide = pools("::ffff:0.0.0.0/95");
+  const pins = await checkShareTargets(shareDoc("//198.51.100.7/s"), wide);
+  assertEquals(pins.get("media"), "198.51.100.7");
+  // /128 matches exactly one address.
+  const one = pools("::ffff:198.51.100.7/128");
+  assertStringIncludes(await refusal("//198.51.100.7/s", one), "address pool");
+  resetShareDenySet();
+  const other = await checkShareTargets(shareDoc("//198.51.100.8/s"), one);
+  assertEquals(other.get("media"), "198.51.100.8");
 });
