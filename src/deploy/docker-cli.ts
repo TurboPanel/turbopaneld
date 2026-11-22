@@ -332,9 +332,18 @@ export async function dockerBinaryInstalled(): Promise<boolean> {
   }
 }
 
-function clearDockerInvocationCache(): void {
+/**
+ * Forget the resolved streaming invocation so the next streamed call probes
+ * again. Called after a Docker install: the answer cached before it (docker
+ * missing, or the socket not yet reachable) no longer describes the host.
+ */
+export function resetDockerInvocation(): void {
   cachedInvocation = undefined;
   cachedInvocationPromise = undefined;
+}
+
+function clearDockerInvocationCache(): void {
+  resetDockerInvocation();
   ensuredConfigDir = undefined;
   configDirResolved = false;
   warnedConfigDir = false;
@@ -619,17 +628,30 @@ let cachedInvocationPromise: Promise<DockerInvocation> | undefined;
 
 const PROBE_ARGS = ["version", "--format", "{{.Server.Version}}"];
 
-async function probeDockerInvocation(): Promise<DockerInvocation> {
+/**
+ * `settled` is true only when the answer can be cached for the life of the
+ * process: a rung actually reached the socket, or this process may not run
+ * sudo at all. A probe that failed for another reason (Docker not installed
+ * yet, the engine still starting, no rung reaching the socket) describes the
+ * host at that moment only; caching it left a daemon that had just installed
+ * Docker calling it without the group it needs until the next restart.
+ */
+type ProbedDockerInvocation = {
+  invocation: DockerInvocation;
+  settled: boolean;
+};
+
+async function probeDockerInvocation(): Promise<ProbedDockerInvocation> {
   const dockerBin = resolvedDockerBin();
   const probeArgs = withDockerConfig(PROBE_ARGS);
   const direct = await runRaw(dockerBin, probeArgs, {
     env: dockerConfigEnv(),
   });
-  if (
-    direct.success ||
-    !dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)
-  ) {
-    return { bin: dockerBin, prefixArgs: [] };
+  if (direct.success) {
+    return { invocation: { bin: dockerBin, prefixArgs: [] }, settled: true };
+  }
+  if (!dockerOutputLooksLikeSocketPermission(direct.stdout, direct.stderr)) {
+    return { invocation: { bin: dockerBin, prefixArgs: [] }, settled: false };
   }
 
   // Same escalation ladder `runDocker` walks reactively: self-refresh first
@@ -639,20 +661,33 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
   const user = await currentUsername();
   const selfPrefix = ["-n", "-u", user, "--", ...sudoEnvPrefix(), dockerBin];
   const refreshed = await runRaw(SUDO_BIN, [...selfPrefix, ...probeArgs]);
-  if (refreshed.success) return { bin: SUDO_BIN, prefixArgs: selfPrefix };
+  if (refreshed.success) {
+    return {
+      invocation: { bin: SUDO_BIN, prefixArgs: selfPrefix },
+      settled: true,
+    };
+  }
   // This process may not run sudo at all: keep the direct invocation so the
   // caller sees Docker's own socket error, not a Deno permission error.
   if (deniedByDenoPermissions(refreshed)) {
-    return { bin: dockerBin, prefixArgs: [] };
+    return { invocation: { bin: dockerBin, prefixArgs: [] }, settled: true };
   }
 
   const rootPrefix = ["-n", "--", ...sudoEnvPrefix(), dockerBin];
   const asRoot = await runRaw(SUDO_BIN, [...rootPrefix, ...probeArgs]);
-  if (asRoot.success) return { bin: SUDO_BIN, prefixArgs: rootPrefix };
+  if (asRoot.success) {
+    return {
+      invocation: { bin: SUDO_BIN, prefixArgs: rootPrefix },
+      settled: true,
+    };
+  }
 
   // Nothing reached the socket; keep the self-refresh invocation so the
   // failure surfaces with the same error `runDocker` would report.
-  return { bin: SUDO_BIN, prefixArgs: selfPrefix };
+  return {
+    invocation: { bin: SUDO_BIN, prefixArgs: selfPrefix },
+    settled: false,
+  };
 }
 
 /**
@@ -667,10 +702,16 @@ async function probeDockerInvocation(): Promise<DockerInvocation> {
 export async function resolveDockerInvocation(): Promise<DockerInvocation> {
   if (cachedInvocation) return cachedInvocation;
   if (!cachedInvocationPromise) {
-    cachedInvocationPromise = probeDockerInvocation().then((resolved) => {
-      cachedInvocation = resolved;
-      return resolved;
+    // Concurrent callers share one probe; only a settled answer outlives it.
+    const pending = probeDockerInvocation().then((probed) => {
+      if (probed.settled) cachedInvocation = probed.invocation;
+      return probed.invocation;
+    }).finally(() => {
+      if (cachedInvocationPromise === pending) {
+        cachedInvocationPromise = undefined;
+      }
     });
+    cachedInvocationPromise = pending;
   }
   return await cachedInvocationPromise;
 }

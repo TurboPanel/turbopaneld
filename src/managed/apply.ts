@@ -21,6 +21,7 @@ import {
   createStreamedRunner,
   type DockerCliResult,
   dockerOutputLooksLikeSocketPermission,
+  resetDockerInvocation,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
   type RunDockerStreamedFn,
@@ -436,6 +437,7 @@ async function composeUpWithDockerRetry(
     return first;
   }
   await runDockerSetup();
+  resetDockerInvocation();
   return await run(args);
 }
 

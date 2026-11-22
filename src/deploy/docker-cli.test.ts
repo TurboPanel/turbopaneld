@@ -4,6 +4,7 @@ import {
   dockerConfigDir,
   dockerEngineProbe,
   dockerEngineReachable,
+  resetDockerInvocation,
   resolveDockerInvocation,
   runDocker,
   setDockerCliIoForTest,
@@ -267,6 +268,105 @@ test("resolveDockerInvocation keeps the direct docker call when this process may
       bin: "/usr/bin/docker",
       prefixArgs: [],
     });
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
+test("resolveDockerInvocation does not cache a probe made before Docker was installed", async () => {
+  // Phase 0: no docker binary. Phase 1: installed, but this process still has
+  // no docker group, so only `sudo -u <self>` reaches the socket.
+  let installed = false;
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve(
+          installed
+            ? fail(SOCKET_DENIED)
+            : fail("spawn failed: No such file or directory (os error 2)", 127),
+        );
+      }
+      return Promise.resolve(ok("24.0.0"));
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    assertEquals(await resolveDockerInvocation(), {
+      bin: "/usr/bin/docker",
+      prefixArgs: [],
+    });
+    installed = true;
+    const after = await resolveDockerInvocation();
+    assertEquals(after.bin, "/usr/bin/sudo");
+    assertEquals(after.prefixArgs.slice(0, 4), ["-n", "-u", "tp", "--"]);
+    installed = false;
+    // The settled answer is now cached for the life of the process.
+    assertEquals(await resolveDockerInvocation(), after);
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
+test("resetDockerInvocation drops a settled invocation so the next call probes again", async () => {
+  let permissionDenied = false;
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve(permissionDenied ? fail(SOCKET_DENIED) : ok());
+      }
+      return Promise.resolve(ok());
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    assertEquals((await resolveDockerInvocation()).prefixArgs, []);
+    permissionDenied = true;
+    assertEquals((await resolveDockerInvocation()).prefixArgs, []);
+    resetDockerInvocation();
+    assertEquals((await resolveDockerInvocation()).bin, "/usr/bin/sudo");
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
+});
+
+test("spawnDockerStreaming reaches the socket through sudo after Docker is installed mid-process", async () => {
+  let installed = false;
+  const spawned: Array<{ bin: string; args: string[] }> = [];
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) => {
+      if (command === "/usr/bin/docker") {
+        return Promise.resolve(
+          installed
+            ? fail(SOCKET_DENIED)
+            : fail("spawn failed: not found", 127),
+        );
+      }
+      return Promise.resolve(ok("24.0.0"));
+    },
+    spawnStreaming: (bin, args) => {
+      spawned.push({ bin, args: [...args] });
+      return Promise.resolve(
+        new Deno.Command("true").spawn(),
+      );
+    },
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    await (await spawnDockerStreaming(["compose", "version"])).status;
+    installed = true;
+    await (await spawnDockerStreaming(["compose", "up"])).status;
+    assertEquals(spawned[0]?.bin, "/usr/bin/docker");
+    assertEquals(spawned[1]?.bin, "/usr/bin/sudo");
+    assertEquals(spawned[1]?.args.slice(0, 4), ["-n", "-u", "tp", "--"]);
   } finally {
     if (previousUser === undefined) Deno.env.delete("USER");
     else Deno.env.set("USER", previousUser);

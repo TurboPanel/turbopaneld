@@ -1,7 +1,7 @@
 import { logInfo } from "../util/logger.ts";
 import { runDockerSetup as defaultRunDockerSetup } from "../orchestration/ansible.ts";
 import type { AnsibleEventHandler } from "../orchestration/ansible-events.ts";
-import { dockerEngineProbe } from "./docker-cli.ts";
+import { dockerEngineProbe, resetDockerInvocation } from "./docker-cli.ts";
 import { diagnoseDockerUnreachable } from "./docker-diagnosis.ts";
 
 const DOCKER_BIN = "/usr/bin/docker";
@@ -84,6 +84,9 @@ async function ensureDockerOnce(deps?: EnsureDockerDeps): Promise<void> {
       : "Docker binary missing — running docker-setup",
   );
   await setupFn();
+  // The install changed what this process can reach (new binary, new group):
+  // anything resolved about Docker before it is stale.
+  resetDockerInvocation();
 
   if (!(await probes.reachable())) {
     throw new Error(await diagnoseFn());
