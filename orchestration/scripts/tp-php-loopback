@@ -112,6 +112,14 @@
 # the input hook. The set is rebuilt with the rest of the table, so a removed
 # app's port opens again at the next sync.
 #
+# Root is the authority on which ports may be dropped, never the unit text
+# (tp-host does not pin an app unit's PORT=): only the app listen bands
+# (18080-18999, 19100-19799) and the range a check copy's port is picked from
+# (32768-60999, the kernel default ephemeral range) are taken, minus the
+# platform's fixed ports there (33001, 33002) and the managed private ports
+# (45000-45999). Any other PORT= is skipped with a warning and never dropped,
+# so a bad unit cannot lock out ssh, the web servers or the panel.
+#
 # Needs the `nft`, `flock` and `ip` programs (Ansible installs the nftables,
 # util-linux and iproute2 packages in turbopanel-user/root-helpers.yml). When
 # one is missing, or `ip` fails, the script exits non-zero with a message
@@ -119,7 +127,8 @@
 # reports why.
 #
 # Not closed: someone running `nft flush ruleset` / `nft delete table inet
-# turbopanel_php` (or `turbopanel_apps`). The next unit start, deploy or daemon boot restores it.
+# turbopanel_php` (or `turbopanel_apps`). The next unit start, deploy or
+# daemon boot restores it.
 set -eu
 umask 077
 
@@ -196,14 +205,29 @@ app_pairs() {
   unit_pairs 'turbopanel-app-*.service'
 }
 
+# True when PORT is one root will drop inbound (see the table's comment above).
+app_port_dropable() {
+  [ "$1" -ge 18080 ] && [ "$1" -le 18999 ] && return 0
+  [ "$1" -ge 19100 ] && [ "$1" -le 19799 ] && return 0
+  [ "$1" -ge 32768 ] && [ "$1" -le 60999 ] || return 1
+  [ "$1" -ne 33001 ] && [ "$1" -ne 33002 ] || return 1
+  [ "$1" -lt 45000 ] || [ "$1" -gt 45999 ]
+}
+
 # Every native app port, one per line, ascending and unique: the PORT= of each
-# app unit (any User=; a line that is not a port is skipped).
+# app unit (any User=) that app_port_dropable accepts. A line that is not a
+# port is skipped; a port outside the accepted ranges is skipped with a warning.
 app_ports() {
   for _ap_u in "$UNITS"/turbopanel-app-*.service; do
     [ -f "$_ap_u" ] && [ ! -L "$_ap_u" ] || continue
     _ap_port="$(sed -n 's/^Environment=PORT=//p' "$_ap_u" | head -1)"
     case "$_ap_port" in ''|0*|*[!0-9]*) continue ;; *) ;; esac
-    [ "${#_ap_port}" -le 5 ] && [ "$_ap_port" -le 65535 ] || continue
+    [ "${#_ap_port}" -le 5 ] || continue
+    if ! app_port_dropable "$_ap_port"; then
+      printf 'tp-php-loopback: not dropping inbound port %s of %s: outside the native app ports\n' \
+        "$_ap_port" "${_ap_u##*/}" >&2
+      continue
+    fi
     printf '%s\n' "$_ap_port"
   done | sort -n -u
 }

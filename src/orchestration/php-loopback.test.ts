@@ -723,23 +723,20 @@ test("native app ports: one input drop for every non-loopback new connection, IP
 
 test("native app ports: the set holds every app unit's port, check copies and any account included", async () => {
   const out = (await render()).stdout;
-  assertEquals(setElements(appsTable(out), "app_ports"), [
-    "3000",
-    "3001",
-    "41234",
-  ]);
+  // 3000 and 3001 are outside the app ports root accepts, so they are left out.
+  assertEquals(setElements(appsTable(out), "app_ports"), ["41234"]);
   // A unit whose account is not a Hosting Account is still an app port.
   await withTree(HOST_FILES, async (run) => {
     const rendered = await run();
     assertEquals(rendered.code, 0, rendered.stderr);
     assertEquals(setElements(appsTable(rendered.stdout), "app_ports"), [
-      "3000",
-      "8080",
+      "18500",
+      "18600",
     ]);
   }, {
-    "turbopanel-app-x1.service": appUnit("nobody", "8080"),
-    "turbopanel-app-x2.service": appUnit("alice", "3000"),
-    "turbopanel-app-x3.service": appUnit("alice", "3000"),
+    "turbopanel-app-x1.service": appUnit("nobody", "18500"),
+    "turbopanel-app-x2.service": appUnit("alice", "18600"),
+    "turbopanel-app-x3.service": appUnit("alice", "18600"),
     "turbopanel-app-bad1.service": appUnit("alice", "0"),
     "turbopanel-app-bad2.service": appUnit("alice", "70000"),
     "turbopanel-app-bad3.service": appUnit("alice", "12a"),
@@ -773,17 +770,48 @@ test("native app ports: the table is replaced whole in the same transaction, aft
     );
     const rendered = await run();
     assertEquals(setElements(appsTable(rendered.stdout), "app_ports"), [
-      "4000",
+      "18700",
     ]);
-  }, { "turbopanel-app-real.service": appUnit("bob", "4000") });
+  }, { "turbopanel-app-real.service": appUnit("bob", "18700") });
 });
 
-test("native app ports: a failed load of the table fails the sync with a message", async () => {
-  const script = await Deno.readTextFile(SCRIPT);
-  assert(
-    script.indexOf("native app port rules not loaded") >
-      script.indexOf("nft -f -"),
-  );
+test("native app ports: only the app bands and the check copy range are dropped; platform ports are skipped", async () => {
+  await withTree(HOST_FILES, async (run) => {
+    const rendered = await run();
+    assertEquals(rendered.code, 0, rendered.stderr);
+    assertEquals(setElements(appsTable(rendered.stdout), "app_ports"), [
+      "18080",
+      "18999",
+      "19100",
+      "19799",
+      "32768",
+      "41234",
+      "60999",
+    ]);
+    for (const port of ["22", "443", "8443", "19080", "33001"]) {
+      assertStringIncludes(
+        rendered.stderr,
+        `not dropping inbound port ${port} of`,
+      );
+    }
+  }, {
+    "turbopanel-app-ok1.service": appUnit("bob", "18080"),
+    "turbopanel-app-ok2.service": appUnit("bob", "18999"),
+    "turbopanel-app-ok3.service": appUnit("bob", "19100"),
+    "turbopanel-app-ok4.service": appUnit("bob", "19799"),
+    "turbopanel-app-ok5.service": appUnit("bob", "32768"),
+    "turbopanel-app-ok6.service": appUnit("bob", "41234"),
+    "turbopanel-app-ok7.service": appUnit("bob", "60999"),
+    "turbopanel-app-p22.service": appUnit("bob", "22"),
+    "turbopanel-app-p443.service": appUnit("bob", "443"),
+    "turbopanel-app-p8443.service": appUnit("bob", "8443"),
+    "turbopanel-app-p19080.service": appUnit("bob", "19080"),
+    "turbopanel-app-p33001.service": appUnit("bob", "33001"),
+    "turbopanel-app-low.service": appUnit("bob", "18079"),
+    "turbopanel-app-mid.service": appUnit("bob", "19000"),
+    "turbopanel-app-high.service": appUnit("bob", "61000"),
+    "turbopanel-app-managed.service": appUnit("bob", "45500"),
+  });
 });
 
 test("the database ports and the band are the code's and tp-host's", async () => {

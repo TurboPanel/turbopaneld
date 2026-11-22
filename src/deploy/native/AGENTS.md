@@ -283,7 +283,11 @@ inet family covers IPv4 and IPv6. `app_ports` is the `PORT=` of every
 `turbopanel-app-*.service` on disk (check copies included, any account),
 rebuilt on every sync, so the existing sync calls above keep it current (apps
 added or removed, daemon start, boot unit); a removed app's port reopens at
-the next sync. It is a per-port set, not the whole 18080-19799 band: a check
+the next sync. Root decides which ports may be dropped, not the unit text:
+only 18080-18999, 19100-19799 and 32768-60999 (the range a check copy's port
+is picked from; `pickPortDefault` also avoids 45000-45999), minus 33001, 33002
+and 45000-45999, are taken; any other `PORT=` is skipped with a warning, so a
+bad unit can never lock out ssh or the web servers. It is a per-port set, not the whole 18080-19799 band: a check
 copy's spare port is outside the band, and the band also holds project caches
 and helper containers. Containers on Docker bridges are dropped too (the
 account wall already refuses their accounts the other direction); there is no
