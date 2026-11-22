@@ -131,13 +131,16 @@ async function staleConfigs(
     name.endsWith(".conf")
   );
   const found: Candidate[] = [];
-  await forEachSequential(names.toSorted(), async (name) => {
-    const cat = await sudoText(io, ["cat", "--", join(dir, name)]);
-    if (!cat.ok) throw new Error(cat.stderr.trim() || `cannot read ${name}`);
-    if (cat.stdout.includes(`${io.layout.runDir}/php/`)) {
-      found.push({ path: join(dir, name), name, text: cat.stdout });
-    }
-  });
+  await forEachSequential(
+    names.toSorted((a, b) => a.localeCompare(b)),
+    async (name) => {
+      const cat = await sudoText(io, ["cat", "--", join(dir, name)]);
+      if (!cat.ok) throw new Error(cat.stderr.trim() || `cannot read ${name}`);
+      if (cat.stdout.includes(`${io.layout.runDir}/php/`)) {
+        found.push({ path: join(dir, name), name, text: cat.stdout });
+      }
+    },
+  );
   return found;
 }
 
