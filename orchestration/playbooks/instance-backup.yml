@@ -70,7 +70,8 @@
           set -euo pipefail
           archive="{{ control_plane_backup_dir }}/etc-turbopanel.tar.gz"
           # The root secret keyring (.instance_secrets) and the env file
-          # rendered from it (runtime.dev-vars) stay out: this folder also
+          # rendered from it (runtime.dev-vars) and the database and queue
+          # passwords (runtime.secrets.env) stay out: this folder also
           # holds the database dump, and a dump that sits beside the secret
           # that opens its sealed values is no longer protected by it.
           # A rollback never reads this archive (it restores the binaries and
@@ -81,6 +82,8 @@
           tar czf "$archive" -C / \
             --exclude=etc/turbopanel/instance/.instance_secrets \
             --exclude=etc/turbopanel/instance/runtime.dev-vars \
+            --exclude=etc/turbopanel/instance/runtime.secrets.env \
+            --exclude=etc/turbopanel/instance/dbstudio.secrets.env \
             etc/turbopanel
           chown root:"{{ turbopanel_group }}" "$archive"
           chmod 0640 "$archive"

@@ -987,7 +987,7 @@ const migrateTest = JINJA_PYTHON === undefined && !RENDER_REQUIRED
   : test;
 
 const MIGRATE_TEST_NAME =
-  "migrate reads the instance unit URL, not runtime.env or a caller URL";
+  "migrate reads the instance secrets file URL, not the unit, runtime.env or a caller URL";
 
 migrateTest(MIGRATE_TEST_NAME, async () => {
   assert(
@@ -1002,13 +1002,21 @@ migrateTest(MIGRATE_TEST_NAME, async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-migrate-" });
   const envPath = join(root, "runtime.env");
   const unitPath = join(root, "turbopanel-instance.service");
+  const secretsPath = join(root, "runtime.secrets.env");
   const binPath = join(root, "turbopanel");
   const templates = join(
     here,
     "../../orchestration/roles/instance-launch/templates",
   );
   const render = await new Deno.Command(JINJA_PYTHON, {
-    args: ["-c", RENDER_MANAGED_INSTANCE, templates, envPath, unitPath],
+    args: [
+      "-c",
+      RENDER_MANAGED_INSTANCE,
+      templates,
+      envPath,
+      unitPath,
+      secretsPath,
+    ],
     stdout: "piped",
     stderr: "piped",
   }).output();
@@ -1020,9 +1028,15 @@ migrateTest(MIGRATE_TEST_NAME, async () => {
   const runtimeEnv = await Deno.readTextFile(envPath);
   const unit = await Deno.readTextFile(unitPath);
   assertEquals(runtimeEnv.includes("TURBOPANEL_DATABASE_URL"), false);
+  assertEquals(unit.includes("s3cret-db"), false);
+  assertEquals(unit.includes("TURBOPANEL_DATABASE_URL"), false);
   assertStringIncludes(
     unit,
-    "Environment=TURBOPANEL_DATABASE_URL=postgresql://turbopanel:s3cret-db@/turbopanel?host=/run/turbopanel/postgres",
+    "EnvironmentFile=/etc/turbopanel/instance/runtime.secrets.env",
+  );
+  assertStringIncludes(
+    await Deno.readTextFile(secretsPath),
+    "TURBOPANEL_DATABASE_URL=postgresql://turbopanel:s3cret-db@/turbopanel?host=/run/turbopanel/postgres",
   );
   await Deno.writeTextFile(
     binPath,
@@ -1042,8 +1056,8 @@ migrateTest(MIGRATE_TEST_NAME, async () => {
     "tp_die() { printf 'tp-orchestrate: %s\\n' \"$1\" >&2; exit 1; }",
     fn
       .replaceAll(
-        "/etc/systemd/system/turbopanel-instance.service",
-        unitPath,
+        "/etc/turbopanel/instance/runtime.secrets.env",
+        secretsPath,
       )
       .replaceAll("/opt/turbopanel/bin/turbopanel", binPath),
     'tp_verb_migrate "$@"',
@@ -1082,7 +1096,7 @@ const RENDER_MANAGED_INSTANCE = `
 import sys
 from pathlib import Path
 import jinja2
-templates, env_path, unit_path = sys.argv[1:]
+templates, env_path, unit_path, secrets_path = sys.argv[1:]
 def as_bool(value):
     if isinstance(value, bool):
         return value
@@ -1122,6 +1136,7 @@ managed = {
     "turbopanel_run_dir": "/run/turbopanel",
     "turbopanel_instance_runtime_env": "/etc/turbopanel/instance/runtime.env",
     "turbopanel_instance_runtime_dev_vars": "/etc/turbopanel/instance/runtime.dev-vars",
+    "turbopanel_instance_runtime_secrets": "/etc/turbopanel/instance/runtime.secrets.env",
     "instance_log_dir": "/var/log/turbopanel/instance",
     "turbopanel_duckdb_lib_dir": "/opt/turbopanel/lib",
     "turbopanel_instance_binary": "/opt/turbopanel/bin/turbopanel",
@@ -1133,6 +1148,7 @@ env_text = env.from_string((root / "instance-deno.env.j2").read_text()).render(m
 unit_text = env.from_string((root / "turbopanel-instance.service.j2").read_text()).render(managed)
 Path(env_path).write_text(env_text)
 Path(unit_path).write_text(unit_text)
+Path(secrets_path).write_text(env.from_string((root / "instance-runtime-secrets.env.j2").read_text()).render(managed))
 `;
 
 // --- control-plane hosts: update-colocated and the pin-less fallback -------

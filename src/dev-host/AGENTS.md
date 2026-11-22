@@ -36,7 +36,8 @@ and an action is answered `not_development`.
   `.config/` / `.local/` / `.cache/` are shown and never block.
 - Migration always runs with a backup first: `pnpm migrate` in the control
   plane checkout with `TURBOPANEL_DATABASE_URL` read from the
-  `turbopanel-instance` unit (its `Environment=`, then its environment files)
+  `turbopanel-instance` unit (its `Environment=`, then its environment files;
+  the root-only passwords file is read through `sudo -n cat`)
   and `TURBOPANEL_MIGRATE_BACKUP_COMMAND` set to a `pg_dump -Fc` inside the
   `turbopanel-database` container written to `dev-updates/backups/` (newest 5
   kept). The control plane's migrate script runs that command only when

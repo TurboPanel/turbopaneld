@@ -853,6 +853,22 @@ test("instance-units-refresh re-renders the instance units and the Docker gate w
   }
 });
 
+test("instance-secrets-refresh runs only the password tasks, restarts nothing and never fails the update", () => {
+  const playbook = readPlaybook("instance-secrets-refresh.yml");
+  if (!playbook.includes("tasks_from: secrets.yml")) {
+    throw new TypeError("it must run instance-launch tasks/secrets.yml");
+  }
+  if (playbook.includes("units.yml")) {
+    throw new TypeError("it must not render units");
+  }
+  if (!/^ {4}instance_start: false$/m.test(playbook)) {
+    throw new TypeError("instance_start must be false");
+  }
+  if (!playbook.includes("rescue:")) {
+    throw new TypeError("a failure must be reported, not raised");
+  }
+});
+
 test("a co-located daemon refresh also installs the Docker gate", () => {
   const roles = readPlaybook("daemon-colocated-refresh.yml");
   if (!roles.includes("- role: docker-gate")) {
