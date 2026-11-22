@@ -3113,6 +3113,7 @@ test("purge deletes TurboPanel's nft tables by name and leaves every other table
     "inet turbopanel_build",
     "inet turbopanel_php",
     "inet turbopanel_tunnel",
+    "inet turbopanel_apps",
     "inet filter",
     "ip nat",
     "inet turbopanel_operator_own",
@@ -3126,6 +3127,7 @@ test("purge deletes TurboPanel's nft tables by name and leaves every other table
     "nft delete table inet turbopanel_build",
     "nft delete table inet turbopanel_php",
     "nft delete table inet turbopanel_tunnel",
+    "nft delete table inet turbopanel_apps",
   ]);
   assertEquals(
     (await Deno.readTextFile(join(bin, "nft.tables"))).trim().split("\n"),

@@ -273,6 +273,25 @@ listen on 127.0.0.1 and `$PORT`. No unit setting forces this: systemd's
 directions, so they would also cut the app off from every outside service it
 calls.
 
+**Inbound port wall.** An app that ignores `HOST` and binds `*:<port>` is still
+kept off the network: `lib/tp-php-loopback` loads a second nftables table,
+`inet turbopanel_apps`, in the same transaction as the account table, with an
+input hook (priority -150) and one rule: `iifname != "lo" ct state new tcp
+dport @app_ports drop`. Only new inbound connections are matched, so replies
+to the app's own outbound traffic (database, API, DNS) are untouched, and the
+inet family covers IPv4 and IPv6. `app_ports` is the `PORT=` of every
+`turbopanel-app-*.service` on disk (check copies included, any account),
+rebuilt on every sync, so the existing sync calls above keep it current (apps
+added or removed, daemon start, boot unit); a removed app's port reopens at
+the next sync. It is a per-port set, not the whole 18080-19799 band: a check
+copy's spare port is outside the band, and the band also holds project caches
+and helper containers. Containers on Docker bridges are dropped too (the
+account wall already refuses their accounts the other direction); there is no
+bridge exception, because every Caddy upstream is `127.0.0.1:<port>`. Without
+`nft` the sync fails with `nft is not installed`, the daemon only warns
+(`account loopback rules not reloaded`), and the ports stay as open as the
+host firewall leaves them. Purge deletes the table (`TP_NFT_TABLES`).
+
 **Account walls.** The app runs as its account, so the account walls
 (`lib/tp-php-loopback`, see `../site/AGENTS.md`) bind it: on loopback it may
 reach the database proxy (127.0.0.1:13306, 15432), the resolver, and its own
