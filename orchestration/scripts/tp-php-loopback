@@ -96,6 +96,30 @@
 #     steps, when Docker becomes reachable again and on every Docker network
 #     create event.
 #
+# Native app ports, inbound. A second table in the same transaction, `inet
+# turbopanel_apps`, with an input hook at priority -150: a new TCP connection
+# to the port of any native app (the PORT= of every
+# /etc/systemd/system/turbopanel-app-*.service, the check copy beside a serving
+# release included, for any account) that does not arrive on `lo` is dropped,
+# IPv4 and IPv6 alike. An app that ignores HOST and binds every interface is
+# thus reachable on loopback only, which is all the hosting proxy uses. Only
+# `ct state new` is matched, so replies to the app's own outbound connections
+# (database, API, DNS) are never touched, whatever local port they use. A
+# per-port set rather than the whole 18080-19799 band: check copies run on
+# ports the kernel picks outside the band, and the band also holds caches and
+# helper containers. Containers on Docker bridges are refused too (no bridge
+# exception). Published container ports are forwarded after NAT and never reach
+# the input hook. The set is rebuilt with the rest of the table, so a removed
+# app's port opens again at the next sync.
+#
+# Root is the authority on which ports may be dropped, never the unit text
+# (tp-host does not pin an app unit's PORT=): only the app listen bands
+# (18080-18999, 19100-19799) and the range a check copy's port is picked from
+# (32768-60999, the kernel default ephemeral range) are taken, minus the
+# platform's fixed ports there (33001, 33002) and the managed private ports
+# (45000-45999). Any other PORT= is skipped with a warning and never dropped,
+# so a bad unit cannot lock out ssh, the web servers or the panel.
+#
 # Needs the `nft`, `flock` and `ip` programs (Ansible installs the nftables,
 # util-linux and iproute2 packages in turbopanel-user/root-helpers.yml). When
 # one is missing, or `ip` fails, the script exits non-zero with a message
@@ -103,7 +127,8 @@
 # reports why.
 #
 # Not closed: someone running `nft flush ruleset` / `nft delete table inet
-# turbopanel_php`. The next unit start, deploy or daemon boot restores it.
+# turbopanel_php` (or `turbopanel_apps`). The next unit start, deploy or
+# daemon boot restores it.
 set -eu
 umask 077
 
@@ -178,6 +203,33 @@ unit_pairs() {
 # Native apps' own ports: never guarded.
 app_pairs() {
   unit_pairs 'turbopanel-app-*.service'
+}
+
+# True when PORT is one root will drop inbound (see the table's comment above).
+app_port_dropable() {
+  [ "$1" -ge 18080 ] && [ "$1" -le 18999 ] && return 0
+  [ "$1" -ge 19100 ] && [ "$1" -le 19799 ] && return 0
+  [ "$1" -ge 32768 ] && [ "$1" -le 60999 ] || return 1
+  [ "$1" -ne 33001 ] && [ "$1" -ne 33002 ] || return 1
+  [ "$1" -lt 45000 ] || [ "$1" -gt 45999 ]
+}
+
+# Every native app port, one per line, ascending and unique: the PORT= of each
+# app unit (any User=) that app_port_dropable accepts. A line that is not a
+# port is skipped; a port outside the accepted ranges is skipped with a warning.
+app_ports() {
+  for _ap_u in "$UNITS"/turbopanel-app-*.service; do
+    [ -f "$_ap_u" ] && [ ! -L "$_ap_u" ] || continue
+    _ap_port="$(sed -n 's/^Environment=PORT=//p' "$_ap_u" | head -1)"
+    case "$_ap_port" in ''|0*|*[!0-9]*) continue ;; *) ;; esac
+    [ "${#_ap_port}" -le 5 ] || continue
+    if ! app_port_dropable "$_ap_port"; then
+      printf 'tp-php-loopback: not dropping inbound port %s of %s: outside the native app ports\n' \
+        "$_ap_port" "${_ap_u##*/}" >&2
+      continue
+    fi
+    printf '%s\n' "$_ap_port"
+  done | sort -n -u
 }
 
 # Project caches that listen on a loopback port (a socket-only cache has no
@@ -399,6 +451,26 @@ guarded_set() {
 SET
 }
 
+# apps_ruleset PORTS: the inbound table for the native app ports (one per line).
+apps_ruleset() {
+  _ar=""
+  for _p in $1; do _ar="${_ar:+$_ar, }$_p"; done
+  cat <<APPS
+add table inet turbopanel_apps
+delete table inet turbopanel_apps
+table inet turbopanel_apps {
+  set app_ports {
+    type inet_service
+${_ar:+    elements = { $_ar \}}
+  }
+  chain input {
+    type filter hook input priority -150; policy accept;
+    iifname != "lo" ct state new tcp dport @app_ports drop
+  }
+}
+APPS
+}
+
 # ruleset OWN_PAIRS DNS4 DNS6 BRIDGE4 BRIDGE6 POOL4 POOL6 KEEP6 FOREIGN_BR GUARDED
 ruleset() {
   _guarded="${10}"
@@ -500,6 +572,8 @@ _rules="$(ruleset "$_own" "$_res4" "$_res6" \
   "$(printf '%s\n' "$_bridges" | valid_cidrs 6)" \
   "$_pools4" "$_pools6" "$_routes6" \
   "$(foreign_br_links "$_link")" "$_guarded")"
+_rules="$_rules
+$(apps_ruleset "$(app_ports)")"
 _rules="$(printf '%s\n' "$_rules" | grep -v '^[[:space:]]*$')"
 
 if [ -n "$TP_TEST" ]; then
@@ -514,3 +588,5 @@ printf '%s\n' "$_live" | grep -q "meta skuid $BAND ip daddr 127.0.0.0/8" ||
   tp_die "loopback rules not loaded"
 printf '%s\n' "$_live" | grep -q "meta skuid $BAND oifname \"docker0\"" ||
   tp_die "container rules not loaded"
+nft list table inet turbopanel_apps | grep -q 'iifname != "lo"' ||
+  tp_die "native app port rules not loaded"

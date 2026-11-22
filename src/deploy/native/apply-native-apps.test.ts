@@ -3620,8 +3620,10 @@ test("a check copy that will not stop keeps its unit and marker; lifecycle stop 
 });
 
 test("the default port pick skips the control plane's band", () => {
-  const offered = [18_080, 19_799, 18_500, 40_001];
+  // The managed private range is skipped too.
+  const offered = [18_080, 19_799, 18_500, 45_000, 45_999, 40_001];
   assertEquals(pickPortDefault(() => offered.shift() ?? 0), 40_001);
+  assertThrows(() => pickPortDefault(() => 45_500), Error, "45000-45999");
   assertThrows(() => pickPortDefault(() => 18_100), Error, "18080-19799");
 });
 
