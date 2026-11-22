@@ -24,7 +24,7 @@
  *   rebuilt after that; when it cannot be built the check fails closed. It
  *   holds this server's addresses, every existing Docker network, the
  *   dockerd's effective `default-address-pools` (`GET /info`, else its
- *   built-in 172.17-31/16 and 192.168/16; a failed query refuses the share) and, per deploy, the networks the compose itself declares
+ *   built-in 172.17-31/16 and 192.168/16, and fd00::/8 when no IPv6 pool; a failed query refuses the share) and, per deploy, the networks the compose itself declares
  *   (they do not exist yet when the check runs). A macvlan or ipvlan network
  *   sits on the LAN: only its gateway is denied, not its parent subnet.
  *
@@ -63,6 +63,9 @@ export type ShareDenySet = {
 
 /** How long a DNS answer is waited for. */
 export const RESOLVE_TIMEOUT_MS = 5_000;
+
+/** Covers dockerd's built-in IPv6 pool, a daemon-derived /48 inside it. */
+const BUILT_IN_POOLS_V6: readonly string[] = ["fd00::/8"];
 
 /**
  * What dockerd hands out when no `default-address-pools` is configured
@@ -137,7 +140,7 @@ export function addressDenial(
     return "is an address of this server itself";
   }
   if (deny.cidrs.some((cidr) => inCidr(bytes, cidr))) {
-    return "is inside a Docker network or address pool of this server; a dockerd default-address-pools setting frees a LAN range for shares";
+    return "is inside a Docker network or address pool of this server; a dockerd default-address-pools setting (IPv4, and an IPv6 one for fd00::/8) frees a range for shares";
   }
   return null;
 }
@@ -200,7 +203,15 @@ async function addPools(
       throw new Error(`dockerd reports an unreadable address pool "${base}"`);
     }
   }
-  const bases = configured.length > 0 ? configured : BUILT_IN_POOLS;
+  // Per family: a configured pool replaces the built-in one of that family.
+  // dockerd's built-in IPv6 pool is a /48 under fd00::/8 derived from its
+  // daemon ID, so without a configured IPv6 pool all of fd00::/8 is denied.
+  const v6 = configured.filter((base) => base.includes(":"));
+  const v4 = configured.filter((base) => !base.includes(":"));
+  const bases = [
+    ...(v4.length > 0 ? v4 : BUILT_IN_POOLS),
+    ...(v6.length > 0 ? v6 : BUILT_IN_POOLS_V6),
+  ];
   addPlan(undefined, bases.map((Subnet) => ({ Subnet })), deny);
 }
 

@@ -169,7 +169,7 @@ test("a check right after a restart is not empty", async () => {
   const set = await getShareDenySet(deps({}));
   assertEquals(set.addresses.has("192.0.2.50"), true);
   assertEquals(set.addresses.has("172.17.0.1"), true);
-  assertEquals(set.cidrs.length, 4);
+  assertEquals(set.cidrs.length, 5);
 });
 
 test("when the deny set cannot be built the check is denied, and not cached", async () => {
@@ -348,6 +348,21 @@ test("without configured pools dockerd's built-in ones are denied", async () => 
     const pins = await checkShareTargets(shareDoc("//172.16.5.5/s"), d);
     assertEquals(pins.get("media"), "172.16.5.5");
   }
+});
+
+test("without an IPv6 pool all of fd00::/8 is denied, with one only that pool", async () => {
+  const v4only = deps({});
+  for (const bad of ["fd12:3456:789a::1", "fd00:9::1"]) {
+    assertStringIncludes(await refusal(`//[${bad}]/s`, v4only), "address pool");
+  }
+  const v6 = deps({}, {
+    dockerPools: () =>
+      Promise.resolve([{ Base: "10.200.0.0/16" }, { Base: "fd10::/48" }]),
+  });
+  assertStringIncludes(await refusal("//[fd10::1]/s", v6), "address pool");
+  resetShareDenySet();
+  const pins = await checkShareTargets(shareDoc("//[fd20::9]/s"), v6);
+  assertEquals(pins.get("media"), "fd20::9");
 });
 
 test("when dockerd cannot say which pools it uses the share is refused", async () => {
