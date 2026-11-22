@@ -296,11 +296,16 @@ export async function checkShareTargets(
   if (shares.length === 0) return pins;
   const deny = await loadDenySet(deps);
   const found: string[] = [];
-  for (const [name, spec] of shares) {
-    const target = dialedHost(spec);
-    const judged = target.refusal === undefined
-      ? await judgeHost(target.host, deny, deps)
-      : { refusal: target.refusal };
+  const judgedAll = await Promise.all(
+    shares.map(async ([name, spec]): Promise<[string, Judged]> => {
+      const target = dialedHost(spec);
+      const judged = target.refusal === undefined
+        ? await judgeHost(target.host, deny, deps)
+        : { refusal: target.refusal };
+      return [name, judged];
+    }),
+  );
+  for (const [name, judged] of judgedAll) {
     if (judged.refusal === undefined) pins.set(name, judged.address);
     else found.push(`volume ${name}: ${judged.refusal}`);
   }
