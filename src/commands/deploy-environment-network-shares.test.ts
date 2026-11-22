@@ -8,10 +8,28 @@ import { handleEnvironmentDeploy } from "./deploy-environment.ts";
 import "../testing/stub-hosting-caddy-host.ts";
 import { loginTokens } from "../deploy/network-share-logins.ts";
 import { instantlyHealthy } from "../testing/instant-health-gate.ts";
+import {
+  resetShareDenySet,
+  type ShareTargetDeps,
+} from "../deploy/network-share-targets.ts";
 
 const test = Deno.test.bind(Deno);
 
 const SECRET = "hunter2-share-pw";
+
+/** Names resolve through a table; nothing here touches DNS or Docker. */
+function targets(
+  names: Record<string, string> = { "files.example.net": "192.0.2.10" },
+): ShareTargetDeps {
+  return {
+    hostAddresses: () => ["192.0.2.50"],
+    listDockerNetworks: () => Promise.resolve([]),
+    resolveDns: (name, type) =>
+      names[name] && type === "A"
+        ? Promise.resolve([names[name]])
+        : Promise.reject(new Deno.errors.NotFound("no record")),
+  };
+}
 
 function shareVolume(extra: Record<string, unknown> = {}) {
   return {
@@ -20,7 +38,7 @@ function shareVolume(extra: Record<string, unknown> = {}) {
       driver_opts: {
         type: "cifs",
         device: "//files.example.net/media",
-        o: "username=svc,vers=3.1.1",
+        o: "username=svc,vers=3.1.1,addr=192.0.2.10",
         ...extra,
       },
     },
@@ -43,7 +61,9 @@ async function deployWithShare(
   volumes: Record<string, unknown>,
   smbFails = false,
   fromYaml = false,
+  shareTargets: ShareTargetDeps = targets(),
 ) {
+  resetShareDenySet();
   const root = await Deno.makeTempDir({ prefix: "tp-deploy-shares-" });
   const previous = {
     state: Deno.env.get("TURBOPANEL_STATE_DIR"),
@@ -125,6 +145,7 @@ async function deployWithShare(
         ensureExternalDockerNetworks: () => Promise.resolve(),
         ensureFabricDockerNetworks: () => Promise.resolve(),
         logSink: sink,
+        shareTargets,
         ensureSmbTools: (log) => {
           smbCalls++;
           order.push("smb");
@@ -260,7 +281,7 @@ test("a sealed login rides in o of the compose docker reads, never in a login fi
   };
   assertEquals(
     doc.volumes.media.driver_opts.o,
-    `vers=3.1.1,${
+    `vers=3.1.1,addr=192.0.2.10,${
       loginTokens({ username: "svc", password: SECRET }).join(",")
     }`,
   );
@@ -339,4 +360,49 @@ test("a password written in compose text is refused even with a login supplied",
   assertStringIncludes(r.error?.message ?? "", "password");
   assertEquals((r.error?.message ?? "").includes(SECRET), false);
   assertEquals(r.order, []);
+});
+
+test("a share name that resolves to this server is refused before anything starts", async () => {
+  const r = await deployWithShare(
+    { allowNetworkShares: true, ...{ composeFiles: LOGIN.composeFiles } },
+    {},
+    false,
+    true,
+    targets({ "files.example.net": "127.0.0.1" }),
+  );
+  assertStringIncludes(r.error?.message ?? "", "resolves to 127.0.0.1");
+  assertEquals(r.order, []);
+});
+
+test("a share name that does not resolve is refused before anything starts", async () => {
+  const r = await deployWithShare(
+    { allowNetworkShares: true, ...{ composeFiles: LOGIN.composeFiles } },
+    {},
+    false,
+    true,
+    targets({}),
+  );
+  assertStringIncludes(r.error?.message ?? "", "could not be resolved");
+  assertEquals(r.order, []);
+});
+
+test("an allowed share is published pinned to the address that was checked", async () => {
+  const r = await deployWithShare(
+    { allowNetworkShares: true, ...{ composeFiles: LOGIN.composeFiles } },
+    {},
+    false,
+    true,
+  );
+  assertEquals(r.error, null);
+  const doc = parse(r.upFiles[0].text) as {
+    volumes: Record<string, { driver_opts: { o: string; device: string } }>;
+  };
+  assertEquals(
+    doc.volumes.media.driver_opts.o,
+    "username=svc,vers=3.1.1,addr=192.0.2.10",
+  );
+  assertEquals(
+    doc.volumes.media.driver_opts.device,
+    "//files.example.net/media",
+  );
 });

@@ -115,6 +115,25 @@ test("DockerClient info reads /info and throws on HTTP error", async () => {
   failing.close();
 });
 
+test("DockerClient listNetworks reads /networks and throws on HTTP error", async () => {
+  const seen: string[] = [];
+  const client = new DockerClient(undefined, {
+    fetchImpl: (url) => {
+      seen.push(url);
+      return Promise.resolve(jsonResponse([{ Id: "a", Name: "bridge" }]));
+    },
+  });
+  assertEquals((await client.listNetworks())[0].Name, "bridge");
+  assertEquals(seen[0], `${DOCKER_HTTP_ORIGIN}/networks`);
+  client.close();
+
+  const failing = new DockerClient(undefined, {
+    fetchImpl: () => Promise.resolve(new Response("no", { status: 500 })),
+  });
+  await assertRejects(() => failing.listNetworks(), Error, "list networks");
+  failing.close();
+});
+
 test("DockerClient systemDf asks for every object type explicitly and throws on HTTP error", async () => {
   const seen: string[] = [];
   const client = new DockerClient(undefined, {

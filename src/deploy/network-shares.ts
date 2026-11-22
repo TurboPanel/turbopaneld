@@ -194,7 +194,7 @@ const SHARE_SEGMENT: Pattern = {
 };
 
 /** Parse `//host/share[/path]`; the refusal is a sentence fragment. */
-function parseShareDevice(
+export function parseShareDevice(
   device: string,
 ): { host: string; refusal?: undefined } | { refusal: string } {
   const match = /^\/\/(\[[^\]/]*\]|[^/]+)\/(.+)$/.exec(device);
@@ -274,7 +274,7 @@ export const SAFE_OPTIONS: readonly string[] = [
   ...FLAG_OPTIONS,
 ].sort((a, b) => a.localeCompare(b));
 
-function optionKey(token: string): { key: string; value?: string } {
+export function optionKey(token: string): { key: string; value?: string } {
   const trimmed = token.trim();
   const eq = trimmed.indexOf("=");
   return eq < 0 ? { key: trimmed.toLowerCase() } : {

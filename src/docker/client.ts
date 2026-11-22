@@ -65,6 +65,15 @@ export interface ContainerInspect {
  * Docker Engine `/info` subset — only the fields the daemon consumes.
  * `DockerRootDir` is the data root backing TurboPanel Docker volumes.
  */
+/** One entry of `GET /networks`: only the address plan is read. */
+export interface DockerNetworkSummary {
+  Id: string;
+  Name: string;
+  IPAM?: {
+    Config?: Array<{ Subnet?: string; Gateway?: string }> | null;
+  } | null;
+}
+
 export interface DockerInfo {
   DockerRootDir?: string;
 }
@@ -217,6 +226,14 @@ export class DockerClient {
       throw new Error(`docker system df failed: HTTP ${response.status}`);
     }
     return await response.json() as DockerSystemDf;
+  }
+
+  async listNetworks(): Promise<DockerNetworkSummary[]> {
+    const response = await this.#fetch("/networks");
+    if (!response.ok) {
+      throw new Error(`list networks failed: HTTP ${response.status}`);
+    }
+    return await response.json() as DockerNetworkSummary[];
   }
 
   async listContainers(all = false): Promise<ContainerSummary[]> {

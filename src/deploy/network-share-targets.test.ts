@@ -1,0 +1,265 @@
+import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
+import { parse } from "yaml";
+import {
+  assertShareAddressesPinned,
+  checkShareTargets,
+  DENY_SET_TTL_MS,
+  getShareDenySet,
+  pinShareAddresses,
+  resetShareDenySet,
+  type ShareTargetDeps,
+} from "./network-share-targets.ts";
+
+const test = Deno.test.bind(Deno);
+
+const BRIDGE = {
+  Id: "a",
+  Name: "bridge",
+  IPAM: { Config: [{ Subnet: "172.17.0.0/16", Gateway: "172.17.0.1" }] },
+};
+const OTHER = {
+  Id: "b",
+  Name: "tp_app",
+  IPAM: {
+    Config: [
+      { Subnet: "172.29.4.0/24", Gateway: "172.29.4.1" },
+      { Subnet: "fd00:4::/64", Gateway: "fd00:4::1" },
+    ],
+  },
+};
+
+type Answers = Record<string, { A?: string[]; AAAA?: string[]; fail?: Error }>;
+
+function deps(answers: Answers, extra: ShareTargetDeps = {}): ShareTargetDeps {
+  return {
+    hostAddresses: () => ["192.0.2.50", "::1"],
+    listDockerNetworks: () => Promise.resolve([BRIDGE, OTHER]),
+    resolveDns: (name, type) => {
+      const answer = answers[name];
+      if (answer?.fail) return Promise.reject(answer.fail);
+      const list = answer?.[type];
+      return list
+        ? Promise.resolve(list)
+        : Promise.reject(new Deno.errors.NotFound("no record"));
+    },
+    ...extra,
+  };
+}
+
+function shareDoc(
+  device: string,
+  o?: string,
+): Record<string, unknown> {
+  return {
+    services: { web: { image: "alpine" } },
+    volumes: {
+      media: { driver_opts: { type: "cifs", device, ...(o ? { o } : {}) } },
+    },
+  };
+}
+
+async function refusal(
+  device: string,
+  d: ShareTargetDeps,
+  o?: string,
+): Promise<string> {
+  resetShareDenySet();
+  const error = await assertRejects(() =>
+    checkShareTargets(shareDoc(device, o), d)
+  );
+  return (error as Error).message;
+}
+
+test("a public address passes and is the pin", async () => {
+  resetShareDenySet();
+  const pins = await checkShareTargets(
+    shareDoc("//files.example.net/media"),
+    deps({ "files.example.net": { A: ["198.51.100.7"] } }),
+  );
+  assertEquals([...pins], [["media", "198.51.100.7"]]);
+});
+
+test("a private LAN address still passes", async () => {
+  resetShareDenySet();
+  const pins = await checkShareTargets(
+    shareDoc("//10.20.30.40/media"),
+    deps({}),
+  );
+  assertEquals(pins.get("media"), "10.20.30.40");
+});
+
+test("a name resolving to an internal address is denied", async () => {
+  for (
+    const bad of ["127.0.0.1", "169.254.169.254", "0.0.0.0", "192.0.2.50"]
+  ) {
+    const msg = await refusal(
+      "//evil.example.net/s",
+      deps({ "evil.example.net": { A: [bad] } }),
+    );
+    assertStringIncludes(msg, `resolves to ${bad}`);
+  }
+});
+
+test("one bad answer among good ones denies the name", async () => {
+  const msg = await refusal(
+    "//mixed.example.net/s",
+    deps({ "mixed.example.net": { A: ["198.51.100.7"], AAAA: ["::1"] } }),
+  );
+  assertStringIncludes(msg, "resolves to ::1");
+});
+
+test("a mapped IPv6 form of an own address is denied", async () => {
+  const msg = await refusal(
+    "//m.example.net/s",
+    deps({ "m.example.net": { AAAA: ["::ffff:192.0.2.50"] } }),
+  );
+  assertStringIncludes(msg, "this server itself");
+});
+
+test("a resolution failure is denied with a reason", async () => {
+  const fail = await refusal(
+    "//down.example.net/s",
+    deps({ "down.example.net": { fail: new Error("timed out") } }),
+  );
+  assertStringIncludes(fail, "could not be resolved (timed out)");
+  const none = await refusal("//gone.example.net/s", deps({}));
+  assertStringIncludes(none, "no A or AAAA record");
+});
+
+test("a failure on only one record type is still a denial", async () => {
+  const msg = await refusal("//half.example.net/s", {
+    ...deps({}),
+    resolveDns: (_name, type) =>
+      type === "A"
+        ? Promise.resolve(["198.51.100.7"])
+        : Promise.reject(new Error("servfail")),
+  });
+  assertStringIncludes(msg, "servfail");
+});
+
+test("the gateway and subnet of another Docker network are denied", async () => {
+  const gateway = await refusal("//172.29.4.1/s", deps({}));
+  assertStringIncludes(gateway, "this server");
+  const member = await refusal(
+    "//c.example.net/s",
+    deps({ "c.example.net": { A: ["172.29.4.200"] } }),
+  );
+  assertStringIncludes(member, "Docker network");
+  const v6 = await refusal("//[fd00:4::9]/s", deps({}));
+  assertStringIncludes(v6, "Docker network");
+  const outside = await checkShareTargets(
+    shareDoc("//172.30.0.9/s"),
+    deps({}),
+  );
+  assertEquals(outside.get("media"), "172.30.0.9");
+});
+
+test("an addr option is the dialed host and is judged the same way", async () => {
+  const msg = await refusal(
+    "//files.example.net/s",
+    deps({ "files.example.net": { A: ["198.51.100.7"] } }),
+    "addr=172.29.4.1",
+  );
+  assertStringIncludes(msg, "172.29.4.1");
+});
+
+test("a check right after a restart is not empty", async () => {
+  resetShareDenySet();
+  const set = await getShareDenySet(deps({}));
+  assertEquals(set.addresses.has("192.0.2.50"), true);
+  assertEquals(set.addresses.has("172.17.0.1"), true);
+  assertEquals(set.cidrs.length, 3);
+});
+
+test("when the deny set cannot be built the check is denied, and not cached", async () => {
+  resetShareDenySet();
+  const broken = deps({}, {
+    listDockerNetworks: () => Promise.reject(new Error("socket gone")),
+  });
+  const error = await assertRejects(() =>
+    checkShareTargets(shareDoc("//198.51.100.7/s"), broken)
+  );
+  assertStringIncludes((error as Error).message, "socket gone");
+  const failedHosts = await assertRejects(() =>
+    checkShareTargets(shareDoc("//198.51.100.7/s"), {
+      ...broken,
+      hostAddresses: () => {
+        throw new Error("no interfaces");
+      },
+    })
+  );
+  assertStringIncludes((failedHosts as Error).message, "no interfaces");
+  const pins = await checkShareTargets(
+    shareDoc("//198.51.100.7/s"),
+    deps({}),
+  );
+  assertEquals(pins.get("media"), "198.51.100.7");
+});
+
+test("the deny set is reused briefly and rebuilt after the TTL", async () => {
+  resetShareDenySet();
+  let builds = 0;
+  let now = 1_000;
+  const counting = deps({}, {
+    now: () => now,
+    listDockerNetworks: () => {
+      builds++;
+      return Promise.resolve([BRIDGE]);
+    },
+  });
+  await getShareDenySet(counting);
+  await getShareDenySet(counting);
+  assertEquals(builds, 1);
+  now += DENY_SET_TTL_MS + 1;
+  await getShareDenySet(counting);
+  assertEquals(builds, 2);
+});
+
+test("a document without shares needs no deny set", async () => {
+  resetShareDenySet();
+  const pins = await checkShareTargets(
+    { volumes: { data: {} } },
+    deps({}, {
+      listDockerNetworks: () => Promise.reject(new Error("never asked")),
+    }),
+  );
+  assertEquals(pins.size, 0);
+});
+
+test("pinning writes the checked address and drops any other addr", () => {
+  const yaml = "services:\n  web:\n    image: alpine\nvolumes:\n  media: {}\n";
+  const resolved = shareDoc(
+    "//files.example.net/s",
+    "username=svc,addr=10.0.0.9,vers=3.1.1",
+  );
+  const out = parse(
+    pinShareAddresses(yaml, resolved, new Map([["media", "198.51.100.7"]])),
+  ) as { volumes: { media: { driver_opts: Record<string, string> } } };
+  assertEquals(
+    out.volumes.media.driver_opts.o,
+    "username=svc,vers=3.1.1,addr=198.51.100.7",
+  );
+  assertEquals(out.volumes.media.driver_opts.device, "//files.example.net/s");
+  assertEquals(pinShareAddresses(yaml, resolved, new Map()), yaml);
+});
+
+test("the final check refuses an unpinned, changed or denied address", async () => {
+  const pins = new Map([["media", "198.51.100.7"]]);
+  const good = shareDoc("//files.example.net/s", "addr=198.51.100.7");
+  resetShareDenySet();
+  await assertShareAddressesPinned(good, pins, deps({}));
+  for (
+    const bad of [
+      shareDoc("//files.example.net/s"),
+      shareDoc("//files.example.net/s", "addr=198.51.100.8"),
+      shareDoc("//files.example.net/s", "addr=172.29.4.1"),
+      shareDoc("//files.example.net/s", "addr=198.51.100.7,addr=10.0.0.1"),
+    ]
+  ) {
+    await assertRejects(
+      () => assertShareAddressesPinned(bad, pins, deps({})),
+      Error,
+      "network share volumes refused before start",
+    );
+  }
+});

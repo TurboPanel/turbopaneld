@@ -128,6 +128,12 @@ import {
   NETWORK_SHARES_REFUSAL_NOTE,
   networkShareVolumes,
 } from "../deploy/network-shares.ts";
+import {
+  assertShareAddressesPinned,
+  checkShareTargets,
+  pinShareAddresses,
+  type ShareTargetDeps,
+} from "../deploy/network-share-targets.ts";
 import { ensureSmbTools as defaultEnsureSmbTools } from "../deploy/smb-tools.ts";
 import { runSmbToolsSetup } from "../orchestration/ansible.ts";
 import { ensureBuildkitImageBuild } from "../deploy/release/image-build.ts";
@@ -478,6 +484,8 @@ export type EnvironmentDeployDeps = {
    * `cifs-utils` through the privileged playbook when a share volume needs it).
    */
   ensureSmbTools?: (log: (line: string) => void) => Promise<void>;
+  /** Test seam — DNS, own-address and Docker-network reads for share hosts. */
+  shareTargets?: ShareTargetDeps;
   /** Test seam — defaults to {@link waitForHealthGate} (real polling and sleeps). */
   waitForHealth?: typeof waitForHealthGate;
   /**
@@ -1823,6 +1831,7 @@ type DeployContainerServicesInput = {
   logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
+  shareTargets: ShareTargetDeps | undefined;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -2616,6 +2625,12 @@ async function deployContainerServices(
       ].filter((n): n is string => typeof n === "string"),
       helperReach: parsedPayload.helperReach,
     });
+    // Where each share really points (names resolved on the daemon, own and
+    // Docker network addresses refused) is judged once the policy accepted it.
+    const sharePins = await checkShareTargets(
+      resolved.document ?? {},
+      input.shareTargets,
+    );
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
     // approval reaches these, bar a public remote context the organization
@@ -2719,6 +2734,9 @@ async function deployContainerServices(
       layout,
       parsedPayload,
     );
+    // Each share dials the address that was just checked, never the name
+    // again (DNS rebinding).
+    yaml = pinShareAddresses(yaml, shareDocument, sharePins);
     // The judged compose gets its share logins last, in the staged file that
     // is published (0640) and read by every later `compose up`.
     const shareApplied = await applyDeployShareLogins(
@@ -2771,16 +2789,19 @@ async function deployContainerServices(
     // Last look before anything starts: the compose that will run, read back
     // as Compose resolves it, must still hold only shares the daemon accepts.
     if (hasNetworkShares(shareDocument)) {
-      assertNetworkSharesFinal(
-        (await resolveComposeModel(
-          parsedPayload.projectName,
-          [stagedPath],
-          run,
-        )).document ?? {},
-        {
-          allowNetworkShares: parsedPayload.allowNetworkShares === true,
-          injectedLogins: shareApplied.injected,
-        },
+      const finalDocument = (await resolveComposeModel(
+        parsedPayload.projectName,
+        [stagedPath],
+        run,
+      )).document ?? {};
+      assertNetworkSharesFinal(finalDocument, {
+        allowNetworkShares: parsedPayload.allowNetworkShares === true,
+        injectedLogins: shareApplied.injected,
+      });
+      await assertShareAddressesPinned(
+        finalDocument,
+        sharePins,
+        input.shareTargets,
       );
     }
 
@@ -3137,6 +3158,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
   ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
+  shareTargets: ShareTargetDeps | undefined;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -3174,6 +3196,7 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
     ensureDockerFn: deps?.ensureDocker ??
       (() => defaultEnsureDocker({ onEvent: dockerEvents })),
+    shareTargets: deps?.shareTargets,
     ensureSmbToolsFn: deps?.ensureSmbTools ??
       ((log) =>
         defaultEnsureSmbTools({
@@ -4014,6 +4037,7 @@ async function deployEnvironmentHolding(
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
     ensureSmbToolsFn: runtime.ensureSmbToolsFn,
+    shareTargets: runtime.shareTargets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
     ...(runtime.waitForHealth === undefined
