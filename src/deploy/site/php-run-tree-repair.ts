@@ -159,10 +159,16 @@ async function stageAll(
 
 async function repairUnit(io: PhpRunTreeRepairIo): Promise<boolean> {
   const path = join(io.unitDir, UNIT_NAME);
-  const cat = await sudoText(io, ["cat", "--", path]);
-  if (!cat.ok) return false; // no php-fpm unit: no shared masters here
-  const next = patchPhpFpmUnit(cat.stdout, io.layout.runDir);
-  if (next === cat.stdout) return false;
+  // The unit folder is world-readable (0644 units), so no root read is needed.
+  let current: string;
+  try {
+    current = await Deno.readTextFile(path);
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return false; // no shared masters
+    throw err;
+  }
+  const next = patchPhpFpmUnit(current, io.layout.runDir);
+  if (next === current) return false;
   await installUnit(io.run, path, next, "tp-php-unit-");
   const reload = await systemctl(io.run, ["daemon-reload"]);
   if (!reload.success) {
