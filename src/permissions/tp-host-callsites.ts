@@ -2587,6 +2587,10 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "restart", "--no-block", "turbopanel-website"] },
     { argv: ["systemctl", "restart", "--no-block", "turbopaneld"] },
   ),
+  notRoot(
+    'src/dev-host/units.ts|["-n","cat",path]',
+    "development host only: the dev account has full sudo and reads the root-only instance passwords file; tp-host's cat refuses that path class on purpose, and a managed host never runs the dev-host reader",
+  ),
   tpHost(
     "src/instance/run-reconcile.ts|args",
     { argv: ["systemctl", "restart", "turbopanel-instance.service"] },
