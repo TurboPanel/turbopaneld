@@ -764,8 +764,9 @@ tp_instance_bootstrap_curl() {
 
 # The last line of curl's captured stderr in $1, single line and short.
 tp_curl_reason() {
-  [ -s "$1" ] || return 0
-  tail -n 1 "$1" | tr -d '\r' | cut -c1-200
+  _cr_file="$1"
+  [ -s "$_cr_file" ] || return 0
+  tail -n 1 "$_cr_file" | tr -d '\r' | cut -c1-200
 }
 
 tp_fetch_uploaded_trust() {
