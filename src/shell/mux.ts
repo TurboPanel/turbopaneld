@@ -75,6 +75,11 @@ export const MAX_SOCKET_BUFFERED_BYTES = 1024 * 1024;
 export const SOCKET_POLL_MS = 25;
 /** Opening the stream (inspect, create, start) gives up after this. */
 export const OPEN_TIMEOUT_MS = 20_000;
+/**
+ * A session the control plane opened ends when no authenticated browser frame
+ * has arrived this long after `shell-opened` (the browser never connected).
+ */
+export const ATTACH_TIMEOUT_MS = 60_000;
 
 export interface MuxTimers {
   now(): number;
@@ -250,6 +255,8 @@ class ShellSession {
   #noticeSent = false;
   #idleTimer: unknown;
   #maxTimer: unknown;
+  #attachTimer: unknown;
+  #applyChain: Promise<void> = Promise.resolve();
 
   constructor(request: OpenRequest, mux: ShellSessionMux, deps: ShellMuxDeps) {
     this.sid = request.sid;
@@ -301,6 +308,10 @@ class ShellSession {
       request.maxMs,
     );
     this.#armIdle();
+    this.#attachTimer = this.#timers.setTimeout(
+      () => this.#onAttachTimer(),
+      ATTACH_TIMEOUT_MS,
+    );
     this.#readyResolve();
     await this.#pump(transport);
   }
@@ -366,30 +377,72 @@ class ShellSession {
   handleFrame(frame: Uint8Array): void {
     if (this.#ended || this.#queuedIn >= MAX_QUEUED_FRAMES) return;
     this.#queuedIn += 1;
-    this.#inChain = this.#inChain.then(async () => {
-      this.#queuedIn -= 1;
-      await this.#processFrame(frame);
-    });
+    this.#inChain = this.#inChain.then(() => this.#processFrame(frame));
   }
 
+  /**
+   * Frames are opened strictly in order (the counter demands it), but only
+   * stdin, resize and close wait in the apply chain behind a slow write. An
+   * output ACK is applied the moment it opens, so it never waits on stdin.
+   */
   async #processFrame(frame: Uint8Array): Promise<void> {
     const opener = this.#opener;
-    if (this.#ended || !opener) return;
+    if (this.#ended || !opener) {
+      this.#queuedIn -= 1;
+      return;
+    }
     let message: PlainMessage;
     try {
       message = decodePlain(await opener.open(frame));
     } catch (err) {
+      this.#queuedIn -= 1;
       if (err instanceof FrameError) this.end("error");
       else throw err;
       return;
     }
-    if (this.#ended) return;
-    await this.#apply(message);
+    if (this.#ended) {
+      this.#queuedIn -= 1;
+      return;
+    }
+    this.#attached();
+    if (message.type === "ack") {
+      this.#queuedIn -= 1;
+      this.#applyAck(message.bytes);
+      return;
+    }
+    this.#applyChain = this.#applyChain.then(async () => {
+      try {
+        await this.#apply(message);
+      } finally {
+        this.#queuedIn -= 1;
+      }
+    });
+  }
+
+  /** The browser has spoken under the session key: stop the attach clock. */
+  #attached(): void {
+    if (this.#attachTimer === undefined) return;
+    this.#timers.clearTimeout(this.#attachTimer);
+    this.#attachTimer = undefined;
+  }
+
+  #onAttachTimer(): void {
+    this.#attachTimer = undefined;
+    // `idle` is the closest existing close reason; the wire has no other.
+    this.end("idle");
+  }
+
+  #applyAck(bytes: number): void {
+    // The browser can only have received what was sent; more is a
+    // forged window, which would let output flood the socket.
+    if (bytes > this.#unacked) return this.end("error");
+    this.#unacked -= bytes;
+    this.#wakeWindow();
   }
 
   async #apply(message: PlainMessage): Promise<void> {
     const transport = this.#transport;
-    if (!transport) return;
+    if (this.#ended || !transport) return;
     switch (message.type) {
       case "data":
         return await this.#stdin(transport, message.data);
@@ -401,12 +454,7 @@ class ShellSession {
         }
         return;
       case "ack":
-        // The browser can only have received what was sent; more is a
-        // forged window, which would let output flood the socket.
-        if (message.bytes > this.#unacked) return this.end("error");
-        this.#unacked -= message.bytes;
-        this.#wakeWindow();
-        return;
+        return this.#applyAck(message.bytes);
       case "close":
         return this.end("client");
       default:
@@ -574,9 +622,17 @@ class ShellSession {
   }
 
   #clearTimers(): void {
-    for (const id of [this.#flushTimer, this.#idleTimer, this.#maxTimer]) {
+    for (
+      const id of [
+        this.#flushTimer,
+        this.#idleTimer,
+        this.#maxTimer,
+        this.#attachTimer,
+      ]
+    ) {
       if (id !== undefined) this.#timers.clearTimeout(id);
     }
+    this.#attachTimer = undefined;
     this.#flushTimer = undefined;
     this.#idleTimer = undefined;
     this.#maxTimer = undefined;
