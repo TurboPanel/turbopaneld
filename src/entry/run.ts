@@ -509,6 +509,9 @@ function scheduleBootRetry(
 ): void {
   if ((io.shouldSkipOrchestration ?? shouldSkipOrchestration)()) return;
   markRuntimeUnverified();
+  // The converge that moves PHP to the root-owned run tree did not finish, so
+  // say so now instead of only after a retry works.
+  void runRunTreeCheck(io);
   const attempt = async () =>
     (await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)()) &&
     (await (io.runBootConverge ?? runBootConverge)());
@@ -547,6 +550,19 @@ async function syncWall(io: DaemonRunIo): Promise<void> {
  * background checks. Runs before the connection on an enrolled host, and after
  * the boot converge on a new one.
  */
+/** The read-only PHP run tree warning; never rejects. */
+function runRunTreeCheck(io: DaemonRunIo): Promise<void> {
+  return (io.checkPhpRunTree ??
+    (() => checkPhpRunTree(hostPhpRunTreeCheckIo(resolveLayout()))))()
+    .then(() => undefined, (err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "PHP run tree check failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+}
+
 async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,
@@ -570,15 +586,7 @@ async function afterOrchestration(
   (io.armPhpPatchRestarts ?? (() => armPhpPatchRestarts(resolveLayout())))();
   // Also in the background: warn when the converge left PHP on the old socket
   // folder (read-only), then add the Apache walls once per daemon version.
-  (io.checkPhpRunTree ??
-    (() => checkPhpRunTree(hostPhpRunTreeCheckIo(resolveLayout()))))()
-    .catch((err) => {
-      (io.logWarn ?? logWarn)(
-        "deploy",
-        "PHP run tree check failed:",
-        err instanceof Error ? err.message : String(err),
-      );
-    })
+  runRunTreeCheck(io)
     .then(() =>
       (io.repairApacheWalls ??
         (() => repairApacheWalls(hostApacheWallsRepairIo(resolveLayout()))))()

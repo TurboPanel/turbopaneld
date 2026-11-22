@@ -56,11 +56,11 @@ Docker Compose. The daemon:
    nothing creates the old `<runDir>/php/<series>/` any more, so a pool or vhost
    still naming it would fail to bind after a reboot. The move is done as root by
    the php-fpm role (`tasks/converge-run-tree.yml`, entered from
-   `daemon-converge.yml`), not by the daemon: it re-renders the unit and each
-   series' `php-fpm.conf` and bootstrap pool, swaps the old prefix for the new
-   one in the pools and the Caddy, nginx and Apache vhosts, tests every engine
+   `daemon-converge.yml`), not by the daemon: it re-renders the unit and swaps the old prefix for the new
+   one in each series' `php-fpm.conf`, the pools (the bootstrap pool too) and the Caddy, nginx and Apache vhosts, tests every engine
    before restarting any master, and restores its backups on any failure. Deploys
-   cannot overlap it (`bootConvergeSettled`). `site/php-run-tree-check.ts`
+   cannot overlap it (`bootConvergeSettled`; a converge retry also waits for
+   running commands, `commandsDrained`). `site/php-run-tree-check.ts`
    (started from `entry/run.ts`) is read-only: it warns when the unit or a pool
    or vhost still names the old folder, and writes nothing.
 

@@ -157,14 +157,6 @@ test("the converge rewrites the old socket prefix, trailing slash kept, to the n
     ?.["ansible.builtin.replace"];
   assertEquals(replace?.regexp, "{{ turbopanel_run_dir }}/php/");
   assertEquals(replace?.replace, "{{ php_fpm_run_dir }}/");
-  // What a pool or vhost says before and after.
-  const old =
-    "listen = /run/turbopanel/php/8.4/tp-e1-shop.sock\nfastcgi_pass unix:/run/turbopanel/php/8.4/tp-e1-shop.sock;\n";
-  const moved = old.replaceAll("/run/turbopanel/php/", `${PHP_FPM_RUN_DIR}/`);
-  assertEquals(
-    moved,
-    `listen = ${PHP_FPM_RUN_DIR}/8.4/tp-e1-shop.sock\nfastcgi_pass unix:${PHP_FPM_RUN_DIR}/8.4/tp-e1-shop.sock;\n`,
-  );
 });
 
 test("every engine config is tested before any master or engine is restarted", async () => {
@@ -178,7 +170,6 @@ test("every engine config is tested before any master or engine is restarted", a
   const firstRestart = at("Restart the php-fpm masters");
   assert(firstRestart > Math.max(...tests), "restart after every test");
   assert(at("Reload the engines") > firstRestart);
-  assert(at("Re-render each series' php-fpm main config") < Math.min(...tests));
   assert(at("Point the pools and vhosts") < Math.min(...tests));
   assert(at("Back up every file") < at("Install the php-fpm unit template"));
 });
@@ -189,17 +180,51 @@ test("a failed move restores the backups, restarts only what ran, and fails", as
   assertEquals(rescue, [
     "Put the backed-up files back",
     "Reload systemd after putting the unit template back",
-    "Restart the masters that were running, on the old files",
+    "Restart the masters the move restarted, on the old files",
+    "Reload the engines the move reloaded, on the old files",
     "Remove the backup file",
     "Fail the move",
   ]);
-  // A master stopped on purpose is never started, here or in the happy path.
-  for (
-    const play of [
-      ...(main.block ?? []),
-      ...(main.rescue ?? []),
-    ].filter((p) => (p.name ?? "").startsWith("Restart the"))
-  ) {
-    assertStringIncludes(String(play.when), "== 'active'");
+  // A master stopped on purpose is never started: only the active ones are.
+  const restart = (main.block ?? []).find((p) =>
+    (p.name ?? "").startsWith("Restart the")
+  );
+  assertStringIncludes(String(restart?.when), "== 'active'");
+});
+
+test("the converge never re-renders a config or pool, so a tpols host keeps its owner and group", async () => {
+  const text = await read("php-fpm/tasks/converge-run-tree.yml");
+  // Re-rendering would use the role default `tpapache`; an OpenLiteSpeed-only
+  // host installed the role as `tpols` and has no such account.
+  for (const template of ["php-fpm.conf.j2", "default-pool.conf.j2"]) {
+    assert(!text.includes(template), template);
   }
+  assert(!text.includes("php_fpm_service_group"));
+  assert(!text.includes("tpapache:"));
+  const { names } = await converge();
+  assertEquals(
+    names.filter((n) => n.startsWith("Re-render")),
+    [],
+  );
+  // php-fpm.conf (the series folder) and the pools are found and rewritten.
+  assertStringIncludes(
+    text,
+    "(_tp_series.files | map(attribute='path') | list)",
+  );
+  assertStringIncludes(text, "'/pools'");
+  // The unit is the only template: role-owned, root:root, no account in it.
+  const unit = await read("php-fpm/templates/turbopanel-php-fpm@.service.j2");
+  assert(!unit.includes("php_fpm_service"));
+});
+
+test("the rescue restarts and reloads only what the block did", async () => {
+  const { main } = await converge();
+  const rescue = (main.rescue ?? []) as Play[];
+  const text = JSON.stringify(rescue);
+  assertStringIncludes(text, "_tp_restarted");
+  assertStringIncludes(text, "_tp_reloaded");
+  assert(!text.includes("_tp_masters"), "not every master that was active");
+  const block = JSON.stringify(main.block);
+  assertStringIncludes(block, '"register":"_tp_restarted"');
+  assertStringIncludes(block, '"register":"_tp_reloaded"');
 });

@@ -1,4 +1,7 @@
-import { bootConvergeSettled } from "../orchestration/boot-converge-gate.ts";
+import {
+  bootConvergeSettled,
+  withCommandRunning,
+} from "../orchestration/boot-converge-gate.ts";
 import {
   answerRepeatedDispatch,
   deliverCommandOutcome,
@@ -419,6 +422,20 @@ export async function handleCommandDispatch(
   // running before the wait, so the same command sent again meanwhile is
   // answered like any running command and never runs twice.
   await bootConvergeSettled();
+  // Counted from here, in the same tick as the wait ends, so a boot converge
+  // retry can wait for every command that got past the gate to finish.
+  await withCommandRunning(() =>
+    runDispatchedCommand(message, ws, deps, daemonReceivedAt)
+  );
+}
+
+/** Everything a command does once the boot converge gate has let it through. */
+async function runDispatchedCommand(
+  message: CommandDispatchMessage,
+  ws: WebSocket,
+  deps: CommandRouterDeps | undefined,
+  daemonReceivedAt: string,
+): Promise<void> {
   const logSink = createDispatchLogSink(message, deps);
   // Before any handler runs: the dead-primary probe must see the platform's
   // own stop/restart/re-apply/promote/restore/destroy as intent, not a crash.

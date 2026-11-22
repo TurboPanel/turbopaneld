@@ -7,10 +7,13 @@
 # command (deploys included) until the converge, retries included, has
 # finished, so no deploy writes a pool or vhost meanwhile.
 #
-# What moves: the unit template, every series' php-fpm.conf and bootstrap pool
-# (re-rendered from the same templates as a fresh install), and the socket
-# prefix in the per-site pools and the Caddy, nginx and Apache vhosts, which is
-# the only thing that differs from what a deploy writes today. Order, so the
+# What moves: the unit template (role-owned, no account in it, so it is
+# re-rendered) and the socket prefix in every series' php-fpm.conf, in the
+# pools (the bootstrap pool too) and in the Caddy, nginx and Apache vhosts. The
+# prefix is the only thing that differs from what a fresh install writes. The
+# configs and pools are NOT re-rendered: their owner and group are whatever
+# the install gave them (`tpapache`, or `tpols` on an OpenLiteSpeed-only host),
+# and a replace keeps both. Order, so the
 # old setup keeps working until the new one is proven:
 #   1. back everything up; 2. write the new files; 3. test EVERY engine config
 #   (nothing has been restarted yet); 4. only then restart the masters that
@@ -35,13 +38,14 @@
   when: _tp_unit.stat.exists
 
 # Every file that may name the old socket folder: the per-site pools (not the
-# per-site php units' own folders) and the three engines' vhosts. The
-# bootstrap pool and php-fpm.conf are re-rendered below.
+# per-site php units' own folders), each series' php-fpm.conf, and the three
+# engines' vhosts.
 - name: Find the pool and vhost files that name the old socket folder
   ansible.builtin.find:
     paths: >-
       {{
-        (_tp_series.files | map(attribute='path') | map('regex_replace', '$', '/pools') | list)
+        (_tp_series.files | map(attribute='path') | list)
+        + (_tp_series.files | map(attribute='path') | map('regex_replace', '$', '/pools') | list)
         + [
           turbopanel_config_dir ~ '/site-caddy/sites',
           turbopanel_config_dir ~ '/nginx/sites',
@@ -74,16 +78,6 @@
 
 - name: Move the php-fpm run tree
   when: _tp_unit.stat.exists and _tp_move | bool
-  vars:
-    _tp_series_files: >-
-      {{
-        _tp_series_names
-        | map('regex_replace', '^(.*)$', turbopanel_config_dir ~ '/php/\1/php-fpm.conf')
-        | list
-        + _tp_series_names
-        | map('regex_replace', '^(.*)$', turbopanel_config_dir ~ '/php/\1/pools/default.conf')
-        | list
-      }}
   block:
     - name: Note which masters run now
       ansible.builtin.command: "systemctl is-active turbopanel-php-fpm@{{ item }}"
@@ -114,7 +108,7 @@
             ['tar', '-C', '/', '-cpf', _tp_backup.path, '--ignore-failed-read']
             + (
               ['etc/systemd/system/turbopanel-php-fpm@.service']
-              + (_tp_series_files + _tp_stale_files)
+              + _tp_stale_files
               | map('regex_replace', '^/', '')
               | list
             )
@@ -145,28 +139,6 @@
         group: "{{ turbopanel_group }}"
         mode: "0750"
       loop: "{{ _tp_series_names }}"
-
-    - name: Re-render each series' php-fpm main config
-      ansible.builtin.template:
-        src: php-fpm.conf.j2
-        dest: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/php-fpm.conf"
-        owner: root
-        group: "{{ php_fpm_service_group }}"
-        mode: "0640"
-      loop: "{{ _tp_series_names }}"
-      loop_control:
-        loop_var: php_fpm_series_item
-
-    - name: Re-render each series' bootstrap pool
-      ansible.builtin.template:
-        src: default-pool.conf.j2
-        dest: "{{ turbopanel_config_dir }}/php/{{ php_fpm_series_item }}/pools/default.conf"
-        owner: root
-        group: "{{ php_fpm_service_group }}"
-        mode: "0640"
-      loop: "{{ _tp_series_names }}"
-      loop_control:
-        loop_var: php_fpm_series_item
 
     - name: Point the pools and vhosts at the new socket folder
       ansible.builtin.replace:
@@ -236,6 +208,7 @@
       loop_control:
         label: "{{ item.item }}"
       when: item.stdout == 'active'
+      register: _tp_restarted
 
     - name: Reload the engines that were running
       ansible.builtin.systemd:
@@ -245,6 +218,7 @@
       loop_control:
         label: "{{ item.item }}"
       when: item.stdout == 'active'
+      register: _tp_reloaded
 
     - name: Remove the backup file
       ansible.builtin.file:
@@ -264,14 +238,25 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: Restart the masters that were running, on the old files
+    # Exactly what the block restarted or reloaded (a skipped item is one that
+    # was not running), masters first so the engines find their sockets. A
+    # failure before any restart, a config test for one, restarts nothing.
+    - name: Restart the masters the move restarted, on the old files
       ansible.builtin.systemd:
-        name: "turbopanel-php-fpm@{{ item.item }}"
+        name: "turbopanel-php-fpm@{{ item.item.item }}"
         state: restarted
-      loop: "{{ _tp_masters.results | default([]) }}"
+      loop: "{{ (_tp_restarted | default({'results': []})).results | rejectattr('skipped', 'defined') | list }}"
       loop_control:
-        label: "{{ item.item }}"
-      when: item.stdout | default('') == 'active'
+        label: "{{ item.item.item }}"
+      failed_when: false
+
+    - name: Reload the engines the move reloaded, on the old files
+      ansible.builtin.systemd:
+        name: "{{ item.item.item }}"
+        state: reloaded
+      loop: "{{ (_tp_reloaded | default({'results': []})).results | rejectattr('skipped', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.item.item }}"
       failed_when: false
 
     - name: Remove the backup file
