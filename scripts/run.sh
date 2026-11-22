@@ -767,14 +767,14 @@ tp_fetch_uploaded_trust() {
   _curl_base="$(tp_instance_bootstrap_curl)"
   _trust_tmp="$(mktemp)"
   # shellcheck disable=SC2086
-  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>/dev/null)
   if [ "$_trust_code" = 000 ] && [ "$_trust_leg" = stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
     # The stored issuer does not verify the control plane any more. Ask
     # again over the public roots (a control plane now behind a public
     # edge): what comes back is checked against this host's list and must
     # still sign the presented certificate before it is stored.
     _trust_leg=system
-    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>/dev/null)
   fi
   case "$_trust_code" in
     200)
@@ -802,6 +802,15 @@ tp_fetch_uploaded_trust() {
         rm -f "$_trust_tmp"
         tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
         return 1
+      fi
+      # Nothing stored, and the fetch could not verify the control plane
+      # against the Platform CA. Behind a publicly trusted certificate (a
+      # public edge) that can never pass and no private issuer exists: say so
+      # plainly instead of showing curl's raw error. Nothing is stored here.
+      if tp_system_roots_validate_leaf 2>/dev/null; then
+        tp_print_step "–" "No private issuer needed: the control plane uses a publicly trusted certificate"
+      else
+        tp_print_step "~" "Could not fetch a private uploaded issuer: the control plane's certificate did not verify against the Platform CA. The trust check below decides whether the install can go on"
       fi
       ;;
     *)
