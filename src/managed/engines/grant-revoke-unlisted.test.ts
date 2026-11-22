@@ -252,11 +252,11 @@ test("a name with a control character is left out of the plan", () => {
 test("each dialect reads its own processlist table", () => {
   assertStringIncludes(
     listConnectionsSql("u1"),
-    "FROM performance_schema.processlist WHERE USER = 'u1'",
+    "FROM performance_schema.processlist WHERE CAST(USER AS BINARY) = CAST('u1' AS BINARY)",
   );
   assertStringIncludes(
     mariadbListConnectionsSql("u1"),
-    "FROM information_schema.PROCESSLIST WHERE USER = 'u1'",
+    "FROM information_schema.PROCESSLIST WHERE CAST(USER AS BINARY) = CAST('u1' AS BINARY)",
   );
 });
 

@@ -12,6 +12,7 @@
 import { assertEquals, assertStringIncludes } from "@std/assert";
 import { docker, dockerReachable } from "../../testing/docker-run.ts";
 import {
+  endConnections,
   endSessionsWhenRightsChange,
   grantDatabasePrivileges,
   revokeUnlistedGrants,
@@ -30,6 +31,7 @@ const ENGINES = [
     rootEnv: "MYSQL_ROOT_PASSWORD",
     client: "mysql",
     dialect: mysqlSql,
+    processlist: "performance_schema.processlist",
     // MySQL with binary logging on refuses a trigger from a login without
     // SUPER (error 1419), whatever its database rights.
     trigger: "",
@@ -39,6 +41,7 @@ const ENGINES = [
     rootEnv: "MARIADB_ROOT_PASSWORD",
     client: "mariadb",
     dialect: mariadbSql,
+    processlist: "information_schema.PROCESSLIST",
     trigger: "CREATE TRIGGER migrations_bi BEFORE INSERT ON migrations " +
       "FOR EACH ROW SET NEW.batch = 1; ",
   },
@@ -208,6 +211,96 @@ for (const engine of ENGINES) {
           "SELECT COUNT(*) FROM mysql.db WHERE User = 'mig'",
         );
         assertEquals(all.trim(), "2");
+      } finally {
+        await docker(["rm", "-f", "-v", name]);
+      }
+    },
+  });
+}
+
+for (const engine of ENGINES) {
+  test({
+    name:
+      `ending one login's sessions leaves a login that differs only by case on ${engine.image}`,
+    ignore: !DOCKER_AVAILABLE,
+    fn: async () => {
+      const name = `tp-owner-grants-${crypto.randomUUID().slice(0, 8)}`;
+      const run = await docker([
+        "run",
+        "-d",
+        "--rm",
+        "--name",
+        name,
+        "-e",
+        `${engine.rootEnv}=${ROOT_PASSWORD}`,
+        engine.image,
+      ]);
+      if (!run.success) throw new Error(`docker run failed: ${run.stderr}`);
+      const exec = (user: string, password: string, statement: string) =>
+        docker([
+          "exec",
+          name,
+          engine.client,
+          `-u${user}`,
+          `-p${password}`,
+          "-N",
+          "-B",
+          "-e",
+          statement,
+        ]);
+      const sql = async (statement: string): Promise<string> => {
+        const result = await exec("root", ROOT_PASSWORD, statement);
+        if (!result.success) throw new Error(result.stderr);
+        return result.stdout;
+      };
+      const d = engine.dialect;
+      try {
+        let ready = false;
+        for (let attempt = 0; attempt < 90 && !ready; attempt++) {
+          ready = (await docker([
+            "exec",
+            name,
+            engine.client,
+            "--protocol=TCP",
+            "-h127.0.0.1",
+            "-uroot",
+            `-p${ROOT_PASSWORD}`,
+            "-e",
+            "SELECT 1",
+          ])).success;
+          if (!ready) await sleep(1000);
+        }
+        if (!ready) throw new Error("engine did not become ready");
+        await sql(
+          [
+            d.createClientAccountSql("App", LOGIN_PASSWORD, ["localhost"]),
+            d.createClientAccountSql("app", LOGIN_PASSWORD, ["localhost"]),
+          ].join("\n"),
+        );
+        const sessions = ["App", "app"].map((user) =>
+          exec(user, LOGIN_PASSWORD, "DO SLEEP(30);")
+        );
+        const count = async (user: string) =>
+          (await sql(
+            "SELECT COUNT(*) FROM " + engine.processlist +
+              ` WHERE CAST(USER AS BINARY) = CAST('${user}' AS BINARY)`,
+          )).trim();
+        let seen = false;
+        for (let attempt = 0; attempt < 60 && !seen; attempt++) {
+          seen = (await count("App")) === "1" && (await count("app")) === "1";
+          if (!seen) await sleep(250);
+        }
+        assertEquals(seen, true, "both sessions should be open");
+
+        await endConnections({
+          username: "App",
+          listConnectionsSql: d.listConnectionsSql,
+          query: sql,
+          run: sql,
+        });
+        assertEquals(await count("App"), "0");
+        assertEquals(await count("app"), "1");
+        void sessions;
       } finally {
         await docker(["rm", "-f", "-v", name]);
       }

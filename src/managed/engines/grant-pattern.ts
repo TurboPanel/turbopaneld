@@ -231,14 +231,19 @@ export function snapshotLoginGrantsSql(
   } ORDER BY Host, Db;`;
 }
 
-/** The open connection ids of the account (one `KILL` each); never this session's. */
+/**
+ * The open connection ids of the account (one `KILL` each); never this
+ * session's. The processlist `USER` column has a case- and trailing-space-
+ * insensitive collation, so `APP` would match `App` and `app `; both sides
+ * are compared as bytes to keep it to the one account.
+ */
 export function listLoginConnectionsSql(
   quoting: GrantQuoting,
   username: string,
 ): string {
-  return `SELECT ID FROM ${quoting.processlistTable} WHERE USER = ${
+  return `SELECT ID FROM ${quoting.processlistTable} WHERE CAST(USER AS BINARY) = CAST(${
     quoting.quoteLiteral(username)
-  } AND ID <> CONNECTION_ID();`;
+  } AS BINARY) AND ID <> CONNECTION_ID();`;
 }
 
 /**
