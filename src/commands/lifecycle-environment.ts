@@ -262,104 +262,94 @@ async function ensureLifecycleSecrets(
   });
 }
 
-async function lifecycleLocked(
+type DockerLifecycleContext = {
+  layout: ReturnType<typeof resolveLayout>;
+  deploymentDir: string;
+  composePaths: string[];
+  manifest: Awaited<ReturnType<typeof readDeploymentManifest>>;
+  run: RunDockerFn;
+  runStreamed: ReturnType<typeof createStreamedRunner>;
+  logSink: CommandOutputSink;
+};
+
+/** Compose and ingress for the action. Returns the earlier-named projects found. */
+async function applyDockerLifecycle(
   parsedPayload: EnvironmentLifecyclePayload,
-  daemonReceivedAt: string,
-  deps?: EnvironmentLifecycleHandlerDeps,
-): Promise<EnvironmentLifecycleResult> {
-  const run = deps?.runDocker ?? defaultRunDocker;
-  const runStreamed = createStreamedRunner(deps?.runDocker);
-  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
-  logSink.setPhase(lifecyclePhase(parsedPayload.action));
-  const decryptSecrets = captureDecryptedSecrets(deps?.decryptSecrets, logSink);
-  const layout = resolveLayout(Deno.env.toObject());
-
-  const deploymentDir = resolveEnvironmentDeploymentDir(
-    layout,
-    parsedPayload.projectId,
-    parsedPayload.environmentId,
+  ctx: DockerLifecycleContext,
+): Promise<string[]> {
+  const { layout, deploymentDir, composePaths, manifest, run } = ctx;
+  const { runStreamed, logSink } = ctx;
+  // A stack still running under an earlier, project-wide name (the recorded
+  // names do not include this command's). Compose acts on a whole project and
+  // sibling environments shared that name, so only this environment's own
+  // containers are touched, and no compose command runs on the old name.
+  const earlier = manifest === null ? [] : await earlierRecordedProjects(
+    deploymentDir,
+    parsedPayload.projectName,
   );
-  const composePaths = await resolveDeployedComposePaths(deploymentDir);
-
-  if (composePaths === null) {
-    throw new Error(
-      `environment ${parsedPayload.environmentId} is not deployed on this server yet — deploy it first`,
-    );
-  }
-
-  // Stop, start and restart change what is running, so the last deploy no
-  // longer describes the host: the next deploy runs in full instead of being
-  // skipped as unchanged.
-  await clearAppliedDeployHash(deploymentDir);
-  const manifest = await readDeploymentManifest(deploymentDir);
-  await ensureLifecycleSecrets(
-    parsedPayload,
-    layout,
-    manifest,
-    decryptSecrets,
-    deps,
-  );
-
-  const dockerPresent = await dockerAvailableForLifecycle(deps);
-  let earlier: string[] = [];
-  if (dockerPresent) {
-    // A stack still running under an earlier, project-wide name (the recorded
-    // names do not include this command's). Compose acts on a whole project and
-    // sibling environments shared that name, so only this environment's own
-    // containers are touched, and no compose command runs on the old name.
-    earlier = manifest === null ? [] : await earlierRecordedProjects(
+  if (earlier.length > 0) {
+    await actOnEarlierContainers(earlier, run, {
+      environmentId: parsedPayload.environmentId,
       deploymentDir,
-      parsedPayload.projectName,
-    );
-    if (earlier.length > 0) {
-      await actOnEarlierContainers(earlier, run, {
-        environmentId: parsedPayload.environmentId,
-        deploymentDir,
-      }, parsedPayload.action);
-    } else {
-      // start / restart act on the live generation; stop on every generation.
-      const projects = projectsForCommand(
-        manifest,
-        parsedPayload.projectName,
-        parsedPayload.action === "stop" ? "all" : "live",
-      );
-      await forEachSequential(projects, async (projectName) => {
-        const result = await runStreamed([
-          ...composeFileArgs(projectName, composePaths),
-          parsedPayload.action,
-        ], {
-          onLine: (event) => logSink.onLine(event.stream, event.line),
-        });
-        if (!result.success) {
-          // Redact before sanitizing: the deny-set matches raw plaintext, and
-          // sanitizeForLog would otherwise rewrite the newlines a multiline
-          // secret (a PEM body) is matched on.
-          throw new Error(
-            sanitizeForLog(
-              logSink.redactSummary(result.stderr) ||
-                `compose ${parsedPayload.action} failed`,
-            ),
-          );
-        }
-      });
-    }
-
-    // Best-effort parity with managed.lifecycle: keep per-service Traefik in
-    // step so stopped stacks do not leave published ports listening with no
-    // backend. Read-only w.r.t. claim files.
-    await applyIngressLifecycle(
-      layout,
-      parsedPayload.environmentId,
-      parsedPayload.action,
-      run,
-    );
+    }, parsedPayload.action);
   } else {
-    logInfo(
-      "commands",
-      `environment.lifecycle Docker not installed; skipping compose ${parsedPayload.action} project=${parsedPayload.projectName} env=${parsedPayload.environmentId}`,
+    // start / restart act on the live generation; stop on every generation.
+    const projects = projectsForCommand(
+      manifest,
+      parsedPayload.projectName,
+      parsedPayload.action === "stop" ? "all" : "live",
     );
+    await forEachSequential(projects, async (projectName) => {
+      const result = await runStreamed([
+        ...composeFileArgs(projectName, composePaths),
+        parsedPayload.action,
+      ], {
+        onLine: (event) => logSink.onLine(event.stream, event.line),
+      });
+      if (!result.success) {
+        // Redact before sanitizing: the deny-set matches raw plaintext, and
+        // sanitizeForLog would otherwise rewrite the newlines a multiline
+        // secret (a PEM body) is matched on.
+        throw new Error(
+          sanitizeForLog(
+            logSink.redactSummary(result.stderr) ||
+              `compose ${parsedPayload.action} failed`,
+          ),
+        );
+      }
+    });
   }
 
+  // Best-effort parity with managed.lifecycle: keep per-service Traefik in
+  // step so stopped stacks do not leave published ports listening with no
+  // backend. Read-only w.r.t. claim files.
+  await applyIngressLifecycle(
+    layout,
+    parsedPayload.environmentId,
+    parsedPayload.action,
+    run,
+  );
+  return earlier;
+}
+
+/** A host without Docker has no containers: the Docker steps are skipped. */
+function skipDockerLifecycle(
+  parsedPayload: EnvironmentLifecyclePayload,
+): string[] {
+  logInfo(
+    "commands",
+    `environment.lifecycle Docker not installed; skipping compose ${parsedPayload.action} project=${parsedPayload.projectName} env=${parsedPayload.environmentId}`,
+  );
+  return [];
+}
+
+/** Native app units, workers and PHP follow the action. */
+async function applyHostUnitLifecycle(
+  parsedPayload: EnvironmentLifecyclePayload,
+  layout: ReturnType<typeof resolveLayout>,
+  logSink: CommandOutputSink,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<void> {
   // Native app units follow the same action. Best-effort per unit for the same
   // reason ingress is: one wedged unit must not fail the whole lifecycle
   // command and leave the compose half in an inconsistent state.
@@ -420,6 +410,59 @@ async function lifecycleLocked(
       }`,
     );
   }
+}
+
+async function lifecycleLocked(
+  parsedPayload: EnvironmentLifecyclePayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<EnvironmentLifecycleResult> {
+  const run = deps?.runDocker ?? defaultRunDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(lifecyclePhase(parsedPayload.action));
+  const decryptSecrets = captureDecryptedSecrets(deps?.decryptSecrets, logSink);
+  const layout = resolveLayout(Deno.env.toObject());
+
+  const deploymentDir = resolveEnvironmentDeploymentDir(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+
+  if (composePaths === null) {
+    throw new Error(
+      `environment ${parsedPayload.environmentId} is not deployed on this server yet — deploy it first`,
+    );
+  }
+
+  // Stop, start and restart change what is running, so the last deploy no
+  // longer describes the host: the next deploy runs in full instead of being
+  // skipped as unchanged.
+  await clearAppliedDeployHash(deploymentDir);
+  const manifest = await readDeploymentManifest(deploymentDir);
+  await ensureLifecycleSecrets(
+    parsedPayload,
+    layout,
+    manifest,
+    decryptSecrets,
+    deps,
+  );
+
+  const dockerPresent = await dockerAvailableForLifecycle(deps);
+  const earlier = dockerPresent
+    ? await applyDockerLifecycle(parsedPayload, {
+      layout,
+      deploymentDir,
+      composePaths,
+      manifest,
+      run,
+      runStreamed,
+      logSink,
+    })
+    : skipDockerLifecycle(parsedPayload);
+  await applyHostUnitLifecycle(parsedPayload, layout, logSink, deps);
 
   // No container listing for an earlier-named stack: Compose would list the
   // whole shared project, siblings included.

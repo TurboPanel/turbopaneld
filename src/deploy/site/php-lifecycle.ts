@@ -87,23 +87,26 @@ export async function phpLifecycle(
         .filter((record) => record.environmentId === environmentId)
         .map((record) => record.series),
     );
-    await forEachSequential([...series].toSorted(), async (value) => {
-      const driver = phpFpmDriver(value);
-      if (action === "start") {
-        await call(["start", `${driver.unit}.service`], driver.unit);
-        return;
-      }
-      try {
-        await driver.reload(io.run, io.layout);
-        asked.push(driver.unit);
-      } catch (err) {
-        failures.push(
-          `reload ${driver.unit}: ${
-            err instanceof Error ? err.message : Deno.inspect(err)
-          }`,
-        );
-      }
-    });
+    await forEachSequential(
+      [...series].toSorted((a, b) => a.localeCompare(b)),
+      async (value) => {
+        const driver = phpFpmDriver(value);
+        if (action === "start") {
+          await call(["start", driver.unit], driver.unit);
+          return;
+        }
+        try {
+          await driver.reload(io.run, io.layout);
+          asked.push(driver.unit);
+        } catch (err) {
+          failures.push(
+            `reload ${driver.unit}: ${
+              err instanceof Error ? err.message : Deno.inspect(err)
+            }`,
+          );
+        }
+      },
+    );
   }
 
   if (failures.length > 0) {

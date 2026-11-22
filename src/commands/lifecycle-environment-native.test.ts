@@ -185,7 +185,7 @@ test({
         "start turbopanel-php-fcgi-site-aaaaaaaaaaaa.socket",
         "start turbopanel-php-fcgi-site-aaaaaaaaaaaa.service",
         "start turbopanel-php-fpm-site-bbbbbbbbbbbb.service",
-        "start turbopanel-php-fpm@8.3.service",
+        "start turbopanel-php-fpm@8.3",
       ]);
     });
   },
@@ -215,6 +215,44 @@ test({
       );
       // The other units were still tried.
       assertEquals(systemctlWords(calls).length, 4);
+    });
+  },
+});
+
+test({
+  name:
+    "handleEnvironmentLifecycle runs compose and native PHP when Docker is present",
+  permissions,
+  fn: async () => {
+    await withNativeHost(async () => {
+      const calls: RunCall[] = [];
+      const dockerCalls: string[][] = [];
+      await handleEnvironmentLifecycle(
+        payload("restart"),
+        new Date().toISOString(),
+        {
+          runDocker: (args) => {
+            dockerCalls.push(args);
+            return Promise.resolve({
+              success: true,
+              stdout: args.includes("ps") ? "[]" : "",
+              stderr: "",
+              code: 0,
+            });
+          },
+          runHost: (command, args) => {
+            calls.push({ command, args });
+            return Promise.resolve({ success: true, stdout: "", stderr: "" });
+          },
+        },
+      );
+      assertEquals(dockerCalls.some((args) => args.includes("restart")), true);
+      assertEquals(systemctlWords(calls), [
+        "start turbopanel-php-fcgi-site-aaaaaaaaaaaa.socket",
+        "restart turbopanel-php-fcgi-site-aaaaaaaaaaaa.service",
+        "restart turbopanel-php-fpm-site-bbbbbbbbbbbb.service",
+        "reload turbopanel-php-fpm@8.3",
+      ]);
     });
   },
 });
