@@ -154,6 +154,8 @@ export async function revokeUnlistedGrants(options: {
   listConnectionsSql: (username: string) => string;
   query: (sql: string) => Promise<string>;
   run: (sql: string) => Promise<unknown>;
+  /** Called after the login's connections were ended. */
+  ended?: () => void;
   sessionEnds?: {
     pending(): Promise<readonly string[]>;
     add(username: string): Promise<void>;
@@ -182,6 +184,7 @@ export async function revokeUnlistedGrants(options: {
   if (went > 0 || owed) {
     await run(FLUSH_SQL);
     await endConnections(options);
+    options.ended?.();
   }
   // Nothing went and nothing was owed: do not leave the record this apply
   // made, or every later apply would end the login's connections for nothing.
@@ -196,17 +199,41 @@ export async function revokeUnlistedGrants(options: {
 }
 
 /**
- * Runs `work` (the grants of one login) and, when the login's database-level
- * rights differ afterwards, flushes and ends its open connections. A session
- * keeps the rights of its current database until it runs `USE`, and the shared
- * proxy's pooled backend connections stay on one database for good, so a login
- * moved up (read-write to owner) would otherwise still get error 1142 on
- * `CREATE TABLE`, and one moved down would keep its old rights. A login with no
- * grant row yet has no such session, so a first apply ends nothing.
+ * True when a (host, db) row of `before` is gone from `after` or kept with
+ * other flags. A row only in `after` (a database or client host added) is not a
+ * change: the connections that exist never had it, so they lose nothing.
+ */
+export function loginRightsChanged(before: string, after: string): boolean {
+  const rows = (text: string) =>
+    new Map(
+      text.split("\n").map((line) => line.trim()).filter((line) =>
+        line.length > 0
+      ).map((line) => {
+        const at = line.lastIndexOf("\t");
+        return [line.slice(0, at), line.slice(at + 1)] as const;
+      }),
+    );
+  const now = rows(after);
+  for (const [key, flags] of rows(before)) {
+    if (now.get(key) !== flags) return true;
+  }
+  return false;
+}
+
+/**
+ * Runs `work` (the grants of one login) and, when a database-level right the
+ * login already had changed or went away, flushes and ends its open
+ * connections. A session keeps the rights of its current database until it runs
+ * `USE`, and the shared proxy's pooled backend connections stay on one database
+ * for good, so a login moved up (read-write to owner) would otherwise still get
+ * error 1142 on `CREATE TABLE`, and one moved down would keep its old rights.
+ * Added rows end nothing, and a login with no row yet has no such session.
  *
  * The login is recorded in `sessionEnds` (as `rights:<login>`) before `work`
  * and cleared once its connections are gone (or nothing changed), so a failure
- * in between is finished by the next apply.
+ * in between is finished by the next apply, whatever the snapshot then says.
+ * `work` returns true when it already ended the login's connections after
+ * writing the grants (the revoke step), so they are not ended twice.
  */
 export async function endSessionsWhenRightsChange(options: {
   username: string;
@@ -219,7 +246,7 @@ export async function endSessionsWhenRightsChange(options: {
     add(username: string): Promise<void>;
     done(username: string): Promise<void>;
   };
-}, work: () => Promise<void>): Promise<void> {
+}, work: () => Promise<boolean | void>): Promise<void> {
   const { username, query, run, sessionEnds } = options;
   // A record of its own (`:` cannot be in a login name), so the revoke step's
   // record for the plain name is not mistaken for this one, and the other way
@@ -230,9 +257,9 @@ export async function endSessionsWhenRightsChange(options: {
     ? (await sessionEnds.pending()).includes(key)
     : false;
   if (before.length > 0) await sessionEnds?.add(key);
-  await work();
+  const alreadyEnded = await work();
   const after = (await query(options.snapshotSql(username))).trim();
-  if (before.length === 0 || (before === after && !owed)) {
+  if (alreadyEnded || (!owed && !loginRightsChanged(before, after))) {
     await sessionEnds?.done(key);
     return;
   }
@@ -241,7 +268,7 @@ export async function endSessionsWhenRightsChange(options: {
   await sessionEnds?.done(key);
 }
 
-async function endConnections(options: {
+export async function endConnections(options: {
   username: string;
   listConnectionsSql: (username: string) => string;
   query: (sql: string) => Promise<string>;

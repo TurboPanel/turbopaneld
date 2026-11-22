@@ -157,7 +157,16 @@ for (const engine of ENGINES) {
           "-e",
           "SELECT 1; DO SLEEP(6); CREATE TABLE migrations (id INT);",
         ]);
-        await sleep(2000);
+        // Wait until the session shows in the processlist (no fixed sleep).
+        let seen = false;
+        for (let attempt = 0; attempt < 60 && !seen; attempt++) {
+          seen = (await sql(
+            "SELECT COUNT(*) FROM information_schema.PROCESSLIST " +
+              "WHERE USER = 'mig'",
+          )).trim() !== "0";
+          if (!seen) await sleep(250);
+        }
+        assertEquals(seen, true, "the long session never appeared");
 
         // The same login becomes owner: the open session is ended, so it
         // never gets to run (or fail) the CREATE with its old rights.

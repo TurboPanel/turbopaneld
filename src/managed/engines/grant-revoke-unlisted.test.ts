@@ -326,6 +326,67 @@ test("a first apply (no grant row before) ends nothing and records nothing", asy
   assertEquals([...marker.names], []);
 });
 
+test("a database added to the login ends no session", async () => {
+  const marker = memoryMarker();
+  const { ran, apply } = widenHarness(
+    ["a\tb\tYYY", "a\tb\tYYY\na\tc\tYYY"],
+    marker,
+  );
+  await apply();
+  assertEquals(ran, ["GRANTS"]);
+  assertEquals([...marker.names], []);
+});
+
+test("a client host added to the login ends no session", async () => {
+  const { ran, apply } = widenHarness([
+    "a\tb\tYYY",
+    "a\tb\tYYY\nz\tb\tYYY",
+  ]);
+  await apply();
+  assertEquals(ran, ["GRANTS"]);
+});
+
+test("a row that went away ends the sessions", async () => {
+  const { ran, apply } = widenHarness(["a\tb\tYYY\na\tc\tYYY", "a\tb\tYYY"]);
+  await apply();
+  assertEquals(ran.slice(1), [
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+});
+
+test("an owed record is honoured even with no row before", async () => {
+  const marker = memoryMarker();
+  await marker.add("rights:u1");
+  const { ran, apply } = widenHarness(["", "a\tb\tYYY"], marker);
+  await apply();
+  assertEquals(ran.slice(1), [
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+  assertEquals([...marker.names], []);
+});
+
+test("sessions the grant work already ended are not ended again", async () => {
+  const marker = memoryMarker();
+  const ran: string[] = [];
+  await endSessionsWhenRightsChange({
+    username: "u1",
+    snapshotSql: (u) => `SNAP ${u}`,
+    listConnectionsSql: (u) => `IDS ${u}`,
+    sessionEnds: marker,
+    query: (sql) => Promise.resolve(sql.startsWith("SNAP") ? "a\tb\tYYN" : "5"),
+    run: (sql) => {
+      ran.push(sql);
+      return Promise.resolve();
+    },
+  }, () => Promise.resolve(true));
+  assertEquals(ran, []);
+  assertEquals([...marker.names], []);
+});
+
 test("a failure after the grants is finished by the next apply", async () => {
   const marker = memoryMarker();
   await assertRejects(
@@ -460,11 +521,11 @@ for (
     assertEquals([...names].sort(), ["rights:ro_user", "ro_user"]);
     failProcesslist = false;
     await engine.applyCredentials(ctx, creds({}));
-    // One kill pass for the revoke record, one for the rights record.
-    assertEquals(kills.length, 2);
+    // One kill pass ends the login for both records.
+    assertEquals(kills.length, 1);
     assertEquals([...names], []);
     await engine.applyCredentials(ctx, creds({}));
-    assertEquals(kills.length, 2);
+    assertEquals(kills.length, 1);
   });
 
   test(`${name}: a login that became owner has its open connections ended`, async () => {

@@ -19,6 +19,7 @@ import type {
 import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
+  endConnections,
   endSessionsWhenRightsChange,
   grantableDatabases,
   grantBackupPrivileges,
@@ -434,7 +435,8 @@ async function applyOneCredential(
 
   // A login the site owner manages by hand keeps its account and password
   // but never has its grants written or reset here.
-  const writeGrants = async () => {
+  const writeGrants = async (): Promise<boolean> => {
+    let ended = false;
     await grantDatabasePrivileges({
       databases: grantableDatabases(credential),
       privileges: credential.privileges ?? [],
@@ -452,11 +454,15 @@ async function applyOneCredential(
         revokeRowsSql,
         listConnectionsSql,
         sessionEnds: ctx.sessionEnds,
+        ended: () => {
+          ended = true;
+        },
         query: (sql) => runMysqlQuery(ctx, sql),
         run: (sql) => runMysql(ctx, sql),
       });
     }
     await runMysql(ctx, "FLUSH PRIVILEGES;");
+    return ended;
   };
   if (panelManagesGrants(credential)) {
     // Open (pooled) connections keep the rights they opened with, so a login
@@ -1006,6 +1012,15 @@ export const mysqlManagedEngineRuntime: ManagedEngineRuntime = {
         query: (sql) => runMysqlQuery(ctx, sql),
         run: (sql) => runMysql(ctx, sql),
         dropAccountSql,
+      });
+      // DROP USER leaves the account's open sessions (the proxy's pooled ones
+      // too) running with their old rights, and a login made again under the
+      // same name would meet them.
+      await endConnections({
+        username,
+        listConnectionsSql,
+        query: (sql) => runMysqlQuery(ctx, sql),
+        run: (sql) => runMysql(ctx, sql),
       });
       dropped.push(username);
     });
