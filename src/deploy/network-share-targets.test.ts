@@ -34,11 +34,7 @@ function deps(answers: Answers, extra: ShareTargetDeps = {}): ShareTargetDeps {
   return {
     hostAddresses: () => ["192.0.2.50", "::1"],
     listDockerNetworks: () => Promise.resolve([BRIDGE, OTHER]),
-    networkingState: () =>
-      Promise.resolve({
-        addressPools: [{ base: "10.200.0.0/16", size: 24 }],
-        defaultBridgeCidr: null,
-      }),
+    dockerPools: () => Promise.resolve([{ Base: "10.200.0.0/16" }]),
     resolveDns: (name, type) => {
       const answer = answers[name];
       if (answer?.fail) return Promise.reject(answer.fail);
@@ -329,39 +325,46 @@ test("a network the compose declares itself is denied before it exists", async (
   assertEquals(pins.get("media"), "10.99.0.9");
 });
 
-test("the persisted default-address-pools and bip are denied", async () => {
+test("the pools dockerd reports are denied, with a hint to free a LAN range", async () => {
   const pool = await refusal("//10.200.7.9/s", deps({}));
-  assertStringIncludes(pool, "Docker network");
-  const bip = await refusal(
-    "//10.55.0.1/s",
-    deps({}, {
-      networkingState: () =>
-        Promise.resolve({
-          addressPools: [{ base: "10.200.0.0/16", size: 24 }],
-          defaultBridgeCidr: "10.55.0.1/24",
-        }),
-    }),
-  );
-  assertStringIncludes(bip, "this server itself");
-  const bipMember = await refusal(
-    "//10.55.0.200/s",
-    deps({}, {
-      networkingState: () =>
-        Promise.resolve({
-          addressPools: [],
-          defaultBridgeCidr: "10.55.0.1/24",
-        }),
-    }),
-  );
-  assertStringIncludes(bipMember, "Docker network");
+  assertStringIncludes(pool, "Docker network or address pool");
+  assertStringIncludes(pool, "default-address-pools");
 });
 
-test("without a persisted pool Docker's default pool is denied", async () => {
-  const msg = await refusal(
-    "//172.18.0.1/s",
-    deps({}, { networkingState: () => Promise.resolve(null) }),
+test("without configured pools dockerd's built-in ones are denied", async () => {
+  for (const none of [null, undefined, []]) {
+    const d = deps({}, { dockerPools: () => Promise.resolve(none) });
+    for (
+      const bad of ["172.17.5.5", "172.18.0.1", "172.31.255.1", "192.168.0.1"]
+    ) {
+      assertStringIncludes(
+        await refusal(`//${bad}/s`, d),
+        "address pool",
+      );
+    }
+    // 192.168/16 is denied whole, not carved out; the rest of 172 is not Docker's
+    assertStringIncludes(await refusal("//192.168.200.9/s", d), "address pool");
+    resetShareDenySet();
+    const pins = await checkShareTargets(shareDoc("//172.16.5.5/s"), d);
+    assertEquals(pins.get("media"), "172.16.5.5");
+  }
+});
+
+test("when dockerd cannot say which pools it uses the share is refused", async () => {
+  const failing = deps({}, {
+    dockerPools: () => Promise.reject(new Error("info: HTTP 500")),
+  });
+  assertStringIncludes(
+    await refusal("//198.51.100.7/s", failing),
+    "info: HTTP 500",
   );
-  assertStringIncludes(msg, "172.18.0.1");
+  const malformed = deps({}, {
+    dockerPools: () => Promise.resolve([{ Base: "not-a-cidr" }]),
+  });
+  assertStringIncludes(
+    await refusal("//198.51.100.7/s", malformed),
+    "unreadable address pool",
+  );
 });
 
 test("a macvlan network denies its gateway, not its parent LAN", async () => {

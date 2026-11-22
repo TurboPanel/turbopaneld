@@ -24,6 +24,7 @@ function targets(
   return {
     hostAddresses: () => ["192.0.2.50"],
     listDockerNetworks: () => Promise.resolve([]),
+    dockerPools: () => Promise.resolve([{ Base: "10.200.0.0/16" }]),
     resolveDns: (name, type) =>
       names[name] && type === "A"
         ? Promise.resolve([names[name]])

@@ -120,7 +120,6 @@ import {
   resolveShareLogins,
   type ShareLogin,
 } from "../deploy/network-share-logins.ts";
-import { readDockerNetworkingState } from "../deploy/docker-networking-state.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
 import {
   assertNetworkSharesFinal,
@@ -2558,10 +2557,6 @@ async function deployContainerServices(
     decryptSecrets,
   } = input;
   const runPrivileged = input.runPrivileged ?? defaultRunPrivileged;
-  const shareDeps: ShareTargetDeps = {
-    networkingState: () => readDockerNetworkingState(layout),
-    ...input.shareTargets,
-  };
   const onLine = (event: { stream: "stdout" | "stderr"; line: string }) =>
     logSink.onLine(event.stream, event.line);
   const cancel = input.cancel;
@@ -2634,7 +2629,7 @@ async function deployContainerServices(
     // Docker network addresses refused) is judged once the policy accepted it.
     const sharePins = await checkShareTargets(
       resolved.document ?? {},
-      shareDeps,
+      input.shareTargets,
     );
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
@@ -2806,7 +2801,7 @@ async function deployContainerServices(
       await assertShareAddressesPinned(
         finalDocument,
         sharePins,
-        shareDeps,
+        input.shareTargets,
       );
     }
 

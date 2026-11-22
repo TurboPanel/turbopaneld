@@ -77,6 +77,8 @@ export interface DockerNetworkSummary {
 
 export interface DockerInfo {
   DockerRootDir?: string;
+  /** The pools dockerd was configured with; absent or empty: built-in ones. */
+  DefaultAddressPools?: Array<{ Base?: string; Size?: number }> | null;
 }
 
 /** Docker 29 `*DiskUsage` summary for one object type. */

@@ -23,8 +23,8 @@
  * - the deny set is built before the first check, cached for a short time and
  *   rebuilt after that; when it cannot be built the check fails closed. It
  *   holds this server's addresses, every existing Docker network, the
- *   persisted dockerd `default-address-pools` / `bip` (or Docker's own default
- *   pool when none) and, per deploy, the networks the compose itself declares
+ *   dockerd's effective `default-address-pools` (`GET /info`, else its
+ *   built-in 172.17-31/16 and 192.168/16; a failed query refuses the share) and, per deploy, the networks the compose itself declares
  *   (they do not exist yet when the check runs). A macvlan or ipvlan network
  *   sits on the LAN: only its gateway is denied, not its parent subnet.
  *
@@ -36,7 +36,6 @@ import { parse, stringify } from "yaml";
 import { DockerClient, resolveDockerSocket } from "../docker/client.ts";
 import type { DockerNetworkSummary } from "../docker/client.ts";
 import { ipBytes, ipScope } from "./compose-build-policy.ts";
-import type { DockerNetworkingDescriptor } from "./docker-networking-state.ts";
 import {
   networkShareVolumes,
   optionKey,
@@ -49,8 +48,8 @@ export type ShareTargetDeps = {
   resolveDns?: (name: string, type: "A" | "AAAA") => Promise<string[]>;
   hostAddresses?: () => string[];
   listDockerNetworks?: () => Promise<DockerNetworkSummary[]>;
-  /** The persisted dockerd address plan; `null` when none was applied. */
-  networkingState?: () => Promise<DockerNetworkingDescriptor | null>;
+  /** dockerd's configured `default-address-pools` (`GET /info`); none: built-in. */
+  dockerPools?: () => Promise<Array<{ Base?: string }> | null | undefined>;
   now?: () => number;
 };
 
@@ -65,9 +64,15 @@ export type ShareDenySet = {
 /** How long a DNS answer is waited for. */
 export const RESOLVE_TIMEOUT_MS = 5_000;
 
-/** Docker's own pool when no `default-address-pools` is configured. */
-const DOCKER_DEFAULT_POOL = "172.16.0.0/12"; // NOSONAR typescript:S1313 - Docker default address pool
-
+/**
+ * What dockerd hands out when no `default-address-pools` is configured
+ * (moby `ipamutils`): 172.17.0.0/16 to 172.31.0.0/16 and 192.168.0.0/16.
+ * A host with many networks reaches 192.168.0.0/20 and on.
+ */
+const BUILT_IN_POOLS: readonly string[] = [
+  ...Array.from({ length: 15 }, (_, i) => `172.${17 + i}.0.0/16`),
+  "192.168.0.0/16", // NOSONAR typescript:S1313 - Docker built-in pool
+];
 /** Networks that sit on the host's LAN: their subnet is not Docker's. */
 const LAN_DRIVERS: ReadonlySet<string> = new Set(["macvlan", "ipvlan"]);
 
@@ -132,7 +137,7 @@ export function addressDenial(
     return "is an address of this server itself";
   }
   if (deny.cidrs.some((cidr) => inCidr(bytes, cidr))) {
-    return "is inside a Docker network of this server";
+    return "is inside a Docker network or address pool of this server; a dockerd default-address-pools setting frees a LAN range for shares";
   }
   return null;
 }
@@ -171,24 +176,32 @@ function addPlan(
   }
 }
 
-/** The persisted `default-address-pools` and `bip` (Docker's pool when none). */
-async function addAddressPlan(
+async function defaultPools(): Promise<Array<{ Base?: string }> | null> {
+  const client = new DockerClient(resolveDockerSocket());
+  try {
+    return (await client.info()).DefaultAddressPools ?? null;
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * The pools dockerd will allocate from: what it reports (`GET /info`), else
+ * its built-in ones. A failed query rejects, so the share is refused.
+ */
+async function addPools(
   deny: { addresses: Set<string>; cidrs: Cidr[] },
   deps: ShareTargetDeps,
 ): Promise<void> {
-  const state = deps.networkingState === undefined
-    ? null
-    : await deps.networkingState();
-  const pools = state?.addressPools ?? [];
-  const plans: Array<{ Subnet?: string; Gateway?: string }> = pools.map((
-    pool,
-  ) => ({ Subnet: pool.base }));
-  if (pools.length === 0) plans.push({ Subnet: DOCKER_DEFAULT_POOL });
-  const bip = state?.defaultBridgeCidr;
-  if (bip) {
-    plans.push({ Subnet: bip, Gateway: bip.slice(0, bip.lastIndexOf("/")) });
+  const pools = await (deps.dockerPools ?? defaultPools)();
+  const configured = (pools ?? []).flatMap((p) => p.Base ? [p.Base] : []);
+  for (const base of configured) {
+    if (parseCidr(base) === null) {
+      throw new Error(`dockerd reports an unreadable address pool "${base}"`);
+    }
   }
-  addPlan(undefined, plans, deny);
+  const bases = configured.length > 0 ? configured : BUILT_IN_POOLS;
+  addPlan(undefined, bases.map((Subnet) => ({ Subnet })), deny);
 }
 
 async function buildDenySet(deps: ShareTargetDeps): Promise<ShareDenySet> {
@@ -201,7 +214,7 @@ async function buildDenySet(deps: ShareTargetDeps): Promise<ShareDenySet> {
   for (const network of networks) {
     addPlan(network.Driver, network.IPAM?.Config ?? [], deny);
   }
-  await addAddressPlan(deny, deps);
+  await addPools(deny, deps);
   return deny;
 }
 
