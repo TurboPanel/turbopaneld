@@ -356,3 +356,25 @@ test("ensureSocketAdminSql drops the image's root@'%' network account", () => {
   // Dropped before the socket admin is (re)granted, never the localhost one.
   assertEquals(sql.includes("DROP USER IF EXISTS `root`@'localhost'"), false);
 });
+
+test("the owner grant on a name with an underscore is exact SQL, aimed at the docker network account", () => {
+  assertEquals(
+    grantDatabaseSql("wp_site", "mig", "owner"),
+    [
+      "GRANT ALL PRIVILEGES ON `wp\\_site`.* TO `mig`@'172.16.0.0/255.240.0.0';",
+      "SET @tp_excess_option = (SELECT IF(Grant_priv = 'Y', 'GRANT OPTION', NULL) FROM mysql.db WHERE Db = 'wp\\\\_site' AND User = 'mig' AND Host = '172.16.0.0/255.240.0.0');",
+      "SET @tp_excess_option_sql = IF(@tp_excess_option IS NULL OR @tp_excess_option = '', 'DO 0', CONCAT('REVOKE ', @tp_excess_option, ' ON `wp\\\\_site`.* FROM `mig`@\\'172.16.0.0/255.240.0.0\\''));",
+      "PREPARE tp_excess_option FROM @tp_excess_option_sql;",
+      "EXECUTE tp_excess_option;",
+      "DEALLOCATE PREPARE tp_excess_option;",
+    ].join("\n"),
+  );
+  assertEquals(
+    grantDatabaseSql("wp_site", "mig", "owner", "192.0.2.7").split("\n")[0],
+    "GRANT ALL PRIVILEGES ON `wp\\_site`.* TO `mig`@'192.0.2.7';",
+  );
+  assertEquals(
+    grantDatabaseSql("shop", "mig", "owner").split("\n")[0],
+    "GRANT ALL PRIVILEGES ON `shop`.* TO `mig`@'172.16.0.0/255.240.0.0';",
+  );
+});

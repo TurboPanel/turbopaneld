@@ -19,6 +19,7 @@ import type {
 import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
+  endSessionsWhenRightsChange,
   grantableDatabases,
   grantBackupPrivileges,
   grantDatabasePrivileges,
@@ -73,6 +74,7 @@ import {
   revokeRowsSql,
   seedWindowReadOnlySql,
   showReplicaStatusSql,
+  snapshotGrantsSql,
   startReplicaSql,
   versionSql,
   waitForExecutedGtidSetSql,
@@ -432,28 +434,44 @@ async function applyOneCredential(
 
   // A login the site owner manages by hand keeps its account and password
   // but never has its grants written or reset here.
-  await grantDatabasePrivileges({
-    databases: grantableDatabases(credential),
-    privileges: credential.privileges ?? [],
-    username: credential.username,
-    hosts: ctx.clientSourceHosts ?? [],
-    grantSql: grantDatabaseSql,
-    revokePlainSql: revokePlainDatabaseGrantSql,
-    run: (sql) => runMysql(ctx, sql),
-  });
-  if (panelManagesGrants(credential)) {
-    await revokeUnlistedGrants({
+  const writeGrants = async () => {
+    await grantDatabasePrivileges({
+      databases: grantableDatabases(credential),
+      privileges: credential.privileges ?? [],
       username: credential.username,
-      listed: grantableDatabases(credential),
-      listRowsSql: listGrantRowsSql,
-      revokeRowsSql,
+      hosts: ctx.clientSourceHosts ?? [],
+      grantSql: grantDatabaseSql,
+      revokePlainSql: revokePlainDatabaseGrantSql,
+      run: (sql) => runMysql(ctx, sql),
+    });
+    if (panelManagesGrants(credential)) {
+      await revokeUnlistedGrants({
+        username: credential.username,
+        listed: grantableDatabases(credential),
+        listRowsSql: listGrantRowsSql,
+        revokeRowsSql,
+        listConnectionsSql,
+        sessionEnds: ctx.sessionEnds,
+        query: (sql) => runMysqlQuery(ctx, sql),
+        run: (sql) => runMysql(ctx, sql),
+      });
+    }
+    await runMysql(ctx, "FLUSH PRIVILEGES;");
+  };
+  if (panelManagesGrants(credential)) {
+    // Open (pooled) connections keep the rights they opened with, so a login
+    // whose rights changed has them ended.
+    await endSessionsWhenRightsChange({
+      username: credential.username,
+      snapshotSql: snapshotGrantsSql,
       listConnectionsSql,
       sessionEnds: ctx.sessionEnds,
       query: (sql) => runMysqlQuery(ctx, sql),
       run: (sql) => runMysql(ctx, sql),
-    });
+    }, writeGrants);
+  } else {
+    await writeGrants();
   }
-  await runMysql(ctx, "FLUSH PRIVILEGES;");
 }
 
 /**

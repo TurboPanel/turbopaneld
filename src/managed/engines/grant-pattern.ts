@@ -212,6 +212,25 @@ export function revokeStoredRowsSql(
   ].join("\n");
 }
 
+/**
+ * The login's database-level rights as one comparable text: per grant row its
+ * host, schema and every privilege flag, in a fixed order. Read before and
+ * after an apply, a difference means the login's rights changed, in either
+ * direction.
+ */
+export function snapshotLoginGrantsSql(
+  quoting: GrantQuoting,
+  username: string,
+): string {
+  const flags = [...DATABASE_PRIVILEGES, ...(quoting.extraPrivileges ?? [])]
+    .map(([, column]) => column);
+  return `SELECT HEX(Host), HEX(Db), CONCAT_WS('', ${
+    [...flags, "Grant_priv"].join(", ")
+  }) FROM mysql.db WHERE User = ${
+    quoting.quoteLiteral(username)
+  } ORDER BY Host, Db;`;
+}
+
 /** The open connection ids of the account (one `KILL` each); never this session's. */
 export function listLoginConnectionsSql(
   quoting: GrantQuoting,
@@ -453,6 +472,7 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
     rows: readonly StoredGrantRow[],
   ) => string;
   listConnectionsSql: (username: string) => string;
+  snapshotGrantsSql: (username: string) => string;
 } {
   return {
     listGrantRowsSql: (username) => listDatabaseGrantRowsSql(quoting, username),
@@ -460,6 +480,7 @@ export function grantSqlFor(quoting: GrantQuoting, defaultHost: string): {
       revokeStoredRowsSql(quoting, username, rows),
     listConnectionsSql: (username) =>
       listLoginConnectionsSql(quoting, username),
+    snapshotGrantsSql: (username) => snapshotLoginGrantsSql(quoting, username),
     grantBackupSql: (username, host = defaultHost) =>
       grantBackupOnAllSql(quoting, username, host),
     grantDatabaseSql: (database, username, privilege, host = defaultHost) =>

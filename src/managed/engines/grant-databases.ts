@@ -195,6 +195,52 @@ export async function revokeUnlistedGrants(options: {
   return went;
 }
 
+/**
+ * Runs `work` (the grants of one login) and, when the login's database-level
+ * rights differ afterwards, flushes and ends its open connections. A session
+ * keeps the rights of its current database until it runs `USE`, and the shared
+ * proxy's pooled backend connections stay on one database for good, so a login
+ * moved up (read-write to owner) would otherwise still get error 1142 on
+ * `CREATE TABLE`, and one moved down would keep its old rights. A login with no
+ * grant row yet has no such session, so a first apply ends nothing.
+ *
+ * The login is recorded in `sessionEnds` (as `rights:<login>`) before `work`
+ * and cleared once its connections are gone (or nothing changed), so a failure
+ * in between is finished by the next apply.
+ */
+export async function endSessionsWhenRightsChange(options: {
+  username: string;
+  snapshotSql: (username: string) => string;
+  listConnectionsSql: (username: string) => string;
+  query: (sql: string) => Promise<string>;
+  run: (sql: string) => Promise<unknown>;
+  sessionEnds?: {
+    pending(): Promise<readonly string[]>;
+    add(username: string): Promise<void>;
+    done(username: string): Promise<void>;
+  };
+}, work: () => Promise<void>): Promise<void> {
+  const { username, query, run, sessionEnds } = options;
+  // A record of its own (`:` cannot be in a login name), so the revoke step's
+  // record for the plain name is not mistaken for this one, and the other way
+  // round.
+  const key = `rights:${username}`;
+  const before = (await query(options.snapshotSql(username))).trim();
+  const owed = sessionEnds
+    ? (await sessionEnds.pending()).includes(key)
+    : false;
+  if (before.length > 0) await sessionEnds?.add(key);
+  await work();
+  const after = (await query(options.snapshotSql(username))).trim();
+  if (before.length === 0 || (before === after && !owed)) {
+    await sessionEnds?.done(key);
+    return;
+  }
+  await run(FLUSH_SQL);
+  await endConnections(options);
+  await sessionEnds?.done(key);
+}
+
 async function endConnections(options: {
   username: string;
   listConnectionsSql: (username: string) => string;
