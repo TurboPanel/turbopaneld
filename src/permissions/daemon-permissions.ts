@@ -57,11 +57,7 @@ const PRINCIPAL_HOME_ROOT = "/srv/users";
  * grant cannot be used to create or replace anything in it.
  */
 export const DOCKER_GATE_SOCKET_DIR = "/run/turbopanel-gate";
-const DOCKER_SOCKETS = [
-  "/run/docker.sock",
-  "/var/run/docker.sock",
-  DOCKER_GATE_SOCKET_DIR,
-];
+const DOCKER_SOCKETS = [DOCKER_GATE_SOCKET_DIR];
 
 /**
  * Vendor subtrees the daemon process itself writes at runtime: uv's download

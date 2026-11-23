@@ -145,12 +145,21 @@
   ansible.builtin.include_tasks: install.yml
   when: (not (_docker_ready | bool)) or (turbopanel_docker_upgrade | bool)
 
-- name: Add daemon user to docker group
+# Managed hosts: the daemon reaches Docker only through the gate, so it is not
+# in the docker group (the group is root-equivalent). Only a co-located dev
+# host keeps it, where there is no gate.
+- name: Add daemon user to docker group (co-located dev only)
   ansible.builtin.user:
     name: "{{ docker_user }}"
     groups: docker
     append: true
-  when: docker_add_turbopanel_user | bool
+  when:
+    - docker_add_turbopanel_user | bool
+    - turbopanel_dev_user | length > 0
+
+- name: Take the daemon user out of the docker group (managed host)
+  ansible.builtin.include_tasks: remove-daemon-from-group.yml
+  when: turbopanel_dev_user | length == 0
 
 - name: Add dev user to docker group (co-located dev)
   ansible.builtin.user:

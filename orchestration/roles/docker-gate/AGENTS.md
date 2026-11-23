@@ -21,7 +21,9 @@ forwards requests to the real `/var/run/docker.sock` and, in the default
 `TURBOPANEL_DOCKER_BUILD_SOCKET`) on managed hosts, orders itself after the
 gate service, and waits for the socket (`scripts/wait-docker-gate.sh`) before
 any Docker work; with no direct fallback a missing gate fails closed. `tp` is
-still in the `docker` group until stage 5. Co-located dev hosts have no gate
+not in the `docker` group (stage 5): the `docker` role skips it on managed hosts and
+`daemon-converge` removes it from hosts provisioned earlier (`gpasswd -d`; the
+running daemon loses the group at its next restart). Co-located dev hosts have no gate
 and are exempt. Root-run Ansible roles and `postgres-backup.sh` keep the real
 socket by design (they are root already).
 
@@ -373,8 +375,9 @@ registry auth, query strings, request bodies, the approval token itself. An
 4. **Done.** `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`),
    **enforce mode**; compose and buildx use a `turbopanel-build` context on the
    build socket (`--context`, buildx `--builder turbopanel-build`); the sudo rungs
-   carry `env DOCKER_HOST=...`; `tp` still in `docker`.
-5. `tp` leaves the `docker` group; the real socket is root-only.
+   carry `env DOCKER_HOST=...`; `tp` was still in `docker` until stage 5.
+5. **Done.** `tp` leaves the `docker` group (role and converge, managed hosts only); the
+   real socket is root-only for it, and the daemon's Deno grants no longer name it.
 
 Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 

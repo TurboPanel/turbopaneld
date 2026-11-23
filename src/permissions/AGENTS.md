@@ -5,19 +5,19 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 ## Managed-host privilege boundary (2026-09-19 hardening, sudo 2026-09-25)
 
 **What this boundary does not contain yet — read first.** The daemon account
-`tp` is still root-equivalent on a managed host, through three paths the
-controls below do not close:
+`tp` was root-equivalent on a managed host through three paths; the list
+below says which are closed:
 
-1. **Docker.** The `docker` role adds `tp` to the `docker` group, and Docker
-   socket access is root (`docker run -v /:/h`). There is no sudo grant for
-   Docker any more; the group is the residual. Closing it is under way with an
-   authorizing proxy in front of the socket: **stages 1-3 are installed** (the
-   root-owned `turbopanel-docker-gate` service, enforcing: it refuses what the
-   strict profile forbids, with a platform allowance, ownership checks and a
-   signed-approval verifier; plus a read-only listener Traefik can use instead
-   of the Tecnativa socket proxy; the daemon's own Docker traffic is routed
-   through it, and only the group membership of `tp` remains) — see
-   `orchestration/roles/docker-gate/AGENTS.md` for the stages.
+1. **Closed: Docker, behind an enforcing gate.** Docker socket access is root
+   (`docker run -v /:/h`), so the root-owned `turbopanel-docker-gate` service
+   sits in front of the engine and refuses what the strict profile forbids
+   (platform allowance, ownership checks, signed-approval verifier). The
+   daemon's own Docker traffic is routed through it, `tp` is not in the
+   `docker` group on a managed host (the role skips it and `daemon-converge`
+   removes it; a co-located dev host keeps it), there is no sudo grant for
+   Docker, and the daemon's Deno grants name only the gate's socket folder.
+   Traefik uses a read-only gate listener, not the Tecnativa proxy. Stages:
+   `orchestration/roles/docker-gate/AGENTS.md`.
 2. **Closed: the hosting Caddy no longer runs as root.**
    `turbopanel-hosting-caddy.service` runs as `tpedge` (not in group `tp`)
    with `AmbientCapabilities=`/`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`

@@ -181,3 +181,18 @@ test("the default host reads never throw", async () => {
   }
   assertEquals(typeof (await diagnoseDockerUnreachable("x")), "string");
 });
+
+test("a daemon routed through the gate is pointed at the gate, not the docker group", () => {
+  const msg = explainDockerUnreachable({
+    service: { activeState: "active", result: "success" },
+    processGroups: [9999],
+    dockerGroup: { gid: 989, members: [] },
+    username: "tp",
+    probeStderr: "permission denied\nsecond line",
+    gateSocket: "/run/turbopanel-gate/docker.sock",
+  });
+  assertStringIncludes(msg, "/run/turbopanel-gate/docker.sock");
+  assertStringIncludes(msg, "permission denied");
+  assertStringIncludes(msg, "turbopanel-docker-gate");
+  assertEquals(msg.includes("docker group"), false);
+});
