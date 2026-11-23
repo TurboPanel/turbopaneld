@@ -5,8 +5,6 @@ import {
   APACHE_OVERRIDE_CLASSES,
   APACHE_OVERRIDE_LIST,
 } from "../deploy/site/apache-overrides.ts";
-import { phpFpmSocketPath } from "../deploy/site.ts";
-import { sitePhpSocketPath } from "../deploy/site/php-runtime.ts";
 
 const test = Deno.test.bind(Deno);
 
@@ -218,61 +216,4 @@ test("a vhost in a shape the role does not rewrite is caught instead of left ope
     "AllowOverride FileInfo Limit",
   );
   assertEquals(STILL_OPEN.test(tighten(odd)), true);
-});
-
-/** The `<ProxyMatch>` pattern in `httpd.conf.j2`, as a JavaScript regex. */
-async function proxyDenyPattern(): Promise<RegExp> {
-  const conf = await Deno.readTextFile(
-    join(ROLE, "templates", "httpd.conf.j2"),
-  );
-  const block = /^<ProxyMatch "(.+)">\n\s+Require all denied\n<\/ProxyMatch>$/m
-    .exec(conf);
-  assert(block, "httpd.conf.j2 has a deny-all <ProxyMatch> block");
-  return new RegExp(block[1]);
-}
-
-test("the Apache template denies proxy targets other than a PHP runtime socket", async () => {
-  const deny = await proxyDenyPattern();
-  const refused = [
-    "proxy:fcgi://192.0.2.10:9000/index.php",
-    "fcgi://server-a.example.lan:9000/",
-    "proxy:fcgi://localhost:9000/index.php",
-    "proxy:http://192.0.2.10/",
-    "https://example.net/",
-    "ajp://192.0.2.10:8009/",
-    "h2c://192.0.2.10/",
-    "ws://192.0.2.10/",
-    "balancer://pool/",
-    "proxy:unix:/run/other.sock|fcgi://localhost/",
-    "unix:/run/turbopanel-php-shop/php.sock|http://localhost/",
-    "unix:/run/turbopanel-php-shop/php.sock|fcgi://192.0.2.10:9000/",
-    "unix:/run/turbopanel-php-shop/other.sock|fcgi://localhost/",
-    "unix:/run/turbopanel-php-../x/php.sock|fcgi://localhost/",
-    "unix:/run/turbopanel-phpfpm/../x.sock|fcgi://localhost/",
-    "unix:/run/turbopanel-phpfpm/8.4/a/b.sock|fcgi://localhost/",
-    "unix:/run/turbopanel-phpfpm/8.4/a.sock|http://localhost/",
-    "unix:/srv/users/u/own.sock|fcgi://localhost/",
-  ];
-  for (const target of refused) {
-    assertEquals(deny.test(target), true, target);
-  }
-});
-
-test("the Apache template's deny does not catch a site's own PHP handler", async () => {
-  const deny = await proxyDenyPattern();
-  const golden = await Deno.readTextFile(GOLDEN);
-  const handler = /SetHandler "proxy:([^"]+)"/.exec(golden);
-  assert(handler, "the golden vhost has a PHP handler");
-  const own = [
-    handler[1],
-    `proxy:${handler[1]}`,
-    `${handler[1]}index.php`,
-    `unix:${sitePhpSocketPath("shop-1")}|fcgi://localhost/index.php`,
-    `unix:${
-      phpFpmSocketPath("8.4", "env-1", "web")
-    }|fcgi://localhost/wp/index.php`,
-  ];
-  for (const target of own) {
-    assertEquals(deny.test(target), false, target);
-  }
 });

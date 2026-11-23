@@ -182,7 +182,7 @@ test("IfDefine, IfFile, IfDirective and IfSection are looked into, not reported"
   }
 });
 
-test("proxying lines are refused with their own finding", () => {
+test("proxying lines get their own finding", () => {
   const text = [
     "RewriteEngine On",
     'RewriteRule ^api/(.*)$ "fcgi://server-a.example.lan:9000/$1" [P,L]',
@@ -207,7 +207,7 @@ test("proxying lines are refused with their own finding", () => {
   );
   assertStringIncludes(
     htaccessWarnings("web", checkHtaccess(text))[0],
-    "Site web: .htaccess line 2: RewriteRule may not proxy",
+    "Site web: .htaccess line 2: RewriteRule proxies to another target",
   );
 });
 

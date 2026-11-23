@@ -69,25 +69,6 @@ CustomLog "/var/log/{{ apache_logs_directory }}/access.log" combined
     AllowOverride None
 </Directory>
 
-# Proxy targets. A site's .htaccess may name `RewriteRule [P]` and `SetHandler`,
-# so mod_proxy would otherwise connect wherever the file says (a FastCGI or HTTP
-# listener on the LAN or loopback, any other unix socket). Every proxied request
-# is refused unless its target is a PHP runtime socket behind `fcgi://localhost`,
-# the form each PHP vhost's own `SetHandler "proxy:unix:<socket>|fcgi://localhost/"`
-# takes: `/run/turbopanel-php-<id>/php.sock` (a site's runtime) or
-# `/run/turbopanel-phpfpm/<series>/<pool>.sock` (a php-fpm pool). One block at
-# server level covers every vhost, old ones on disk included. The pattern reads
-# only the start of the target, so a request path cannot change the answer, and
-# a socket path cannot climb out of those directories (the id, series and pool
-# name hold no slash). Another site's runtime socket is still reachable by name;
-# the per-site key refuses that (`src/deploy/site/AGENTS.md`). A bare
-# `fcgi://localhost/` (no socket) is not caught here. The test
-# (`apache-role-vhosts.test.ts`) runs this pattern against the targets the vhost
-# renders and against the ones it must refuse.
-<ProxyMatch "^(?!(?:proxy:)?(?:unix:/run/(?:turbopanel-php-[a-z0-9][a-z0-9-]{0,63}/php|turbopanel-phpfpm/[0-9]\.[0-9]{1,2}/[A-Za-z0-9_-][A-Za-z0-9_.-]*)\.sock\|)?fcgi://localhost(?:/|$))">
-    Require all denied
-</ProxyMatch>
-
 # Dummy document root (unused — each site sets its own DocumentRoot).
 DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"
 <Directory "{{ turbopanel_state_dir }}/apache/empty">

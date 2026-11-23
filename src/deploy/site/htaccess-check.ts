@@ -110,8 +110,8 @@ function splitArgs(args: string): string[] {
 /**
  * A `RewriteRule` that proxies: the `P` (or `proxy`) flag, or a substitution
  * that starts with `proxy:` (mod_rewrite proxies that one without a flag).
- * The server also denies every proxy target but the site's own PHP socket
- * (`httpd.conf.j2`); this names the line at deploy.
+ * Apache does not restrict where a per-directory proxy goes (see the known
+ * limit in `AGENTS.md`), so this only names the line at deploy.
  */
 function rewriteProxies(args: string): boolean {
   const words = splitArgs(args);
@@ -249,7 +249,7 @@ export function htaccessWarnings(
 ): string[] {
   const shown = findings.slice(0, MAX_WARNINGS).map((finding) => {
     if (finding.reason === "proxy") {
-      return `Site ${service}: .htaccess line ${finding.line}: ${finding.directive} may not proxy to a target on this server (only the site's own PHP runtime is reachable), so Apache refuses those requests.`;
+      return `Site ${service}: .htaccess line ${finding.line}: ${finding.directive} proxies to another target, which this server does not allow. Remove the line.`;
     }
     const what = finding.reason === "not allowed"
       ? `${finding.directive} is not allowed on this server`
