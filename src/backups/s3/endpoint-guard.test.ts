@@ -15,6 +15,37 @@ test("accepts https hosts and private http addresses", () => {
   assertEquals(endpointRefusal("http://10.1.2.3:9000"), null);
   assertEquals(endpointRefusal("http://192.168.1.5"), null);
   assertEquals(endpointRefusal("http://[fd12::1]:9000"), null);
+  assertEquals(endpointRefusal("https://[2001:db8::1]:9000"), null);
+  assertEquals(endpointRefusal("https://[::ffff:8.8.8.8]"), null);
+  assertEquals(endpointRefusal("http://[::ffff:10.1.2.3]:9000"), null);
+});
+
+test("refuses loopback and link-local addresses written as IPv6", () => {
+  for (
+    const url of [
+      "https://[::ffff:127.0.0.1]",
+      "https://[::ffff:7f00:1]",
+      "https://[::ffff:a9fe:a9fe]",
+      "https://[::ffff:169.254.169.254]",
+      "https://[0:0:0:0:0:ffff:7f00:1]",
+      "https://[::127.0.0.1]",
+      "https://[::7f00:1]",
+      "https://[64:ff9b::7f00:1]",
+      "https://[64:ff9b::a9fe:a9fe]",
+      "https://[::ffff:0.0.0.0]",
+    ]
+  ) {
+    assertEquals(typeof endpointRefusal(url), "string", url);
+    assertEquals(
+      typeof endpointRefusal(url.replace("https", "http")),
+      "string",
+      url,
+    );
+  }
+});
+
+test("a mapped public address over plain http is still refused", () => {
+  assertEquals(typeof endpointRefusal("http://[::ffff:8.8.8.8]"), "string");
 });
 
 test("refuses loopback, link-local, metadata and public http", () => {
