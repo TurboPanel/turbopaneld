@@ -556,19 +556,20 @@ ProxySQL to enforce. Canonical policy:
      database that the owner role does not own to the owner role (a schema can
      only be dropped by its owner; the login gets no other membership, not even
      an inheriting one, because a schema owner may hold rights in other
-     databases; a failed restore leaves those schemas with the owner role, the same
-     as a successful `--no-owner` replay does); stale logins are dropped only once their hour has run
-     out, so two restores at once keep their own logins; (2) one transaction on a TLS connection as that
-     login, to the container's own address (production `pg_hba` admits a
-     non-admin login only over `hostssl` with a password from the managed
-     network): `restoreResetSql` drops every user schema (only `public` is
-     recreated, with its owner and privileges; the dump creates the others),
-     `SET LOCAL ROLE` to the owner, the dump as plain SQL (`pg_restore
-     --no-owner --clean --if-exists -f -`), then `restoreLoginFinishSql`
-     (`RESET ROLE`, `REASSIGN OWNED` / `DROP OWNED` of the login); (3) after the
-     commit, as the superuser, the per-login read-write schemas are recreated
-     (`restoreReadWriteLoginSchemasSql`; the login cannot assume those logins);
-     a shell `trap` (exit, HUP, INT, TERM) drops the login on any exit. `SET ROLE` alone
+     databases; a failed restore leaves those schemas with the owner role, the
+     same as a successful `--no-owner` replay does); stale logins are dropped
+     only once their hour has run out, so two restores at once keep their own
+     logins; (2) one transaction on a TLS connection as that login, to the
+     container's own address (production `pg_hba` admits a non-admin login only
+     over `hostssl` with a password from the managed network): `restoreResetSql`
+     drops every user schema (only `public` is recreated, with its owner and
+     privileges; the dump creates the others), `SET LOCAL ROLE` to the owner,
+     the dump as plain SQL (`pg_restore --no-owner --clean --if-exists -f -`),
+     then `restoreLoginFinishSql` (`RESET ROLE`, `REASSIGN OWNED` / `DROP OWNED`
+     of the login); (3) after the commit, as the superuser, the per-login
+     read-write schemas are recreated (`restoreReadWriteLoginSchemasSql`; the
+     login cannot assume those logins); a shell `trap` (exit, HUP, INT, TERM)
+     drops the login on any exit. `SET ROLE` alone
      would not be enough (tenant code can `RESET ROLE`), which is why the
      session user is itself a non-superuser. The password is made in the
      container, lives in shell variables, the prepare step's stdin and the
@@ -581,9 +582,9 @@ ProxySQL to enforce. Canonical policy:
      `pg_restore` and `psql`: it drops the large-object section's own
      `BEGIN;` / `COMMIT;` (that `COMMIT;` would end the restore transaction
      early; matched on `Type: BLOBS;`, since pg_restore 18 names the section by
-     its object range) and `ALTER DEFAULT PRIVILEGES FOR ROLE <other role>` entries, which
-     the owner's session may not replay; those belong to the platform's logins,
-     survive a restore and are set again by every apply.
+     its object range) and `ALTER DEFAULT PRIVILEGES FOR ROLE <other role>`
+     entries, which the owner's session may not replay; those belong to the
+     platform's logins, survive a restore and are set again by every apply.
      `COMMIT` is sent only when `pg_restore`
      succeeded, and the script fails unless the server confirmed the commit,
      so a truncated dump, a failing statement or a lock timeout (30 s) leaves

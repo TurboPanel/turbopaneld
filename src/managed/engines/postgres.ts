@@ -246,7 +246,7 @@ out=$({
   printf '%s\n%s\n' "SELECT r.rolname AS tp_owner FROM pg_catalog.pg_database d JOIN pg_catalog.pg_roles r ON r.oid = d.datdba WHERE d.datname = pg_catalog.current_database() \\gset" "$4"
   printf 'SET LOCAL ROLE :"tp_owner";\n'
   if pg_restore --no-owner --clean --if-exists -f - | sed -E '` +
-  PG_RESTORE_TIMEOUT_SET_LINE_SED + String.raw`d' | awk -v owner="$owner" '` +
+  PG_RESTORE_TIMEOUT_SET_LINE_SED + `d' | awk -v owner="$owner" '` +
   PG_RESTORE_FILTER_AWK + String.raw`'; then
     printf '%s\nCOMMIT;\nSELECT %s;\n' "$5" "'tp_restore_committed'"
   fi

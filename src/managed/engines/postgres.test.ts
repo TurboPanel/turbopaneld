@@ -442,8 +442,8 @@ test("backup dump/restore argv always target the stable platform admin regardles
   assertStringIncludes(restoreArgv[6], "NOSUPERUSER");
   assertStringIncludes(restoreArgv[6], "log_statement = 'none'");
   // The restore login never assumes another role: schemas of other owners
-  // move to the owner role in the prepare step (no memberships), and per-login schemas are made by the superuser step
-  // after the commit.
+  // move to the owner role in the prepare step (no memberships), and
+  // per-login schemas are made by the superuser step after the commit.
   assertEquals(restoreArgv[6].includes("INHERIT"), false);
   assertEquals(restoreArgv[6].includes("GRANT"), true);
   assertEquals(restoreArgv[6].includes("rolvaliduntil"), true);
