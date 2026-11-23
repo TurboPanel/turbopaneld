@@ -181,3 +181,50 @@ test("IfDefine, IfFile, IfDirective and IfSection are looked into, not reported"
     );
   }
 });
+
+test("proxying lines are refused with their own finding", () => {
+  const text = [
+    "RewriteEngine On",
+    'RewriteRule ^api/(.*)$ "fcgi://server-a.example.lan:9000/$1" [P,L]',
+    "RewriteRule ^a$ http://192.0.2.10/ [proxy]",
+    "RewriteRule ^b$ http://192.0.2.10/ [L, P]",
+    "RewriteRule ^c$ proxy:http://192.0.2.10/",
+    'SetHandler "proxy:fcgi://192.0.2.10:9000"',
+    "<FilesMatch \\.php$>",
+    "  SetHandler proxy:unix:/run/other.sock|fcgi://localhost/",
+    "</FilesMatch>",
+  ].join("\n");
+  assertEquals(
+    checkHtaccess(text).map((f) => [f.line, f.directive, f.reason]),
+    [
+      [2, "RewriteRule", "proxy"],
+      [3, "RewriteRule", "proxy"],
+      [4, "RewriteRule", "proxy"],
+      [5, "RewriteRule", "proxy"],
+      [6, "SetHandler", "proxy"],
+      [8, "SetHandler", "proxy"],
+    ],
+  );
+  assertStringIncludes(
+    htaccessWarnings("web", checkHtaccess(text))[0],
+    "Site web: .htaccess line 2: RewriteRule may not proxy",
+  );
+});
+
+test("rules that only look like proxying, and ordinary handlers, are accepted", () => {
+  assertEquals(
+    checkHtaccess(
+      [
+        "RewriteRule ^go$ https://example.net/ [R=302,L]",
+        "RewriteRule ^p$ /page.php [L,QSA]",
+        "RewriteRule ^proxy/(.*)$ /index.php?p=$1 [L]",
+        "RewriteRule ^x$ /y [NC,PT]",
+        "SetHandler application/x-httpd-php",
+        "SetHandler none",
+        "RemoveHandler .php",
+        "",
+      ].join("\n"),
+    ),
+    [],
+  );
+});

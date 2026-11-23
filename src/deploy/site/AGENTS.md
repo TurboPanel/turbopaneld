@@ -103,9 +103,22 @@ Docker Compose. The daemon:
    only after its own site is deployed or the update repair above has run; until
    then another site can still proxy to it and run its existing scripts. The Apache role does tighten every vhost
    already on disk at the host's first Apache deploy (`orchestration/AGENTS.md`):
-   no `FileInfo`, the closed list, the strip lines. Known limit: a `[P]` to a
-   FastCGI listener on loopback that is not a site runtime is not covered by the
-   key (none exists today). `AuthUserFile` may name any file `tpapache` can read;
+   no `FileInfo`, the closed list, the strip lines.
+   **Proxy targets are closed too.** `RewriteRule [P]` and `SetHandler` are
+   allowed overrides, so `httpd.conf.j2` carries one server-level
+   `<ProxyMatch>` with `Require all denied` for every proxied target except a
+   PHP runtime socket behind `fcgi://localhost` (`/run/turbopanel-php-<id>/php.sock`
+   or `/run/turbopanel-phpfpm/<series>/<pool>.sock`): no FastCGI, HTTP, AJP,
+   websocket or h2 target on the LAN or loopback, no other unix socket. It sits
+   in the shared config, so it also covers vhosts already on disk. A test pins
+   the pattern against the targets a vhost renders and against the ones it must
+   refuse. The deploy check names a `RewriteRule` with `[P]` (or a `proxy:`
+   substitution) and a `SetHandler proxy:...` line as a warning. Not checked
+   against a live Apache yet: the pattern assumes mod_proxy matches the target
+   in the `[proxy:]unix:<socket>|fcgi://localhost/...` form (or the same with
+   the socket already split off), so prove it on canary (a site's PHP page
+   answers, a `[P]` to another target answers 403). A bare `fcgi://localhost/` without a socket
+   is not caught. `AuthUserFile` may name any file `tpapache` can read;
    Apache only checks passwords against it, so the worst case is a guessing
    oracle against another site's password file.
 

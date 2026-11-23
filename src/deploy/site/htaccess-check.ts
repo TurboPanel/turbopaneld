@@ -14,7 +14,7 @@ import {
 export type HtaccessFinding = {
   line: number;
   directive: string;
-  reason: "not allowed" | "unknown";
+  reason: "not allowed" | "unknown" | "proxy";
 };
 
 /** Modules that are always loaded (the base set in `httpd.conf.j2`). */
@@ -98,6 +98,36 @@ const REFUSED = new Set<string>(
   APACHE_REFUSED_DIRECTIVES.map((name) => name.toLowerCase()),
 );
 
+/** Split a directive's arguments on spaces, keeping quoted text together. */
+function splitArgs(args: string): string[] {
+  const out: string[] = [];
+  for (const m of args.matchAll(/"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g)) {
+    out.push(m[1] ?? m[2] ?? m[3]);
+  }
+  return out;
+}
+
+/**
+ * A `RewriteRule` that proxies: the `P` (or `proxy`) flag, or a substitution
+ * that starts with `proxy:` (mod_rewrite proxies that one without a flag).
+ * The server also denies every proxy target but the site's own PHP socket
+ * (`httpd.conf.j2`); this names the line at deploy.
+ */
+function rewriteProxies(args: string): boolean {
+  const words = splitArgs(args);
+  if (words[1]?.toLowerCase().startsWith("proxy:")) return true;
+  const flags = /\[([^\]]*)\]$/.exec(args.trim())?.[1];
+  return flags?.split(",").some((flag) => {
+    const name = flag.trim().toLowerCase();
+    return name === "p" || name === "proxy";
+  }) ?? false;
+}
+
+/** A handler name that hands the request to mod_proxy (`proxy:...`). */
+function handlerProxies(args: string): boolean {
+  return (splitArgs(args)[0] ?? "").toLowerCase().startsWith("proxy:");
+}
+
 /** Options this server does not allow in a `.htaccess`. */
 const REFUSED_OPTIONS = new Set<string>(["followsymlinks", "all"]);
 
@@ -174,6 +204,12 @@ function findingForLine(
   const lower = word.toLowerCase();
   const directive = printableName(word);
   if (REFUSED.has(lower)) return { line, directive, reason: "not allowed" };
+  if (lower === "rewriterule" && rewriteProxies(args)) {
+    return { line, directive: "RewriteRule", reason: "proxy" };
+  }
+  if (lower === "sethandler" && handlerProxies(args)) {
+    return { line, directive: "SetHandler", reason: "proxy" };
+  }
   if (lower === "options") {
     return optionsRefused(args)
       ? { line, directive: "Options", reason: "not allowed" }
@@ -212,6 +248,9 @@ export function htaccessWarnings(
   findings: readonly HtaccessFinding[],
 ): string[] {
   const shown = findings.slice(0, MAX_WARNINGS).map((finding) => {
+    if (finding.reason === "proxy") {
+      return `Site ${service}: .htaccess line ${finding.line}: ${finding.directive} may not proxy to a target on this server (only the site's own PHP runtime is reachable), so Apache refuses those requests.`;
+    }
     const what = finding.reason === "not allowed"
       ? `${finding.directive} is not allowed on this server`
       : `${finding.directive} is not a directive this server knows`;
