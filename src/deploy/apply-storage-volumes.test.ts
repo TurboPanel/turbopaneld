@@ -54,11 +54,13 @@ describe("buildStorageVolumesFragment", () => {
         type: "bind",
         source: "/var/lib/tp/data",
         target: "/data",
+        read_only: false,
       },
       {
         type: "volume",
         source: "tp-00000000-cache",
         target: "/cache",
+        read_only: false,
       },
     ]);
     assertEquals(fragment.volumes?.["tp-00000000-cache"], {

@@ -462,7 +462,7 @@ test("the helper mounts the copy read-write and the archive read-only, offline",
     argv[i - 1] === "--mount" ? [arg] : []
   );
   assertEquals(mounts, [
-    `type=volume,src=${VOLUME},dst=/dst`,
+    `type=volume,src=${VOLUME},dst=/dst,readonly=false`,
     "type=bind,src=/var/lib/turbopanel/backups/copies/c/bk_one.tar.gz,dst=/archive.tar.gz,readonly=true",
   ]);
   assertEquals(argv[argv.indexOf("--network") + 1], "none");

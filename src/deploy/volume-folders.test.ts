@@ -63,6 +63,7 @@ test("a container that mounts an owner's volume runs as the owner's ids", () => 
     type: "bind",
     source: "/srv/users/alice/production/volumes/uploads",
     target: "/data",
+    read_only: false,
   }]);
 });
 

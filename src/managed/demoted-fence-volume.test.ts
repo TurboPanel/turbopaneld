@@ -237,7 +237,7 @@ for (const engine of ["mysql", "mariadb"] as const) {
       // The helper runs as root against the config dir the engine mounts.
       const write = fake.calls.find((args) => args.includes("sh"));
       assert(write?.includes("0"));
-      assert(write?.some((arg) => arg.endsWith("/config:/c")));
+      assert(write?.some((arg) => arg.endsWith("/config:/c:rw")));
       // Re-planting a complete block is a read-only check.
       await persistDemotedVolumeFence(layout, managedId, engine, fake.run);
       assertEquals(fake.writes(), 1);
