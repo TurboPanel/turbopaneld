@@ -206,10 +206,12 @@ export function restoreResetSql(): string {
 
 /**
  * SQL expression: the role is a superuser, or holds the rights of one through
- * a membership. `roleOid` is a SQL expression for the role's oid.
+ * a membership, or holds a predefined role that reads or writes server files
+ * or runs server programs (which amount to the same thing). `roleOid` is a
+ * SQL expression for the role's oid.
  */
 function actsAsSuperuserSql(roleOid: string): string {
-  return `EXISTS (SELECT 1 FROM pg_catalog.pg_roles s WHERE s.rolsuper AND pg_catalog.pg_has_role(${roleOid}, s.oid, 'USAGE'))`;
+  return `EXISTS (SELECT 1 FROM pg_catalog.pg_roles s WHERE (s.rolsuper OR s.rolname IN ('pg_execute_server_program', 'pg_read_server_files', 'pg_write_server_files')) AND pg_catalog.pg_has_role(${roleOid}, s.oid, 'USAGE'))`;
 }
 
 /**
@@ -230,10 +232,16 @@ function actsAsSuperuserSql(roleOid: string): string {
  * - The reset in the replay transaction drops every user schema, so the login
  *   needs the rights of each schema's owner: a schema owned by a superuser
  *   (or by a role that holds one's rights) moves to the database owner, any
- *   other schema owner is granted to the login.
+ *   other schema owner is granted to the login with `INHERIT TRUE, SET
+ *   FALSE`. The login can then use those rights but never switch to that
+ *   role, so the only role it (and the dump code) can assume is the database
+ *   owner role.
+ * - Stale logins are dropped only once their validity has run out, so a
+ *   restore running at the same time on the engine keeps its own login.
  */
 export function restoreLoginPrepareSql(): string {
   return [
+    "SET search_path = pg_catalog, pg_temp;",
     "SET log_statement = 'none';",
     "SET log_min_duration_statement = -1;",
     "SET log_min_error_statement = panic;",
@@ -251,11 +259,12 @@ export function restoreLoginPrepareSql(): string {
     "    JOIN pg_catalog.pg_database d ON d.datdba = x.oid",
     "   WHERE d.datname = pg_catalog.current_database();",
     `  IF ${actsAsSuperuserSql("o.oid")} THEN`,
-    "    RAISE EXCEPTION 'restore refused: database % is owned by % which has superuser rights, not by a database owner role; convert it to an owner role first',",
+    "    RAISE EXCEPTION 'restore refused: database % is owned by % which has superuser-grade rights, not by a database owner role; convert it to an owner role first',",
     "      pg_catalog.current_database(), o.rolname;",
     "  END IF;",
     "  FOR r IN SELECT x.rolname FROM pg_catalog.pg_roles x",
-    "            WHERE x.rolname ~ '^tp_restore_[0-9a-f]+$' LOOP",
+    "            WHERE x.rolname ~ '^tp_restore_[0-9a-f]+$'",
+    "              AND x.rolvaliduntil < pg_catalog.now() LOOP",
     "    BEGIN",
     "      EXECUTE pg_catalog.format('DROP ROLE %I', r.rolname);",
     "    EXCEPTION WHEN OTHERS THEN",
@@ -282,14 +291,9 @@ export function restoreLoginPrepareSql(): string {
     "      EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.name,",
     "        pg_catalog.pg_get_userbyid(o));",
     "    ELSIF r.owner_name !~ '^pg_' THEN",
-    "      EXECUTE pg_catalog.format('GRANT %I TO %I', r.owner_name, l);",
+    "      EXECUTE pg_catalog.format('GRANT %I TO %I WITH INHERIT TRUE, SET FALSE',",
+    "        r.owner_name, l);",
     "    END IF;",
-    "  END LOOP;",
-    // Per-login schemas of the read-write logins are recreated at the end of
-    // the replay, which needs the restore login to be a member of each.
-    `  FOR r IN ${RW_LOGIN_SCHEMA_ROLES_SQL}`,
-    "  LOOP",
-    "    EXECUTE pg_catalog.format('GRANT %I TO %I', r.rolname, l);",
     "  END LOOP;",
     "END",
     "$tp_restore_login$;",
@@ -318,9 +322,9 @@ const RW_LOGIN_SCHEMA_ROLES_SQL = [
 /**
  * Recreate per-login schemas for every read-write platform login on the
  * connected database. The schema reset drops them; the dump does not contain
- * logins created after the backup. Idempotent. Run in the replay transaction
- * after the dump, as the restore login after `RESET ROLE` (the prepare step
- * made it a member of each of these logins, which `AUTHORIZATION` needs).
+ * logins created after the backup. Idempotent. Run as the engine superuser
+ * after the replay committed (the restore login cannot assume these logins,
+ * which `AUTHORIZATION` needs).
  */
 export function restoreReadWriteLoginSchemasSql(): string {
   return [
@@ -351,15 +355,13 @@ export function restoreReadWriteLoginSchemasSql(): string {
 
 /**
  * Last step inside the replay transaction, run as the throwaway login (psql
- * variable `tp_login`) after the dump: recreates the per-login schemas, then
- * whatever the login itself ended up
+ * variable `tp_login`) after the dump: whatever the login itself ended up
  * owning, or holding privileges on, goes to the database owner or is revoked,
  * so the login can be dropped.
  */
 export function restoreLoginFinishSql(): string {
   return [
     "RESET ROLE;",
-    restoreReadWriteLoginSchemasSql(),
     'REASSIGN OWNED BY :"tp_login" TO :"tp_owner";',
     'DROP OWNED BY :"tp_login";',
   ].join("\n");

@@ -407,7 +407,7 @@ test("backup dump/restore argv always target the stable platform admin regardles
   // pieces travel as positional arguments, never inside the script text.
   assertEquals(restoreArgv.slice(0, 2), ["sh", "-c"]);
   assertEquals(restoreArgv.slice(3, 6), ["tp-restore", "postgres", "appdb"]);
-  assertEquals(restoreArgv.length, 9);
+  assertEquals(restoreArgv.length, 10);
   const script = restoreArgv[2];
   assertEquals(script.includes("appdb"), false);
   // Admin session: prepare only; the dump is replayed as the temporary login.
@@ -441,8 +441,17 @@ test("backup dump/restore argv always target the stable platform admin regardles
   assertStringIncludes(script, "set +e");
   assertStringIncludes(restoreArgv[6], "NOSUPERUSER");
   assertStringIncludes(restoreArgv[6], "log_statement = 'none'");
-  assertStringIncludes(restoreArgv[8], "CREATE SCHEMA %I AUTHORIZATION %I");
+  // The restore login never assumes another role: schema owners are granted
+  // to it without SET, and per-login schemas are made by the superuser step
+  // after the commit.
+  assertStringIncludes(restoreArgv[6], "WITH INHERIT TRUE, SET FALSE");
+  assertEquals(restoreArgv[6].includes("rolvaliduntil"), true);
   assertStringIncludes(restoreArgv[8], "REASSIGN OWNED BY");
+  assertEquals(restoreArgv[8].includes("CREATE SCHEMA"), false);
+  assertStringIncludes(restoreArgv[9], "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(script, "trap 'exit 143' TERM");
+  assertStringIncludes(script, "SET search_path = pg_catalog, pg_temp;");
+  assertStringIncludes(script, "Type: BLOBS;");
 });
 
 function standbyReplicationSpec() {

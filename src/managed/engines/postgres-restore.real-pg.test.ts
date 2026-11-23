@@ -932,10 +932,11 @@ for (const series of SERIES) {
         assertEquals(dump.success, true, dump.stderr);
         await sql("CREATE TABLE public.made_later (id int);");
         const argv = backup.restoreArgv(ctx, { database: "shop" });
-        argv[argv.length - 1] = handOverPlatformObjectsSql(
+        // Position 8 is the finish SQL that runs inside the replay transaction.
+        argv[8] = handOverPlatformObjectsSql(
           "(SELECT 'no_such_role')",
           "ARRAY[current_user::text]",
-        ) + "\n" + argv[argv.length - 1];
+        ) + "\n" + argv[8];
         const failed = await docker(
           ["exec", "-i", "-u", "0", name, ...argv],
           dump.bytes,
@@ -1163,5 +1164,287 @@ for (const series of SERIES) {
         await docker(["rm", "-f", "-v", name]);
       }
     },
+  });
+}
+
+type ShopEnv = {
+  name: string;
+  sql: (user: string, sqlText: string, database?: string) => Promise<string>;
+  dumpAndRestore: (mutate?: () => Promise<void>) => Promise<Run>;
+};
+
+/**
+ * One throwaway engine with the platform transport and a database `shop`
+ * owned by the owner role, with a `migrate` (owner) and an `app` (read-write)
+ * login. `dumpAndRestore` takes a backup, runs `mutate` (changes made after
+ * the backup), then restores the backup and returns the result.
+ */
+async function withShop(
+  series: string,
+  fn: (env: ShopEnv) => Promise<void>,
+): Promise<void> {
+  const name = `tp-restrole-pg${series}-${crypto.randomUUID().slice(0, 8)}`;
+  const started = await docker([
+    "run",
+    "-d",
+    "--rm",
+    "--name",
+    name,
+    "-e",
+    "POSTGRES_HOST_AUTH_METHOD=trust",
+    `postgres:${series}`,
+  ]);
+  try {
+    if (!started.success || !(await waitReady(name, 60))) {
+      if (REQUIRE) {
+        throw new Error(`postgres:${series} did not start: ${started.stderr}`);
+      }
+      console.warn(`skipping real Postgres ${series}: container not ready`);
+      return;
+    }
+    await platformTransport(name);
+    const sql = async (user: string, sqlText: string, database = "shop") => {
+      const out = await docker([
+        "exec",
+        "-i",
+        name,
+        "psql",
+        "-X",
+        "-q",
+        "-t",
+        "-A",
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-U",
+        user,
+        "-d",
+        database,
+      ], sqlText);
+      assertEquals(out.success, true, out.stderr);
+      return out.stdout.trim();
+    };
+    const ctx: ManagedEngineContext = {
+      containerId: name,
+      composeServiceName: "postgres",
+      rootUsername: "postgres",
+      defaultDatabase: "postgres",
+      exec: (argv, input) => docker(["exec", "-i", name, ...argv], input),
+    };
+    const backup = postgresManagedEngineRuntime.backup;
+    if (!backup) throw new TypeError("expected postgres backup support");
+    const login = (username: string, level: string) => ({
+      ...credential(username, [level]),
+      databases: ["shop"],
+    });
+    await sql("postgres", ensureOwnerRolesSql("shop"), "postgres");
+    await sql(
+      "postgres",
+      "CREATE DATABASE shop OWNER tp_shop_owner;",
+      "postgres",
+    );
+    await postgresManagedEngineRuntime.applyCredentials(
+      ctx,
+      [login("migrate", "owner"), login("app", "read-write")],
+      { ownerRoleDatabases: ["shop"] },
+    );
+    await fn({
+      name,
+      sql,
+      dumpAndRestore: async (mutate) => {
+        const dump = await docker([
+          "exec",
+          "-u",
+          "postgres",
+          name,
+          ...backup.dumpArgv(ctx, { database: "shop" }),
+        ]);
+        assertEquals(dump.success, true, dump.stderr);
+        if (mutate) await mutate();
+        return docker(
+          [
+            "exec",
+            "-i",
+            "-u",
+            "0",
+            name,
+            ...backup.restoreArgv(ctx, { database: "shop" }),
+          ],
+          dump.bytes,
+        );
+      },
+    });
+  } finally {
+    await docker(["rm", "-f", "-v", name]);
+  }
+}
+
+for (const series of SERIES) {
+  test({
+    name:
+      `real Postgres ${series}: a failure after the large-object section rolls the whole restore back`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: () =>
+      withShop(series, async ({ sql, dumpAndRestore }) => {
+        // The refresh of this view runs after the large objects (post-data)
+        // and fails only for the restore (its session login is not `migrate`).
+        await sql(
+          "migrate",
+          `CREATE TABLE public.keep (id int);
+           INSERT INTO public.keep VALUES (1), (2);
+           SELECT lo_create(424242);
+           CREATE FUNCTION public.guard() RETURNS int
+             LANGUAGE plpgsql VOLATILE AS $f$
+           BEGIN
+             IF session_user <> 'migrate' THEN
+               RAISE EXCEPTION 'post-data failure on purpose';
+             END IF;
+             RETURN 1;
+           END $f$;
+           CREATE MATERIALIZED VIEW public.guarded AS SELECT public.guard() AS g;`,
+        );
+        const restored = await dumpAndRestore(async () => {
+          await sql(
+            "migrate",
+            `INSERT INTO public.keep VALUES (3);
+             CREATE TABLE public.after_backup (id int);
+             SELECT lo_unlink(424242);`,
+          );
+        });
+        assertEquals(restored.success, false, "the restore must fail");
+        assertStringIncludes(restored.stderr, "post-data failure on purpose");
+        assertStringIncludes(restored.stderr, "database is unchanged");
+        assertEquals(
+          await sql("postgres", "SELECT count(*) FROM public.keep;"),
+          "3",
+          "the data made after the backup is still there",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_class WHERE relname = 'after_backup';",
+          ),
+          "1",
+          "the schema reset was rolled back too",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_largeobject_metadata WHERE oid = 424242;",
+          ),
+          "0",
+          "the large object was not brought back by a failed restore",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'tp\\_restore%';",
+            "postgres",
+          ),
+          "0",
+          "no temporary restore login is left behind",
+        );
+      }),
+  });
+
+  test({
+    name:
+      `real Postgres ${series}: dump code running as the owner cannot switch to or alter another login`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: () =>
+      withShop(series, async ({ sql, dumpAndRestore }) => {
+        const hashes = () =>
+          sql(
+            "postgres",
+            `SELECT string_agg(rolname || ':' || md5(coalesce(rolpassword, '')), ',' ORDER BY rolname)
+               FROM pg_authid WHERE rolname IN ('app', 'legacy_own', 'migrate');`,
+            "postgres",
+          );
+        // Dump text that runs at restore time and tries to become, or change,
+        // the other logins. `RESET ROLE` goes back to the session login.
+        await sql(
+          "migrate",
+          `CREATE TABLE public.audit (who text, target text, switched boolean, altered boolean);
+           CREATE FUNCTION public.probe() RETURNS boolean
+             LANGUAGE plpgsql VOLATILE AS $f$
+           DECLARE t text; cur text := current_user; sw boolean; al boolean;
+           BEGIN
+             FOREACH t IN ARRAY ARRAY['app', 'legacy_own', 'postgres'] LOOP
+               sw := false; al := false;
+               EXECUTE 'RESET ROLE';
+               BEGIN
+                 EXECUTE format('SET ROLE %I', t);
+                 sw := true;
+                 BEGIN
+                   EXECUTE format('ALTER ROLE %I PASSWORD %L', t, 'changed-by-dump');
+                   al := true;
+                 EXCEPTION WHEN OTHERS THEN NULL;
+                 END;
+               EXCEPTION WHEN OTHERS THEN NULL;
+               END;
+               EXECUTE 'RESET ROLE';
+               BEGIN
+                 EXECUTE format('ALTER ROLE %I PASSWORD %L', t, 'changed-by-dump');
+                 al := true;
+               EXCEPTION WHEN OTHERS THEN NULL;
+               END;
+               INSERT INTO public.audit VALUES (cur, t, sw, al);
+               EXECUTE format('SET ROLE %I', cur);
+             END LOOP;
+             RETURN true;
+           END $f$;
+           CREATE TABLE public.checked (id int CHECK (public.probe()));
+           INSERT INTO public.checked VALUES (1);`,
+        );
+        // The setup run is only the tenant's own session: keep restore rows.
+        await sql("migrate", "DELETE FROM public.audit;");
+        let before = "";
+        const restored = await dumpAndRestore(async () => {
+          // After the backup: a schema owned by a login that is not the owner
+          // role. The restore has to drop it, so the restore login holds that
+          // login's rights.
+          await sql(
+            "postgres",
+            `CREATE ROLE legacy_own LOGIN PASSWORD 'legacy-secret-1';
+             CREATE SCHEMA legacy AUTHORIZATION legacy_own;
+             CREATE TABLE legacy.t (id int);
+             ALTER TABLE legacy.t OWNER TO legacy_own;`,
+          );
+          before = await hashes();
+        });
+        assertEquals(restored.success, true, restored.stderr);
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM public.audit WHERE who = 'tp_shop_owner';",
+          ),
+          "3",
+          "the probe ran at restore time, as the owner role",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM public.audit WHERE switched OR altered;",
+          ),
+          "0",
+          "dump code could neither switch to nor alter another login",
+        );
+        assertEquals(
+          await hashes(),
+          before,
+          "no login's password changed",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_namespace WHERE nspname = 'legacy';",
+          ),
+          "0",
+          "the other login's schema was dropped by the reset",
+        );
+      }),
   });
 }

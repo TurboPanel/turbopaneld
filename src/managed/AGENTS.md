@@ -553,17 +553,21 @@ ProxySQL to enforce. Canonical policy:
      `tp_restore_<12 hex>` (`LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
      NOREPLICATION NOBYPASSRLS`, connection limit 2, random password, valid for
      an hour) that is a member of the owner role, hands superuser-owned schemas
-     to the owner and makes the login a member of the other schema owners and
-     the read-write logins; (2) one transaction on a TLS connection as that
+     to the owner and grants the other schema owners to the login with
+     `INHERIT TRUE, SET FALSE` (it can use their rights to drop their schemas
+     but never switch to them: the only role it, and the dump code, can assume
+     is the owner role); stale logins are dropped only once their hour has run
+     out, so two restores at once keep their own logins; (2) one transaction on a TLS connection as that
      login, to the container's own address (production `pg_hba` admits a
      non-admin login only over `hostssl` with a password from the managed
      network): `restoreResetSql` drops every user schema (only `public` is
      recreated, with its owner and privileges; the dump creates the others),
      `SET LOCAL ROLE` to the owner, the dump as plain SQL (`pg_restore
      --no-owner --clean --if-exists -f -`), then `restoreLoginFinishSql`
-     (`RESET ROLE`, per-login read-write schemas back
-     (`restoreReadWriteLoginSchemasSql`), `REASSIGN OWNED` / `DROP OWNED` of the
-     login); (3) a shell `trap` drops the login on any exit. `SET ROLE` alone
+     (`RESET ROLE`, `REASSIGN OWNED` / `DROP OWNED` of the login); (3) after the
+     commit, as the superuser, the per-login read-write schemas are recreated
+     (`restoreReadWriteLoginSchemasSql`; the login cannot assume those logins);
+     a shell `trap` (exit, HUP, INT, TERM) drops the login on any exit. `SET ROLE` alone
      would not be enough (tenant code can `RESET ROLE`), which is why the
      session user is itself a non-superuser. The password is made in the
      container, lives in shell variables, the prepare step's stdin and the
@@ -575,7 +579,8 @@ ProxySQL to enforce. Canonical policy:
      A filter (`PG_RESTORE_FILTER_AWK`, `COPY` data untouched) sits between
      `pg_restore` and `psql`: it drops the large-object section's own
      `BEGIN;` / `COMMIT;` (that `COMMIT;` would end the restore transaction
-     early) and `ALTER DEFAULT PRIVILEGES FOR ROLE <other role>` entries, which
+     early; matched on `Type: BLOBS;`, since pg_restore 18 names the section by
+     its object range) and `ALTER DEFAULT PRIVILEGES FOR ROLE <other role>` entries, which
      the owner's session may not replay; those belong to the platform's logins,
      survive a restore and are set again by every apply.
      `COMMIT` is sent only when `pg_restore`
