@@ -112,6 +112,15 @@ container is not caught here. An operator-chosen storage path under a home
 refused too, backup and restore helpers included. `principalRoots` is the
 built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
 
+**Allowed places under the storage root.** Below `/var/lib/turbopanel/storage`
+(`storageRoots`, built in like `principalRoots`) only
+`<org>/<storage>/<location>/data` and what is under it may be bound
+(`policy.ts` `storageViolation`, rule `bind-storage-path`): the root, an
+organization's folder, a storage's folder and a location's folder are refused.
+The gate does not know a container's organization, so another organization's
+well-formed location still passes here; the daemon confines a deploy to its own
+locations (`stateTree` in `compose-host-paths.ts`).
+
 **Generated secret and config files.** A tenant container (`ownerOf` is
 `tenant`) may bind, read-only, exactly the files the daemon writes for Compose
 `secrets:` and `configs:`: `<runDir>/deployments/<projectId>/<environmentId>/(secrets|configs)/<name>`
