@@ -12,9 +12,12 @@
  *    error: nothing has been stopped yet, so the old version is still serving.
  *    A cancel lands here too (`commit` throws `DeployCancelledError`); after
  *    `commit` it answers "too late".
- * 2. Stop the application services of the previous deploy. Services named in
- *    `keepRunning` (databases and other stateful services) stay up so
- *    migrations have something to talk to.
+ * 2. Stop the application services of the previous deploy that this deploy
+ *    changes. Services named in `keepRunning` (databases and other stateful
+ *    services) stay up so migrations have something to talk to, and so does a
+ *    service whose effective config, image and generated files are all
+ *    unchanged: stopping it would only cost a restart (see
+ *    {@link unchangedServices}).
  * 3. Pre-deploy hooks (the migrations). From the moment a `preDeployCommand`
  *    starts the schema may have changed, so the deploy is past the point of no
  *    return, as it is when the environment declares `migrations: breaking`.
@@ -88,6 +91,12 @@ export type SequentialDeployInput = {
   hooksMigrate: boolean;
   /** The environment declares a breaking migration for this deploy. */
   breakingMigration: boolean;
+  /**
+   * Compose services whose generated secret or config files differ from what
+   * the previous deploy wrote. Compose's own config hash does not cover file
+   * contents, so these count as changed and are stopped.
+   */
+  filesChanged?: ReadonlySet<string>;
   steps: SequentialDeploySteps;
 };
 
@@ -95,7 +104,96 @@ function fail(outcome: SequentialOutcome, reason: string): never {
   throw new SequentialDeployError(outcome, reason);
 }
 
-/** Services to stop: those the previous compose defines, minus the kept ones. */
+/** `service hash` lines of `docker compose config --hash "*"`; `null` when unreadable. */
+async function configHashes(
+  input: SequentialDeployInput,
+  paths: readonly string[],
+): Promise<Map<string, string> | null> {
+  const { steps } = input;
+  const result = await steps.run([
+    ...steps.composeArgs(paths),
+    "config",
+    "--hash",
+    "*",
+  ]);
+  if (!result.success) return null;
+  const hashes = new Map<string, string>();
+  for (const line of result.stdout.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length === 2) hashes.set(parts[0], parts[1]);
+  }
+  return hashes;
+}
+
+/** Whether the service's container runs the image its reference points at now. */
+async function runsCurrentImage(
+  steps: SequentialDeploySteps,
+  previous: readonly string[],
+  service: string,
+): Promise<boolean> {
+  const ids = await steps.run([
+    ...steps.composeArgs(previous),
+    "ps",
+    "-a",
+    "-q",
+    service,
+  ]);
+  const containers = ids.stdout.split("\n").map((id) => id.trim()).filter(
+    Boolean,
+  );
+  if (!ids.success || containers.length === 0) return false;
+  const used = await steps.run([
+    "inspect",
+    "--format",
+    "{{.Image}} {{.Config.Image}}",
+    ...containers,
+  ]);
+  if (!used.success) return false;
+  for (const line of used.stdout.split("\n")) {
+    if (line.trim() === "") continue;
+    const [imageId, reference] = line.trim().split(/\s+/);
+    if (!imageId || !reference) return false;
+    const current = await steps.run([
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      reference,
+    ]);
+    if (!current.success || current.stdout.trim() !== imageId) return false;
+  }
+  return true;
+}
+
+/**
+ * Services of the previous deploy this deploy leaves exactly as they are:
+ * the same Compose config hash (the previous chain read with its own `.env`
+ * snapshot, so a changed environment value or tag counts), the same generated
+ * secret and config files, and a container still on the image its reference
+ * resolves to now (a re-pulled tag counts). Anything that cannot be told
+ * apart is treated as changed, so it is stopped as before.
+ */
+export async function unchangedServices(
+  input: SequentialDeployInput,
+  previous: readonly string[],
+  candidates: readonly string[],
+): Promise<Set<string>> {
+  const { steps } = input;
+  const before = await configHashes(input, previous);
+  const after = await configHashes(input, input.composePaths);
+  const same = new Set<string>();
+  if (before === null || after === null) return same;
+  for (const name of candidates) {
+    const hash = before.get(name);
+    if (hash === undefined || hash !== after.get(name)) continue;
+    if (input.filesChanged?.has(name)) continue;
+    if (!(await runsCurrentImage(steps, previous, name))) continue;
+    same.add(name);
+  }
+  return same;
+}
+
+/** Services to stop: those the previous compose defines, minus the kept and unchanged ones. */
 async function servicesToStop(
   input: SequentialDeployInput,
   previous: readonly string[],
@@ -112,10 +210,15 @@ async function servicesToStop(
     );
   }
   const keep = new Set(input.keepRunning);
-  return listed.stdout
+  const candidates = listed.stdout
     .split("\n")
     .map((name) => name.trim())
     .filter((name) => name.length > 0 && !keep.has(name));
+  const unchanged = await unchangedServices(input, previous, candidates);
+  if (unchanged.size > 0) {
+    steps.log(`leaving unchanged services running (${[...unchanged].join(", ")})`);
+  }
+  return candidates.filter((name) => !unchanged.has(name));
 }
 
 async function stopPrevious(input: SequentialDeployInput): Promise<void> {

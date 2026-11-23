@@ -201,7 +201,11 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    absent or `inplace` is the flow above, unchanged; `src/deploy/sequential-deploy.ts`):
    networks and `compose build` + best-effort `pull` first (a failure there leaves the
    old version serving), then stop the previous deploy's services (those named in
-   `keepRunningServices`, the stateful ones, stay up), pre-deploy hooks (migrations),
+   `keepRunningServices`, the stateful ones, stay up; so does a service whose
+   `compose config --hash` (previous chain with its own `previous/.env`, against the
+   new chain), generated secret/config file contents (`generated-files-changed.ts`)
+   and container image id are all unchanged, and any service that cannot be compared
+   is stopped), pre-deploy hooks (migrations),
    `up -d --remove-orphans`, then the health gate (`healthTimeoutSeconds`, default 120).
    A failure before any migration restores `previous/` (`restorePreviousDeployment`)
    and starts the old version (`rolled_back`). Once a `preDeployCommand` hook has

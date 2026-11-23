@@ -10,6 +10,10 @@ import {
   ensureNamedVolumeOwners,
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
+import {
+  servicesWithChangedFiles,
+  snapshotGeneratedFiles,
+} from "../deploy/generated-files-changed.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import {
   applyDeployCachesAndReach,
@@ -2074,6 +2078,7 @@ type SequentialDeployContext = {
   labeledServices: string[];
   deploymentDir: string;
   onLine: LineHandler;
+  filesChanged: ReadonlySet<string>;
 };
 
 const DEFAULT_HEALTH_TIMEOUT_SECONDS = 120;
@@ -2120,6 +2125,7 @@ async function deploySequentially(
     hasHooks: serviceHooks.length > 0,
     hooksMigrate: serviceHooks.some((hook) => Boolean(hook.preDeployCommand)),
     breakingMigration: parsedPayload.migrations === "breaking",
+    filesChanged: ctx.filesChanged,
     steps,
   });
   if (serviceHooks.length > 0) {
@@ -2588,6 +2594,7 @@ async function deployContainerServices(
     );
     await writeComposeFileSecure(stagedPath, yaml);
     await persistComposeEnvFile(stageDir, parsedPayload.envFile);
+    const filesBefore = await snapshotGeneratedFiles(layout, parsedPayload);
     await materializeDeploySecrets(layout, parsedPayload, decryptSecrets);
     await materializeConfigFiles(
       layout,
@@ -2596,6 +2603,11 @@ async function deployContainerServices(
       parsedPayload.configFiles ?? [],
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
+    );
+    const filesChanged = await servicesWithChangedFiles(
+      filesBefore,
+      layout,
+      parsedPayload,
     );
     // SMB logins are decrypted here but added to the compose only after every
     // policy check below has judged the author's text (a login is never
@@ -2892,6 +2904,7 @@ async function deployContainerServices(
         labeledServices,
         deploymentDir,
         onLine,
+        filesChanged,
       });
       await pruneAfterDeploy(input, shareApplied.volumeNames);
       return sequential;
