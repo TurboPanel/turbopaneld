@@ -6011,39 +6011,62 @@ function bracesBalance(text: string): boolean {
   return depth === 0;
 }
 
-const HTTPS_SITE = `https-app.example.com {
-  tls internal
-  ${caddyTraefikUpstream("https")}
-}
-`;
-const HTTP_SITE = `http://http-app.example.com {
-  ${caddyTraefikUpstream("http")}
-}
-`;
+const HTTPS_SITE = siteSnippet({
+  hostname: "https-app.example.com",
+  tlsDir: TLS_DIR,
+});
+const HTTP_SITE = siteSnippet({
+  hostname: "http-app.example.com",
+  tlsDir: TLS_DIR,
+  forceHttps: false,
+});
+const ROUTED_SITE = siteSnippet({
+  hostname: "routed-app.example.com",
+  tlsDir: TLS_DIR,
+  routes: [
+    {
+      pathPrefix: "/php",
+      upstream: { kind: "traefik" },
+    },
+    { upstream: { kind: "traefik" } },
+  ],
+});
 
 test("a repeated site block keeps its own closing brace after a reverse_proxy closer in column 0", () => {
-  const layout = siteBoundLayout([
-    HTTPS_SITE + "\n" + HTTP_SITE,
-    "bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n",
-    "http://bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n",
-  ]);
+  const bound =
+    "bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n" +
+    "http://bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n";
+  const texts = [HTTPS_SITE, HTTP_SITE, ROUTED_SITE, bound];
+  for (const text of texts) assertEquals(bracesBalance(text), true);
+  const layout = siteBoundLayout(texts);
+  const copied = layout.unbound ?? [];
+  assertEquals(
+    copied.map((b) => b.address).sort(),
+    [
+      "http://http-app.example.com",
+      "http://https-app.example.com",
+      "http://routed-app.example.com",
+      "https-app.example.com",
+      "routed-app.example.com",
+    ].sort(),
+  );
   const out = hostingFallbackSnippet(false, false, layout);
   assertEquals(bracesBalance(out), true);
-  for (
-    const [original, name, scheme] of [
-      [HTTPS_SITE, "https-app.example.com", "https"],
-      [HTTP_SITE, "http://http-app.example.com", "http"],
-    ] as const
-  ) {
-    for (const address of layout[scheme]) {
-      const copy = original.replace(
-        ` {\n`,
-        ` {\n  bind ${address}\n`,
+  for (const block of copied) {
+    // The captured body ends before the block's own closing brace, and the
+    // copy is the original block with the bind line added.
+    assertEquals(bracesBalance(block.body), true);
+    for (const address of layout[block.scheme]) {
+      assertStringIncludes(
+        out,
+        `# ${block.address} on ${address}.\n${block.address} {\n  bind ${address}\n${block.body}}\n`,
       );
-      assertEquals(bracesBalance(copy), true);
-      assertStringIncludes(out, `# ${name} on ${address}.\n${copy}`);
     }
   }
+  // The routed site's handle blocks and the upstream closers survive whole.
+  const routed = copied.find((b) => b.address === "routed-app.example.com");
+  assertStringIncludes(routed?.body ?? "", "handle /php/*");
+  assertEquals(/^\}$/m.test(routed?.body ?? ""), true);
 });
 
 test("site blocks ignore braces in quotes and comments when finding the closing brace", () => {

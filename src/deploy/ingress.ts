@@ -2328,12 +2328,9 @@ const NO_BOUND_ADDRESSES: BoundAddresses = { http: [], https: [] };
 const SITE_OPEN_RE = /^(\S[^\n]*?) \{$/;
 const SITE_BIND_LINE_RE = /^ {2}bind (\S+(?: \S+)*)$/m;
 
-/**
- * How much one line opens or closes braces, leaving out braces in quoted text
- * and after a `#` that starts a comment.
- */
-function braceDelta(line: string): number {
-  let delta = 0;
+/** The line with quoted text and a trailing `#` comment taken out. */
+function unquoted(line: string): string {
+  let out = "";
   let quote = "";
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
@@ -2344,13 +2341,31 @@ function braceDelta(line: string): number {
       quote = ch;
     } else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
       break;
-    } else if (ch === "{") {
-      delta++;
-    } else if (ch === "}") {
-      delta--;
+    } else {
+      out += ch;
     }
   }
+  return out;
+}
+
+/** How much one line opens or closes braces, outside quotes and comments. */
+function braceDelta(line: string): number {
+  let delta = 0;
+  for (const ch of unquoted(line)) {
+    if (ch === "{") delta++;
+    else if (ch === "}") delta--;
+  }
   return delta;
+}
+
+/** The index just past the line that closes the block opened at `from`, or -1. */
+function blockEnd(lines: readonly string[], from: number): number {
+  let depth = 1;
+  for (let end = from + 1; end < lines.length; end++) {
+    depth += braceDelta(lines[end]);
+    if (depth === 0) return end + 1;
+  }
+  return -1;
 }
 
 /**
@@ -2362,21 +2377,20 @@ function* siteBlocks(
   text: string,
 ): Generator<{ readonly address: string; readonly body: string }> {
   const lines = text.split("\n");
-  for (let i = 0; i < lines.length; i++) {
+  let i = 0;
+  while (i < lines.length) {
     const open = SITE_OPEN_RE.exec(lines[i]);
-    if (open === null) continue;
-    let depth = 1;
-    let end = i + 1;
-    for (; end < lines.length && depth > 0; end++) {
-      depth += braceDelta(lines[end]);
+    const end = open === null ? -1 : blockEnd(lines, i);
+    if (open === null || end === -1) {
+      i++;
+      continue;
     }
-    if (depth > 0) return;
     const body = lines.slice(i + 1, end - 1);
     yield {
       address: open[1],
       body: body.length === 0 ? "" : body.join("\n") + "\n",
     };
-    i = end - 1;
+    i = end;
   }
 }
 
