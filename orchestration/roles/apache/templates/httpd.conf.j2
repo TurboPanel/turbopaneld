@@ -60,6 +60,15 @@ LogLevel notice
 LogFormat "%a %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" combined
 CustomLog "/var/log/{{ apache_logs_directory }}/access.log" combined
 
+# No .htaccess is read outside a site's own document root. Without a section for
+# the folders above it (a release root, the site folder), Apache still reads a
+# .htaccess there and refuses its first section tag (`<IfModule not allowed
+# here`) with a 500. Each vhost's own <Directory> block, merged after this one,
+# turns the closed override list on for its document root.
+<Directory "/">
+    AllowOverride None
+</Directory>
+
 # Dummy document root (unused — each site sets its own DocumentRoot).
 DocumentRoot "{{ turbopanel_state_dir }}/apache/empty"
 <Directory "{{ turbopanel_state_dir }}/apache/empty">
