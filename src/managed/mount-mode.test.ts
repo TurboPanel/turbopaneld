@@ -63,3 +63,100 @@ test("helper container mount arguments state a mode", () => {
     "type=volume,src=v,dst=/src,readonly=true",
   );
 });
+
+const MODE_END = /:(ro|rw)(`|"|'|\}\})?,?$/;
+
+async function sourceFiles(
+  dir: string,
+  extensions: readonly string[],
+  skipTests: boolean,
+): Promise<string[]> {
+  const found: string[] = [];
+  for await (const entry of Deno.readDir(dir)) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory) {
+      if (entry.name === "testdata" || entry.name === "node_modules") continue;
+      found.push(...await sourceFiles(path, extensions, skipTests));
+    } else if (
+      extensions.some((ext) => entry.name.endsWith(ext)) &&
+      !(skipTests && /\.test\.ts$/.test(entry.name))
+    ) {
+      found.push(path);
+    }
+  }
+  return found;
+}
+
+/**
+ * Docker `-v` argument sites: a line that is only the `-v` flag (TS argv
+ * array or Ansible list item), whose next line is the mount spec. psql's own
+ * `-v ON_ERROR_STOP=1` variable flag is not a mount.
+ */
+function findUnmodedVolumeArgs(path: string, text: string): string[] {
+  const lines = text.split("\n");
+  const bad: string[] = [];
+  for (let i = 0; i < lines.length - 1; i++) {
+    if (!/^\s*(- )?["']?-v["']?,?$/.test(lines[i])) continue;
+    const spec = lines[i + 1].trim();
+    if (/ON_ERROR_STOP/.test(spec)) continue;
+    if (!MODE_END.test(spec)) bad.push(`${path}:${i + 2}: ${spec}`);
+  }
+  return bad;
+}
+
+test("every docker -v argument in the daemon source and Ansible roles states a mode", async () => {
+  const files = [
+    ...await sourceFiles("src", [".ts"], true),
+    ...await sourceFiles(
+      "orchestration",
+      [".yml", ".yaml", ".j2", ".sh"],
+      true,
+    ),
+  ];
+  assert(files.length > 50, "the scan sees the source tree");
+  const bad: string[] = [];
+  for (const path of files) {
+    bad.push(...findUnmodedVolumeArgs(path, await Deno.readTextFile(path)));
+  }
+  assertEquals(bad, []);
+});
+
+test("every compose volumes list in the Ansible roles states a mode", async () => {
+  const files = await sourceFiles(
+    "orchestration",
+    [".yml", ".yaml", ".j2"],
+    true,
+  );
+  const bad: string[] = [];
+  let scanned = 0;
+  for (const path of files) {
+    const lines = (await Deno.readTextFile(path)).split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const header = /^(\s*)volumes:\s*$/.exec(lines[i]);
+      if (!header) continue;
+      for (let j = i + 1; j < lines.length; j++) {
+        const entry = /^(\s*)- (.*)$/.exec(lines[j]);
+        if (!entry || entry[1].length <= header[1].length) break;
+        // Only short-form mount strings carry a mode; `pgdata:` style top-level
+        // volume declarations are maps, not list items.
+        if (!entry[2].includes(":")) continue;
+        scanned++;
+        if (!MODE_END.test(entry[2].trim())) bad.push(`${path}:${j + 1}`);
+      }
+    }
+  }
+  assert(scanned > 0, "the scan sees at least one compose volumes list");
+  assertEquals(bad, []);
+});
+
+test("the scan flags a -v argument without a mode", () => {
+  const sample = ['    "-v",', "    `${dir}:/data`,"].join("\n");
+  assertEquals(findUnmodedVolumeArgs("x.ts", sample).length, 1);
+  assertEquals(
+    findUnmodedVolumeArgs(
+      "x.ts",
+      ['    "-v",', "    `${dir}:/data:ro`,"].join("\n"),
+    ),
+    [],
+  );
+});
