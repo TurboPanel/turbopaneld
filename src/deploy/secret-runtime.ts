@@ -145,8 +145,13 @@ export async function writeFileAtomic(
   }
   // Content already right: keep the file (and its modification time, which the
   // sequential deploy reads as "last changed"); only its mode is made sure of.
+  // Only a regular file is kept: reading or chmodding a link would follow it,
+  // so a link (or anything else) falls through to the rename, which replaces it.
   try {
-    if ((await Deno.readTextFile(path)) === content) {
+    if (
+      (await Deno.lstat(path)).isFile &&
+      (await Deno.readTextFile(path)) === content
+    ) {
       await Deno.chmod(path, mode);
       return;
     }
