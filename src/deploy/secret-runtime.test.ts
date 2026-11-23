@@ -8,6 +8,7 @@ import {
   rewriteComposeFileSources,
   rewriteComposeSecretFilePaths,
   SECRET_FILE_MODE,
+  writeFileAtomic,
   writeSecretFiles,
 } from "./secret-runtime.ts";
 
@@ -702,4 +703,28 @@ test("rewriteComposeFileSources drops authored content, environment and external
   assertEquals(rewritten.includes("external"), false);
   assertEquals(rewritten.includes("file: /r/configs/web--conf"), true);
   assertEquals(rewritten.includes("name: keep-me"), true);
+});
+
+test({
+  name:
+    "writeFileAtomic replaces a link holding the same content and leaves its target alone",
+  permissions: { read: true, write: true },
+  fn: async () => {
+    const root = await Deno.makeTempDir({ prefix: "tp-secret-link-" });
+    try {
+      const target = join(root, "target");
+      const path = join(root, "run", "secret");
+      await Deno.mkdir(dirname(path), { recursive: true });
+      await Deno.writeTextFile(target, "same", { mode: 0o600 });
+      await Deno.symlink(target, path);
+      await writeFileAtomic(path, "same", SECRET_FILE_MODE);
+      assertEquals((await Deno.lstat(path)).isFile, true);
+      assertEquals(await Deno.readTextFile(path), "same");
+      assertEquals((await Deno.stat(path)).mode! & 0o777, SECRET_FILE_MODE);
+      assertEquals((await Deno.stat(target)).mode! & 0o777, 0o600);
+      assertEquals(await Deno.readTextFile(target), "same");
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  },
 });
