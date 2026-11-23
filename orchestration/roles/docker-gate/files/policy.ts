@@ -47,6 +47,14 @@ export type PolicyConfig = {
    * directory (see `storageViolation`). Applies on top of `bindRoots`.
    */
   storageRoots: readonly string[];
+  /**
+   * The daemon's state directories (`/var/lib/turbopanel`). A bind source
+   * above one (`/var/lib`, `/var`), at one, or below one outside the storage
+   * roots (`deployments/`, secrets records, the spool) is refused by the
+   * `bind-state-dir` rule, which no approval can relax (see
+   * `stateDirViolation`).
+   */
+  stateDirs: readonly string[];
   /** Host paths (and everything under them) a bind mount may never reach. */
   denyPrefixes: readonly string[];
   /** The engine socket in every spelling the host uses. */
@@ -70,6 +78,7 @@ export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   bindRoots: ["/srv/users", "/var/lib/turbopanel/storage"],
   principalRoots: ["/srv/users"],
   storageRoots: ["/var/lib/turbopanel/storage"],
+  stateDirs: ["/var/lib/turbopanel"],
   denyPrefixes: [
     "/etc",
     "/var/run",
@@ -433,6 +442,25 @@ function storageViolation(
   return ok ? undefined : { rule: "bind-storage-path", detail: resolved };
 }
 
+/**
+ * The daemon's state directory, its `deployments/` and every ancestor of them
+ * (`/var/lib`, `/var`): a bind there reaches the deploy records and secret
+ * material of every project on the host. Unlike `bind-outside-roots`, which a
+ * host-level approval relaxes, this one is never approvable. Only the storage
+ * roots below a state directory stay reachable (judged by `storageViolation`).
+ */
+function stateDirViolation(
+  resolved: string,
+  config: PolicyConfig,
+): Violation | undefined {
+  const hit = config.stateDirs.some((dir) => {
+    if (within(dir, resolved)) return true; // the directory or an ancestor
+    return within(resolved, dir) &&
+      !config.storageRoots.some((root) => within(resolved, root));
+  });
+  return hit ? { rule: "bind-state-dir", detail: resolved } : undefined;
+}
+
 /** The cases a bind source can break, most specific first. */
 function bindViolation(
   resolved: string,
@@ -445,6 +473,8 @@ function bindViolation(
   if (config.denyPrefixes.some((prefix) => within(resolved, prefix))) {
     return { rule: "bind-forbidden-path", detail: resolved };
   }
+  const state = stateDirViolation(resolved, config);
+  if (state) return state;
   if (!config.bindRoots.some((root) => within(resolved, root))) {
     return { rule: "bind-outside-roots", detail: resolved };
   }
@@ -592,8 +622,14 @@ async function checkBindSource(
   }
   const platform = platformOutcome(resolved, entry, ctx);
   if (platform) return platform;
+  // A source that cannot be resolved (a link loop, a directory the gate cannot
+  // traverse) is judged on its spelling alone, which a link defeats; refuse it
+  // instead. No approval relaxes this rule.
   const violation = bindViolation(resolved, ctx.config);
-  return violation ? { violation } : {};
+  if (violation) return { violation };
+  return resolveOk
+    ? {}
+    : { violation: { rule: "bind-unresolvable", detail: resolved } };
 }
 
 function bindIsReadOnly(spec: string): boolean {

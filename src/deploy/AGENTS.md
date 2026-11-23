@@ -1111,7 +1111,10 @@ the deployments tree and every ancestor (`/var/lib/turbopanel`, `/var/lib`,
 `/`) are refused, checked on the path and on where it resolves. The one
 exception is a storage location this deploy was sent
 (`<state>/storage/<org>/<storage>/<location>/data`), and only with host-level
-approval and only while it resolves inside that location.
+approval and only while it resolves inside that location. With host-level
+approval a path that cannot be resolved at all (not merely missing) is refused,
+never judged on its spelling. `stateTreeOutcome` hands the own-location case to
+`ownLocationOutcome`.
 
 Named volumes stay in the deploy's namespace (`volumeNamespace` in
 `compose-final-policy.ts`, approved or not): a top-level volume's effective name

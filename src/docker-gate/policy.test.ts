@@ -138,10 +138,10 @@ test("tenant-facing flows are clean; the platform's own containers are clean exc
     CORPUS.filter((e) => e.flow === "attack").map((e) => [e.name, e.expect]),
   );
   assertEquals(attacks.get("managed-root-helper-unlabeled"), [
-    "bind-outside-roots",
+    "bind-state-dir",
   ]);
   assertEquals(attacks.get("managed-root-helper-forged-component"), [
-    "bind-outside-roots",
+    "bind-state-dir",
   ]);
   assertEquals(attacks.get("backup-restore-helper-unlabeled"), [
     "bind-forbidden-path",
@@ -295,8 +295,12 @@ test("forbidden host trees, and everything outside the allowed roots", async () 
     ["/run/turbopanel", "bind-forbidden-path"],
     ["/opt/turbopanel/vendor", "bind-forbidden-path"],
     ["/backup/engine", "bind-forbidden-path"],
-    ["/var/lib/turbopanel", "bind-outside-roots"],
-    ["/var/lib/turbopanel/secrets", "bind-outside-roots"],
+    ["/var/lib/turbopanel", "bind-state-dir"],
+    ["/var/lib/turbopanel/secrets", "bind-state-dir"],
+    ["/var/lib/turbopanel/deployments", "bind-state-dir"],
+    ["/var/lib/turbopanel/deployments/p/e/secrets/s", "bind-state-dir"],
+    ["/var/lib", "bind-state-dir"],
+    ["/var", "bind-state-dir"],
     // base is a reserved scope name: an old base environment loses its volume binds.
     ["/srv/users/alice/base/volumes/data", "bind-principal-path"],
     ["/srv/usersx", "bind-outside-roots"],
@@ -390,15 +394,15 @@ test("a symlink under an allowed root that leaves it is judged by its target", a
   );
 });
 
-test("a resolver that throws falls back to the path as written", async () => {
+test("a resolver that throws keeps lexical refusals and refuses the rest", async () => {
   const broken: ResolvePath = () => Promise.reject(new Error("EACCES"));
   assertEquals(
     ruleNames(await createVerdict({ Binds: ["/etc/x:/x"] }, broken)),
     ["bind-forbidden-path"],
   );
   assertEquals(
-    await createVerdict({ Binds: ["/srv/users/a/data:/x"] }, broken),
-    [],
+    ruleNames(await createVerdict({ Binds: ["/srv/users/a/data:/x"] }, broken)),
+    ["bind-unresolvable"],
   );
 });
 
@@ -1384,5 +1388,83 @@ test("a local volume cannot bind a generated path through o=bind and device", as
       },
     });
     assertEquals(ruleNames(found), ["volume-bind-forbidden-path"], o);
+  }
+});
+
+test("a bind source that cannot be resolved is refused, never judged on its spelling", async () => {
+  const failing: ResolvePath = (path) =>
+    path.startsWith("/srv/users/a/data/loop")
+      ? Promise.reject(new Error("too many levels of symbolic links"))
+      : Promise.resolve(path);
+  assertEquals(
+    ruleNames(
+      await createVerdict(
+        { Binds: ["/srv/users/a/data/loop/data:/x"] },
+        failing,
+      ),
+    ),
+    ["bind-unresolvable"],
+  );
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Binds: [
+          "/var/lib/turbopanel/storage/org-1/st-1/loc-1/data/loop:/x",
+        ],
+      }, (path) => Promise.reject(new Error(`cannot resolve ${path}`))),
+    ),
+    ["bind-unresolvable"],
+  );
+});
+
+test("a link into the daemon's state directory is refused through the target, whatever the spelling", async () => {
+  const toState: ResolvePath = (path) =>
+    Promise.resolve(
+      path.endsWith("/link") ? "/var/lib/turbopanel/deployments" : path,
+    );
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Binds: [
+          "/var/lib/turbopanel/storage/org-1/st-1/loc-1/data/link:/x",
+        ],
+      }, toState),
+    ),
+    ["bind-state-dir"],
+  );
+});
+
+test("volume create: a bind device inside the storage root passes, the state directory does not", async () => {
+  const create = (device: string) =>
+    verdict({
+      path: "/volumes/create",
+      body: {
+        Name: "v",
+        Driver: "local",
+        DriverOpts: { type: "none", o: "bind", device },
+      },
+    });
+  assertEquals(
+    await create("/var/lib/turbopanel/storage/org-1/st-1/loc-1/data"),
+    [],
+  );
+  assertEquals(
+    await create("/var/lib/turbopanel/storage/org-1/st-1/loc-1/data/sub"),
+    [],
+  );
+  for (
+    const [device, rule] of [
+      ["/var/lib/turbopanel/storage", "volume-bind-storage-path"],
+      ["/var/lib/turbopanel/storage/org-1/st-1", "volume-bind-storage-path"],
+      ["/var/lib/turbopanel", "volume-bind-state-dir"],
+      ["/var/lib/turbopanel/deployments", "volume-bind-state-dir"],
+      ["/var/lib", "volume-bind-state-dir"],
+    ]
+  ) {
+    assertEquals(
+      (await create(device!)).map((v) => v.rule),
+      [rule],
+      device,
+    );
   }
 });

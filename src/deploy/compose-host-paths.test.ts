@@ -1668,3 +1668,92 @@ test("state tree: a build path in the own location is refused, and relative sour
       ComposeHostPathError,
     );
   }));
+
+function deviceScan(device: string): ComposeHostPathScan {
+  return collectResolvedHostPaths({
+    services: { web: { image: "x" } },
+    volumes: {
+      data: { driver_opts: { type: "none", o: "bind", device } },
+    },
+  });
+}
+
+test("state tree: a driver_opts device bind into the own location is accepted with approval, and its escapes and neighbours are refused", () =>
+  withStateTree(async (f, tree, own, other) => {
+    const base = {
+      deploymentDir: f.dir,
+      stageDir: f.stage,
+      hostLevelApproved: true,
+      stateTree: tree,
+    };
+    await Deno.mkdir(join(own, "sub"));
+    await assertComposeHostPathsConfined([deviceScan(own)], base);
+    await assertComposeHostPathsConfined(
+      [deviceScan(join(own, "sub"))],
+      base,
+    );
+    // A path Docker has yet to create resolves through its existing ancestor.
+    await assertComposeHostPathsConfined(
+      [deviceScan(join(own, "sub", "new"))],
+      base,
+    );
+    await Deno.symlink(other, join(own, "escape"));
+    for (const device of [join(own, "escape"), other, tree.storageRoot]) {
+      await assertRejects(
+        () => assertComposeHostPathsConfined([deviceScan(device)], base),
+        ComposeHostPathError,
+      );
+    }
+    await assertRejects(
+      () =>
+        assertComposeHostPathsConfined([deviceScan(own)], {
+          ...base,
+          hostLevelApproved: false,
+        }),
+      ComposeHostPathError,
+    );
+  }));
+
+/** A realpath that fails with an error other than "not found" for paths under `blocked`. */
+function failingRealPath(blocked: string) {
+  return (path: string): Promise<string> =>
+    path === blocked || path.startsWith(`${blocked}/`)
+      ? Promise.reject(new Deno.errors.PermissionDenied("denied"))
+      : Deno.realPath(path);
+}
+
+test("state tree: an approved bind whose path cannot be resolved is refused, not judged on its spelling", () =>
+  withStateTree(async (f, tree, own) => {
+    const blockedOutside = join(f.outside, "locked");
+    await Deno.mkdir(blockedOutside);
+    for (
+      const [source, blocked] of [[own, own], [blockedOutside, blockedOutside]]
+    ) {
+      const options = {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+        realPath: failingRealPath(blocked!),
+      };
+      const err = await assertRejects(
+        () =>
+          assertComposeHostPathsConfined(
+            [binds({ type: "bind", source: source!, target: "/s" })],
+            options,
+          ),
+        ComposeHostPathError,
+      );
+      assert(err.message.includes("cannot"), err.message);
+    }
+    // The same path resolves fine when the engine can read it.
+    await assertComposeHostPathsConfined(
+      [binds({ type: "bind", source: blockedOutside, target: "/s" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+      },
+    );
+  }));

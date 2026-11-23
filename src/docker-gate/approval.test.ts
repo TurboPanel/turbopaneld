@@ -284,6 +284,9 @@ test("the approvable set never includes the unconditional rules", () => {
     const rule of [
       "bind-host-root",
       "bind-forbidden-path",
+      "bind-state-dir",
+      "bind-unresolvable",
+      "volume-bind-state-dir",
       "bind-noncanonical-path",
       "userns-mode-host",
       "volumes-from",

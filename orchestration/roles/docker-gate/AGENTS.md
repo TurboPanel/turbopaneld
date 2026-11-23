@@ -121,6 +121,15 @@ The gate does not know a container's organization, so another organization's
 well-formed location still passes here; the daemon confines a deploy to its own
 locations (`stateTree` in `compose-host-paths.ts`).
 
+**State directory rule no approval waives.** A source at `/var/lib/turbopanel`
+(`stateDirs`), below it outside the storage root (`deployments/`, secret
+records, the spool), or above it (`/var/lib`, `/var`) is `bind-state-dir`
+(`policy.ts` `stateDirViolation`, `volume-bind-state-dir` for a volume device).
+It is not in `APPROVABLE_RULES`, unlike `bind-outside-roots`, so a signed
+`host-paths` approval does not relax it. A source the gate cannot resolve (a
+link loop, an untraversable directory) is `bind-unresolvable`, also never
+approvable, instead of being judged on its spelling.
+
 **Generated secret and config files.** A tenant container (`ownerOf` is
 `tenant`) may bind, read-only, exactly the files the daemon writes for Compose
 `secrets:` and `configs:`: `<runDir>/deployments/<projectId>/<environmentId>/(secrets|configs)/<name>`
