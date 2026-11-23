@@ -62,3 +62,16 @@ turbopanel_firewall_guard_bin: "{{ turbopanel_install_root }}/lib/tp-firewall-gu
 # timer's first fire lands just after it.
 turbopanel_firewall_guard_deadline_sec: 125
 turbopanel_firewall_guard_retry_sec: 10
+
+# Docker goes through the root-owned Docker gate on a managed host (the
+# docker-gate role; `tp` talks to its socket, never to the engine's). These
+# mirror that role's `docker_gate_run_dir`, `docker_gate_service_name` and
+# `docker_gate_build_run_dir` (pinned equal by src/orchestration/docker-gate-role.test.ts).
+# A co-located dev host (turbopanel_dev_user set) has no gate and keeps the
+# engine's own socket.
+turbopanel_docker_gate_run_dir: /run/turbopanel-gate
+turbopanel_docker_gate_build_dir: "{{ turbopanel_docker_gate_run_dir }}/build"
+turbopanel_docker_gate_service: turbopanel-docker-gate.service
+# How long the daemon's start waits for the gate's socket when the gate service
+# is installed (seconds). Docker calls made after that fail closed.
+turbopanel_docker_gate_wait_seconds: 60

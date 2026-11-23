@@ -29,6 +29,15 @@ esac
 # The per-engine lock lives under the run dir: it must be the daemon's own, or
 # a scheduled run and a manual backup would not exclude each other.
 export TURBOPANEL_RUN_DIR="${TURBOPANEL_RUN_DIR:-{{ runtime_socket_dir | default('/run/turbopanel') }}}"
+{% if (turbopanel_dev_user | default('') | length) == 0 %}
+
+# A managed host's backup runner reaches Docker only through the gate, like the
+# daemon (its own unit does not carry the daemon's environment). The docker
+# client's DOCKER_HOST is derived from TURBOPANEL_DOCKER_SOCKET.
+export TURBOPANEL_DOCKER_SOCKET="{{ turbopanel_docker_gate_run_dir }}/docker.sock"
+export TURBOPANEL_DOCKER_BUILD_SOCKET="{{ turbopanel_docker_gate_build_dir }}/docker.sock"
+export DOCKER_HOST="unix://{{ turbopanel_docker_gate_run_dir }}/docker.sock"
+{% endif %}
 
 {% if turbopanel_daemon_exec_mode | default('source') == 'native' %}
 exec {{ turbopanel_daemon_bin }} backup-run "$policy_id"

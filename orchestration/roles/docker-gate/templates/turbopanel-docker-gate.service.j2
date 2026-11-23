@@ -1,5 +1,5 @@
 [Unit]
-Description=TurboPanel Docker gate (observe mode: forwards everything, logs what the strict profile would refuse)
+Description=TurboPanel Docker gate (the daemon's only route to Docker: {{ docker_gate_mode }} mode)
 Documentation=https://github.com/TurboPanel/turbopaneld/blob/trunk/orchestration/roles/docker-gate/AGENTS.md
 # Ordered after Docker, but independent of it: the gate connects to the engine
 # per request, so a Docker restart needs no gate restart, and a stopped Docker
@@ -13,8 +13,8 @@ StartLimitIntervalSec=0
 Type=simple
 User=root
 Group=root
-# Observe (the default): the gate never refuses a policy finding; findings go
-# to the journal. docker_gate_mode switches on the refusing stage-4 mode.
+# enforce (the default): a request with findings is a 403 before the engine is
+# reached. observe never refuses a policy finding and only logs it.
 Environment=TP_DOCKER_GATE_MODE={{ docker_gate_mode }}
 Environment=TP_DOCKER_GATE_SOCKET={{ docker_gate_socket }}
 # Stage 3: the read-only listener Traefik may mount (readonly.ts). It refuses

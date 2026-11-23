@@ -169,6 +169,26 @@ const SEAM_TOOLS: BuildkitImageBuildTools = {
   frontendDigest: VALID_DIGEST,
 };
 
+test("imageBuildBuildxArgs names the builder it is given, so a gate-routed build uses its context's builder", () => {
+  const args = imageBuildBuildxArgs(
+    {
+      workingDir: "/w/checkout",
+      cacheKey: "proj-1",
+      imageTag: "turbopanel-app/web:rel-1",
+      tools: SEAM_TOOLS,
+    },
+    "/w/scratch/railpack-plan.json",
+    undefined,
+    "turbopanel-build",
+  );
+  assertEquals(args.slice(0, 4), [
+    "buildx",
+    "build",
+    "--builder",
+    "turbopanel-build",
+  ]);
+});
+
 test("imageBuildBuildxArgs targets the Engine builder with the pinned frontend", () => {
   const args = imageBuildBuildxArgs({
     workingDir: "/w/checkout",

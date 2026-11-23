@@ -13,8 +13,13 @@
 #      a host-root bind, the Docker socket, host networking, an added
 #      capability): each is LOGGED as docker-gate.would-deny, and each still
 #      runs (observe mode refuses nothing);
-#   4. nothing routes through the gate by default: the daemon's environment has
-#      no DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET.
+#   4. the daemon's own env file does not pin DOCKER_HOST (the unit sets it).
+#
+# Sections 2 onward prove the observe-mode behaviour: they expect every probe
+# to run. On an enforcing host (the default) the script runs section 1 and
+# then section 1b instead, which proves a blocked create is refused with the
+# gate's 403 (and journaled as docker-gate.denied) and exits; set the gate to
+# observe to run the rest.
 #
 # Stage 2 adds: the ownership observation (a container nothing stamped is
 # logged as unowned-container when stopped through the gate), a rejected signed
@@ -169,6 +174,29 @@ else
   fail "gate source is root-owned and not writable by the daemon"
 fi
 
+# The gate's mode comes from its unit (the same source the service reads).
+GATE_MODE=$(systemctl show -p Environment --value "$GATE_UNIT" 2>/dev/null | tr ' ' '\n' | sed -n 's/^TP_DOCKER_GATE_MODE=//p' | head -1)
+if [[ "$GATE_MODE" == enforce ]]; then
+  echo "== 1b. enforce mode: a blocked create is refused with the gate's 403"
+  # The refusal is the gate's own (403 before the engine is reached), not an
+  # engine error: use the raw API so the status is visible.
+  _body='{"Image":"'"$IMAGE"'","HostConfig":{"Privileged":true,"NetworkMode":"none"}}'
+  _code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' -d "$_body" --unix-socket "$GATE_SOCKET" "localhost/containers/create?name=tpgate-proof-denied")
+  if [[ "$_code" == 403 ]]; then pass "a privileged create answered 403"; else fail "a privileged create answered '$_code', want 403"; fi
+  if gate_docker inspect tpgate-proof-denied >/dev/null 2>&1; then fail "the refused container exists"; gate_docker rm -f -v tpgate-proof-denied >/dev/null 2>&1; else pass "the refused container was never created"; fi
+  if gate_docker run --rm --network none -v /run/turbopanel:/x:ro "$IMAGE" true >/dev/null 2>&1; then fail "a tenant bind under /run was allowed"; else pass "a tenant bind under /run is refused"; fi
+  sleep 1
+  _log=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null)
+  if printf '%s\n' "$_log" | grep -q '"event":"docker-gate.denied"'; then pass "journal has docker-gate.denied lines"; else fail "journal has no docker-gate.denied line"; fi
+  echo "NOTE  enforce mode: the observe-mode sections (2 onward) run shapes the gate now refuses; set the gate to observe to run them"
+  if [[ "$FAILED" -ne 0 ]]; then
+    echo "RESULT: $FAILED check(s) failed"
+    exit 1
+  fi
+  echo "RESULT: all checks passed"
+  exit 0
+fi
+
 echo "== 2. ordinary traffic through the gate"
 check "pull the pinned image" gate_docker pull "$IMAGE"
 check "docker run" gate_docker run --rm --network none "$IMAGE" true
@@ -226,9 +254,9 @@ if printf '%s\n' "$_log" | grep '"event":"docker-gate.approval"' | grep -q '"res
 if printf '%s\n' "$_log" | grep -q 'bm90LWEtdG9rZW4'; then fail "an approval token reached the journal"; else pass "approval token is never logged"; fi
 if printf '%s\n' "$_log" | grep -q '"level":"error"'; then fail "the gate logged an error (see below)"; printf '%s\n' "$_log" | grep '"level":"error"' | head -5; else pass "no error-level gate log lines"; fi
 
-echo "== 4. nothing routes through the gate by default"
+echo "== 4. the env file does not pin the Docker socket (the unit does)"
 if grep -Eq '^(export )?(DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET)=' "$DAEMON_ENV" 2>/dev/null; then
-  echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (an opt-in canary flip, not the default)"
+  echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (the unit sets these; the env file should not)"
 else
   pass "$DAEMON_ENV sets neither DOCKER_HOST nor TURBOPANEL_DOCKER_SOCKET"
 fi

@@ -88,6 +88,9 @@ const FAKE_BIN = `#!/bin/sh
   printf 'RUN_DIR=%s\\n' "\${TURBOPANEL_RUN_DIR:-}"
   printf 'DENO_DIR=%s\\n' "\${DENO_DIR:-}"
   printf 'PWD=%s\\n' "$(pwd -P)"
+  printf 'DOCKER_HOST=%s\\n' "\${DOCKER_HOST:-}"
+  printf 'DOCKER_SOCKET=%s\\n' "\${TURBOPANEL_DOCKER_SOCKET:-}"
+  printf 'BUILD_SOCKET=%s\\n' "\${TURBOPANEL_DOCKER_BUILD_SOCKET:-}"
 } > "$FAKE_OUT"
 `;
 
@@ -96,6 +99,7 @@ type Fixture = { tmp: string; wrapper: string; out: string; workdir: string };
 async function withWrapper(
   mode: "native" | "js" | "source",
   fn: (fixture: Fixture) => Promise<void>,
+  vars: Record<string, unknown> = {},
 ): Promise<void> {
   const tmp = await Deno.realPath(
     await Deno.makeTempDir({ prefix: "tp-backup-run-wrapper-" }),
@@ -118,6 +122,9 @@ async function withWrapper(
         turbopanel_daemon_js: "/opt/turbopanel/bin/turbopaneld.js",
         turbopanel_daemon_state_dir: "/var/lib/turbopanel",
         turbopanel_daemon_workdir: workdir,
+        turbopanel_docker_gate_run_dir: "/run/turbopanel-gate",
+        turbopanel_docker_gate_build_dir: "/run/turbopanel-gate/build",
+        ...vars,
       }),
       { mode: 0o755 },
     );
@@ -242,5 +249,32 @@ test({
       assertEquals(args.slice(-3), ["main.ts", "backup-run", POLICY_ID]);
       assert(record.includes(`PWD=${fixture.workdir}`));
     });
+  },
+});
+
+test({
+  name:
+    "tp-backup-run reaches Docker through the gate on a managed host, and not on a dev host",
+  ignore: !JINJA_PYTHON,
+  fn: async () => {
+    await withWrapper("native", async (fixture) => {
+      const { code, record } = await runWrapper(fixture, [POLICY_ID]);
+      assertEquals(code, 0);
+      assert(record);
+      assert(
+        record.includes("DOCKER_HOST=unix:///run/turbopanel-gate/docker.sock"),
+      );
+      assert(record.includes("DOCKER_SOCKET=/run/turbopanel-gate/docker.sock"));
+      assert(
+        record.includes("BUILD_SOCKET=/run/turbopanel-gate/build/docker.sock"),
+      );
+    });
+    await withWrapper("native", async (fixture) => {
+      const { code, record } = await runWrapper(fixture, [POLICY_ID]);
+      assertEquals(code, 0);
+      assert(record);
+      assert(record.includes("DOCKER_HOST="));
+      assert(record.includes("DOCKER_SOCKET="));
+    }, { turbopanel_dev_user: "dev" });
   },
 });

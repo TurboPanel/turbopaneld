@@ -14,8 +14,16 @@
  * role adds `tp` to `docker`, so the self re-exec above is what reaches
  * dockerd before the daemon restarts; the root fallback only succeeds on a
  * development host whose user has full sudo.
+ *
+ * On a managed host the daemon unit sets `TURBOPANEL_DOCKER_SOCKET` to the
+ * Docker gate's socket, and every spawn here talks to that socket
+ * (`DOCKER_HOST`, see {@link dockerConfigEnv}), the sudo rungs included. Compose
+ * and buildx calls use a Docker context on the gate's build socket instead
+ * (`TURBOPANEL_DOCKER_BUILD_SOCKET`, see {@link dockerBuildContext}): BuildKit's
+ * sessions are refused everywhere else.
  */
 
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join } from "@std/path";
 import { emitBufferedLines, pumpLines } from "../logs/line-stream.ts";
 import { PROD_RUN_DIR_DEFAULT } from "../paths/layout.ts";
@@ -30,6 +38,33 @@ const decoder = new TextDecoder();
 const SUDO_BIN = "/usr/bin/sudo";
 const DOCKER_BIN = "/usr/bin/docker";
 const ENV_BIN = "/usr/bin/env";
+
+/** The Docker context that points at the gate's build socket. */
+export const DOCKER_BUILD_CONTEXT = "turbopanel-build";
+
+function trimmedOrUndefined(
+  read: () => string | undefined,
+): string | undefined {
+  try {
+    return read()?.trim() || undefined;
+  } catch {
+    return undefined; // a caller without env access
+  }
+}
+
+/** The gate socket the daemon talks to (`TURBOPANEL_DOCKER_SOCKET`), when it is set. */
+function configuredDockerSocket(): string | undefined {
+  if (ioOverride) return ioOverride.dockerSocket;
+  return trimmedOrUndefined(() => Deno.env.get("TURBOPANEL_DOCKER_SOCKET"));
+}
+
+/** The gate's build socket (`TURBOPANEL_DOCKER_BUILD_SOCKET`), when it is set and absolute. */
+function configuredBuildSocket(): string | undefined {
+  const socket = ioOverride ? ioOverride.buildSocket : trimmedOrUndefined(
+    () => Deno.env.get("TURBOPANEL_DOCKER_BUILD_SOCKET"),
+  );
+  return socket !== undefined && isAbsolute(socket) ? socket : undefined;
+}
 
 function configuredRunDir(): string {
   try {
@@ -62,6 +97,7 @@ export function dockerConfigDir(runDir: string = configuredRunDir()): string {
 
 let ensuredConfigDir: string | undefined;
 let configDirResolved = false;
+let buildContextReady = false;
 let warnedConfigDir = false;
 
 function warnConfigDirOnce(reason: string): void {
@@ -70,6 +106,14 @@ function warnConfigDirOnce(reason: string): void {
   console.warn(
     `docker config folder: ${reason}; docker uses its own default config`,
   );
+}
+
+let warnedBuildContext = false;
+
+function warnBuildContextOnce(reason: string): void {
+  if (warnedBuildContext) return;
+  warnedBuildContext = true;
+  console.warn(`docker build context: ${reason}`);
 }
 
 type ConfigDirStat = {
@@ -105,6 +149,63 @@ function trustConfigDir(dir: string): string | undefined {
 }
 
 /**
+ * Write the Docker context `turbopanel-build` (host: the gate's build socket)
+ * into the vetted config folder, in the layout the CLI's own context store
+ * reads (`contexts/meta/<sha256 of the name>/meta.json`), so no extra spawn is
+ * needed. The run folder is tmpfs, so a reboot drops it and the next process
+ * writes it again. With no build socket configured (a development host, or a
+ * host with no gate) nothing is written and builds keep the default context.
+ */
+function prepareBuildContext(dir: string): void {
+  const socket = configuredBuildSocket();
+  if (socket === undefined) return;
+  try {
+    const id = createHash("sha256").update(DOCKER_BUILD_CONTEXT).digest("hex");
+    const metaDir = join(dir, "contexts", "meta", id);
+    Deno.mkdirSync(metaDir, { recursive: true, mode: 0o700 });
+    const meta = JSON.stringify({
+      Name: DOCKER_BUILD_CONTEXT,
+      Metadata: {},
+      Endpoints: {
+        docker: { Host: `unix://${socket}`, SkipTLSVerify: false },
+      },
+    });
+    const target = join(metaDir, "meta.json");
+    const staged = `${target}.${crypto.randomUUID()}.tmp`;
+    Deno.writeTextFileSync(staged, meta, { mode: 0o600 });
+    Deno.renameSync(staged, target);
+    buildContextReady = true;
+  } catch (err) {
+    warnBuildContextOnce(
+      `cannot write the build context (${
+        err instanceof Error ? err.message : String(err)
+      }); image builds and compose builds will fail closed until it can be written`,
+    );
+  }
+}
+
+/**
+ * The context a compose or buildx call runs in, or `undefined` when it uses
+ * the default (not a build verb, or no build socket on this host).
+ */
+export function dockerBuildContext(
+  verb: string | undefined,
+): string | undefined {
+  if (verb !== "compose" && verb !== "buildx") return undefined;
+  ensureDockerConfigDir();
+  return buildContextReady ? DOCKER_BUILD_CONTEXT : undefined;
+}
+
+/**
+ * The buildx builder for an image build: the one a context makes, named like
+ * it, when the build socket is in use (the `default` builder follows the
+ * default context and is refused next to `--context`), else `default`.
+ */
+export function dockerBuilderName(): string {
+  return dockerBuildContext("buildx") ?? "default";
+}
+
+/**
  * Create and vet the config folder once; `undefined` leaves Docker its own
  * default. Docker runs plugins and credential helpers named in this folder as
  * the daemon account, and other accounts share the run dir's group, so
@@ -122,6 +223,7 @@ function ensureDockerConfigDir(): string | undefined {
     const found = trustConfigDir(dir);
     if (found === undefined) {
       ensuredConfigDir = dir;
+      prepareBuildContext(dir);
       return ensuredConfigDir;
     }
     problem = `${dir} is unusable (${found})`;
@@ -139,6 +241,7 @@ function ensureDockerConfigDir(): string | undefined {
     if (found === undefined) {
       warnConfigDirOnce(`${problem}, using ${fresh}`);
       ensuredConfigDir = fresh;
+      prepareBuildContext(fresh);
       return ensuredConfigDir;
     }
     problem += `; ${fresh} is unusable too (${found})`;
@@ -154,23 +257,39 @@ function ensureDockerConfigDir(): string | undefined {
 /** `args` behind the global `--config <folder>` flag, when a trusted folder exists. */
 export function withDockerConfig(args: string[]): string[] {
   const dir = ensureDockerConfigDir();
-  return dir === undefined ? args : ["--config", dir, ...args];
+  if (dir === undefined) return args;
+  const context = dockerBuildContext(args[0]);
+  return [
+    "--config",
+    dir,
+    ...(context === undefined ? [] : ["--context", context]),
+    ...args,
+  ];
 }
 
 /**
- * `DOCKER_CONFIG=<folder>` for a docker process, when a trusted folder exists.
- * Every spawn of the docker client must pass this next to
- * {@link withDockerConfig}: a Compose plugin child never sees `--config`.
+ * The environment of a docker process: `DOCKER_CONFIG=<folder>` when a trusted
+ * folder exists, and `DOCKER_HOST=unix://<gate socket>` when the daemon is
+ * routed through the Docker gate (`TURBOPANEL_DOCKER_SOCKET`). Every spawn of
+ * the docker client must pass this next to {@link withDockerConfig}: a Compose
+ * plugin child never sees `--config`. The host is derived from the one
+ * variable the daemon may read, so a spawn that did not inherit `DOCKER_HOST`
+ * (the scheduled-backup runner, a `sudo` rung) still reaches the gate and
+ * never the engine's own socket.
  */
 export function dockerConfigEnv(): Record<string, string> {
   const dir = ensureDockerConfigDir();
-  return dir === undefined ? {} : { DOCKER_CONFIG: dir };
+  const socket = configuredDockerSocket();
+  return {
+    ...(dir === undefined ? {} : { DOCKER_CONFIG: dir }),
+    ...(socket === undefined ? {} : { DOCKER_HOST: `unix://${socket}` }),
+  };
 }
 
-/** `env DOCKER_CONFIG=<folder>` words that put the variable back after `sudo` resets it. */
+/** `env NAME=value …` words that put the docker variables back after `sudo` resets the environment. */
 function sudoEnvPrefix(): string[] {
-  const dir = ensureDockerConfigDir();
-  return dir === undefined ? [] : [ENV_BIN, `DOCKER_CONFIG=${dir}`];
+  const words = Object.entries(dockerConfigEnv()).map(([k, v]) => `${k}=${v}`);
+  return words.length === 0 ? [] : [ENV_BIN, ...words];
 }
 
 export type DockerCliResult = {
@@ -279,6 +398,10 @@ export type DockerCliIo = {
    * names one, so nothing here touches the real `/run/turbopanel`.
    */
   configDir?: string;
+  /** Replaces `TURBOPANEL_DOCKER_SOCKET` (the gate's main socket). */
+  dockerSocket?: string;
+  /** Replaces `TURBOPANEL_DOCKER_BUILD_SOCKET` (the gate's build socket). */
+  buildSocket?: string;
   /** Replaces `Deno.lstatSync` / `Deno.uid()` when vetting the config folder. */
   lstatSync?: (path: string) => {
     isDirectory: boolean;
@@ -346,7 +469,9 @@ function clearDockerInvocationCache(): void {
   resetDockerInvocation();
   ensuredConfigDir = undefined;
   configDirResolved = false;
+  buildContextReady = false;
   warnedConfigDir = false;
+  warnedBuildContext = false;
 }
 
 function isDockerSocketPermissionError(text: string): boolean {

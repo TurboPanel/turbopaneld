@@ -24,6 +24,14 @@
     turbopanel_user: tp
     turbopanel_group: tp
     turbopanel_service_name: turbopaneld
+    # Rendered into the unit and the backup wrapper below; the same values as
+    # the daemon-launch role defaults (pinned equal by
+    # src/orchestration/docker-gate-role.test.ts), which this play does not load.
+    turbopanel_backup_run_bin: "{{ turbopanel_install_root }}/lib/tp-backup-run"
+    turbopanel_docker_gate_run_dir: /run/turbopanel-gate
+    turbopanel_docker_gate_build_dir: "{{ turbopanel_docker_gate_run_dir }}/build"
+    turbopanel_docker_gate_service: turbopanel-docker-gate.service
+    turbopanel_docker_gate_wait_seconds: 60
     # Managed daemon-only hosts have no co-located instance service to order after.
     turbopanel_after_instance_service: false
 
@@ -79,10 +87,10 @@
       ansible.builtin.import_role:
         name: docker
         tasks_from: converge-builder
-    # Existing Docker hosts get the observe-mode gate on their next converge;
+    # Existing Docker hosts get the enforcing gate on their next converge;
     # the role is a no-op where Docker is absent (docker-setup installs it
     # there, via the docker role).
-    - name: Docker gate (no-op without Docker, observe mode)
+    - name: Docker gate (no-op without Docker, enforce mode)
       ansible.builtin.import_role:
         name: docker-gate
     # Repairs that a fresh install makes but an update never reached. Both are
@@ -132,6 +140,23 @@
         mode: "0640"
       when: turbopanel_daemon_unit.stat.exists
       notify: Reload systemd for refreshed daemon unit
+
+    # The scheduled-backup runner is a separate file the daemon-launch role
+    # installs; an existing host never re-runs that role, so without this its
+    # backups would keep reaching the engine directly instead of the gate.
+    - name: Check for an installed scheduled-backup runner
+      ansible.builtin.stat:
+        path: "{{ turbopanel_backup_run_bin }}"
+      register: turbopanel_backup_run_installed
+
+    - name: Refresh the scheduled-backup runner wrapper
+      ansible.builtin.template:
+        src: "{{ turbopanel_orchestration_dir }}/roles/daemon-launch/templates/tp-backup-run.j2"
+        dest: "{{ turbopanel_backup_run_bin }}"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+      when: turbopanel_backup_run_installed.stat.exists
 
   handlers:
     - name: Reload systemd for refreshed daemon unit
