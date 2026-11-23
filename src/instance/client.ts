@@ -3779,38 +3779,67 @@ export class InstanceClient {
       logError("update", "failed:", sanitizeForLog(error));
     }
 
+    let restarting = false;
     try {
-      if (ok && shouldRestart) {
-        let restartError: string | undefined;
-        try {
-          restartError = await this.#restartAfterUpdate(upgradeId);
-        } catch (err) {
-          restartError = describeUnknown(err);
-          logError("update", "restart threw:", sanitizeForLog(restartError));
-        }
-        if (restartError) {
-          ok = false;
-          error = restartError;
-          errorCode = "restart_failed";
-        }
-      } else if (ok && !shouldRestart) {
-        this.#reportUpdateStage("done", { upgradeId });
-      }
-
-      await this.#updateProgress.flush();
-      if (!ok || !shouldRestart) {
-        await clearActiveUpgradeContext();
-      }
-      this.#sendUpdateResult(ws, message.id, ok, error, {
+      restarting = await this.#finishUpdate(ws, message.id, {
+        ok,
+        shouldRestart,
+        error,
         errorCode,
         upgradeId,
       });
     } finally {
-      // Whatever went wrong above, a daemon that stays up takes commands and
+      // Whatever went wrong, a daemon that stays up takes commands and
       // updates again; only a successful install keeps the gate shut until
       // the restart.
-      if (!ok || !shouldRestart) endUpdateDrain();
+      if (!restarting) endUpdateDrain();
       this.#updateInstallInProgress = false;
+    }
+  }
+
+  /**
+   * Restart when a build was installed, then report the result. True when the
+   * daemon restarted for the new build (the command gate then stays shut).
+   */
+  async #finishUpdate(
+    ws: WebSocket,
+    id: string,
+    state: {
+      ok: boolean;
+      shouldRestart: boolean;
+      error?: string;
+      errorCode?: string;
+      upgradeId?: string;
+    },
+  ): Promise<boolean> {
+    let { ok, error, errorCode } = state;
+    const { shouldRestart, upgradeId } = state;
+    if (ok && shouldRestart) {
+      const restartError = await this.#restartAfterUpdateSafely(upgradeId);
+      if (restartError) {
+        ok = false;
+        error = restartError;
+        errorCode = "restart_failed";
+      }
+    } else if (ok) {
+      this.#reportUpdateStage("done", { upgradeId });
+    }
+    await this.#updateProgress.flush();
+    if (!ok || !shouldRestart) await clearActiveUpgradeContext();
+    this.#sendUpdateResult(ws, id, ok, error, { errorCode, upgradeId });
+    return ok && shouldRestart;
+  }
+
+  /** `#restartAfterUpdate`, with a throw turned into the failure message. */
+  async #restartAfterUpdateSafely(
+    upgradeId: string | undefined,
+  ): Promise<string | undefined> {
+    try {
+      return await this.#restartAfterUpdate(upgradeId);
+    } catch (err) {
+      const message = describeUnknown(err);
+      logError("update", "restart threw:", sanitizeForLog(message));
+      return message;
     }
   }
 
