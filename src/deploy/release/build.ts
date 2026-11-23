@@ -614,6 +614,23 @@ function derivationSource(params: ReleaseBuildParams): string {
   return params.build.packageManager ?? "lockfile detection";
 }
 
+const NODE_TOOL_IN_COMMAND = /\b(?:npm|npx|pnpm|yarn|corepack|node)\b/;
+
+/**
+ * A PHP site's checkout often carries a `package.json` only for a front end it
+ * ships prebuilt, so Node steps are never derived for it on a guess. The
+ * client asks for them with `packageManager` or by authoring a command that
+ * runs a Node tool; an authored `installCommand` or `buildCommand` always runs
+ * as written either way.
+ */
+function phpSiteDerivesNode(params: ReleaseBuildParams): boolean {
+  if (!params.nativeRuntime?.php) return true;
+  return params.build.packageManager !== undefined ||
+    [params.build.installCommand, params.build.buildCommand].some((command) =>
+      command !== undefined && NODE_TOOL_IN_COMMAND.test(command)
+    );
+}
+
 /**
  * The install command: the author's, else (native app only) one derived from
  * the package manager / lockfile ({@link deriveNodeInstallCommand}).
@@ -623,6 +640,7 @@ async function resolveInstallCommand(
 ): Promise<string | undefined> {
   const explicit = params.build.installCommand;
   if (explicit !== undefined || !params.nativeRuntime) return explicit;
+  if (!phpSiteDerivesNode(params)) return undefined;
   if (params.nativeRuntime.runtime === "deno") {
     const files = preBuildDenoFiles(params.workingDir);
     const derived = await deriveDenoInstallCommand(
@@ -675,6 +693,7 @@ async function resolveBuildCommand(
     return derived;
   }
   if (explicit === undefined) {
+    if (!phpSiteDerivesNode(params)) return undefined;
     const derived = await deriveNodeBuildCommand({
       packageManager: params.build.packageManager,
       workingDir: params.workingDir,

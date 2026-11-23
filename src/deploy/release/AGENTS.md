@@ -149,7 +149,12 @@ project (`<build cache>/composer`) and a home outside the checkout. With a
 `composer.json` (a regular file) and no author command naming it, `composer
 install --no-dev --optimize-autoloader --no-interaction --no-progress
 --prefer-dist` runs first (never `--no-scripts`: package discovery writes the
-framework's caches into the release while it is writable). `COMPOSER_AUTH`,
+framework's caches into the release while it is writable). A PHP site never
+derives the Node install or build from a `package.json` on its own (many ship
+a prebuilt front end); `build.packageManager`, or an authored `installCommand` /
+`buildCommand` that runs `npm`, `npx`, `pnpm`, `yarn`, `corepack` or `node`,
+asks for them. An authored command always runs as written; a shell no-op such as
+`true` as `installCommand` is the explicit "no install step". `COMPOSER_AUTH`,
 `COMPOSER_HOME`, `COMPOSER_CACHE_DIR` and `TURBOPANEL_PHP` are reserved build
 variables: a build variable is an `env(1)` argument and not secret, so private
 packages are not supported yet.
