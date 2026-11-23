@@ -20,6 +20,7 @@ socket="${2:?usage: wait-docker-gate.sh <gate-unit> <gate-socket> <seconds>}"
 seconds="${3:-60}"
 case "$seconds" in
   '' | *[!0-9]*) seconds=60 ;;
+  *) ;;
 esac
 
 load_state="$(systemctl show -p LoadState --value "$unit" 2>/dev/null || true)"
