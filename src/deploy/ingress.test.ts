@@ -2200,7 +2200,9 @@ function fakeCaddyRefusal(layout: LayoutPaths): string | null {
     // A name is ambiguous per listen address: the same name on another bind
     // is another site.
     const own = new Set(
-      [...text.matchAll(/^(?:http:\/\/)?([a-z0-9.-]+) \{\n(?: {2}bind (.+)\n)?/gm)]
+      [...text.matchAll(
+        /^(?:http:\/\/)?([a-z0-9.-]+) \{\n(?: {2}bind (.+)\n)?/gm,
+      )]
         .map((m) => `${m[1]!}@${m[2] ?? ""}`),
     );
     for (const host of own) {
@@ -6023,7 +6025,10 @@ test("plannedFallbackForSites repeats the unbound sites of the files on disk on 
       sitesDir,
       new Map([["env-b.caddy", "b.test {\n  bind 127.0.0.1\n}\n"]]),
     );
-    assertStringIncludes(planned!, "u.test {\n  bind 127.0.0.1\n  respond ok\n}");
+    assertStringIncludes(
+      planned!,
+      "u.test {\n  bind 127.0.0.1\n  respond ok\n}",
+    );
   } finally {
     await cleanup();
   }
