@@ -143,6 +143,16 @@ export async function writeFileAtomic(
   } catch (err) {
     if (!(err instanceof Deno.errors.NotFound)) throw err;
   }
+  // Content already right: keep the file (and its modification time, which the
+  // sequential deploy reads as "last changed"); only its mode is made sure of.
+  try {
+    if ((await Deno.readTextFile(path)) === content) {
+      await Deno.chmod(path, mode);
+      return;
+    }
+  } catch {
+    // Missing or unreadable: written below.
+  }
   const tmp = `${path}.tmp`;
   // A leftover read-only tmp from an interrupted write would make the next
   // write fail, so clear it first.

@@ -10,6 +10,7 @@ import {
   ensureNamedVolumeOwners,
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
+import { generatedFileTimes } from "../deploy/generated-files-changed.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import {
   applyDeployCachesAndReach,
@@ -2074,6 +2075,7 @@ type SequentialDeployContext = {
   labeledServices: string[];
   deploymentDir: string;
   onLine: LineHandler;
+  fileTimes: ReadonlyMap<string, number>;
 };
 
 const DEFAULT_HEALTH_TIMEOUT_SECONDS = 120;
@@ -2120,6 +2122,7 @@ async function deploySequentially(
     hasHooks: serviceHooks.length > 0,
     hooksMigrate: serviceHooks.some((hook) => Boolean(hook.preDeployCommand)),
     breakingMigration: parsedPayload.migrations === "breaking",
+    fileTimes: ctx.fileTimes,
     steps,
   });
   if (serviceHooks.length > 0) {
@@ -2597,6 +2600,7 @@ async function deployContainerServices(
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
+    const fileTimes = await generatedFileTimes(layout, parsedPayload);
     // SMB logins are decrypted here but added to the compose only after every
     // policy check below has judged the author's text (a login is never
     // compose text from the control plane).
@@ -2892,6 +2896,7 @@ async function deployContainerServices(
         labeledServices,
         deploymentDir,
         onLine,
+        fileTimes,
       });
       await pruneAfterDeploy(input, shareApplied.volumeNames);
       return sequential;

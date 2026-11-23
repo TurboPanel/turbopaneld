@@ -201,7 +201,16 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    absent or `inplace` is the flow above, unchanged; `src/deploy/sequential-deploy.ts`):
    networks and `compose build` + best-effort `pull` first (a failure there leaves the
    old version serving), then stop the previous deploy's services (those named in
-   `keepRunningServices`, the stateful ones, stay up), pre-deploy hooks (migrations),
+   `keepRunningServices`, the stateful ones, stay up; so does a service whose
+   containers all carry a `com.docker.compose.config-hash` label equal to the new
+   `compose config --hash` for it, run the image id their reference resolves to now,
+   and started after its generated secret/config files last changed
+   (`generated-files-changed.ts` reads file mtimes; `writeFileAtomic` keeps the
+   mtime when content is unchanged). Any service that cannot be compared (hash,
+   `ps`, `inspect` or `image inspect` failing, no containers) is stopped, and a
+   deploy with `migrations: breaking` or a migrating hook stops all of them.
+   Top-level network and volume changes are not compared; they are left to Compose
+   as before), pre-deploy hooks (migrations),
    `up -d --remove-orphans`, then the health gate (`healthTimeoutSeconds`, default 120).
    A failure before any migration restores `previous/` (`restorePreviousDeployment`)
    and starts the old version (`rolled_back`). Once a `preDeployCommand` hook has
