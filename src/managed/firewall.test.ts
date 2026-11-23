@@ -780,7 +780,7 @@ test("boot scoping loads its listeners only once it holds the firewall lock", as
     });
     const scoping = scopePublicListenersClosedAtBootLocked(() => {
       order.push("loaded");
-      return Promise.resolve([BOOT_LISTENER]);
+      return Promise.resolve({ listeners: [BOOT_LISTENER], privateIds: [] });
     });
     await Promise.resolve();
     assertEquals(order, ["lock held"]);

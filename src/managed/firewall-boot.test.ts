@@ -3,10 +3,15 @@ import { join } from "@std/path";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import {
+  managedFirewallChain,
+  setManagedFirewallRunForTests,
+} from "./firewall.ts";
+import {
   isPubliclyRoutableIpv4,
   listBootPublicListeners,
   reconcileManagedFirewallBefore,
   recordManagedListenerCleared,
+  scanBootListeners,
   scopeManagedPublicListenersAtBoot,
 } from "./firewall-boot.ts";
 
@@ -14,6 +19,8 @@ const test = Deno.test.bind(Deno);
 
 const ID_A = "550e8400-e29b-41d4-a716-446655440000";
 const ID_B = "550e8400-e29b-41d4-a716-446655440001";
+// Chain names use the first 20 id characters, so this one differs early.
+const ID_PUB = "a50e8400-e29b-41d4-a716-446655440009";
 const ID_C = "550e8400-e29b-41d4-a716-446655440002";
 
 async function withState(
@@ -39,7 +46,7 @@ test("a host with no managed apps scopes nothing and makes no firewall call", as
     const scoped = await scopeManagedPublicListenersAtBoot(
       layout,
       async (load) => {
-        loaded = (await load()).length;
+        loaded = (await load()).listeners.length;
         return 0;
       },
     );
@@ -101,7 +108,7 @@ test("a boot with public listeners hands each to the firewall once", async () =>
     const scoped = await scopeManagedPublicListenersAtBoot(
       layout,
       async (load) => {
-        const l = await load();
+        const l = (await load()).listeners;
         seen.push(l.map((entry) => `${entry.address}:${entry.port}`));
         return l.length;
       },
@@ -470,3 +477,72 @@ test("a private record with a stray port is still private, a public one without 
     );
   });
 });
+
+test("boot removes the chain of a private record and keeps a public record's chain", async () => {
+  await withState(async (layout, dir) => {
+    await putFile(
+      dir,
+      ID_A,
+      "listener-scope.json",
+      '{"public":false,"address":"","port":0,"peers":[]}\n',
+    );
+    await putFile(dir, ID_A, "docker-compose.yml", COMPOSE_10);
+    await putFile(
+      dir,
+      ID_PUB,
+      "listener-scope.json",
+      JSON.stringify({
+        public: true,
+        address: "203.0.113.50",
+        port: 45001,
+        peers: [],
+      }),
+    );
+    const calls: string[] = [];
+    setManagedFirewallRunForTests((cmd, waited) => {
+      calls.push(`${cmd} ${waited.slice(2).join(" ")}`);
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    });
+    try {
+      assertEquals(await scopeManagedPublicListenersAtBoot(layout), 1);
+    } finally {
+      setManagedFirewallRunForTests(null);
+    }
+    const chainA = managedFirewallChain(ID_A);
+    const chainB = managedFirewallChain(ID_PUB);
+    assertEquals(calls.includes(`iptables -X ${chainA}`), true);
+    assertEquals(calls.includes(`iptables -F ${chainA}`), true);
+    assertEquals(calls.includes(`iptables -X ${chainB}`), false);
+    assertEquals(calls.some((c) => c.includes(`-j ${chainB}`)), true);
+    assertEquals(calls.some((c) => c.includes(`-A ${chainA} `)), false);
+  });
+});
+
+for (
+  const [label, record] of [
+    ["a string public", '{"public":"false","address":"","port":0}'],
+    ["a missing public", '{"address":"","port":0,"peers":[]}'],
+    [
+      "a public record with a numeric address",
+      '{"public":true,"address":5,"port":45001}',
+    ],
+  ] as const
+) {
+  test(`type confusion: ${label} reads as invalid and fails closed`, async () => {
+    await withState(async (layout, dir) => {
+      await putFile(dir, ID_A, "listener-scope.json", record);
+      await putFile(dir, ID_A, "docker-compose.yml", COMPOSE_10);
+      const scan = await scanBootListeners(layout);
+      // Not trusted as private (no chain removed); compose DROP-only chain.
+      assertEquals(scan.privateIds, []);
+      assertEquals(scan.listeners, [
+        { managedId: ID_A, address: "10.10.0.151", port: 45000, peers: [] },
+      ]);
+    });
+  });
+}
