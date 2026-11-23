@@ -5137,7 +5137,7 @@ function installDrainTestHooks(opts: {
 
 it({
   name:
-    "update waits for a running command, refuses new work meanwhile, then installs",
+    "update reports why it waits, waits for a running command, then installs",
   permissions: {
     env: true,
     read: true,
@@ -5163,14 +5163,37 @@ it({
     const { socket, restore } = await startConnectedClient();
     try {
       socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
         type: "update",
         id: "upd-drain",
+        upgradeId: "up-drain",
         at: new Date().toISOString(),
       });
       await waitFor(
         "update drain to begin",
         () => isUpdateDraining() || undefined,
       );
+      const waiting = await waitFor(
+        "the waiting progress frame",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { detail?: string }).detail?.includes(
+              "waiting for 1 running command",
+            )
+          ) as { stage?: string; unit?: string; id?: string } | undefined,
+      );
+      assertEquals(waiting.stage, "preparing");
+      assertEquals(waiting.unit, "daemon");
+      assertEquals(waiting.id, "upd-drain");
+      // The install has not started while the frame is out.
       assertEquals(reconcileCalls, 0);
       finishCommand();
       await command;

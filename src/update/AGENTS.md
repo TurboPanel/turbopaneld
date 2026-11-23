@@ -173,8 +173,8 @@ half-way. After the manifest checks pass and before the installer runs,
 (`src/orchestration/boot-converge-gate.ts`): new `command-dispatch` messages
 are refused whole with a failed outcome (nothing runs), and the update waits
 for every command that got past the gate (`withCommandRunning`), up to
-`UPDATE_DRAIN_CAP_MS` (10 minutes, inside the control plane's 15 minute step window); at the cap it logs what still runs and
-installs anyway. The gate reopens (`endUpdateDrain`) when the update fails or
+`UPDATE_DRAIN_CAP_MS` (10 minutes, inside the control plane's 15 minute step
+window); at the cap it logs what still runs and installs anyway. The gate reopens (`endUpdateDrain`) when the update fails or
 installs nothing; after an install it stays closed until the restart. No wire
 message is involved. A command the daemon was running when it stopped anyway
 is reported failed ("The daemon restarted while this command was running")

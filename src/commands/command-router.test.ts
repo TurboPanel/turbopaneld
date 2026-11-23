@@ -129,6 +129,42 @@ test({
 
 test({
   name:
+    "handleCommandDispatch still runs a firewall confirm while a daemon update drains",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    gate.beginUpdateDrain();
+    let confirmed = 0;
+    setCommandRouterHandlersForTests({
+      handleFirewallConfirm: () => {
+        confirmed += 1;
+        return Promise.resolve({ confirmed: true } as never);
+      },
+    });
+    try {
+      const mock = new MockWebSocket();
+      await handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-drain-fw",
+        commandId: "cmd-drain-fw",
+        commandType: "server.firewall.confirm",
+        payload: { digest: "a".repeat(64) },
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      assertEquals(confirmed, 1);
+      assertEquals(parseFrames(mock.sentFrames)[1]?.ok, true);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch acks at once but runs nothing until the boot converge has finished",
   permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
