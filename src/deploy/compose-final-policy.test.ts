@@ -367,3 +367,57 @@ test("a helper entry with no matching publish is refused, even for an approved d
     "127.0.0.1:18200:7700",
   );
 });
+
+const PROJECT = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+const namespace = { project: PROJECT, owned: ["st-volume-1"] };
+const volumeFindings = (volumes: Record<string, unknown>, approved: boolean) =>
+  collectComposePolicyFindings({ services: {}, volumes }, {
+    volumeNamespace: namespace,
+    hostLevelApproved: approved,
+  });
+
+test("a volume outside the project's namespace is refused, approved or not", () => {
+  for (const approved of [false, true]) {
+    for (
+      const volumes of [
+        { x: { external: true, name: "managed_0192_data" } },
+        { x: { name: "managed_0192_data" } },
+        { x: { external: true } },
+        { managed_0192_data: { external: true } },
+        { x: { name: `${PROJECT}x_data` } },
+        { x: { name: "other-project_data" } },
+      ]
+    ) {
+      assertEquals(
+        volumeFindings(volumes, approved).length,
+        1,
+        JSON.stringify(volumes),
+      );
+    }
+  }
+});
+
+test("a volume in the project's own prefix or this deploy's storage is accepted", () => {
+  for (const approved of [false, true]) {
+    assertEquals(
+      volumeFindings({
+        data: {},
+        plain: null,
+        named: { name: `${PROJECT}_named` },
+        resolved: { name: `${PROJECT}_resolved` },
+        storage: { name: "st-volume-1", external: true },
+      }, approved),
+      [],
+    );
+  }
+});
+
+test("without a namespace the volume names are not judged", () => {
+  assertEquals(
+    collectComposePolicyFindings({
+      services: {},
+      volumes: { x: { external: true, name: "managed_0192_data" } },
+    }, {}),
+    [],
+  );
+});

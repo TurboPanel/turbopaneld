@@ -354,15 +354,19 @@ export async function materializeStorageEntries(
   return mountPaths;
 }
 
+/** `<state>/storage`: every organization's storage locations live below it. */
+export function storageRootPath(layout: Pick<LayoutPaths, "stateDir">): string {
+  return join(layout.stateDir, STORAGE_ROOT);
+}
+
 export function storageHostPath(
-  layout: LayoutPaths,
+  layout: Pick<LayoutPaths, "stateDir">,
   organizationId: string,
   storageId: string,
   locationId: string,
 ): string {
   return join(
-    layout.stateDir,
-    STORAGE_ROOT,
+    storageRootPath(layout),
     organizationId,
     storageId,
     locationId,

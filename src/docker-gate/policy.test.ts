@@ -318,8 +318,8 @@ test("the allowed roots, and named volumes, pass", async () => {
       "/srv/users/alice/data/app/data",
       "/srv/users/alice/tmp",
       "/srv/users/alice/production/volumes/data",
-      "/var/lib/turbopanel/storage",
-      "/var/lib/turbopanel/storage/vol-1",
+      "/var/lib/turbopanel/storage/org-1/st-1/loc-1/data",
+      "/var/lib/turbopanel/storage/org-1/st-1/loc-1/data/sub/dir",
       "named-volume",
     ]
   ) {
@@ -329,6 +329,47 @@ test("the allowed roots, and named volumes, pass", async () => {
       source,
     );
   }
+});
+
+test("under the storage root only a full location data path may be bound", async () => {
+  const refused = [
+    "/var/lib/turbopanel/storage",
+    "/var/lib/turbopanel/storage/org-1",
+    "/var/lib/turbopanel/storage/org-1/st-1",
+    "/var/lib/turbopanel/storage/org-1/st-1/loc-1",
+    "/var/lib/turbopanel/storage/org-1/st-1/loc-1/other",
+    "/var/lib/turbopanel/storage/org-1/st-1/loc-1/data2",
+    "/var/lib/turbopanel/storage/.hidden/st-1/loc-1/data",
+  ];
+  for (const source of refused) {
+    assertEquals(
+      ruleNames(await createVerdict({ Binds: [`${source}:/x`] })),
+      ["bind-storage-path"],
+      source,
+    );
+    assertEquals(
+      ruleNames(
+        await createVerdict({
+          Mounts: [{ Type: "bind", Source: source, Target: "/x" }],
+        }),
+      ),
+      ["bind-storage-path"],
+      source,
+    );
+  }
+  // A link out of a location into the root is judged by its target.
+  const toRoot: ResolvePath = (path) =>
+    Promise.resolve(
+      path.endsWith("/link") ? "/var/lib/turbopanel/storage/org-2" : path,
+    );
+  assertEquals(
+    ruleNames(
+      await createVerdict({
+        Binds: ["/var/lib/turbopanel/storage/org-1/st-1/loc-1/data/link:/x"],
+      }, toRoot),
+    ),
+    ["bind-storage-path"],
+  );
 });
 
 test("a symlink under an allowed root that leaves it is judged by its target", async () => {

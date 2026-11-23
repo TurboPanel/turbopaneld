@@ -85,14 +85,6 @@ export const RESERVED_HOST_PORT_RANGES: ReadonlyArray<
   [19100, 19799],
 ];
 
-/**
- * Not checkable here, by design: a volume's `name:` / `external:` pointing at
- * another project's volume. The control plane rewrites its own storage volumes
- * to external named volumes before the daemon sees them, so the daemon cannot
- * tell an authored reference from a platform one; the control plane's
- * host-access gate owns that rule.
- */
-
 export const COMPOSE_POLICY_REFUSED_CODE = "compose_policy_refused";
 
 export class ComposePolicyError extends Error {
@@ -321,7 +313,53 @@ function networkFindings(networks: unknown): string[] {
   return found;
 }
 
+/**
+ * The volume names this deploy may mount: Compose names a volume
+ * `<project>_<key>` unless the file sets `name:`, and `external: true` or an
+ * explicit `name:` can point at any volume on the host (a managed database's
+ * data volume, another project's data). Only the project's own prefix and the
+ * names the control plane sent as this deploy's storage are accepted.
+ */
+export type VolumeNamespace = {
+  /** The Compose project name this deploy runs under. */
+  project: string;
+  /** `volumeName` of every docker storage entry this deploy was sent. */
+  owned: readonly string[];
+};
+
+/** The name Compose gives a top-level volume once the project is known. */
+function effectiveVolumeName(
+  project: string,
+  key: string,
+  spec: Record<string, unknown>,
+): string {
+  if (typeof spec.name === "string" && spec.name !== "") return spec.name;
+  return spec.external === true || isRecord(spec.external)
+    ? key
+    : `${project}_${key}`;
+}
+
+/** Host-level approval never excuses a volume that belongs to someone else. */
+function volumeNamespaceFindings(
+  volumes: unknown,
+  ns: VolumeNamespace,
+): string[] {
+  if (!isRecord(volumes)) return [];
+  const found: string[] = [];
+  for (const [key, raw] of Object.entries(volumes)) {
+    const spec = isRecord(raw) ? raw : {};
+    const name = effectiveVolumeName(ns.project, key, spec);
+    if (name.startsWith(`${ns.project}_`) || ns.owned.includes(name)) continue;
+    found.push(
+      `volume ${key} names the Docker volume \`${name}\`, which is not this project's own (volumes outside \`${ns.project}_\` and this environment's storage cannot be mounted)`,
+    );
+  }
+  return found;
+}
+
 export type ComposePolicyOptions = {
+  /** When set, a top-level volume must stay in this namespace, approved or not. */
+  volumeNamespace?: VolumeNamespace;
   hostLevelApproved?: boolean;
   /** `environment.deploy` `allowNetworkShares`: SMB share volumes may be mounted. */
   allowNetworkShares?: boolean;
@@ -359,6 +397,9 @@ export function collectComposePolicyFindings(
     // Joining the hosting-ingress or managed network by hand is never
     // approved: the daemon attaches those itself.
     ...platformNetworkFindings(document.networks, opts.platformNetworks ?? []),
+    ...(opts.volumeNamespace
+      ? volumeNamespaceFindings(document.volumes, opts.volumeNamespace)
+      : []),
     ...volumeFindings(document.volumes, {
       approved,
       allowNetworkShares: opts.allowNetworkShares === true,

@@ -150,6 +150,7 @@ export function loadConfig(env: Env): GateConfig {
     policy: {
       bindRoots: roots.length > 0 ? roots : DEFAULT_POLICY_CONFIG.bindRoots,
       principalRoots: DEFAULT_POLICY_CONFIG.principalRoots,
+      storageRoots: DEFAULT_POLICY_CONFIG.storageRoots,
       denyPrefixes: [...DEFAULT_POLICY_CONFIG.denyPrefixes, ...denyExtra],
       dockerSockets: DEFAULT_POLICY_CONFIG.dockerSockets,
       capAllowlist: caps,

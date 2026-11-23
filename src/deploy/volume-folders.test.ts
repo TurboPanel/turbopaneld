@@ -17,7 +17,10 @@ import {
   materializeStorageEntries,
   resolveVolumeOwnerIds,
 } from "./materialize-storage.ts";
-import { ownedVolumeRoots } from "../commands/deploy-environment.ts";
+import {
+  ownedStateTree,
+  ownedVolumeRoots,
+} from "../commands/deploy-environment.ts";
 import type { RunFn } from "./ensure-principal.ts";
 
 const test = Deno.test.bind(Deno);
@@ -564,3 +567,21 @@ test("two binds, one inside the other, are refused as a nested writable bind", (
       "writable bind",
     );
   }));
+
+test("ownedStateTree names the storage root and only this deploy's path locations", () => {
+  const layout = {
+    stateDir: "/var/lib/turbopanel",
+    daemonStateDir: "/var/lib/turbopanel",
+  };
+  const tree = ownedStateTree(layout, {
+    organizationId: "org-a",
+    storageMaterial: [
+      volume({ locationId: "loc-1" }),
+      volume({ locationId: "loc-2", kind: "volume", provider: "docker" }),
+    ],
+  });
+  assertEquals(tree.storageRoot, "/var/lib/turbopanel/storage");
+  assertEquals(tree.locations, [
+    `/var/lib/turbopanel/storage/org-a/${STORAGE_ID}/loc-1/data`,
+  ]);
+});
