@@ -2560,7 +2560,7 @@
       }
     },
     "expect": [
-      "bind-outside-roots"
+      "bind-state-dir"
     ]
   },
   {
@@ -2691,7 +2691,7 @@
       }
     },
     "expect": [
-      "bind-outside-roots"
+      "bind-state-dir"
     ]
   },
   {
