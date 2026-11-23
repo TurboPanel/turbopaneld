@@ -2199,12 +2199,16 @@ function fakeCaddyRefusal(layout: LayoutPaths): string | null {
     if (text.includes("BAD")) return `unrecognized directive in ${entry.name}`;
     // A name is ambiguous per listen address: the same name on another bind
     // is another site.
-    const own = new Set(
-      [...text.matchAll(
+    const own = new Set<string>();
+    for (
+      const m of text.matchAll(
         /^(?:http:\/\/)?([a-z0-9.-]+) \{\n(?: {2}bind (.+)\n)?/gm,
-      )]
-        .map((m) => `${m[1]!}@${m[2] ?? ""}`),
-    );
+      )
+    ) {
+      for (const address of (m[2] ?? "").split(" ")) {
+        own.add(`${m[1]!}@${address}`);
+      }
+    }
     for (const host of own) {
       if (seen.has(host)) return `ambiguous site definition: ${host}`;
       seen.add(host);
@@ -6028,6 +6032,51 @@ test("plannedFallbackForSites repeats the unbound sites of the files on disk on 
     assertStringIncludes(
       planned!,
       "u.test {\n  bind 127.0.0.1\n  respond ok\n}",
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("the repeated blocks follow the forward blocks a deploy writes, for a name that moves here and one that leaves", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    await Deno.writeTextFile(
+      join(sitesDir, "00-fallback.caddy"),
+      hostingFallbackSnippet(false, true),
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-b.caddy"),
+      "b.test {\n  bind 127.0.0.1\n}\n",
+    );
+    // On disk the tunnel file still forwards moved.test to its old peer.
+    await Deno.writeTextFile(
+      join(sitesDir, "10-tunnels.caddy"),
+      "moved.test {\n  reverse_proxy old-peer\n}\n",
+    );
+    const moved = await plannedFallbackForSites(
+      sitesDir,
+      new Map([
+        ["env-m.caddy", "moved.test {\n  respond local\n}\n"],
+        ["10-tunnels.caddy", ""],
+      ]),
+    );
+    assertStringIncludes(
+      moved!,
+      "moved.test {\n  bind 127.0.0.1\n  respond local",
+    );
+    assertEquals(moved!.includes("old-peer"), false);
+    // A name that leaves: its forward block is repeated, not dropped.
+    const left = await plannedFallbackForSites(
+      sitesDir,
+      new Map([
+        ["10-tunnels.caddy", "gone.test {\n  reverse_proxy new-peer\n}\n"],
+      ]),
+    );
+    assertStringIncludes(
+      left!,
+      "gone.test {\n  bind 127.0.0.1\n  reverse_proxy new-peer",
     );
   } finally {
     await cleanup();

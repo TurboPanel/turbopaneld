@@ -256,8 +256,9 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    the written sites with `bind <address>` for every address its scheme is
    bound on (`siteBoundLayout`), behind a marker line; judging one file at a
    time leaves those repeats out so a stale site file cannot take the
-   catch-all down, and a deploy recomputes them from the files left. A deploy, a tunnel table apply that relocks sites, a site
-   removal (validated first, one reload) and the
+   catch-all down, and a deploy recomputes them from the files left and the
+   forward blocks it writes. A deploy, a tunnel table apply that relocks sites,
+   a site removal (validated first, one reload) and the
    start-time check keep the addresses current. HTTPS shows one fixed internal
    certificate for the reserved
    name `unconfigured.invalid`, given to every other name by the Caddyfile's

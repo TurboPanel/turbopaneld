@@ -2419,6 +2419,17 @@ async function liveBindAddresses(
   ]);
 }
 
+/** The files about to be written: the site and, when planned, the tunnel file. */
+function pendingSites(
+  siteFile: string,
+  siteContent: string,
+  tunnel: string | undefined,
+): Map<string, string> {
+  const pending = new Map([[siteFile, siteContent]]);
+  if (tunnel !== undefined) pending.set(TUNNEL_SITE_FILE, tunnel);
+  return pending;
+}
+
 /**
  * The catch-all file as it should be once `pending` site files are written,
  * with the header choices it has on disk; `undefined` when none is on disk (a
@@ -3505,7 +3516,10 @@ export async function validateHostingCaddyCandidate(
         bad.length === 0 ? fallbackContents : hostingFallbackSnippet(
           deletesHeader(fallbackContents, "Server"),
           !deletesHeader(fallbackContents, "Via"),
-          await liveBindAddresses(sitesDir, new Map([[siteFile, contents]])),
+          await liveBindAddresses(
+            sitesDir,
+            pendingSites(siteFile, contents, tunnelContents),
+          ),
         ),
         { mode: 0o640 },
       );
@@ -3967,11 +3981,6 @@ async function rewriteHostingCaddySitesLocked(
     tunnelGeneration,
   );
   const siteFile = `${payload.environmentId}.caddy`;
-  const fallbackContent = hostingFallbackSnippet(
-    payload.hideWebServerNames === true,
-    payload.sendViaHeader,
-    await liveBindAddresses(sitesDir, new Map([[siteFile, siteContent]])),
-  );
   // Tunnel names that run on other servers have forward blocks in a reserved
   // file. Which names run here just changed, so that file is re-rendered with
   // the new site and judged in the same set: a name that moved here leaves it,
@@ -3982,6 +3991,19 @@ async function rewriteHostingCaddySitesLocked(
     siteFile,
     siteContent,
   );
+  // The repeated blocks are judged with the forward blocks this deploy
+  // writes, not the ones on disk: a name that moved here or left changes which
+  // blocks have a bind of their own to be repeated.
+  const plannedFallback = async (tunnel: string | undefined) =>
+    hostingFallbackSnippet(
+      payload.hideWebServerNames === true,
+      payload.sendViaHeader,
+      await liveBindAddresses(
+        sitesDir,
+        pendingSites(siteFile, siteContent, tunnel),
+      ),
+    );
+  const fallbackContent = await plannedFallback(tunnelContents);
   let tunnelToWrite = tunnelContents;
   try {
     await validateHostingCaddyCandidate(
@@ -4010,7 +4032,7 @@ async function rewriteHostingCaddySitesLocked(
       siteFile,
       siteContent,
       grantRead,
-      { fallback: fallbackContent, tunnel: "" },
+      { fallback: await plannedFallback(""), tunnel: "" },
     );
   }
 
@@ -4018,11 +4040,7 @@ async function rewriteHostingCaddySitesLocked(
 
   // A site file set aside while judging leaves the repeated blocks of its
   // names out of the catch-all, as the judged set did.
-  const fallbackToWrite = hostingFallbackSnippet(
-    payload.hideWebServerNames === true,
-    payload.sendViaHeader,
-    await liveBindAddresses(sitesDir, new Map([[siteFile, siteContent]])),
-  );
+  const fallbackToWrite = await plannedFallback(tunnelToWrite);
   await activateHostingSites([
     { live: join(sitesDir, siteFile), contents: siteContent },
     { live: join(sitesDir, HOSTING_FALLBACK_SITE), contents: fallbackToWrite },
