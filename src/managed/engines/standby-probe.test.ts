@@ -8,7 +8,9 @@ import {
   execStandbySeedWithInitRetry,
   formatStandbySeedFailure,
   isTransientStandbySeedFailure,
+  probeVolumePath,
   scrubSeedOutput,
+  volumeMountArgs,
   waitMysqlFamilyRealServer,
 } from "./standby-probe.ts";
 
@@ -271,4 +273,36 @@ test("formatStandbySeedFailure scrubs row values from import stderr", () => {
   });
   assertEquals(text.includes("secret-note"), false);
   assertEquals(text.includes("ERROR 1406"), true);
+});
+
+test("volumeMountArgs mounts rw unless told otherwise", () => {
+  const volumes = [{ name: "data", target: "/var/lib/data" }];
+  assertEquals(volumeMountArgs(volumes), ["-v", "data:/var/lib/data:rw"]);
+  assertEquals(volumeMountArgs(volumes, "ro"), ["-v", "data:/var/lib/data:ro"]);
+});
+
+test("probeVolumePath mounts the data volume read-only", async () => {
+  const seen: string[][] = [];
+  const present = await probeVolumePath(
+    {
+      image: "postgres:18",
+      volumes: [{ name: "pgdata", target: "/var/lib/postgresql" }],
+      containerUser: "999:999",
+      runDocker: (argv: string[]) => {
+        seen.push(argv);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "present\n",
+          stderr: "",
+        });
+      },
+    },
+    "-f",
+    "/var/lib/postgresql/PG_VERSION",
+  );
+  assertEquals(present, true);
+  assertEquals(seen.length, 1);
+  assertEquals(seen[0].includes("pgdata:/var/lib/postgresql:ro"), true);
+  assertEquals(seen[0].some((arg) => arg.endsWith(":rw")), false);
 });

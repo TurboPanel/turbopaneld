@@ -109,7 +109,7 @@
           - run
           - --rm
           - -v
-          - "{{ item.volume }}:{{ item.mount }}"
+          - "{{ item.volume }}:{{ item.mount }}:rw"
           - --user
           - root
           - alpine

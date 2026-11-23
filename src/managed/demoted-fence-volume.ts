@@ -144,7 +144,7 @@ async function writeMysqlFamilyCnf(
     "--entrypoint",
     "sh",
     "-v",
-    `${target.configDir}:/c`,
+    `${target.configDir}:/c:rw`,
     target.image,
     "-c",
     `set -eu; cp -p '${file}' '${tmp}'; printf '%s' "$1" > '${tmp}'; mv -f '${tmp}' '${file}'`,

@@ -921,7 +921,7 @@ export function proxysqlComposeWithAttachments(
     "      - ./proxysql.cnf:/etc/proxysql.cnf:ro",
     "      - ./admin.cnf:/etc/proxysql-admin.cnf:ro",
     "      - ./tls:/var/lib/proxysql/certs:ro",
-    "      - proxysql-data:/var/lib/proxysql",
+    "      - proxysql-data:/var/lib/proxysql:rw",
     ...labelLines,
     "    networks:",
     ...serviceNetworkLines,

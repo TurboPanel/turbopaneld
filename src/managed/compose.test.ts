@@ -95,6 +95,29 @@ test("normalizeManagedCompose pins the data volume name against project prefixin
   assertEquals(pgdata?.name, "pgdata");
 });
 
+test("normalizeManagedCompose appends a missing data volume mount with an explicit rw mode", () => {
+  const payload = basePayload();
+  payload.composeYaml = [
+    "services:",
+    "  postgres:",
+    "    image: postgres:18-alpine",
+    "    environment:",
+    `      POSTGRES_PASSWORD: \${${MANAGED_ROOT_PASSWORD_VAR}}`,
+    "    volumes:",
+    "      - ./config:/etc/postgresql:ro",
+    "volumes:",
+    "  pgdata:",
+  ].join("\n");
+  const doc = parseNormalized(payload);
+  const services = doc.services as Record<string, Record<string, unknown>>;
+  const mounts = Object.values(services)[0].volumes as string[];
+  assertEquals(mounts.includes("pgdata:/var/lib/postgresql:rw"), true);
+  assertEquals(
+    mounts.some((m) => /^pgdata:/.test(m) && !/:(ro|rw)$/.test(m)),
+    false,
+  );
+});
+
 test("normalizeManagedCompose rewrites nested config/tls mounts that Docker cannot start", () => {
   const withTls = basePayload({
     composeYaml: [

@@ -15,13 +15,14 @@ import type {
   ManagedEngineProbeContext,
 } from "./types.ts";
 
-/** `-v name:target` pairs for every managed volume. */
+/** `-v name:target:mode` pairs for every managed volume. */
 export function volumeMountArgs(
   volumes: ManagedEngineProbeContext["volumes"],
+  mode: "rw" | "ro" = "rw",
 ): string[] {
   const args: string[] = [];
   for (const volume of volumes) {
-    args.push("-v", `${volume.name}:${volume.target}`);
+    args.push("-v", `${volume.name}:${volume.target}:${mode}`);
   }
   return args;
 }
@@ -44,7 +45,7 @@ export async function probeVolumePath(
     ...helperLabelArgs("volume-copy"),
     "--user",
     ctx.containerUser,
-    ...volumeMountArgs(ctx.volumes),
+    ...volumeMountArgs(ctx.volumes, "ro"),
     ctx.image,
     "sh",
     "-c",
