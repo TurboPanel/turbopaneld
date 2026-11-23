@@ -6002,6 +6002,75 @@ test("hostingFallbackSnippet repeats a block with no bind on each bound address 
   assertEquals(out.includes(":9443"), false);
 });
 
+function bracesBalance(text: string): boolean {
+  let depth = 0;
+  for (const ch of text.replace(/\{[a-z_.]+\}/g, "")) {
+    if (ch === "{") depth++;
+    if (ch === "}" && --depth < 0) return false;
+  }
+  return depth === 0;
+}
+
+const HTTPS_SITE = `https-app.example.com {
+  tls internal
+  ${caddyTraefikUpstream("https")}
+}
+`;
+const HTTP_SITE = `http://http-app.example.com {
+  ${caddyTraefikUpstream("http")}
+}
+`;
+
+test("a repeated site block keeps its own closing brace after a reverse_proxy closer in column 0", () => {
+  const layout = siteBoundLayout([
+    HTTPS_SITE + "\n" + HTTP_SITE,
+    "bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n",
+    "http://bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n",
+  ]);
+  const out = hostingFallbackSnippet(false, false, layout);
+  assertEquals(bracesBalance(out), true);
+  for (
+    const [original, name, scheme] of [
+      [HTTPS_SITE, "https-app.example.com", "https"],
+      [HTTP_SITE, "http://http-app.example.com", "http"],
+    ] as const
+  ) {
+    for (const address of layout[scheme]) {
+      const copy = original.replace(
+        ` {\n`,
+        ` {\n  bind ${address}\n`,
+      );
+      assertEquals(bracesBalance(copy), true);
+      assertStringIncludes(out, `# ${name} on ${address}.\n${copy}`);
+    }
+  }
+});
+
+test("site blocks ignore braces in quotes and comments when finding the closing brace", () => {
+  const text =
+    'a.test {\n  # a { comment\n  respond "x { y" 200\n}\n\nb.test {\n  bind 127.0.0.1\n}\n';
+  const layout = siteBoundLayout([text]);
+  assertEquals(layout.unbound?.map((b) => b.address), ["a.test"]);
+  assertEquals(
+    layout.unbound?.[0].body,
+    '  # a { comment\n  respond "x { y" 200\n',
+  );
+  assertEquals(layout.https, ["127.0.0.1"]);
+});
+
+test("a host with one bound site and unbound hostname sites renders balanced fallback and site files", () => {
+  const bound =
+    "bound.example.com {\n  bind 10.10.0.154 127.0.0.1\n  respond ok\n}\n";
+  const texts = [bound, HTTPS_SITE, HTTP_SITE];
+  const out = hostingFallbackSnippet(false, false, siteBoundLayout(texts));
+  assertEquals(bracesBalance(out), true);
+  for (const text of texts) assertEquals(bracesBalance(text), true);
+  assertStringIncludes(out, "# https-app.example.com on 10.10.0.154.");
+  assertStringIncludes(out, "# https-app.example.com on 127.0.0.1.");
+  // The plain-HTTP block binds nowhere, so it has no scheme address to copy to.
+  assertEquals(out.includes("# http://http-app.example.com on"), false);
+});
+
 test("hostingFallbackSnippet does not repeat a block where another block of the same name already binds", () => {
   const layout = siteBoundLayout([
     "u.test {\n  respond ok\n}\n",
