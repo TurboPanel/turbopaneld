@@ -379,7 +379,15 @@ registry auth, query strings, request bodies, the approval token itself. An
 5. **Done.** `tp` leaves the `docker` group (role and converge, managed hosts only); the
    real socket is root-only for it, and the daemon's Deno grants no longer name it.
 
-Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
+Break-glass: never stop the gate. Since stage 4 the daemon reaches Docker only
+through the gate socket, so stopping the gate cuts it off from Docker entirely.
+The rollback is `docker_gate_mode: observe` plus a converge: the gate then
+relays everything and refuses nothing. `usermod -aG docker tp` does not work as
+a rollback: the unit's `ExecStartPre` `gpasswd -d` removes the group again on
+every start, the converge removes it too, and the daemon's Deno grants no longer
+include `/run/docker.sock`. Only a downgrade to a package from before stage 4
+needs the group (`usermod -aG docker tp` and a restart); that package's unit has
+no `gpasswd` line.
 
 ## What stage 4 needs from stage 3
 

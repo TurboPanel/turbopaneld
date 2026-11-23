@@ -3,9 +3,10 @@
  *
  * Listens on a socket only the daemon group can open, forwards every request
  * to the real engine socket and logs what the strict profile would refuse.
- * `TP_DOCKER_GATE_MODE` is `observe` (the default, and what the unit pins:
- * nothing is refused) or `enforce` (stage 4: a request with findings is
- * refused with a 403). A third listener, the build socket (build.ts), is the
+ * `TP_DOCKER_GATE_MODE` is `observe` (nothing is refused; what the code assumes
+ * when the variable is unset) or `enforce` (a request with findings is refused
+ * with a 403). The unit always sets it from `docker_gate_mode`, whose role
+ * default is `enforce`; `observe` is the operator's rollback. A third listener, the build socket (build.ts), is the
  * only place BuildKit's `/session` and `/grpc` may open.
  *
  * Run by the vendored Deno with scoped permissions (see the unit template):
