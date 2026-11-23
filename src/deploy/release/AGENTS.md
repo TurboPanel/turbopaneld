@@ -123,8 +123,12 @@ root is detected as Laravel or WordPress (regular files only) and the layout is
 recorded in the release manifest (`frameworkLayout`, daemon-only). tp-host
 `publish` / `publish-keep` take it as an optional seventh word,
 `layout=laravel|wordpress`, and in the sealed leaf, before the link check,
-replace one path with a link into `shared/`: Laravel `storage` ->
-`shared/storage`, WordPress `wp-content/uploads` -> `../shared/uploads`. Only
+replace each recipe path with a link into `shared/`: Laravel `storage` ->
+`shared/storage` and `public/storage` -> `../shared/storage/app/public` (the
+public disk's web path, where the app writes; a build that ships it as a folder,
+file or link has it replaced, and `/storage/` is still served by the alias, since
+neither nginx nor Apache follows a root-owned link into an owner's folder),
+WordPress `wp-content/uploads` -> `../shared/uploads`. Only
 that; Laravel's `bootstrap/cache` stays in the release (filled while it is
 built, by the PHP dependency install's package discovery) and, as the one folder
 of the sealed release the site account owns (`0750`, files `0640`), is what a
