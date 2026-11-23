@@ -216,6 +216,55 @@ function renderHostRule(rule: FirewallRule, family: FirewallFamily): string[] {
   return lines;
 }
 
+/** The lines for one `accept` rule against a published port; see above. */
+function renderAcceptedPublishedRule(
+  rule: FirewallRule,
+  family: FirewallFamily,
+  defaultDrop: boolean,
+  destinations: (string | null)[],
+): string[] {
+  const lines: string[] = [];
+  if (rule.sources.includes("any")) {
+    // Docker already accepts, so under the accept default there is nothing
+    // to say. Under the drop default the chain ends in a DROP, so the port
+    // must be handed back to Docker explicitly or it would be closed.
+    if (!defaultDrop) return lines;
+    for (const dest of destinations) {
+      lines.push(joinArgs([
+        `-A ${FIREWALL_FORWARD_CHAIN}`,
+        protoArgs(rule),
+        publishedMatchArgs(rule, dest),
+        commentFor(rule),
+        "-j RETURN",
+      ]));
+    }
+    return lines;
+  }
+  // When every allowed source is of the other family, `sources` is empty
+  // here: in *this* family nobody is allowed, and the port still closes.
+  const sources = sourcesFor(rule, family);
+  for (const dest of destinations) {
+    for (const source of sources) {
+      lines.push(joinArgs([
+        `-A ${FIREWALL_FORWARD_CHAIN}`,
+        `-s ${source}`,
+        protoArgs(rule),
+        publishedMatchArgs(rule, dest),
+        commentFor(rule),
+        "-j RETURN",
+      ]));
+    }
+    lines.push(joinArgs([
+      `-A ${FIREWALL_FORWARD_CHAIN}`,
+      protoArgs(rule),
+      publishedMatchArgs(rule, dest),
+      commentFor(rule),
+      "-j DROP",
+    ]));
+  }
+  return lines;
+}
+
 /**
  * The lines one `published` rule contributes. An `accept` from `any` renders
  * nothing (Docker already accepts). An `accept` from named sources narrows the
@@ -234,45 +283,7 @@ function renderPublishedRule(
   const destinations = destinationsFor(rule, family);
   if (destinations.length === 0) return lines;
   if (rule.action === "accept") {
-    if (rule.sources.includes("any")) {
-      // Docker already accepts, so under the accept default there is nothing
-      // to say. Under the drop default the chain ends in a DROP, so the port
-      // must be handed back to Docker explicitly or it would be closed.
-      if (!defaultDrop) return lines;
-      for (const dest of destinations) {
-        lines.push(joinArgs([
-          `-A ${FIREWALL_FORWARD_CHAIN}`,
-          protoArgs(rule),
-          publishedMatchArgs(rule, dest),
-          commentFor(rule),
-          "-j RETURN",
-        ]));
-      }
-      return lines;
-    }
-    // When every allowed source is of the other family, `sources` is empty
-    // here: in *this* family nobody is allowed, and the port still closes.
-    const sources = sourcesFor(rule, family);
-    for (const dest of destinations) {
-      for (const source of sources) {
-        lines.push(joinArgs([
-          `-A ${FIREWALL_FORWARD_CHAIN}`,
-          `-s ${source}`,
-          protoArgs(rule),
-          publishedMatchArgs(rule, dest),
-          commentFor(rule),
-          "-j RETURN",
-        ]));
-      }
-      lines.push(joinArgs([
-        `-A ${FIREWALL_FORWARD_CHAIN}`,
-        protoArgs(rule),
-        publishedMatchArgs(rule, dest),
-        commentFor(rule),
-        "-j DROP",
-      ]));
-    }
-    return lines;
+    return renderAcceptedPublishedRule(rule, family, defaultDrop, destinations);
   }
   for (const dest of destinations) {
     for (const source of sourcesFor(rule, family)) {
