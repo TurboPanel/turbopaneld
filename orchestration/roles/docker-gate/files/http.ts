@@ -336,7 +336,7 @@ function withTarget(raw: Uint8Array, to: string): Uint8Array {
   const method = line.slice(0, line.indexOf(" "));
   const version = line.slice(line.lastIndexOf(" ") + 1);
   const out = `${method} ${to} ${version}${text.slice(end)}`;
-  return Uint8Array.from(out, (char) => char.charCodeAt(0));
+  return Uint8Array.from(out, (char) => char.codePointAt(0) ?? 0);
 }
 
 export function parseResponseHead(raw: Uint8Array): ResponseHead {
