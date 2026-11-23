@@ -1,4 +1,5 @@
 import { assert, assertEquals } from "@std/assert";
+import { fromFileUrl } from "@std/path";
 import { parse as parseYaml } from "yaml";
 import { copyMountArg } from "../backups/copy-backup.ts";
 import { dockerProxyCompose } from "../deploy/ingress.ts";
@@ -12,6 +13,11 @@ import { orchestratorCompose } from "./orchestrator.ts";
 import { proxysqlCompose } from "./proxysql.ts";
 
 const test = Deno.test.bind(Deno);
+
+/** Repo root, resolved from this file so the scan never depends on the cwd. */
+const ROOT = fromFileUrl(new URL("../../", import.meta.url)).replace(/\/$/, "");
+const SRC_DIR = `${ROOT}/src`;
+const ORCHESTRATION_DIR = `${ROOT}/orchestration`;
 
 const NETWORK = "00000000-0000-4000-8000-0000000000ee";
 const HA: SystemComponentDescriptor = {
@@ -104,16 +110,18 @@ function findUnmodedVolumeArgs(path: string, text: string): string[] {
     ) continue;
     const spec = (inline ? inline[1] : lines[i + 1] ?? "").trim();
     if (/ON_ERROR_STOP/.test(spec)) continue;
-    if (!MODE_END.test(spec)) bad.push(`${path}:${i + 2}: ${spec}`);
+    if (!MODE_END.test(spec)) {
+      bad.push(`${path}:${inline ? i + 1 : i + 2}: ${spec}`);
+    }
   }
   return bad;
 }
 
 test("every docker -v argument in the daemon source and Ansible roles states a mode", async () => {
   const files = [
-    ...await sourceFiles("src", [".ts"], true),
+    ...await sourceFiles(SRC_DIR, [".ts"], true),
     ...await sourceFiles(
-      "orchestration",
+      ORCHESTRATION_DIR,
       [".yml", ".yaml", ".j2", ".sh"],
       true,
     ),
@@ -128,7 +136,7 @@ test("every docker -v argument in the daemon source and Ansible roles states a m
 
 test("every compose volumes list in the Ansible roles states a mode", async () => {
   const files = await sourceFiles(
-    "orchestration",
+    ORCHESTRATION_DIR,
     [".yml", ".yaml", ".j2"],
     true,
   );
@@ -155,7 +163,7 @@ test("every compose volumes list in the Ansible roles states a mode", async () =
 });
 
 test("every volumeMountArgs caller outside the probe keeps the rw default", async () => {
-  const callers = (await sourceFiles("src", [".ts"], true)).filter((path) =>
+  const callers = (await sourceFiles(SRC_DIR, [".ts"], true)).filter((path) =>
     !path.endsWith("standby-probe.ts")
   );
   const calls: string[] = [];
