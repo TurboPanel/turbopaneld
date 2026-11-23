@@ -411,7 +411,7 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   daemon (and possibly tenant Compose) can set; enforcement needs tenant
   Compose to be refused `turbopanel.*` / `io.turbopanel.*` labels.
 
-## Lockouts to expect when enforcement arrives (stage 4; none bite in stage 2)
+## Lockouts to watch now that enforcement is on (stage 4)
 
 - Approval key missing or rotated without overlap: every host-level deploy is
   denied. Ship the new key alongside the old one, then retire the old one.
@@ -423,13 +423,14 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - Renaming a system component label (or an emitter changing a bind path)
   makes platform containers lose the allowance; the emitter test guards the
   paths, the label constants are pinned to `src/deploy/labels.ts`.
-- The label-less helpers (managed-file normalisation, **backup and restore**)
-  would be denied until the daemon stamps a platform label on them: backups and
-  restores stop working. This is the most critical gap to close before stage 4.
-
-- Before enforcement every environment must be redeployed: rehydrate re-runs
-  stored pre-#825 compose files, and older containers may lack the project
-  labels or carry tenant-written ones.
+- The helper containers (managed-file normalisation, backup copy and restore)
+  carry a platform label (`helperLabelArgs` in `src/deploy/labels.ts`); one
+  that loses it is denied, and its backup or restore fails. The scheduled
+  backup wrapper (`tp-backup-run`) is re-rendered by `daemon-converge`, so
+  existing hosts route it through the gate too.
+- Environments deployed before the project labels existed (pre-#825 compose
+  files, or containers carrying tenant-written labels) must be redeployed once;
+  until then a stop or remove of such a container can read as unowned.
 
 ## Ownership scope
 
@@ -512,9 +513,9 @@ mounts) rides inside them. They open only on the **build listener** (`build.ts`)
 - **Modes.** Observe logs the finding as `would-deny` and relays. Enforce answers 403 with a `docker-gate.denied`
   line (method, route, rules) **before the engine is reached**, for this finding and every other one left after
   allowances and approvals. The read-only listener refuses both routes as before.
-- **Daemon side (not wired yet, needed before enforce):** every buildx / Compose build call must use a Docker context
-  whose host is the build socket (`docker context create ... --docker host=unix://<build socket>`, then
-  `--context`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
+- **Daemon side (wired, stage 4):** every buildx / Compose build call uses a Docker context (`turbopanel-build`)
+  whose host is the build socket, written by `src/deploy/docker-cli.ts` and passed as `--context` (and buildx
+  `--builder turbopanel-build`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
   `docker-container` builder that creates a privileged BuildKit container (refused).
 - **Proof (host-a, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
   and loaded an image; through the main socket `/grpc` was refused and the fallback BuildKit container's create too;

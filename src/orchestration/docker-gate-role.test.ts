@@ -956,3 +956,44 @@ test("the gate deploy waits for the engine itself, bounded, and names the engine
   // More than the old 35 s gate probe, and still bounded.
   assert(retries * delay >= 60 && retries * delay <= 180);
 });
+
+test("daemon-converge defines the gate vars the units render and refreshes the backup wrapper", async () => {
+  const converge = await Deno.readTextFile(
+    join(ORCHESTRATION, "playbooks/daemon-converge.yml"),
+  );
+  const launch = await Deno.readTextFile(
+    join(ORCHESTRATION, "roles/daemon-launch/defaults/main.yml"),
+  );
+  // The converge play does not load the launch role's defaults, so every var
+  // the daemon unit and the wrapper render must be set in its own vars, equal
+  // to the launch value.
+  for (
+    const line of [
+      `turbopanel_docker_gate_run_dir: ${DEFAULT_VARS.docker_gate_run_dir}`,
+      'turbopanel_docker_gate_build_dir: "{{ turbopanel_docker_gate_run_dir }}/build"',
+      `turbopanel_docker_gate_service: ${DEFAULT_VARS.docker_gate_service_name}.service`,
+      "turbopanel_docker_gate_wait_seconds: 60",
+      'turbopanel_backup_run_bin: "{{ turbopanel_install_root }}/lib/tp-backup-run"',
+    ]
+  ) {
+    assertStringIncludes(converge, line);
+    assertStringIncludes(launch, line);
+  }
+  const task = converge.indexOf(
+    "- name: Refresh the scheduled-backup runner wrapper",
+  );
+  assert(task >= 0, "converge re-renders the backup wrapper");
+  const body = converge.slice(task, task + 500);
+  assertStringIncludes(body, "roles/daemon-launch/templates/tp-backup-run.j2");
+  assertStringIncludes(body, 'dest: "{{ turbopanel_backup_run_bin }}"');
+  assertStringIncludes(body, 'mode: "0750"');
+  assertStringIncludes(body, "turbopanel_backup_run_installed.stat.exists");
+});
+
+test("enforce mode needs the Traefik gate socket explicitly on", async () => {
+  const main = await read("tasks/main.yml");
+  assertStringIncludes(
+    main,
+    "(docker_gate_ingress_socket | string | lower) in ['true', 'yes', '1', 'on']",
+  );
+});
