@@ -161,7 +161,14 @@ test("checkoutRelease fetches and checks out when the branch tip drifted", async
       runGit: run,
     });
     assertEquals(result.commitSha, SHA);
-    assertEquals(calls[2]?.args, ["fetch", "--depth", "1", "origin", SHA]);
+    assertEquals(calls[2]?.args, [
+      "fetch",
+      "--depth",
+      "1",
+      "--",
+      "origin",
+      SHA,
+    ]);
     assertEquals(calls[3]?.args, ["checkout", "--detach", "FETCH_HEAD"]);
   } finally {
     await Deno.remove(scratchDir, { recursive: true });

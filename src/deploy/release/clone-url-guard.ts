@@ -45,7 +45,8 @@ export const PUBLIC_GIT_HOST_REQUIRED =
   "repositories must be on a public git host";
 
 /** `user@host:path`: the user and the host, before the first colon. */
-const SCP_LIKE_RE = /^([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):(.+)$/;
+const SCP_LIKE_RE =
+  /^([A-Za-z0-9._][A-Za-z0-9._-]*)@([A-Za-z0-9.][A-Za-z0-9.-]*):(.+)$/;
 
 /** A host name or IPv4 literal that starts like one, never with `-` or `.`. */
 const HOST_START_RE = /^[A-Za-z0-9[]/;
@@ -89,7 +90,7 @@ function urlHost(cloneUrl: string, scheme: "https" | "ssh"): string {
  * differently.
  */
 const AUTHORITY_RE =
-  /^(?:[A-Za-z0-9._-]+@)?(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
+  /^(?:[A-Za-z0-9._][A-Za-z0-9._-]*@)?(?:[A-Za-z0-9.][A-Za-z0-9.-]*|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 
 function assertPlainAuthority(cloneUrl: string, scheme: "https" | "ssh") {
   const rest = cloneUrl.slice(`${scheme}://`.length);

@@ -6725,9 +6725,13 @@ function isSafeSourceSubdirectory(value: unknown): value is string {
 function isCredentialFreeCloneUrl(value: string): boolean {
   if (value.startsWith("https://") || value.startsWith("ssh://")) {
     const authority = value.slice(value.indexOf("://") + 3).split("/")[0] ?? "";
-    return !authority.includes("@");
+    // A host git could hand to ssh as an option (`-oProxyCommand=…`) is refused.
+    return !authority.includes("@") && !authority.startsWith("-");
   }
-  return /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/.test(value);
+  // Neither the user nor the host may start with `-`: ssh would read it as an option.
+  return /^[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9.][A-Za-z0-9.-]*:/.test(
+    value,
+  );
 }
 
 function parseSourceBuildCommand(
