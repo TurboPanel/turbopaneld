@@ -36,6 +36,14 @@ export const LABEL_RAW_PORT = "io.turbopanel.raw-port";
  */
 export const LABEL_ROUTED = "io.turbopanel.system.routed";
 
+/**
+ * Storage UUID stamped on every Docker volume the daemon creates for a managed
+ * storage row. The Docker gate treats a volume with none of a Compose project
+ * or an `io.turbopanel.*` label as unowned and refuses to remove it, so an
+ * unlabeled volume could never be deleted by a Destroy that deletes data.
+ */
+export const LABEL_STORAGE = "io.turbopanel.storage";
+
 /** Project UUID stamped on tenant app containers. */
 export const LABEL_PROJECT = "io.turbopanel.project";
 
