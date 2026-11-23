@@ -164,6 +164,7 @@ type Shape = {
   routes?: Parameters<typeof siteSnippet>[0]["routes"];
   bindAddress?: string;
   tlsId?: string;
+  hideWebServerNames?: boolean;
 };
 
 const SHAPES: Record<string, Shape> = {
@@ -255,14 +256,81 @@ test("lock: true on an open name that already has trusted peers adds the lock an
   assertEquals(addLock(open), render({ upstream: UPSTREAM }, true));
 });
 
-test("a block with an automatic certificate (no tls line) is left to the next deploy", () => {
-  const acme = siteSnippet({
+/** A site rendered with automatic certificates, as an earlier deploy wrote it. */
+function acmeSite(shape: Shape = {}, lock = false): string {
+  return siteSnippet({
     hostname: NAME,
     tlsDir: TLS_DIR,
     upstream: UPSTREAM,
     tlsMode: "acme",
+    ...shape,
+    ...(lock
+      ? { tunnel: { lock: true, peers: PEERS, extraBind: LISTEN } }
+      : {}),
   });
-  assertEquals(addLock(acme), acme);
+}
+
+const ACME_SHAPES: Record<string, Shape> = {
+  "a plain upstream": {},
+  "a bound site": { bindAddress: "10.0.0.8" },
+  "nested braces (header and error blocks)": {
+    hideWebServerNames: true,
+    routes: [
+      { pathPrefix: "/api", upstream: UPSTREAM },
+      { upstream: { kind: "traefik" } },
+    ],
+  },
+};
+
+for (const [label, shape] of Object.entries(ACME_SHAPES)) {
+  test(`an automatic certificate block is locked as a deploy renders it, for ${label}`, () => {
+    const acme = acmeSite(shape);
+    assertEquals(acme.includes("tls "), false);
+    assertEquals(acme.includes("http://app.example.com {"), true);
+    const after = addLock(acme);
+    // The same bytes a full deploy writes: `tls internal`, the lock lines,
+    // trusted peers, loopback bind, and no plain HTTP block.
+    assertEquals(after, acmeSite(shape, true));
+    assertEquals(after.includes("  tls internal\n"), true);
+    assertEquals(after.includes("@tp_outside"), true);
+    assertEquals(after.includes("http://app.example.com {"), false);
+    // Applying again changes nothing.
+    assertEquals(addLock(after), after);
+  });
+}
+
+test("an automatic certificate block next to other sites leaves them alone", () => {
+  const other = siteSnippet({
+    hostname: "other.example.com",
+    tlsDir: TLS_DIR,
+    upstream: UPSTREAM,
+    tlsMode: "acme",
+  });
+  assertEquals(
+    addLock(`${other}\n${acmeSite()}`),
+    `${other}\n${acmeSite({}, true)}`,
+  );
+});
+
+test("a block that already has tls internal and no lock is made the same locked block", () => {
+  const internal = render({}, false);
+  assertEquals(internal.includes("  tls internal\n"), true);
+  assertEquals(addLock(internal), render({}, true));
+});
+
+test("a block that is already locked with tls internal is unchanged", () => {
+  const done = render({}, true);
+  assertEquals(addLock(done), done);
+});
+
+test("an automatic certificate block with no lock entry is left exactly as it was", () => {
+  const acme = acmeSite();
+  assertEquals(relockSiteText(acme, peersOf(NAME, PEERS), LISTEN), acme);
+});
+
+test("an automatic certificate block with no empty slot for the tls line is left alone", () => {
+  const odd = `${NAME} {\n  reverse_proxy 127.0.0.1:8080\n}\n`;
+  assertEquals(addLock(odd), odd);
 });
 
 test("a peer that is not an exact address is refused when adding a lock", () => {
