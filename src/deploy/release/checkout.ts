@@ -497,7 +497,7 @@ export async function checkoutRelease(
     // The pinned commit is not what `--branch <ref>` produced — fetch it
     // explicitly rather than silently building a different commit.
     const fetch = await git(
-      ["fetch", "--depth", "1", "origin", params.commitSha],
+      ["fetch", "--depth", "1", "--", "origin", params.commitSha],
       workingDir,
       env,
       params.onOutput,
