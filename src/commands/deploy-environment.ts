@@ -10,10 +10,7 @@ import {
   ensureNamedVolumeOwners,
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
-import {
-  servicesWithChangedFiles,
-  snapshotGeneratedFiles,
-} from "../deploy/generated-files-changed.ts";
+import { generatedFileTimes } from "../deploy/generated-files-changed.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import {
   applyDeployCachesAndReach,
@@ -2078,7 +2075,7 @@ type SequentialDeployContext = {
   labeledServices: string[];
   deploymentDir: string;
   onLine: LineHandler;
-  filesChanged: ReadonlySet<string>;
+  fileTimes: ReadonlyMap<string, number>;
 };
 
 const DEFAULT_HEALTH_TIMEOUT_SECONDS = 120;
@@ -2125,7 +2122,7 @@ async function deploySequentially(
     hasHooks: serviceHooks.length > 0,
     hooksMigrate: serviceHooks.some((hook) => Boolean(hook.preDeployCommand)),
     breakingMigration: parsedPayload.migrations === "breaking",
-    filesChanged: ctx.filesChanged,
+    fileTimes: ctx.fileTimes,
     steps,
   });
   if (serviceHooks.length > 0) {
@@ -2594,7 +2591,6 @@ async function deployContainerServices(
     );
     await writeComposeFileSecure(stagedPath, yaml);
     await persistComposeEnvFile(stageDir, parsedPayload.envFile);
-    const filesBefore = await snapshotGeneratedFiles(layout, parsedPayload);
     await materializeDeploySecrets(layout, parsedPayload, decryptSecrets);
     await materializeConfigFiles(
       layout,
@@ -2604,11 +2600,7 @@ async function deployContainerServices(
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
-    const filesChanged = await servicesWithChangedFiles(
-      filesBefore,
-      layout,
-      parsedPayload,
-    );
+    const fileTimes = await generatedFileTimes(layout, parsedPayload);
     // SMB logins are decrypted here but added to the compose only after every
     // policy check below has judged the author's text (a login is never
     // compose text from the control plane).
@@ -2904,7 +2896,7 @@ async function deployContainerServices(
         labeledServices,
         deploymentDir,
         onLine,
-        filesChanged,
+        fileTimes,
       });
       await pruneAfterDeploy(input, shareApplied.volumeNames);
       return sequential;

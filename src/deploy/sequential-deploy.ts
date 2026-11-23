@@ -17,7 +17,8 @@
  *    services) stay up so migrations have something to talk to, and so does a
  *    service whose effective config, image and generated files are all
  *    unchanged: stopping it would only cost a restart (see
- *    {@link unchangedServices}).
+ *    {@link unchangedServices}). A deploy that migrates (`preDeployCommand`
+ *    hooks or `migrations: breaking`) still stops every application service.
  * 3. Pre-deploy hooks (the migrations). From the moment a `preDeployCommand`
  *    starts the schema may have changed, so the deploy is past the point of no
  *    return, as it is when the environment declares `migrations: breaking`.
@@ -93,11 +94,11 @@ export type SequentialDeployInput = {
   /** The environment declares a breaking migration for this deploy. */
   breakingMigration: boolean;
   /**
-   * Compose services whose generated secret or config files differ from what
-   * the previous deploy wrote. Compose's own config hash does not cover file
-   * contents, so these count as changed and are stopped.
+   * Per compose service, when its generated secret or config files last
+   * changed (ms). Compose's config hash does not cover file contents, so a
+   * service whose containers started before that moment is stopped.
    */
-  filesChanged?: ReadonlySet<string>;
+  fileTimes?: ReadonlyMap<string, number>;
   steps: SequentialDeploySteps;
 };
 
@@ -108,11 +109,10 @@ function fail(outcome: SequentialOutcome, reason: string): never {
 /** `service hash` lines of `docker compose config --hash "*"`; `null` when unreadable. */
 async function configHashes(
   input: SequentialDeployInput,
-  paths: readonly string[],
 ): Promise<Map<string, string> | null> {
   const { steps } = input;
   const result = await steps.run([
-    ...steps.composeArgs(paths),
+    ...steps.composeArgs(input.composePaths),
     "config",
     "--hash",
     "*",
@@ -126,14 +126,24 @@ async function configHashes(
   return hashes;
 }
 
-/** Whether the service's container runs the image its reference points at now. */
-async function runsCurrentImage(
-  steps: SequentialDeploySteps,
-  previous: readonly string[],
+const INSPECT_FORMAT =
+  '{{index .Config.Labels "com.docker.compose.config-hash"}} {{.Image}} {{.Config.Image}} {{.State.StartedAt}}';
+
+/**
+ * Whether every running container of the service already matches this deploy:
+ * the config hash Compose stamped on it equals the new one (what Compose
+ * itself checks before it recreates), it still runs the image its reference
+ * resolves to now, and it started after its generated files last changed.
+ * Anything missing or unreadable answers `false`.
+ */
+async function containersMatch(
+  input: SequentialDeployInput,
   service: string,
+  hash: string,
 ): Promise<boolean> {
+  const { steps } = input;
   const ids = await steps.run([
-    ...steps.composeArgs(previous),
+    ...steps.composeArgs(input.composePaths),
     "ps",
     "-a",
     "-q",
@@ -146,58 +156,60 @@ async function runsCurrentImage(
   const used = await steps.run([
     "inspect",
     "--format",
-    "{{.Image}} {{.Config.Image}}",
+    INSPECT_FORMAT,
     ...containers,
   ]);
-  if (!used.success) return false;
-  let current = true;
-  await forEachSequential(
-    used.stdout.split("\n").filter((line) => line.trim() !== ""),
-    async (line) => {
-      if (!current) return;
-      const [imageId, reference] = line.trim().split(/\s+/);
-      if (!imageId || !reference) {
-        current = false;
-        return;
-      }
-      const resolved = await steps.run([
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        reference,
-      ]);
-      if (!resolved.success || resolved.stdout.trim() !== imageId) {
-        current = false;
-      }
-    },
-  );
-  return current;
+  const lines = used.stdout.split("\n").filter((line) => line.trim() !== "");
+  if (!used.success || lines.length !== containers.length) return false;
+  const filesAt = input.fileTimes?.get(service) ?? 0;
+  let match = true;
+  await forEachSequential(lines, async (line) => {
+    if (!match) return;
+    const [labelHash, imageId, reference, startedAt] = line.trim().split(
+      /\s+/,
+    );
+    const started = Date.parse(startedAt ?? "");
+    if (
+      labelHash !== hash || !imageId || !reference || Number.isNaN(started) ||
+      started < filesAt
+    ) {
+      match = false;
+      return;
+    }
+    const resolved = await steps.run([
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      reference,
+    ]);
+    if (!resolved.success || resolved.stdout.trim() !== imageId) match = false;
+  });
+  return match;
 }
 
 /**
- * Services of the previous deploy this deploy leaves exactly as they are:
- * the same Compose config hash (the previous chain read with its own `.env`
- * snapshot, so a changed environment value or tag counts), the same generated
- * secret and config files, and a container still on the image its reference
- * resolves to now (a re-pulled tag counts). Anything that cannot be told
- * apart is treated as changed, so it is stopped as before.
+ * Services this deploy leaves exactly as they are. Compose recreates a
+ * container whose stamped config hash differs from the service's new one, so
+ * those are the changed ones (an env value, tag or compose entry that moved).
+ * On top of that a service counts as changed when its image was re-pulled or
+ * a generated secret or config file changed after its containers started.
+ * Anything that cannot be compared is treated as changed and stopped. Changes
+ * to top-level networks or volumes are not seen here: they are left to
+ * Compose, as before.
  */
 export async function unchangedServices(
   input: SequentialDeployInput,
-  previous: readonly string[],
   candidates: readonly string[],
 ): Promise<Set<string>> {
-  const { steps } = input;
-  const before = await configHashes(input, previous);
-  const after = await configHashes(input, input.composePaths);
+  const hashes = await configHashes(input);
   const same = new Set<string>();
-  if (before === null || after === null) return same;
+  if (hashes === null) return same;
   await forEachSequential(candidates, async (name) => {
-    const hash = before.get(name);
-    if (hash === undefined || hash !== after.get(name)) return;
-    if (input.filesChanged?.has(name)) return;
-    if (await runsCurrentImage(steps, previous, name)) same.add(name);
+    const hash = hashes.get(name);
+    if (hash !== undefined && await containersMatch(input, name, hash)) {
+      same.add(name);
+    }
   });
   return same;
 }
@@ -223,7 +235,11 @@ async function servicesToStop(
     .split("\n")
     .map((name) => name.trim())
     .filter((name) => name.length > 0 && !keep.has(name));
-  const unchanged = await unchangedServices(input, previous, candidates);
+  // A migration locks tables its services use: stop them all, as ever.
+  const migrates = input.hooksMigrate || input.breakingMigration;
+  const unchanged = migrates
+    ? new Set<string>()
+    : await unchangedServices(input, candidates);
   if (unchanged.size > 0) {
     steps.log(
       `leaving unchanged services running (${[...unchanged].join(", ")})`,

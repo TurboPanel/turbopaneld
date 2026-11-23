@@ -1,8 +1,13 @@
 /**
- * Which compose services get different generated secret or config files from
- * a deploy. Compose's config hash covers the path of such a file but never its
- * contents, so a rotated secret would otherwise look like "no change" to the
- * sequential deploy, which only stops changed services.
+ * When each compose service's generated secret and config files last changed.
+ * Compose's config hash covers the path of such a file but never its
+ * contents, so a rotated secret looks like "no change" to it. The sequential
+ * deploy compares these times with when the service's container started: a
+ * file written after that moment is one the running container never saw, even
+ * when an earlier, failed attempt of this same deploy already wrote it.
+ *
+ * `writeFileAtomic` leaves a file alone when its content is already right, so
+ * a file's time moves only when its content did.
  */
 import { join } from "@std/path";
 import type { EnvironmentDeployPayload } from "../contracts/commands-contracts.ts";
@@ -10,9 +15,6 @@ import { configHostDirectory } from "./config-files.ts";
 import { secretHostPath } from "./secret-runtime.ts";
 
 type GeneratedFile = { service: string; path: string };
-
-/** Content of each planned file by path; `null` for one that is not there. */
-export type GeneratedFileSnapshot = ReadonlyMap<string, string | null>;
 
 function plannedFiles(
   layout: { runDir: string },
@@ -34,41 +36,28 @@ function plannedFiles(
   return [...secrets, ...configs];
 }
 
-async function readOrNull(path: string): Promise<string | null> {
+async function modifiedAt(path: string): Promise<number> {
   try {
-    return await Deno.readTextFile(path);
+    return (await Deno.stat(path)).mtime?.getTime() ?? Infinity;
   } catch {
-    return null;
+    return Infinity;
   }
 }
 
-/** Read every planned file as it is now; call before the deploy writes them. */
-export async function snapshotGeneratedFiles(
-  layout: { runDir: string },
-  payload: Parameters<typeof plannedFiles>[1],
-): Promise<GeneratedFileSnapshot> {
-  const files = plannedFiles(layout, payload);
-  const contents = await Promise.all(files.map((f) => readOrNull(f.path)));
-  return new Map(files.map((file, i) => [file.path, contents[i]]));
-}
-
 /**
- * Services owning a planned file that is new, missing now or different from
- * `before`. A file that cannot be read counts as changed.
+ * Per service, the latest modification time (ms) of its planned files. A file
+ * that is missing or has no readable time counts as `Infinity`: newer than
+ * any container, so the service is stopped.
  */
-export async function servicesWithChangedFiles(
-  before: GeneratedFileSnapshot,
+export async function generatedFileTimes(
   layout: { runDir: string },
   payload: Parameters<typeof plannedFiles>[1],
-): Promise<Set<string>> {
+): Promise<Map<string, number>> {
   const files = plannedFiles(layout, payload);
-  const now = await Promise.all(files.map((f) => readOrNull(f.path)));
-  const changed = new Set<string>();
+  const times = await Promise.all(files.map((f) => modifiedAt(f.path)));
+  const latest = new Map<string, number>();
   files.forEach((file, i) => {
-    const prior = before.get(file.path) ?? null;
-    if (prior === null || now[i] === null || prior !== now[i]) {
-      changed.add(file.service);
-    }
+    latest.set(file.service, Math.max(latest.get(file.service) ?? 0, times[i]));
   });
-  return changed;
+  return latest;
 }
