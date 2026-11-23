@@ -15,10 +15,13 @@
  *    `DOCKER-USER` is the sanctioned operator hook. A `published` rule renders
  *    here, matched on the **original** destination port via
  *    `conntrack --ctorigdstport`, because by the time the packet is here the
- *    destination is already the container's. `TP-FWD` ends in an implicit
- *    `RETURN`, so Docker keeps governing everything this chain does not
- *    restrict — far fewer invariants to get right than a separate nftables
- *    table with `policy drop` on the forward hook, which would have needed every
+ *    destination is already the container's. Under the accept default `TP-FWD`
+ *    ends in an implicit `RETURN`, so Docker keeps governing everything this
+ *    chain does not restrict; under the drop default it ends in a `DROP` for
+ *    DNAT'd connections (published ports) with no rule, and an accept-from-any
+ *    rule renders an explicit `RETURN` so its port stays open. That is still
+ *    far fewer invariants to get right than a separate nftables table
+ *    with `policy drop` on the forward hook, which would have needed every
  *    legitimate forward path enumerated (considered, rejected 2026-09-19).
  *
  * **Telling inbound from container egress in `DOCKER-USER`.** `xt_conntrack`
@@ -213,6 +216,55 @@ function renderHostRule(rule: FirewallRule, family: FirewallFamily): string[] {
   return lines;
 }
 
+/** The lines for one `accept` rule against a published port; see above. */
+function renderAcceptedPublishedRule(
+  rule: FirewallRule,
+  family: FirewallFamily,
+  defaultDrop: boolean,
+  destinations: (string | null)[],
+): string[] {
+  const lines: string[] = [];
+  if (rule.sources.includes("any")) {
+    // Docker already accepts, so under the accept default there is nothing
+    // to say. Under the drop default the chain ends in a DROP, so the port
+    // must be handed back to Docker explicitly or it would be closed.
+    if (!defaultDrop) return lines;
+    for (const dest of destinations) {
+      lines.push(joinArgs([
+        `-A ${FIREWALL_FORWARD_CHAIN}`,
+        protoArgs(rule),
+        publishedMatchArgs(rule, dest),
+        commentFor(rule),
+        "-j RETURN",
+      ]));
+    }
+    return lines;
+  }
+  // When every allowed source is of the other family, `sources` is empty
+  // here: in *this* family nobody is allowed, and the port still closes.
+  const sources = sourcesFor(rule, family);
+  for (const dest of destinations) {
+    for (const source of sources) {
+      lines.push(joinArgs([
+        `-A ${FIREWALL_FORWARD_CHAIN}`,
+        `-s ${source}`,
+        protoArgs(rule),
+        publishedMatchArgs(rule, dest),
+        commentFor(rule),
+        "-j RETURN",
+      ]));
+    }
+    lines.push(joinArgs([
+      `-A ${FIREWALL_FORWARD_CHAIN}`,
+      protoArgs(rule),
+      publishedMatchArgs(rule, dest),
+      commentFor(rule),
+      "-j DROP",
+    ]));
+  }
+  return lines;
+}
+
 /**
  * The lines one `published` rule contributes. An `accept` from `any` renders
  * nothing (Docker already accepts). An `accept` from named sources narrows the
@@ -225,35 +277,13 @@ function renderHostRule(rule: FirewallRule, family: FirewallFamily): string[] {
 function renderPublishedRule(
   rule: FirewallRule,
   family: FirewallFamily,
+  defaultDrop: boolean,
 ): string[] {
   const lines: string[] = [];
   const destinations = destinationsFor(rule, family);
   if (destinations.length === 0) return lines;
   if (rule.action === "accept") {
-    if (rule.sources.includes("any")) return lines;
-    // When every allowed source is of the other family, `sources` is empty
-    // here: in *this* family nobody is allowed, and the port still closes.
-    const sources = sourcesFor(rule, family);
-    for (const dest of destinations) {
-      for (const source of sources) {
-        lines.push(joinArgs([
-          `-A ${FIREWALL_FORWARD_CHAIN}`,
-          `-s ${source}`,
-          protoArgs(rule),
-          publishedMatchArgs(rule, dest),
-          commentFor(rule),
-          "-j RETURN",
-        ]));
-      }
-      lines.push(joinArgs([
-        `-A ${FIREWALL_FORWARD_CHAIN}`,
-        protoArgs(rule),
-        publishedMatchArgs(rule, dest),
-        commentFor(rule),
-        "-j DROP",
-      ]));
-    }
-    return lines;
+    return renderAcceptedPublishedRule(rule, family, defaultDrop, destinations);
   }
   for (const dest of destinations) {
     for (const source of sourcesFor(rule, family)) {
@@ -358,9 +388,23 @@ function renderFamily(
         payload.rules.filter((r) => r.scope === "published"),
       )
     ) {
-      const ruleLines = renderPublishedRule(rule, family);
+      const ruleLines = renderPublishedRule(
+        rule,
+        family,
+        payload.policy.inputDefault === "drop",
+      );
       if (ruleLines.length > 0) rendered.add(rule.id);
       lines.push(...ruleLines);
+    }
+    if (payload.policy.inputDefault === "drop") {
+      // Only connections Docker DNAT'd (a published port) reach this line:
+      // replies, container egress and the fabric were RETURNed by the prefix,
+      // and forwarding that was never port-mapped is not this chain's to cut.
+      lines.push(
+        `-A ${FIREWALL_FORWARD_CHAIN} -m conntrack --ctstate DNAT ${
+          systemComment("default")
+        } -j DROP`,
+      );
     }
   }
 
