@@ -27,6 +27,10 @@ if [ "$load_state" != "loaded" ]; then
   exit 0
 fi
 
+# `-S` alone is not enough: a socket file left behind by a gate that has
+# stopped (or from before a reboot) still tests true, so the unit must also be
+# active. A gate that is active but has not yet bound its socket is covered by
+# the `-S` test; the loop waits for both.
 waited=0
 while [ "$waited" -lt "$seconds" ]; do
   if [ -S "$socket" ] && systemctl is-active --quiet "$unit"; then

@@ -108,6 +108,14 @@ function warnConfigDirOnce(reason: string): void {
   );
 }
 
+let warnedBuildContext = false;
+
+function warnBuildContextOnce(reason: string): void {
+  if (warnedBuildContext) return;
+  warnedBuildContext = true;
+  console.warn(`docker build context: ${reason}`);
+}
+
 type ConfigDirStat = {
   isDirectory: boolean;
   isSymlink: boolean;
@@ -168,10 +176,10 @@ function prepareBuildContext(dir: string): void {
     Deno.renameSync(staged, target);
     buildContextReady = true;
   } catch (err) {
-    warnConfigDirOnce(
+    warnBuildContextOnce(
       `cannot write the build context (${
         err instanceof Error ? err.message : String(err)
-      }); builds go through the default socket`,
+      }); image builds and compose builds will fail closed until it can be written`,
     );
   }
 }
@@ -463,6 +471,7 @@ function clearDockerInvocationCache(): void {
   configDirResolved = false;
   buildContextReady = false;
   warnedConfigDir = false;
+  warnedBuildContext = false;
 }
 
 function isDockerSocketPermissionError(text: string): boolean {

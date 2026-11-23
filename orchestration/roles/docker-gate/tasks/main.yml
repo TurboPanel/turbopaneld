@@ -30,8 +30,8 @@
 - name: Refuse an enforcing gate with Traefik's gate socket switched off
   ansible.builtin.assert:
     that:
-      - (docker_gate_mode | string) != 'enforce' or (docker_gate_ingress_socket | string | lower) not in ['false', 'no', '0', 'off']
-    fail_msg: "docker_gate_mode enforce needs docker_gate_ingress_socket on (or empty): the socket-proxy fallback mounts the engine socket, which the enforcing gate refuses"
+      - (docker_gate_mode | string) != 'enforce' or (docker_gate_ingress_socket | string | lower) in ['true', 'yes', '1', 'on']
+    fail_msg: "docker_gate_mode enforce needs docker_gate_ingress_socket explicitly on (an empty value leaves the switch as it is, possibly off): the socket-proxy fallback mounts the engine socket, which the enforcing gate refuses"
     quiet: true
 
 - name: Check for the Docker binary
