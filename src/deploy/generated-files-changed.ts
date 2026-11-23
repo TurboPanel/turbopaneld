@@ -47,11 +47,9 @@ export async function snapshotGeneratedFiles(
   layout: { runDir: string },
   payload: Parameters<typeof plannedFiles>[1],
 ): Promise<GeneratedFileSnapshot> {
-  const snapshot = new Map<string, string | null>();
-  for (const file of plannedFiles(layout, payload)) {
-    snapshot.set(file.path, await readOrNull(file.path));
-  }
-  return snapshot;
+  const files = plannedFiles(layout, payload);
+  const contents = await Promise.all(files.map((f) => readOrNull(f.path)));
+  return new Map(files.map((file, i) => [file.path, contents[i]]));
 }
 
 /**
@@ -63,13 +61,14 @@ export async function servicesWithChangedFiles(
   layout: { runDir: string },
   payload: Parameters<typeof plannedFiles>[1],
 ): Promise<Set<string>> {
+  const files = plannedFiles(layout, payload);
+  const now = await Promise.all(files.map((f) => readOrNull(f.path)));
   const changed = new Set<string>();
-  for (const file of plannedFiles(layout, payload)) {
+  files.forEach((file, i) => {
     const prior = before.get(file.path) ?? null;
-    const now = await readOrNull(file.path);
-    if (prior === null || now === null || prior !== now) {
+    if (prior === null || now[i] === null || prior !== now[i]) {
       changed.add(file.service);
     }
-  }
+  });
   return changed;
 }

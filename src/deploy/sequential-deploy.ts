@@ -33,6 +33,7 @@
  * the control plane parses, since the command outcome carries only a string.
  */
 
+import { forEachSequential } from "../util/sequential.ts";
 import type { HealthGateResult } from "./health-gate.ts";
 
 export type SequentialOutcome = "rolled_back" | "needs_attention";
@@ -149,20 +150,29 @@ async function runsCurrentImage(
     ...containers,
   ]);
   if (!used.success) return false;
-  for (const line of used.stdout.split("\n")) {
-    if (line.trim() === "") continue;
-    const [imageId, reference] = line.trim().split(/\s+/);
-    if (!imageId || !reference) return false;
-    const current = await steps.run([
-      "image",
-      "inspect",
-      "--format",
-      "{{.Id}}",
-      reference,
-    ]);
-    if (!current.success || current.stdout.trim() !== imageId) return false;
-  }
-  return true;
+  let current = true;
+  await forEachSequential(
+    used.stdout.split("\n").filter((line) => line.trim() !== ""),
+    async (line) => {
+      if (!current) return;
+      const [imageId, reference] = line.trim().split(/\s+/);
+      if (!imageId || !reference) {
+        current = false;
+        return;
+      }
+      const resolved = await steps.run([
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        reference,
+      ]);
+      if (!resolved.success || resolved.stdout.trim() !== imageId) {
+        current = false;
+      }
+    },
+  );
+  return current;
 }
 
 /**
@@ -183,13 +193,12 @@ export async function unchangedServices(
   const after = await configHashes(input, input.composePaths);
   const same = new Set<string>();
   if (before === null || after === null) return same;
-  for (const name of candidates) {
+  await forEachSequential(candidates, async (name) => {
     const hash = before.get(name);
-    if (hash === undefined || hash !== after.get(name)) continue;
-    if (input.filesChanged?.has(name)) continue;
-    if (!(await runsCurrentImage(steps, previous, name))) continue;
-    same.add(name);
-  }
+    if (hash === undefined || hash !== after.get(name)) return;
+    if (input.filesChanged?.has(name)) return;
+    if (await runsCurrentImage(steps, previous, name)) same.add(name);
+  });
   return same;
 }
 
