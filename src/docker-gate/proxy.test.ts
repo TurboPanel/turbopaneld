@@ -5,6 +5,7 @@ import {
   assertStringIncludes,
 } from "@std/assert";
 import { join } from "@std/path";
+import { DockerClient } from "../docker/client.ts";
 import {
   BufferedReader,
   concatBytes,
@@ -215,6 +216,126 @@ e2e("a GET is relayed byte for byte in both directions", async (h) => {
     { route: "read", method: "GET", status: 200, count: 1 },
   ]);
 });
+
+e2e(
+  "the daemon's DockerClient request bytes parse and reach the engine in origin-form",
+  async (h) => {
+    const seen: string[] = [];
+    h.engine(async (conn) => {
+      const reader = new BufferedReader(conn);
+      while (true) {
+        const raw = await reader.readHead();
+        if (raw === null) return;
+        seen.push(text(raw).split("\r\n")[0]);
+        const body = seen.length === 1 ? "OK" : "[]";
+        await conn.write(
+          encodeText(
+            `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n${body}`,
+          ),
+        );
+      }
+    });
+    const client = new DockerClient(h.config.socket);
+    try {
+      assertEquals(await timeout(client.ping()), true);
+      assertEquals(await timeout(client.listContainers(true)), []);
+    } finally {
+      client.close();
+    }
+    assertEquals(seen, [
+      "GET /_ping HTTP/1.1",
+      "GET /containers/json?all=true HTTP/1.1",
+    ]);
+    assertFalse(h.logs.some((l) => l.event === "docker-gate.bad-request"));
+  },
+  { env: { TP_DOCKER_GATE_MODE: "enforce" } },
+);
+
+/** What a client got and the engine saw for one raw request head. */
+async function outcomeOf(
+  h: Harness,
+  line: string,
+  body = "",
+): Promise<{ status: string; engineSaw: boolean }> {
+  let engineSaw = false;
+  h.engine(async (conn) => {
+    engineSaw = true;
+    await readRequest(conn);
+    await conn.write(encodeText(OK_EMPTY));
+  });
+  const client = await h.connect();
+  await client.write(
+    encodeText(
+      `${line} HTTP/1.1\r\nHost: d\r\nConnection: close\r\n` +
+        `Content-Length: ${body.length}\r\n\r\n${body}`,
+    ),
+  );
+  const got = await timeout(readUntilEof(client));
+  return { status: got.split("\r\n")[0], engineSaw };
+}
+
+e2e(
+  "an absolute-form request gets the same policy outcome as the same path in origin-form",
+  async (h) => {
+    const privileged = JSON.stringify({
+      Labels: PROJECT_LABELS,
+      HostConfig: { Privileged: true },
+    });
+    const harmless = JSON.stringify({ Labels: PROJECT_LABELS });
+    const cases: Array<[string, string, string]> = [
+      ["GET", "/_ping", ""],
+      ["GET", "/v1.55/containers/json?all=true", ""],
+      ["POST", "/containers/create", privileged],
+      ["POST", "/v1.55/containers/create?name=x", privileged],
+      ["POST", "/containers/create", harmless],
+      ["GET", "/v1.55/../containers/json", ""],
+      ["GET", "/v1.55/%2e%2e/containers/json", ""],
+      ["GET", "/v1.55/containers/json#x", ""],
+      ["GET", "//containers/json", ""],
+      ["GET", "/containers/%zz/json", ""],
+    ];
+    for (const [method, path, body] of cases) {
+      const origin = await outcomeOf(h, `${method} ${path}`, body);
+      const absolute = await outcomeOf(
+        h,
+        `${method} http://docker${path}`,
+        body,
+      );
+      assertEquals(absolute, origin, `${method} ${path}`);
+    }
+    // The denied ones are really denied (not all passing as 200).
+    assertStringIncludes(
+      (await outcomeOf(h, "POST /containers/create", privileged)).status,
+      "403",
+    );
+    assertStringIncludes(
+      (await outcomeOf(h, "POST http://docker/containers/create", privileged))
+        .status,
+      "403",
+    );
+  },
+  { env: { TP_DOCKER_GATE_MODE: "enforce" } },
+);
+
+e2e(
+  "an absolute-form target that is not plain http or has no path never reaches the engine",
+  async (h) => {
+    for (
+      const target of [
+        "https://docker/_ping",
+        "http://docker",
+        "http://u@docker/_ping",
+        "ftp://docker/_ping",
+        "http://docker/_ping#x",
+      ]
+    ) {
+      const out = await outcomeOf(h, `GET ${target}`);
+      assertStringIncludes(out.status, "400");
+      assertFalse(out.engineSaw, target);
+    }
+  },
+  { env: { TP_DOCKER_GATE_MODE: "enforce" } },
+);
 
 e2e("a keep-alive client connection carries several requests", async (h) => {
   const order: string[] = [];

@@ -109,10 +109,92 @@ const BAD_REQUESTS: Array<[string, string, number]> = [
   ["no colon", "GET / HTTP/1.1\r\nHost\r\n\r\n", 400],
   ["NUL byte", "GET / HTTP/1.1\r\nX: a\u0000b\r\n\r\n", 400],
   ["lowercase method", "get / HTTP/1.1\r\n\r\n", 400],
-  ["absolute-form target", "GET http://x/ HTTP/1.1\r\n\r\n", 400],
   ["extra request-line token", "GET / x HTTP/1.1\r\n\r\n", 400],
   ["HTTP/2", "GET / HTTP/2.0\r\n\r\n", 505],
 ];
+
+const BAD_ABSOLUTE_TARGETS: Array<[string, string]> = [
+  ["no path after the authority", "http://docker"],
+  ["a query but no path", "http://docker?all=true"],
+  ["an empty authority", "http:///containers/json"],
+  ["userinfo", "http://user@docker/containers/json"],
+  ["userinfo that looks like a host", "http://docker@evil/containers/json"],
+  ["a space in the authority", "http://do cker/containers/json"],
+  ["a fragment", "http://docker/containers/json#x"],
+  ["a fragment on the authority", "http://docker#/containers/json"],
+  ["a backslash authority", "http://docker\\@x/containers/json"],
+  ["https", "https://docker/containers/json"],
+  ["an upper-case scheme", "HTTP://docker/containers/json"],
+  ["another scheme", "ftp://docker/containers/json"],
+  ["a unix scheme", "unix:///var/run/docker.sock/containers/json"],
+  ["a percent-encoded authority", "http://%64ocker/containers/json"],
+  ["no scheme", "docker/containers/json"],
+  ["the asterisk form", "*"],
+];
+
+for (const [name, target] of BAD_ABSOLUTE_TARGETS) {
+  test(`parseRequestHead refuses an absolute-form target with ${name}`, () => {
+    const err = assertThrows(
+      () => head(`GET ${target} HTTP/1.1\r\nHost: d\r\n\r\n`),
+      HttpError,
+    );
+    assertEquals(err.status, 400);
+  });
+}
+
+const ABSOLUTE_TARGETS: Array<[string, string, string]> = [
+  ["a bare path", "http://docker/_ping", "/_ping"],
+  ["the root", "http://docker/", "/"],
+  [
+    "a query",
+    "http://docker/containers/json?all=true",
+    "/containers/json?all=true",
+  ],
+  ["a port", "http://docker:2375/info", "/info"],
+  ["a bracketed address", "http://[::1]/info", "/info"],
+  [
+    "a version prefix",
+    "http://docker/v1.43/containers/json",
+    "/v1.43/containers/json",
+  ],
+  ["a second authority in the path", "http://a/http://b/x", "/http://b/x"],
+  [
+    "the first segment as the path",
+    "http://a/b/containers/json",
+    "/b/containers/json",
+  ],
+  ["a doubled scheme", "http://http://docker/x", "//docker/x"],
+  ["a doubled slash", "http://docker//containers/json", "//containers/json"],
+  [
+    "an encoded query",
+    "http://docker/events?filters=%7B%7D",
+    "/events?filters=%7B%7D",
+  ],
+  [
+    "traversal kept for the policy",
+    "http://docker/a/../containers/json",
+    "/a/../containers/json",
+  ],
+];
+
+for (const [name, wire, reduced] of ABSOLUTE_TARGETS) {
+  test(`parseRequestHead reduces an absolute-form target with ${name}`, () => {
+    const parsed = head(
+      `GET ${wire} HTTP/1.1\r\nHost: docker\r\nX-A: b\r\n\r\n`,
+    );
+    assertEquals(parsed.target, reduced);
+    // The engine is sent the origin-form line and every other byte as read.
+    assertEquals(
+      text(parsed.raw),
+      `GET ${reduced} HTTP/1.1\r\nHost: docker\r\nX-A: b\r\n\r\n`,
+    );
+  });
+}
+
+test("an origin-form head is relayed as the very bytes read", () => {
+  const raw = encodeText("GET /_ping HTTP/1.1\r\nHost: d\r\n\r\n");
+  assertEquals(parseRequestHead(raw).raw, raw);
+});
 
 for (const [name, raw, status] of BAD_REQUESTS) {
   test(`parseRequestHead refuses ${name}`, () => {

@@ -44,7 +44,11 @@ export type RequestHead = {
   target: string;
   version: string;
   headers: Header[];
-  /** The exact bytes read, relayed to the engine unchanged. */
+  /**
+   * The bytes read, relayed to the engine. An absolute-form target is rewritten
+   * to its origin-form path and query first, so the engine routes on exactly
+   * what the policy judged; every other byte is unchanged.
+   */
   raw: Uint8Array;
 };
 
@@ -248,6 +252,11 @@ const METHOD = /^[A-Z]+$/;
 // never a fragment on the wire), so a target holding one is refused rather
 // than read two ways (`/build?q=1#&networkmode=host`).
 const TARGET = /^\/[\x21\x22\x24-\x7e]*$/;
+// Absolute-form `http://<authority><path>[?query]`, which the daemon's client
+// sends. The authority is a plain host[:port] (no userinfo, path, query,
+// fragment, space or escape) and a path must follow it; anything else is
+// refused. Only the lowercase `http` scheme is read.
+const ABSOLUTE_TARGET = /^http:\/\/[A-Za-z\d._~:[\]-]+(\/.*)$/s;
 const VERSION = /^HTTP\/1\.[01]$/;
 
 function splitHeadLines(raw: Uint8Array): string[] {
@@ -292,13 +301,42 @@ export function parseRequestHead(raw: Uint8Array): RequestHead {
   const [requestLine, ...headerLines] = splitHeadLines(raw);
   const parts = requestLine.split(" ");
   if (parts.length !== 3) throw new HttpError(400, "malformed request line");
-  const [method, target, version] = parts;
+  const [method, wireTarget, version] = parts;
   if (!METHOD.test(method)) throw new HttpError(400, "invalid method");
+  const target = toOriginForm(wireTarget);
   if (!TARGET.test(target)) throw new HttpError(400, "invalid request target");
   if (!VERSION.test(version)) {
     throw new HttpError(505, "only HTTP/1.0 and HTTP/1.1 are supported");
   }
-  return { method, target, version, headers: parseHeaders(headerLines), raw };
+  return {
+    method,
+    target,
+    version,
+    headers: parseHeaders(headerLines),
+    raw: target === wireTarget ? raw : withTarget(raw, target),
+  };
+}
+
+/**
+ * Reduces an absolute-form target to its path and query. The authority is
+ * dropped and never used for routing or policy. A target that is not
+ * absolute-form is returned as it is, for the origin-form checks.
+ */
+function toOriginForm(target: string): string {
+  if (target.startsWith("/")) return target;
+  const match = ABSOLUTE_TARGET.exec(target);
+  return match ? match[1] : target;
+}
+
+/** The head bytes with the request line's target replaced. */
+function withTarget(raw: Uint8Array, to: string): Uint8Array {
+  const text = latin1(raw);
+  const end = text.indexOf("\r\n");
+  const line = text.slice(0, end);
+  const method = line.slice(0, line.indexOf(" "));
+  const version = line.slice(line.lastIndexOf(" ") + 1);
+  const out = `${method} ${to} ${version}${text.slice(end)}`;
+  return Uint8Array.from(out, (char) => char.charCodeAt(0));
 }
 
 export function parseResponseHead(raw: Uint8Array): ResponseHead {

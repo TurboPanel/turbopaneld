@@ -136,6 +136,38 @@
     "raw": "GET http://h/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
   },
   {
+    "name": "absolute-form with a query",
+    "raw": "GET http://h/containers/json?all=true HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form with traversal",
+    "raw": "GET http://h/v1.43/../containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form with an encoded traversal",
+    "raw": "GET http://h/v1.43/%2e%2e/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form without a path",
+    "raw": "GET http://h HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form with userinfo",
+    "raw": "GET http://u@h/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form https",
+    "raw": "GET https://h/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form with a fragment",
+    "raw": "GET http://h/containers/json#x HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
+    "name": "absolute-form with a path in the authority",
+    "raw": "GET http://h/x/containers/json HTTP/1.1\r\nHost: d\r\n\r\n"
+  },
+  {
     "name": "asterisk target",
     "raw": "OPTIONS * HTTP/1.1\r\nHost: d\r\n\r\n"
   },
