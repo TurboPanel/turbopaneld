@@ -26,10 +26,14 @@ page carries the build order; this is the `fw-daemon-reconcile` row.
   `--ctorigdst`; the chain opens with `RETURN`s for reply traffic and for
   anything that entered on `docker0`, `br-+`, `tp0`, so container egress is
   never restricted (`xt_conntrack` has no DNAT status match — `--ctstatus
-  DNAT` is nftables-only). Ends in an implicit `RETURN`: Docker keeps
-  governing what the panel did not restrict. `scope: published`. An `accept`
-  from named sources **narrows** (RETURN those, DROP the rest for that port);
-  an `accept` from `any` renders nothing.
+  DNAT` is nftables-only). Under `inputDefault: accept` it ends in an
+  implicit `RETURN`: Docker keeps governing what the panel did not restrict.
+  Under `inputDefault: drop` it ends in `-m conntrack --ctstate DNAT -j DROP`
+  (only connections Docker port-mapped; replies, container egress and the
+  fabric are RETURNed by the prefix). `scope: published`. An `accept` from
+  named sources **narrows** (RETURN those, DROP the rest for that port); an
+  `accept` from `any` renders nothing under accept, and an explicit `RETURN`
+  under drop so its port survives the final DROP.
 
 A separate native nftables table with `policy drop` on the forward hook was
 considered and rejected: it needs every legitimate forward path enumerated

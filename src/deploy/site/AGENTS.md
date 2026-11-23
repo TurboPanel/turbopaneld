@@ -553,7 +553,7 @@ root-owned `0550` by design:
   nginx (alone, or in front of Apache) a `location ^~` with its own `alias`
   for `/storage/` (`shared/storage/app/public`) or `/wp-content/uploads/`
   (`shared/uploads`), links followed only when link and target share an owner,
-  and `.php`, `.phtml` and `.phar` refused there. The folders are served
+  and `.php`, `.phtml` and `.phar` refused there. Laravel's `public/storage` is also a recipe link into the same folder, but only so the app can write through its usual path; it is never the serving path (the document root follows no link on nginx, and the alias takes `/storage/` first), so the alias stays. The folders are served
   folders, like the document root: whatever lets an engine read a document root
   must cover them. OpenLiteSpeed and the site Caddy get no alias yet and a
   deploy warning says so (`planSiteFrameworkAliases`). The alias paths go

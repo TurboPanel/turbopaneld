@@ -1617,6 +1617,43 @@ test("an Apache site with a framework layout serves its shared folder by URL and
   );
 });
 
+test("a Laravel public/storage link is never the serving path: nginx follows no link in a sealed root, so /storage/ is answered by the alias", () => {
+  const site = {
+    composeServiceName: "web",
+    engine: "nginx",
+    root: "public",
+    listenPort: 18080,
+    php: { version: "8.4" },
+  } as const;
+  const docroot = "/srv/users/alice/production/services/web/current/public";
+  const conf = nginxSiteConfig(site, docroot, null, {
+    phpFpmSocket: "/run/turbopanel-phpfpm/8.4/tp.sock",
+    releaseBacked: true,
+    frameworkAliases: LARAVEL_ALIAS,
+  });
+  // The document root follows no link, so public/storage (a recipe link) would
+  // answer 403 there; the exact-prefix location takes /storage/ before it.
+  assertStringIncludes(conf, "disable_symlinks on from=$document_root;");
+  assertEquals(conf.split("location ^~ /storage/ {").length - 1, 1);
+  assertStringIncludes(
+    conf,
+    `alias ${SHARED_STORAGE}/storage/app/public/;`,
+  );
+  // The Apache side keeps owner-match links and its own Alias for the prefix.
+  const apache = apacheSiteConfig(
+    {
+      composeServiceName: "web",
+      engine: "apache",
+      root: "public",
+      listenPort: 18081,
+    },
+    docroot,
+    { frameworkAliases: LARAVEL_ALIAS },
+  );
+  assertStringIncludes(apache, "    Options SymLinksIfOwnerMatch\n");
+  assertEquals(apache.split('Alias "/storage/"').length - 1, 1);
+});
+
 test("nginx serves the shared folder from an alias location and refuses PHP in it, alone or in front of Apache", () => {
   const site = {
     composeServiceName: "web",

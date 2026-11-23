@@ -1,5 +1,6 @@
 import {
   bootConvergeSettled,
+  isUpdateDraining,
   withCommandRunning,
 } from "../orchestration/boot-converge-gate.ts";
 import {
@@ -373,6 +374,15 @@ function sanitizeOutcomeError(
   );
 }
 
+/**
+ * Commands that still run while an update drains: a ping is harmless, and a
+ * firewall confirm refused now would let the pending change roll back.
+ */
+const DRAIN_ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
+  "daemon.ping",
+  "server.firewall.confirm",
+]);
+
 export async function handleCommandDispatch(
   message: CommandDispatchMessage,
   ws: WebSocket,
@@ -423,7 +433,23 @@ export async function handleCommandDispatch(
   // answered like any running command and never runs twice.
   await bootConvergeSettled();
   // Counted from here, in the same tick as the wait ends, so a boot converge
-  // retry can wait for every command that got past the gate to finish.
+  // retry or a daemon update can wait for every command that got past the gate
+  // to finish. While an update drains, new work is refused whole instead of
+  // being half-run when the daemon stops.
+  if (isUpdateDraining() && !DRAIN_ALLOWED_COMMANDS.has(message.commandType)) {
+    const at = new Date().toISOString();
+    await deliverCommandOutcome(ws, {
+      type: "command-outcome",
+      id: message.id,
+      ok: false,
+      error:
+        "The server is installing a TurboPanel update and is not taking new work. Nothing was run; try again in a few minutes.",
+      at,
+      daemonReceivedAt,
+      daemonRespondedAt: at,
+    });
+    return;
+  }
   await withCommandRunning(() =>
     runDispatchedCommand(message, ws, deps, daemonReceivedAt)
   );

@@ -5617,12 +5617,24 @@ tp_publish_seal() {
 tp_publish_links() {
   _pl_root="$(pwd -P)"
   # The platform's own layout links (tp_publish_layout) are the one exception:
-  # the exact path with the exact text. Any other link, including one that goes
+  # each exact path with its exact text. Any other link, including one that goes
   # through them, is resolved like every other.
   set --
   if [ -n "$PUB_LAYOUT" ]; then
     tp_layout_recipe "$PUB_LAYOUT"
-    set -- ! \( -path "./$LAYOUT_PATH" -lname "$LAYOUT_TEXT" \)
+    _pl_any=""
+    while read -r _pl_path _pl_text; do
+      [ -n "$_pl_path" ] || continue
+      if [ -z "$_pl_any" ]; then
+        set -- ! \( \( -path "./$_pl_path" -lname "$_pl_text" \)
+        _pl_any=1
+      else
+        set -- "$@" -o \( -path "./$_pl_path" -lname "$_pl_text" \)
+      fi
+    done <<LINKS
+$LAYOUT_LINKS
+LINKS
+    [ -z "$_pl_any" ] || set -- "$@" \)
   fi
   _pl_out="$(find -P . -type l "$@" -exec realpath -m -- {} + && echo :ok)" ||
     tp_die "publish: refusing $PUB_NAME: a symlink cannot be resolved"
@@ -5638,18 +5650,17 @@ tp_publish_links() {
 # site's shared/ folder: storage/ (Laravel) or wp-content/uploads (WordPress)
 # becomes a link there, and nothing else is shared. The recipe is the daemon's
 # platformLayoutLinks (src/deploy/release/framework-layout.ts); a test keeps
-# the two equal. Sets LAYOUT_PATH, LAYOUT_TEXT (the link) and LAYOUT_FOLDERS
-# (folders made in shared/, as the owner).
+# the two equal. Sets LAYOUT_LINKS (one "PATH TEXT" line per link; neither has a
+# space) and LAYOUT_FOLDERS (folders made in shared/, as the owner).
 tp_layout_recipe() {
   case "$1" in
     laravel)
-      LAYOUT_PATH="storage"
-      LAYOUT_TEXT="shared/storage"
+      LAYOUT_LINKS="storage shared/storage
+public/storage ../shared/storage/app/public"
       LAYOUT_FOLDERS="storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs"
       ;;
     wordpress)
-      LAYOUT_PATH="wp-content/uploads"
-      LAYOUT_TEXT="../shared/uploads"
+      LAYOUT_LINKS="wp-content/uploads ../shared/uploads"
       LAYOUT_FOLDERS="uploads"
       ;;
     *) return 1 ;;
@@ -5662,8 +5673,25 @@ tp_layout_recipe() {
 tp_publish_layout() {
   [ -n "$PUB_LAYOUT" ] || return 0
   tp_layout_recipe "$PUB_LAYOUT" || tp_die "publish: refusing layout $PUB_LAYOUT"
-  _ly_parent="${LAYOUT_PATH%/*}"
-  [ "$_ly_parent" != "$LAYOUT_PATH" ] || _ly_parent=""
+  while read -r _ly_path _ly_text; do
+    [ -n "$_ly_path" ] || continue
+    tp_publish_layout_link "$_ly_path" "$_ly_text"
+  done <<LINKS
+$LAYOUT_LINKS
+LINKS
+  if [ "$PUB_LAYOUT" = laravel ]; then
+    tp_publish_bootstrap_cache
+  fi
+}
+
+# PATH TEXT: put one recipe link in the leaf, in place of whatever the build
+# shipped at PATH (a folder, a file or a link; rm removes a link, never what it
+# points at).
+tp_publish_layout_link() {
+  _ly_path="$1"
+  _ly_text="$2"
+  _ly_parent="${_ly_path%/*}"
+  [ "$_ly_parent" != "$_ly_path" ] || _ly_parent=""
   # No component above the link may itself be a link.
   _ly_walk=""
   _ly_rest="$_ly_parent"
@@ -5675,20 +5703,19 @@ tp_publish_layout() {
     esac
     _ly_walk="${_ly_walk:+$_ly_walk/}$_ly_c"
     if [ -L "./$_ly_walk" ]; then
-      tp_die "publish: refusing $PUB_NAME: $_ly_walk is a link, so $LAYOUT_PATH cannot be shared"
+      tp_die "publish: refusing $PUB_NAME: $_ly_walk is a link, so $_ly_path cannot be shared"
     fi
   done
   if [ -n "$_ly_parent" ] && [ ! -d "./$_ly_parent" ]; then
+    [ ! -e "./$_ly_parent" ] ||
+      tp_die "publish: refusing $PUB_NAME: $_ly_parent is not a folder, so $_ly_path cannot be shared"
     mkdir -p -- "./$_ly_parent"
     tp_run chown -h -- "root:$PUB_USER" "./$_ly_parent"
     chmod 0750 -- "./$_ly_parent"
   fi
-  rm -rf -- "./$LAYOUT_PATH"
-  ln -s -T -- "$LAYOUT_TEXT" "./$LAYOUT_PATH"
-  tp_run chown -h -- "root:$PUB_USER" "./$LAYOUT_PATH"
-  if [ "$PUB_LAYOUT" = laravel ]; then
-    tp_publish_bootstrap_cache
-  fi
+  rm -rf -- "./$_ly_path"
+  ln -s -T -- "$_ly_text" "./$_ly_path"
+  tp_run chown -h -- "root:$PUB_USER" "./$_ly_path"
 }
 
 # Laravel: bootstrap/cache stays in the release and becomes the site account's,

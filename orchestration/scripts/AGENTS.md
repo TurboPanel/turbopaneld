@@ -490,12 +490,14 @@ a downloaded statement: `sudo tp-host panel-identity-write statement < key-set-N
 `publish` and `publish-keep` take an optional seventh word after the six-word
 form: `layout=laravel` or `layout=wordpress` (anything else is refused, and
 `publish-open` takes none). In the sealed leaf, before the link check
-(`tp_publish_layout`), the one recipe path (`tp_layout_recipe`: Laravel
-`storage` -> `shared/storage`, WordPress `wp-content/uploads` ->
-`../shared/uploads`) is replaced by its link, refusing a parent that is a link;
+(`tp_publish_layout`), each recipe path (`tp_layout_recipe`, one `PATH TEXT` line per link: Laravel
+`storage` -> `shared/storage` and `public/storage` ->
+`../shared/storage/app/public`, WordPress `wp-content/uploads` ->
+`../shared/uploads`) is replaced by its link (`tp_publish_layout_link`),
+refusing a parent that is a link or not a folder;
 for Laravel the real `bootstrap/cache` folder (when it is not a link) is made the
 site account's (`0750`, files `0640`), the only entry of the release that is not
-root's. `tp_publish_links` skips exactly that path with exactly that text
+root's. `tp_publish_links` skips exactly each of those paths with exactly its text
 (`find ... ! ( -path -lname )`), so a user link that goes through the recipe link
 still resolves under `shared/` and is refused. After the release is placed,
 `tp_layout_folders` makes the layout's folders in the service's `shared/` **as

@@ -235,6 +235,12 @@ import {
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { RepoKeyReporter } from "./repo-key-reporter.ts";
+import {
+  beginUpdateDrain,
+  endUpdateDrain,
+  runningCommandCount,
+  waitForCommandsToDrain,
+} from "../orchestration/boot-converge-gate.ts";
 import { repoKeyLedgerFor } from "../orchestration/repo-key-changes.ts";
 import {
   FabricPeerReporter,
@@ -447,6 +453,8 @@ export function normalizeReconnectDelayMs(reconnectDelayMs?: number): number {
 export const STABLE_SESSION_MS = 5_000;
 /** Delay after sending update-result before restarting, so the instance can persist it. */
 export const UPDATE_RESULT_HANDOFF_DELAY_MS = 2_000;
+/** Longest an update waits for running deploys, builds and other commands before installing anyway. Kept well inside the control plane's 15 minute step window, which restarts at the stage reported before the wait. */
+export const UPDATE_DRAIN_CAP_MS = 10 * 60_000;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
@@ -3445,6 +3453,40 @@ export class InstanceClient {
     }
   }
 
+  /**
+   * Installing a build stops the daemon, which would kill a deploy or build
+   * half-way. Stop taking new commands (they are refused whole), then wait for
+   * the running ones, up to the cap; a command still running at the cap is
+   * logged and the update goes ahead. The gate reopens when the update fails
+   * or does not restart the daemon (`endUpdateDrain` in `#applyUpdate`).
+   */
+  async #drainCommandsForUpdate(upgradeId?: string): Promise<void> {
+    beginUpdateDrain();
+    const waiting = runningCommandCount();
+    if (waiting > 0) {
+      // The control plane re-sends a step that reports nothing for 5 minutes,
+      // so say why the install has not started.
+      this.#reportUpdateStage("preparing", {
+        upgradeId,
+        detail: `waiting for ${waiting} running command(s) to finish`,
+      });
+      logInfo(
+        "update",
+        `waiting for ${waiting} running command(s) before installing`,
+      );
+    }
+    const left = await waitForCommandsToDrain(
+      clientTestHooks.updateDrainCapMs,
+      clientTestHooks.updateDrainSleep,
+    );
+    if (left > 0) {
+      logWarn(
+        "update",
+        `${left} command(s) still running after the wait; installing anyway`,
+      );
+    }
+  }
+
   async #reconcileToLatestUpdate(
     config: UpdateChannelConfig,
     options: {
@@ -3464,6 +3506,8 @@ export class InstanceClient {
       );
       return false;
     }
+
+    await this.#drainCommandsForUpdate(options.upgradeId);
 
     if (this.#isColocatedSocketMode()) {
       // The daemon on a self-hosted control-plane host: refresh it in socket
@@ -3735,24 +3779,68 @@ export class InstanceClient {
       logError("update", "failed:", sanitizeForLog(error));
     }
 
+    let restarting = false;
+    try {
+      restarting = await this.#finishUpdate(ws, message.id, {
+        ok,
+        shouldRestart,
+        error,
+        errorCode,
+        upgradeId,
+      });
+    } finally {
+      // Whatever went wrong, a daemon that stays up takes commands and
+      // updates again; only a successful install keeps the gate shut until
+      // the restart.
+      if (!restarting) endUpdateDrain();
+      this.#updateInstallInProgress = false;
+    }
+  }
+
+  /**
+   * Restart when a build was installed, then report the result. True when the
+   * daemon restarted for the new build (the command gate then stays shut).
+   */
+  async #finishUpdate(
+    ws: WebSocket,
+    id: string,
+    state: {
+      ok: boolean;
+      shouldRestart: boolean;
+      error?: string;
+      errorCode?: string;
+      upgradeId?: string;
+    },
+  ): Promise<boolean> {
+    let { ok, error, errorCode } = state;
+    const { shouldRestart, upgradeId } = state;
     if (ok && shouldRestart) {
-      const restartError = await this.#restartAfterUpdate(upgradeId);
+      const restartError = await this.#restartAfterUpdateSafely(upgradeId);
       if (restartError) {
         ok = false;
         error = restartError;
         errorCode = "restart_failed";
       }
-    } else if (ok && !shouldRestart) {
+    } else if (ok) {
       this.#reportUpdateStage("done", { upgradeId });
     }
-
     await this.#updateProgress.flush();
-    if (!ok || !shouldRestart) {
-      await clearActiveUpgradeContext();
-    }
-    this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
+    if (!ok || !shouldRestart) await clearActiveUpgradeContext();
+    this.#sendUpdateResult(ws, id, ok, error, { errorCode, upgradeId });
+    return ok && shouldRestart;
+  }
 
-    this.#updateInstallInProgress = false;
+  /** `#restartAfterUpdate`, with a throw turned into the failure message. */
+  async #restartAfterUpdateSafely(
+    upgradeId: string | undefined,
+  ): Promise<string | undefined> {
+    try {
+      return await this.#restartAfterUpdate(upgradeId);
+    } catch (err) {
+      const message = describeUnknown(err);
+      logError("update", "restart threw:", sanitizeForLog(message));
+      return message;
+    }
   }
 
   /**
@@ -4699,6 +4787,10 @@ type ClientTestHooks = {
   runDockerSetup: typeof runDockerSetup;
   /** Override UPDATE_RESULT_HANDOFF_DELAY_MS for host-free update tests. */
   updateResultHandoffDelayMs: number;
+  /** Longest an update waits for running commands before it goes ahead. */
+  updateDrainCapMs: number;
+  /** Pause used by that wait; tests pass a promise they settle themselves. */
+  updateDrainSleep: (ms: number) => Promise<void>;
 };
 
 let clientTestHooks: ClientTestHooks = {
@@ -4720,6 +4812,8 @@ let clientTestHooks: ClientTestHooks = {
   syncHostDockerNetworking,
   runDockerSetup,
   updateResultHandoffDelayMs: UPDATE_RESULT_HANDOFF_DELAY_MS,
+  updateDrainCapMs: UPDATE_DRAIN_CAP_MS,
+  updateDrainSleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
 /**

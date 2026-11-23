@@ -2,8 +2,9 @@
  * Framework layouts for release-backed PHP sites.
  *
  * A Laravel or WordPress release keeps its writable state outside the release:
- * `storage/` (Laravel) or `wp-content/uploads` (WordPress) is a link into the
- * site's `shared/` folder, and nothing else is shared. Everything else stays in
+ * `storage/` and `public/storage` (Laravel) or `wp-content/uploads`
+ * (WordPress) are links into the site's `shared/` folder, and nothing else is
+ * shared. Everything else stays in
  * the sealed release, including Laravel's `bootstrap/cache` (filled while the
  * release is built, and written afterwards only by post-deploy commands) and
  * WordPress's `wp-content/cache` (read-only).
@@ -85,6 +86,13 @@ const RECIPES: Record<FrameworkLayout, readonly LayoutLink[]> = {
       "storage/framework/views",
       "storage/logs",
     ],
+  }, {
+    // The public disk's web path: apps write here (`artisan storage:link`'s
+    // job), and a build may ship it as a real folder, which is replaced. The
+    // folder it points into is made by the `storage` link's list above.
+    path: "public/storage",
+    text: "../shared/storage/app/public",
+    sharedFolders: [],
   }],
   wordpress: [{
     path: "wp-content/uploads",
