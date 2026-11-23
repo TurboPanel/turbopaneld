@@ -108,6 +108,18 @@ function splitArgs(args: string): string[] {
 }
 
 /**
+ * The text of a trailing `[...]` group, found without a backtracking regex:
+ * the group opens at the first `[` after the last earlier `]`.
+ */
+function trailingFlags(args: string): string | undefined {
+  const trimmed = args.trim();
+  if (!trimmed.endsWith("]")) return undefined;
+  const body = trimmed.slice(0, -1);
+  const open = body.indexOf("[", body.lastIndexOf("]") + 1);
+  return open < 0 ? undefined : body.slice(open + 1);
+}
+
+/**
  * A `RewriteRule` that proxies: the `P` (or `proxy`) flag, or a substitution
  * that starts with `proxy:` (mod_rewrite proxies that one without a flag).
  * Apache does not restrict where a per-directory proxy goes (see the known
@@ -116,7 +128,7 @@ function splitArgs(args: string): string[] {
 function rewriteProxies(args: string): boolean {
   const words = splitArgs(args);
   if (words[1]?.toLowerCase().startsWith("proxy:")) return true;
-  const flags = /\[([^\]]*)\]$/.exec(args.trim())?.[1];
+  const flags = trailingFlags(args);
   return flags?.split(",").some((flag) => {
     const name = flag.trim().toLowerCase();
     return name === "p" || name === "proxy";
@@ -181,35 +193,52 @@ function printableName(raw: string): string {
   return /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(raw) ? raw : "(unreadable)";
 }
 
-/** The finding for one directive line (or container tag), if any. */
-function findingForLine(
+/** The finding for a container tag, opening or closing, if any. */
+function containerFinding(
   line: number,
   content: string,
 ): HtaccessFinding | null {
-  if (content.startsWith("<")) {
-    // A container tag, opening or closing: `<Name ...>` or `</Name>`.
-    let tag = content.slice(1).trimStart();
-    if (tag.startsWith("/")) tag = tag.slice(1).trimStart();
-    const name = /^[A-Za-z]+/.exec(tag)?.[0] ?? "";
-    if (CONTAINERS.has(name.toLowerCase())) return null;
-    return {
-      line,
-      directive: printableName(name),
-      reason: REFUSED.has(name.toLowerCase()) ? "not allowed" : "unknown",
-    };
-  }
-  const space = content.search(/\s/);
-  const word = space < 0 ? content : content.slice(0, space);
-  const args = space < 0 ? "" : content.slice(space).trim();
-  const lower = word.toLowerCase();
-  const directive = printableName(word);
-  if (REFUSED.has(lower)) return { line, directive, reason: "not allowed" };
+  // `<Name ...>` or `</Name>`.
+  let tag = content.slice(1).trimStart();
+  if (tag.startsWith("/")) tag = tag.slice(1).trimStart();
+  const name = /^[A-Za-z]+/.exec(tag)?.[0] ?? "";
+  if (CONTAINERS.has(name.toLowerCase())) return null;
+  return {
+    line,
+    directive: printableName(name),
+    reason: REFUSED.has(name.toLowerCase()) ? "not allowed" : "unknown",
+  };
+}
+
+/** The finding for a proxying `RewriteRule` or `SetHandler`, if any. */
+function proxyFinding(
+  line: number,
+  lower: string,
+  args: string,
+): HtaccessFinding | null {
   if (lower === "rewriterule" && rewriteProxies(args)) {
     return { line, directive: "RewriteRule", reason: "proxy" };
   }
   if (lower === "sethandler" && handlerProxies(args)) {
     return { line, directive: "SetHandler", reason: "proxy" };
   }
+  return null;
+}
+
+/** The finding for one directive line (or container tag), if any. */
+function findingForLine(
+  line: number,
+  content: string,
+): HtaccessFinding | null {
+  if (content.startsWith("<")) return containerFinding(line, content);
+  const space = content.search(/\s/);
+  const word = space < 0 ? content : content.slice(0, space);
+  const args = space < 0 ? "" : content.slice(space).trim();
+  const lower = word.toLowerCase();
+  const directive = printableName(word);
+  if (REFUSED.has(lower)) return { line, directive, reason: "not allowed" };
+  const proxy = proxyFinding(line, lower, args);
+  if (proxy) return proxy;
   if (lower === "options") {
     return optionsRefused(args)
       ? { line, directive: "Options", reason: "not allowed" }

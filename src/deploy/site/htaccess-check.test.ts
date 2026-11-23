@@ -228,3 +228,37 @@ test("rules that only look like proxying, and ordinary handlers, are accepted", 
     [],
   );
 });
+
+test("trailing flag groups: matched and unmatched forms", () => {
+  const cases: Array<[string, boolean]> = [
+    ["^a$ /b [P]", true],
+    ["^a$ /b [L,P]", true],
+    ["^a$ /b [L, proxy ]  ", true],
+    ["^a$ /b [x[P]", false],
+    ["^a$ /b [x] [P]", true],
+    ["^a$ /b [P]]", false],
+    ["^a$ /b [P] x", false],
+    ["^a$ /b P]", false],
+    ["^a$ /b [P", false],
+    ["^a$ /b []", false],
+    ["^a$ /b [L]", false],
+    ["^a$ /b [P][L]", false],
+    ["^a$ /b []P]", false],
+  ];
+  for (const [args, proxies] of cases) {
+    assertEquals(
+      checkHtaccess(`RewriteRule ${args}`).length,
+      proxies ? 1 : 0,
+      args,
+    );
+  }
+});
+
+test("a long line of open brackets does not backtrack", () => {
+  const started = performance.now();
+  for (const tail of ["", " [", "]", "x]"]) {
+    checkHtaccess(`RewriteRule ^a$ /b ${"[".repeat(200_000)}${tail}`);
+    checkHtaccess(`RewriteRule ^a$ /b ${"[] ".repeat(70_000)}${tail}`);
+  }
+  assertEquals(performance.now() - started < 2000, true);
+});
