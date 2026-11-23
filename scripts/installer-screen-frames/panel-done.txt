@@ -1,0 +1,28 @@
+  ▄█▀▄█▀██████████▀
+ ▀▀ ▀▀▀▀▀████▀▀▀▀     TurboPanel installer
+       ▄███▀          v1.8.2  channel release
+      ▄███▀           mode control plane
+     ████
+
+ ✓ Preflight           Debian 13, amd64, 4 CPU, 8 GiB RAM                    0s
+ ✓ Release             channel release, signature verified                   0s
+ ✓ Download            control plane 1.8.2, web app 1.8.2                    0s
+ ✓ Runtimes            Postgres 18, Redis 8, RabbitMQ 4                      0s
+ ✓ Ansible             Ansible 2.20, 63 tasks, 0 failed                      0s
+ ✓ Database            schema is up to date                                  0s
+ ✓ Services            control plane, Caddy and daemon active                0s
+ ✓ Health              healthy in 4 s                                        0s
+
+ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  8/8  0s
+ ╭─ Control plane is ready  0s
+ │
+ │  Public     https://192.0.2.10:8443
+ │  Private    https://10.0.0.5:8443
+ │  Next       open a URL and create the first administrator
+ │
+ │  To do
+ │  ! Port 8443 is open to the internet: limit it in your firewall
+ │  ! No swap is configured: add 2 GiB before hosting databases
+ │
+ │  log        install.log
+ ╰─

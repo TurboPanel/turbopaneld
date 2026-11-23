@@ -1,0 +1,13 @@
+  ▄█▀▄█▀██████████▀
+ ▀▀ ▀▀▀▀▀████▀▀▀▀     TurboPanel installer
+       ▄███▀          v1.8.2  channel release
+      ▄███▀           mode control plane
+     ████
+
+ ✓ Preflight           Debian 13, amd64, 4 CPU, 8 GiB RAM                    0s
+ ✓ Release             channel release, signature verified                   0s
+ ✓ Download            control plane 1.8.2, web app 1.8.2                    0s
+ ✗ Runtimes            Postgres 18 did not start: port 5432 is in use        0s
+      see install.log
+
+ ━━━━━━━━━━━━────────────────────  3/8  0s

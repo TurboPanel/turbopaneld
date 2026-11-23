@@ -354,6 +354,10 @@ apt call in `run.sh` goes through `tp_apt_get`, which runs apt under
 `Unable to lock directory`: up to 60 tries 5 s apart, and never past 15
 minutes in all. Any other failure returns at once.
 
+## Installer screen (mockup)
+
+`scripts/lib/installer-screen.sh` is a reusable POSIX sh layer for a quiet installer screen (live area, collapsed result lines, progress bar, summary panel; plain output without a TTY, with `NO_COLOR` or with `TERM=dumb`). It is a mockup: `run.sh` does not source it yet. Try it with `sh scripts/installer-screen-demo.sh --mode panel` (`--mode daemon`, `--fail-at <n>`). Rules: POSIX only (tested under dash and busybox ash, no `tput`), ASCII text in plain mode, every real command's output goes to the log file, and the cursor is always restored on exit, error, INT, TERM and HUP. Brand colors come from the UI design system (`#3366cc`, `#3dd68c`). Tests: `scripts/installer-screen.test.ts`.
+
 ## Scope Summary (Former Root Index Entry)
 
 | Subsystem | Read before editing | Covers |

@@ -1,0 +1,27 @@
+  ▄█▀▄█▀██████████▀
+ ▀▀ ▀▀▀▀▀████▀▀▀▀     TurboPanel installer
+       ▄███▀          v1.8.2  channel release
+      ▄███▀           mode daemon
+     ████
+
+ ✓ Preflight           Debian 13, amd64, 4 CPU, 8 GiB RAM                    0s
+ ✓ Release             channel release, signature verified                   0s
+ ✓ Download            turbopaneld 1.8.2, native, 61 MiB                     0s
+ ✓ Runtimes            Deno 2.9.8, uv 0.11.21                                0s
+ ✓ Ansible             Ansible 2.20, 41 tasks, 0 failed                      0s
+ ✓ Services            turbopaneld active, update guard armed                0s
+ ✓ Enrolment           enrolled as server-a.example.lan                      0s
+ ✓ Kernel              cgroup v2, user namespaces                            0s
+
+ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  8/8  0s
+ ╭─ Server enrolled  0s
+ │
+ │  Server     server-a.example.lan
+ │  Panel      panel.example.net
+ │  Channel    release
+ │
+ │  To do
+ │  ! Clock is 2.1 s off: time sync was enabled, check it in a minute
+ │
+ │  log        install.log
+ ╰─

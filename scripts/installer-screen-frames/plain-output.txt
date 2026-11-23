@@ -1,0 +1,52 @@
+TurboPanel installer 1.8.2 (channel release, mode control plane)
+log: install.log
+[1/8] Preflight ...
+      - Checking host operating system
+      - Checking host prerequisites
+      - Checking ports 80, 443 and 8443
+[1/8] ok   Preflight: Debian 13, amd64, 4 CPU, 8 GiB RAM (0s)
+[2/8] Release ...
+      - Fetching release manifest
+      - Finding the control plane release (channel release)
+      - Finding the web app release
+[2/8] ok   Release: channel release, signature verified (0s)
+[3/8] Download ...
+      - Downloading control plane package (amd64)
+      - Downloading UI export
+      - Unpacking under /opt/turbopanel
+[3/8] ok   Download: control plane 1.8.2, web app 1.8.2 (0s)
+[4/8] Runtimes ...
+      - Installing Postgres 18
+      - Installing Redis 8
+      - Installing RabbitMQ 4
+      - Installing Caddy 2.11.4
+[4/8] ok   Runtimes: Postgres 18, Redis 8, RabbitMQ 4 (0s)
+[5/8] Ansible ...
+      - Installing Ansible 2.20
+      - Running the install playbook
+      - Applying role instance-launch
+      - Applying role instance-certs
+[5/8] ok   Ansible: Ansible 2.20, 63 tasks, 0 failed (0s)
+[6/8] Database ...
+      - Creating database roles
+      - Running migrations
+      - Checking the schema
+[6/8] ok   Database: schema is up to date (0s)
+[7/8] Services ...
+      - Starting the control plane
+      - Starting Caddy
+      - Starting the co-located daemon
+[7/8] ok   Services: control plane, Caddy and daemon active (0s)
+[8/8] Health ...
+      - Waiting for /api/health
+      - Checking the web interface
+      - Enrolling the co-located daemon
+[8/8] ok   Health: healthy in 4 s (0s)
+== Control plane is ready (0s)
+   Public: https://192.0.2.10:8443
+   Private: https://10.0.0.5:8443
+   Next: open a URL and create the first administrator
+   warning: Port 8443 is open to the internet: limit it in your firewall
+   warning: No swap is configured: add 2 GiB before hosting databases
+log: install.log
+total: 0s
