@@ -343,7 +343,7 @@ function ensureServiceVolumeMounts(
     }
   }
   for (const volume of volumes) {
-    const mount = `${volume.name}:${volume.target}`;
+    const mount = `${volume.name}:${volume.target}:rw`;
     const already = mounts.some((entry) =>
       entry === mount || entry.startsWith(`${volume.name}:`)
     );

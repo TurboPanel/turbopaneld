@@ -190,7 +190,7 @@
       - "-p"
       - "127.0.0.1:{{ redis_insight_web_port }}:5540"
       - "-v"
-      - "{{ redis_insight_volume_name }}:/data"
+      - "{{ redis_insight_volume_name }}:/data:rw"
       - "-v"
       - "{{ redis_socket_mount_dir }}:{{ redis_socket_mount_dir }}:ro"
       - "-e"

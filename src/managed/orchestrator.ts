@@ -604,7 +604,7 @@ export function orchestratorCompose(
       ]
       : []),
     "    volumes:",
-    "      - orchestrator-data:/var/lib/orchestrator",
+    "      - orchestrator-data:/var/lib/orchestrator:rw",
     // Quote the WHOLE mount string: a quoted source path immediately
     // followed by `:` (`- "./x":/etc/…`) parses as a mapping key in go-yaml
     // and fails compose's loader ("did not find expected '-'").

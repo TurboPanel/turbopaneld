@@ -355,7 +355,7 @@ test("runScheduledBackup archives a docker copy under its policy directory throu
     assertEquals(argv[argv.indexOf("--network") + 1], "none");
     assertEquals(
       argv[argv.indexOf("--mount") + 1],
-      "type=volume,src=0192f1de-7c3b-7e4a-9f10-0000000000b1,dst=/src,readonly",
+      "type=volume,src=0192f1de-7c3b-7e4a-9f10-0000000000b1,dst=/src,readonly=true",
     );
     assertEquals(argv.slice(argv.indexOf(COPY_BACKUP_HELPER_IMAGE)), [
       COPY_BACKUP_HELPER_IMAGE,

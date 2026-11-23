@@ -94,8 +94,8 @@ function applyMounts(
       type,
       source,
       target: mount.destinationPath,
+      read_only: mount.readOnly === true,
     };
-    if (mount.readOnly) spec.read_only = true;
     if (
       type === "volume" &&
       typeof mount.subpath === "string" &&

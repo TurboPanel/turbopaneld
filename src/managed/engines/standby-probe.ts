@@ -21,7 +21,7 @@ export function volumeMountArgs(
 ): string[] {
   const args: string[] = [];
   for (const volume of volumes) {
-    args.push("-v", `${volume.name}:${volume.target}`);
+    args.push("-v", `${volume.name}:${volume.target}:rw`);
   }
   return args;
 }

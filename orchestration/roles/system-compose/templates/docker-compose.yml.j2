@@ -32,8 +32,8 @@ services:
     networks:
       - {{ turbopanel_docker_network }}
     volumes:
-      - {{ postgres_volume_name }}:/var/lib/postgresql
-      - {{ postgres_socket_dir }}:/var/run/postgresql
+      - {{ postgres_volume_name }}:/var/lib/postgresql:rw
+      - {{ postgres_socket_dir }}:/var/run/postgresql:rw
     environment:
       POSTGRES_USER: {{ postgres_user }}
       POSTGRES_DB: {{ postgres_db }}
@@ -69,7 +69,7 @@ services:
     networks:
       - {{ turbopanel_docker_network }}
     volumes:
-      - {{ rabbitmq_volume_name }}:/var/lib/rabbitmq
+      - {{ rabbitmq_volume_name }}:/var/lib/rabbitmq:rw
       - {{ turbopanel_config_dir }}/rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
     environment:
       RABBITMQ_DEFAULT_USER: {{ rabbitmq_user }}

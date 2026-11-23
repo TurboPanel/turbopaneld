@@ -284,7 +284,7 @@ test("the archive runs offline, read-only and from the pinned image", () => {
   assertEquals(argv[argv.indexOf("--security-opt") + 1], "no-new-privileges");
   assertEquals(
     argv[argv.indexOf("--mount") + 1],
-    "type=bind,src=/srv/users/a/volumes/b,dst=/src,readonly",
+    "type=bind,src=/srv/users/a/volumes/b,dst=/src,readonly=true",
   );
   assert(COPY_BACKUP_HELPER_IMAGE.includes("@sha256:"));
   assertEquals(argv.slice(argv.indexOf(COPY_BACKUP_HELPER_IMAGE)), [
@@ -304,7 +304,7 @@ test("the archive runs offline, read-only and from the pinned image", () => {
   ]);
   assertEquals(
     copyMountArg({ type: "volume", name: "v" }, "/dst", false),
-    "type=volume,src=v,dst=/dst",
+    "type=volume,src=v,dst=/dst,readonly=false",
   );
 });
 
