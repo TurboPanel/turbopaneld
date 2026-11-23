@@ -84,6 +84,18 @@
     _sury_repo.changed
     or (repo_key_changed | default(false)) | bool
 
+# Laravel loads database/schema/mysql-schema.sql by running the `mysql` binary,
+# so a PHP host needs the client. Debian's mariadb-client provides `mysql` and
+# does not depend on the server, so it is safe next to a managed MariaDB, which
+# runs in a container and never installs the server package on the host.
+- name: Install the database command-line client for PHP hosts
+  ansible.builtin.apt:
+    lock_timeout: 300
+    name: mariadb-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
 # One template for every series: `%i` is the series. Installed once, before the
 # loop, because `systemctl enable turbopanel-php-fpm@8.4` needs the template to
 # already exist.
