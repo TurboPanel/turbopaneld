@@ -529,6 +529,13 @@ async function scopeClosedLocked(
   );
 }
 
+/** What boot found on disk: listeners to scope, clusters recorded private. */
+export type BootScan = {
+  listeners: BootPublicListener[];
+  /** Clusters whose valid record says not public: any chain is removed. */
+  privateIds: string[];
+};
+
 /**
  * Daemon start (and Docker coming back): give every published public listener
  * a chain that accepts the peers the last apply allowed (none: drops everyone),
@@ -540,10 +547,24 @@ async function scopeClosedLocked(
  * Returns how many listeners are now scoped.
  */
 export function scopePublicListenersClosedAtBootLocked(
-  load: () => Promise<BootPublicListener[]>,
+  load: () => Promise<BootScan>,
 ): Promise<number> {
   return withFirewallLock(async () => {
-    const listeners = await load();
+    const { listeners, privateIds } = await load();
+    // A private record is written only after compose succeeded, so a chain
+    // an older daemon left for it would block cluster peers for good.
+    await Promise.all(privateIds.map(async (managedId) => {
+      try {
+        await removeUnlocked(managedId);
+      } catch (err) {
+        logWarn(
+          "managed",
+          `boot firewall could not clear chain managed=${
+            sanitizeForLog(managedId)
+          }: ${sanitizeForLog(err)}`,
+        );
+      }
+    }));
     const results = await mapSequential(listeners, async (listener) => {
       try {
         if (!isValidIpv4Literal(listener.address)) return false;
@@ -568,6 +589,6 @@ export function scopePublicListenersClosedAtBoot(
   listeners: BootPublicListener[],
 ): Promise<number> {
   return scopePublicListenersClosedAtBootLocked(() =>
-    Promise.resolve(listeners)
+    Promise.resolve({ listeners, privateIds: [] })
   );
 }

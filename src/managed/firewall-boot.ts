@@ -26,6 +26,7 @@ import {
 } from "./engine-paths.ts";
 import {
   type BootPublicListener,
+  type BootScan,
   reconcileManagedPublicFirewall,
   resolveManagedPublicAllowedSources,
   scopePublicListenersClosedAtBootLocked,
@@ -119,11 +120,24 @@ function isValidPort(value: unknown): value is number {
 function parseScope(text: string, managedId: string): ScopeRead {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
+    // A private record names no listener, so it needs no address or port
+    // (apply writes `port: 0` for it); only a public one must carry both.
     if (
-      typeof value.public !== "boolean" || typeof value.address !== "string" ||
-      !isValidPort(value.port)
+      typeof value.public !== "boolean" ||
+      (value.public &&
+        (typeof value.address !== "string" || !isValidPort(value.port)))
     ) {
+      logWarn(
+        "managed",
+        `listener scope record invalid managedId=${sanitizeForLog(managedId)}`,
+      );
       return { kind: "invalid" };
+    }
+    if (!value.public) {
+      return {
+        kind: "record",
+        record: { public: false, address: "", port: 0, peers: [] },
+      };
     }
     let peers: string[] | null = [];
     if (value.peers !== undefined) {
@@ -146,9 +160,9 @@ function parseScope(text: string, managedId: string): ScopeRead {
     return {
       kind: "record",
       record: {
-        public: value.public,
-        address: value.address,
-        port: value.port,
+        public: true,
+        address: value.address as string,
+        port: value.port as number,
         peers: peers ?? [],
         // Only an explicit `false` skips the boot chain; anything else is
         // scoped, so a narrowed `[]` still gets a DROP-only chain.
@@ -156,6 +170,12 @@ function parseScope(text: string, managedId: string): ScopeRead {
       },
     };
   } catch {
+    logWarn(
+      "managed",
+      `listener scope record unparseable managedId=${
+        sanitizeForLog(managedId)
+      }`,
+    );
     return { kind: "invalid" };
   }
 }
@@ -286,21 +306,26 @@ async function managedIdsOnDisk(layout: LayoutPaths): Promise<string[]> {
   return ids.sort((a, b) => a.localeCompare(b));
 }
 
-async function publicListenerOf(
+/** `listener` is null when nothing is to be scoped; `isPrivate` marks a valid not-public record. */
+async function bootScopeOf(
   layout: LayoutPaths,
   managedId: string,
-): Promise<BootPublicListener | null> {
+): Promise<{ listener: BootPublicListener | null; isPrivate: boolean }> {
   const read = await readScope(layout, managedId);
   if (read.kind === "record") {
     const { record } = read;
     // `scoped: false`: apply installed no rules (no known peers), so none are
     // installed here either (a DROP-only chain would block the port for good).
-    if (!record.public || record.scoped === false) return null;
+    if (!record.public) return { listener: null, isPrivate: true };
+    if (record.scoped === false) return { listener: null, isPrivate: false };
     return {
-      managedId,
-      address: record.address,
-      port: record.port,
-      peers: record.peers,
+      listener: {
+        managedId,
+        address: record.address,
+        port: record.port,
+        peers: record.peers,
+      },
+      isPrivate: false,
     };
   }
   // No record (older daemon) or one that cannot be read: what compose
@@ -308,23 +333,40 @@ async function publicListenerOf(
   // there but unreadable was meant as one, so any IPv4 bind counts then (its
   // transport is unknown), otherwise only a publicly routable one.
   const published = await composePublish(layout, managedId);
-  if (published === null) return null;
+  if (published === null) return { listener: null, isPrivate: false };
   const counts = read.kind === "invalid"
     ? isValidIpv4Literal(published.address) &&
       !published.address.startsWith("127.")
     : isPubliclyRoutableIpv4(published.address);
-  return counts ? { managedId, ...published, peers: [] } : null;
+  return {
+    listener: counts ? { managedId, ...published, peers: [] } : null,
+    isPrivate: false,
+  };
 }
 
 /** Every managed listener on disk that publishes a port publicly. */
 export async function listBootPublicListeners(
   layout: LayoutPaths,
 ): Promise<BootPublicListener[]> {
+  return (await scanBootListeners(layout)).listeners;
+}
+
+/**
+ * The public listeners to scope, plus the clusters whose record validly says
+ * not public: their chain (left by an older daemon) is removed at boot.
+ */
+export async function scanBootListeners(
+  layout: LayoutPaths,
+): Promise<BootScan> {
+  const ids = await managedIdsOnDisk(layout);
   const found = await mapSequential(
-    await managedIdsOnDisk(layout),
-    (managedId) => publicListenerOf(layout, managedId),
+    ids,
+    (managedId) => bootScopeOf(layout, managedId),
   );
-  return found.filter((entry): entry is BootPublicListener => entry !== null);
+  return {
+    listeners: found.flatMap((entry) => entry.listener ?? []),
+    privateIds: ids.filter((_, index) => found[index].isPrivate),
+  };
 }
 
 /**
@@ -339,9 +381,9 @@ export async function scopeManagedPublicListenersAtBoot(
 ): Promise<number> {
   let found = 0;
   const scoped = await scope(async () => {
-    const listeners = await listBootPublicListeners(layout);
-    found = listeners.length;
-    return listeners;
+    const scan = await scanBootListeners(layout);
+    found = scan.listeners.length;
+    return scan;
   });
   if (found > 0) {
     logInfo(
