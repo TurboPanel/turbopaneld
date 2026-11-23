@@ -216,7 +216,9 @@ async function servicesToStop(
     .filter((name) => name.length > 0 && !keep.has(name));
   const unchanged = await unchangedServices(input, previous, candidates);
   if (unchanged.size > 0) {
-    steps.log(`leaving unchanged services running (${[...unchanged].join(", ")})`);
+    steps.log(
+      `leaving unchanged services running (${[...unchanged].join(", ")})`,
+    );
   }
   return candidates.filter((name) => !unchanged.has(name));
 }
