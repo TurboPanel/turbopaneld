@@ -553,7 +553,7 @@ export function scopePublicListenersClosedAtBootLocked(
     const { listeners, privateIds } = await load();
     // A private record is written only after compose succeeded, so a chain
     // an older daemon left for it would block cluster peers for good.
-    for (const managedId of privateIds) {
+    await Promise.all(privateIds.map(async (managedId) => {
       try {
         await removeUnlocked(managedId);
       } catch (err) {
@@ -564,7 +564,7 @@ export function scopePublicListenersClosedAtBootLocked(
           }: ${sanitizeForLog(err)}`,
         );
       }
-    }
+    }));
     const results = await mapSequential(listeners, async (listener) => {
       try {
         if (!isValidIpv4Literal(listener.address)) return false;

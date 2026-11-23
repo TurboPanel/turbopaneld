@@ -523,6 +523,48 @@ test("boot removes the chain of a private record and keeps a public record's cha
   });
 });
 
+test("a failing private chain removal is logged and the public listener is still scoped", async () => {
+  await withState(async (layout, dir) => {
+    await putFile(
+      dir,
+      ID_A,
+      "listener-scope.json",
+      '{"public":false,"address":"","port":0,"peers":[]}\n',
+    );
+    await putFile(
+      dir,
+      ID_PUB,
+      "listener-scope.json",
+      JSON.stringify({
+        public: true,
+        address: "203.0.113.50",
+        port: 45001,
+        peers: [],
+      }),
+    );
+    const chainA = managedFirewallChain(ID_A);
+    const chainPub = managedFirewallChain(ID_PUB);
+    const calls: string[] = [];
+    setManagedFirewallRunForTests((cmd, waited, options) => {
+      const line = `${cmd} ${waited.slice(2).join(" ")}`;
+      calls.push(`${line} ${options?.stdin ?? ""}`);
+      if (line.includes(chainA)) throw new Error("boom");
+      return Promise.resolve({
+        success: true,
+        code: 0,
+        stdout: "",
+        stderr: "",
+      });
+    });
+    try {
+      assertEquals(await scopeManagedPublicListenersAtBoot(layout), 1);
+    } finally {
+      setManagedFirewallRunForTests(null);
+    }
+    assertEquals(calls.some((c) => c.includes(chainPub)), true);
+  });
+});
+
 for (
   const [label, record] of [
     ["a string public", '{"public":"false","address":"","port":0}'],
