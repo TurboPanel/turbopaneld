@@ -103,11 +103,23 @@ Docker Compose. The daemon:
    only after its own site is deployed or the update repair above has run; until
    then another site can still proxy to it and run its existing scripts. The Apache role does tighten every vhost
    already on disk at the host's first Apache deploy (`orchestration/AGENTS.md`):
-   no `FileInfo`, the closed list, the strip lines. Known limit: a `[P]` to a
-   FastCGI listener on loopback that is not a site runtime is not covered by the
-   key (none exists today). `AuthUserFile` may name any file `tpapache` can read;
-   Apache only checks passwords against it, so the worst case is a guessing
-   oracle against another site's password file.
+   no `FileInfo`, the closed list, the strip lines. Known limit: `RewriteRule [P]`
+   and `SetHandler proxy:` are allowed overrides and nothing in the server
+   config restricts their target. `<Proxy>`/`<ProxyMatch>` runs only in the
+   `map_to_storage` hook (`proxy_walk`, `mod_proxy.c`), before the per-directory
+   rewrite or `SetHandler` has named a proxy target, and a request with no
+   configured worker falls back to the always-created default reverse worker
+   (`ap_proxy_pre_request`, `proxy_util.c`), so no config turns it off. Only
+   `mod_proxy_fcgi` is loaded, so the reachable targets are FastCGI: a unix
+   socket (other sites' runtimes are behind the per-site key) or a FastCGI
+   listener on loopback or the LAN that is not a site runtime (none exists today
+   and the key does not cover it). The deploy check names a `RewriteRule` with
+   `[P]` (or a `proxy:` substitution) and a `SetHandler proxy:...` line as a
+   warning; it does not block. Closing it means dropping `SetHandler` (or the
+   proxy forms) from the closed list or confining the Apache unit at the OS
+   level; both change what tenants may do, so they are the owner's call.
+   `AuthUserFile` may name any file `tpapache` can read; Apache
+   only checks passwords against it, so the worst case is a guessing oracle against another site's password file.
 
    **Refused `.htaccess` lines are named at deploy.** For a release-backed
    Apache or nginx+Apache site, `htaccessWarningsForSite`
