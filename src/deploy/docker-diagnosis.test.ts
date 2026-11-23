@@ -181,3 +181,59 @@ test("the default host reads never throw", async () => {
   }
   assertEquals(typeof (await diagnoseDockerUnreachable("x")), "string");
 });
+
+test("a daemon routed through the gate is pointed at the gate, not the docker group", () => {
+  const msg = explainDockerUnreachable({
+    service: { activeState: "active", result: "success" },
+    processGroups: [9999],
+    dockerGroup: { gid: 989, members: [] },
+    username: "tp",
+    probeStderr: "permission denied\nsecond line",
+    gateSocket: "/run/turbopanel-gate/docker.sock",
+  });
+  assertStringIncludes(msg, "/run/turbopanel-gate/docker.sock");
+  assertStringIncludes(msg, "permission denied");
+  assertStringIncludes(msg, "turbopanel-docker-gate");
+  assertEquals(msg.includes("docker group"), false);
+});
+
+test("a gate message without probe output has no detail suffix", () => {
+  const msg = explainDockerUnreachable({
+    service: null,
+    processGroups: [],
+    dockerGroup: null,
+    username: "tp",
+    probeStderr: "",
+    gateSocket: "/run/turbopanel-gate/docker.sock",
+  });
+  assertEquals(
+    msg,
+    "Docker gate unreachable at /run/turbopanel-gate/docker.sock; check `systemctl status turbopanel-docker-gate`",
+  );
+});
+
+test("the host read takes the gate socket from the environment", async () => {
+  const io = {
+    systemctlShow: () => Promise.resolve(""),
+    readProcStatus: () => Promise.resolve(""),
+    readGroupFile: () => Promise.resolve(""),
+    username: () => Promise.resolve("tp"),
+  };
+  const prior = Deno.env.get("TURBOPANEL_DOCKER_SOCKET");
+  try {
+    Deno.env.set("TURBOPANEL_DOCKER_SOCKET", "  /run/gate/docker.sock  ");
+    assertStringIncludes(
+      await diagnoseDockerUnreachable("denied", io),
+      "Docker gate unreachable at /run/gate/docker.sock: denied",
+    );
+    // Blank counts as unset: the group checks run instead.
+    Deno.env.set("TURBOPANEL_DOCKER_SOCKET", "   ");
+    assertEquals(
+      (await diagnoseDockerUnreachable("denied", io)).includes("gate"),
+      false,
+    );
+  } finally {
+    if (prior === undefined) Deno.env.delete("TURBOPANEL_DOCKER_SOCKET");
+    else Deno.env.set("TURBOPANEL_DOCKER_SOCKET", prior);
+  }
+});

@@ -346,6 +346,14 @@ test({
     );
     // The wait runs after the run dir and lock guard, before the daemon.
     assert(pre[0].endsWith("/scripts/ensure-single-daemon.sh"));
+    // Root, failure ignored: the daemon always starts without the docker group,
+    // so a host converged from an already-grouped process does not keep it.
+    const drop = pre.findIndex((l) => l.includes("gpasswd"));
+    assertEquals(
+      pre[drop],
+      `+-/usr/bin/gpasswd -d ${BASE_VARS.turbopanel_user} docker`,
+    );
+    assert(drop > 0 && drop < pre.length - 1);
     // Ordering only: a site-only host has no gate unit to want.
     assertEquals(
       only(unit, "Unit", "Wants").includes("docker-gate"),
@@ -376,5 +384,6 @@ test({
       "network-online.target docker.service",
     );
     assertEquals(text.includes("wait-docker-gate"), false);
+    assertEquals(text.includes("gpasswd"), false);
   },
 });

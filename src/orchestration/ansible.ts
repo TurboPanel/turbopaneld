@@ -764,7 +764,7 @@ export function buildDockerSetupExtraArgs(opts: DockerSetupOpts): string[] {
 }
 
 /**
- * Install Docker and ensure turbopanel/dev users are in the docker group.
+ * Install Docker (co-located dev users join the docker group; a managed host reaches Docker through the gate).
  * When `opts` is omitted the org Docker addressing is resolved from the
  * descriptor the daemon session persisted, so an on-demand install
  * (`ensureDocker`) lands with the right `default-address-pools` too.

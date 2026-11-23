@@ -147,9 +147,13 @@ test("daemon-converge never runs the whole docker role", async () => {
     .map((c) => c.name);
   assertEquals(offenders, []);
 
-  // The docker role itself is only entered for the builder-deny re-apply.
+  // The docker role itself is only entered for the builder-deny re-apply and
+  // for taking the daemon out of the docker group.
   const docker = roles.filter((r) => r.name === "docker");
-  assertEquals(docker.map((r) => r.tasksFrom), ["converge-builder"]);
+  assertEquals(docker.map((r) => r.tasksFrom), [
+    "converge-builder",
+    "converge-group",
+  ]);
 });
 
 async function ansiblePlaybookAvailable(): Promise<boolean> {
@@ -204,11 +208,18 @@ test({
   fn: async () => {
     const tasks = await listTasks("daemon-converge.yml");
 
-    // Only converge-builder's tasks run from the docker role; nothing from
-    // its main.yml (key fetch, docker-ce install, daemon.json pools).
-    const builder = new Set(await taskNames("docker", "converge-builder.yml"));
+    // Only converge-builder's and converge-group's tasks run from the docker
+    // role; nothing from its main.yml (key fetch, docker-ce install, pools).
+    const builder = new Set([
+      ...await taskNames("docker", "converge-builder.yml"),
+      ...await taskNames("docker", "converge-group.yml"),
+    ]);
     const dockerTasks = tasks.filter((t) => t.startsWith("docker : "));
     assert(dockerTasks.length > 0, "converge-builder tasks are missing");
+    assert(
+      dockerTasks.some((t) => t.includes("out of the docker group")),
+      "converge-group task is missing",
+    );
     assertEquals(
       dockerTasks.filter((t) => !builder.has(t.slice("docker : ".length))),
       [],

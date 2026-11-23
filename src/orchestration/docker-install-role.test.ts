@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { DAEMON_ROOT } from "./assets.ts";
 
@@ -288,4 +288,32 @@ test("no Galaxy role is referenced or fetched anywhere in the daemon repo", asyn
     join(ORCH, "requirements.yml"),
   );
   assertEquals(/^roles:/m.test(requirements), false);
+});
+
+test("the daemon user is in the docker group only on a co-located dev host", async () => {
+  const main = await Deno.readTextFile(join(DOCKER_ROLE, "tasks", "main.yml"));
+  const add = main.slice(
+    main.indexOf("- name: Add daemon user to docker group"),
+    main.indexOf("- name: Add dev user to docker group"),
+  );
+  assertStringIncludes(add, "groups: docker");
+  assertStringIncludes(add, "turbopanel_dev_user | length > 0");
+  // A managed host takes it out, on install and on every converge.
+  assertMatch(
+    main,
+    /include_tasks: remove-daemon-from-group\.yml\s+when: turbopanel_dev_user \| length == 0/,
+  );
+  const converge = await Deno.readTextFile(
+    join(DOCKER_ROLE, "tasks", "converge-group.yml"),
+  );
+  assertStringIncludes(converge, "remove-daemon-from-group.yml");
+  assertStringIncludes(converge, "length == 0");
+  const remove = await Deno.readTextFile(
+    join(DOCKER_ROLE, "tasks", "remove-daemon-from-group.yml"),
+  );
+  assertMatch(remove, /gpasswd,\s*-d,\s*"\{\{ docker_user \}\}",\s*docker/);
+  assertStringIncludes(
+    remove,
+    "'docker' in _docker_daemon_groups.stdout.split()",
+  );
 });
