@@ -1744,7 +1744,10 @@ test("state tree: an approved bind whose path cannot be resolved is refused, not
           ),
         ComposeHostPathError,
       );
-      assert(err.message.includes("cannot be resolved on this host"), err.message);
+      assert(
+        err.message.includes("cannot be resolved on this host"),
+        err.message,
+      );
     }
     // A path inside the own location the account cannot read, while the
     // location itself resolves, is refused as leading somewhere unknown.

@@ -380,6 +380,26 @@ test("parseEnvironmentDeployPayload accepts the image build kind", () => {
   assertEquals(isImageBuildKind("native"), false);
 });
 
+test("parseEnvironmentDeployPayload rejects a cloneUrl whose user or host starts with a dash", () => {
+  for (
+    const cloneUrl of [
+      "-uhelp@gitlab.test:acme/app.git",
+      "git@-gitlab.test:acme/app.git",
+      "ssh://-oProxyCommand=x/acme/app.git",
+    ]
+  ) {
+    assertThrows(
+      () =>
+        parseEnvironmentDeployPayload({
+          ...DEPLOY_BASE,
+          sourceMaterial: [{ ...SOURCE_ENTRY, cloneUrl }],
+        }),
+      TypeError,
+      "Invalid sourceMaterial cloneUrl",
+    );
+  }
+});
+
 test("parseEnvironmentDeployPayload rejects credential-bearing cloneUrl", () => {
   assertThrows(
     () =>

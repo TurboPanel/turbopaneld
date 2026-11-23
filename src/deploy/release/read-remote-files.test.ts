@@ -587,3 +587,109 @@ test("every git spawn of a read is pinned to https and ssh", async () => {
     assertEquals(env.GIT_ALLOW_PROTOCOL, "https:ssh");
   }
 });
+
+test("a clone URL or ref that starts with a dash never reaches git", async () => {
+  const original = Deno.Command;
+  let spawned = 0;
+  Deno.Command = class {
+    constructor() {
+      spawned += 1;
+    }
+    output() {
+      return Promise.reject(new Error("git must not run"));
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    // The URL check is off so only the option guard stands in the way.
+    await assertRejects(
+      () => resolveDefaultBranch("--upload-pack=x", "/tmp", PINNED_ONLY),
+      Error,
+      "must not start",
+    );
+    await assertRejects(
+      () =>
+        readRemoteFiles(
+          {
+            cloneUrl: "-uhelp@example.com:o/r",
+            ref: "main",
+            paths: [],
+            maxBytesPerFile: 1024,
+          },
+          "/tmp",
+          PINNED_ONLY,
+        ),
+      Error,
+      "must not start",
+    );
+    await assertRejects(
+      () =>
+        readRemoteFiles(
+          {
+            cloneUrl: "https://example.com/o/r.git",
+            ref: "--upload-pack=x",
+            paths: [],
+            maxBytesPerFile: 1024,
+          },
+          "/tmp",
+          PINNED_ONLY,
+        ),
+      Error,
+      "must not start",
+    );
+  } finally {
+    Deno.Command = original;
+  }
+  assertEquals(spawned, 0);
+});
+
+test("the url and ref are positional after -- on every read spawn", async () => {
+  const original = Deno.Command;
+  const seen: string[][] = [];
+  Deno.Command = class {
+    constructor(_cmd: string, options: { args: string[] }) {
+      seen.push(options.args.slice(6));
+    }
+    output() {
+      return Promise.resolve({
+        code: 0,
+        success: true,
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        signal: null,
+      });
+    }
+  } as unknown as typeof Deno.Command;
+  try {
+    await resolveDefaultBranch("https://example.com/o/r.git");
+    await readRemoteFiles({
+      cloneUrl: "https://example.com/o/r.git",
+      ref: "main",
+      paths: [],
+      maxBytesPerFile: 1024,
+    }).catch(() => {});
+  } finally {
+    Deno.Command = original;
+  }
+  const byVerb = (verb: string) => seen.find((args) => args[0] === verb);
+  assertEquals(byVerb("ls-remote"), [
+    "ls-remote",
+    "--symref",
+    "--",
+    "https://example.com/o/r.git",
+    "HEAD",
+  ]);
+  assertEquals(byVerb("remote"), [
+    "remote",
+    "add",
+    "--",
+    "origin",
+    "https://example.com/o/r.git",
+  ]);
+  assertEquals(byVerb("fetch")?.slice(0, 5), [
+    "fetch",
+    "--depth",
+    "1",
+    "--filter=blob:none",
+    "--",
+  ]);
+});
