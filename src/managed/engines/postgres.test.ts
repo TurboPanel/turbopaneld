@@ -444,7 +444,8 @@ test("backup dump/restore argv always target the stable platform admin regardles
   // The restore login never assumes another role: schema owners are granted
   // to it without SET, and per-login schemas are made by the superuser step
   // after the commit.
-  assertStringIncludes(restoreArgv[6], "WITH INHERIT TRUE, SET FALSE");
+  assertEquals(restoreArgv[6].includes("INHERIT"), false);
+  assertEquals(restoreArgv[6].includes("GRANT"), true);
   assertEquals(restoreArgv[6].includes("rolvaliduntil"), true);
   assertStringIncludes(restoreArgv[8], "REASSIGN OWNED BY");
   assertEquals(restoreArgv[8].includes("CREATE SCHEMA"), false);

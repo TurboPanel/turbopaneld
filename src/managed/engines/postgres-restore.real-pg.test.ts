@@ -1447,4 +1447,101 @@ for (const series of SERIES) {
         );
       }),
   });
+
+  test({
+    name:
+      `real Postgres ${series}: dump code running as the owner cannot change another database a schema owner holds`,
+    ignore: !dockerUp,
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: () =>
+      withShop(series, async ({ sql, dumpAndRestore }) => {
+        // `multi` owns database `other` and, after the backup, a schema in
+        // `shop`. The restore has to drop that schema, but its rights in
+        // `other` must stay out of reach of the dump code. A GRANT without
+        // the right to grant only warns, so the grant is judged by the ACL
+        // comparison below, the other changes by the audit rows.
+        await sql(
+          "postgres",
+          `CREATE ROLE multi LOGIN PASSWORD 'multi-secret-1';
+           CREATE DATABASE other OWNER multi;`,
+          "postgres",
+        );
+        const state = () =>
+          sql(
+            "postgres",
+            `SELECT d.datdba::regrole::text || '|' || coalesce(d.datacl::text, '') || '|' ||
+                    coalesce((SELECT array_agg(s.setconfig::text) FROM pg_db_role_setting s
+                               WHERE s.setdatabase = d.oid)::text, '')
+               FROM pg_database d WHERE d.datname = 'other';`,
+            "postgres",
+          );
+        await sql(
+          "migrate",
+          `CREATE TABLE public.audit (who text, step text);
+           CREATE FUNCTION public.probe() RETURNS boolean
+             LANGUAGE plpgsql VOLATILE AS $f$
+           DECLARE cur text := current_user;
+           BEGIN
+             EXECUTE 'RESET ROLE';
+             BEGIN
+               EXECUTE 'GRANT ALL ON DATABASE other TO PUBLIC';
+             EXCEPTION WHEN OTHERS THEN NULL;
+             END;
+             BEGIN
+               EXECUTE 'ALTER DATABASE other SET tp.planted = ''yes''';
+               INSERT INTO public.audit VALUES (cur, 'alter');
+             EXCEPTION WHEN OTHERS THEN NULL;
+             END;
+             BEGIN
+               EXECUTE 'ALTER DATABASE other OWNER TO tp_shop_owner';
+               INSERT INTO public.audit VALUES (cur, 'owner');
+             EXCEPTION WHEN OTHERS THEN NULL;
+             END;
+             INSERT INTO public.audit VALUES (cur, 'ran');
+             EXECUTE format('SET ROLE %I', cur);
+             RETURN true;
+           END $f$;
+           CREATE TABLE public.checked (id int CHECK (public.probe()));
+           INSERT INTO public.checked VALUES (1);`,
+        );
+        await sql("migrate", "DELETE FROM public.audit;");
+        let before = "";
+        const restored = await dumpAndRestore(async () => {
+          await sql(
+            "postgres",
+            `CREATE SCHEMA owned_by_multi AUTHORIZATION multi;
+             CREATE TABLE owned_by_multi.t (id int);
+             ALTER TABLE owned_by_multi.t OWNER TO multi;`,
+          );
+          before = await state();
+        });
+        assertEquals(restored.success, true, restored.stderr);
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM public.audit WHERE step = 'ran' AND who = 'tp_shop_owner';",
+          ),
+          "1",
+          "the probe ran at restore time, as the owner role",
+        );
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT coalesce(string_agg(who || ':' || step, ','), '') FROM public.audit WHERE step <> 'ran';",
+          ),
+          "",
+          "dump code could not change the other database",
+        );
+        assertEquals(await state(), before, "the other database is unchanged");
+        assertEquals(
+          await sql(
+            "postgres",
+            "SELECT count(*) FROM pg_namespace WHERE nspname = 'owned_by_multi';",
+          ),
+          "0",
+          "the schema of the other login was dropped by the reset",
+        );
+      }),
+  });
 }

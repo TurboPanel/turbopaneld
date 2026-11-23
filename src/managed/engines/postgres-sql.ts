@@ -206,12 +206,13 @@ export function restoreResetSql(): string {
 
 /**
  * SQL expression: the role is a superuser, or holds the rights of one through
- * a membership, or holds a predefined role that reads or writes server files
- * or runs server programs (which amount to the same thing). `roleOid` is a
+ * a membership, or holds a predefined role that reads or writes server files,
+ * runs server programs, reads or writes all data or signals other backends
+ * (rights a database owner role never needs). `roleOid` is a
  * SQL expression for the role's oid.
  */
 function actsAsSuperuserSql(roleOid: string): string {
-  return `EXISTS (SELECT 1 FROM pg_catalog.pg_roles s WHERE (s.rolsuper OR s.rolname IN ('pg_execute_server_program', 'pg_read_server_files', 'pg_write_server_files')) AND pg_catalog.pg_has_role(${roleOid}, s.oid, 'USAGE'))`;
+  return `EXISTS (SELECT 1 FROM pg_catalog.pg_roles s WHERE (s.rolsuper OR s.rolname IN ('pg_execute_server_program', 'pg_read_server_files', 'pg_write_server_files', 'pg_read_all_data', 'pg_write_all_data', 'pg_signal_backend')) AND pg_catalog.pg_has_role(${roleOid}, s.oid, 'USAGE'))`;
 }
 
 /**
@@ -229,13 +230,13 @@ function actsAsSuperuserSql(roleOid: string): string {
  *   NOBYPASSRLS`, valid for an hour, member of the database owner role. It is
  *   dropped when the restore ends; a leftover from a killed run is dropped by
  *   the next one.
- * - The reset in the replay transaction drops every user schema, so the login
- *   needs the rights of each schema's owner: a schema owned by a superuser
- *   (or by a role that holds one's rights) moves to the database owner, any
- *   other schema owner is granted to the login with `INHERIT TRUE, SET
- *   FALSE`. The login can then use those rights but never switch to that
- *   role, so the only role it (and the dump code) can assume is the database
- *   owner role.
+ * - The reset in the replay transaction drops every user schema, and a schema
+ *   can only be dropped by its owner. Every schema in this database that the
+ *   owner role does not own moves to the owner role here (a successful
+ *   replay with `--no-owner` ends with that ownership anyway). The login gets
+ *   no other membership, so it, and the dump code, can assume no role except
+ *   the owner role, and inherits nothing from the schema owners (a login
+ *   that owns a schema here may hold rights in other databases).
  * - Stale logins are dropped only once their validity has run out, so a
  *   restore running at the same time on the engine keeps its own login.
  */
@@ -282,18 +283,13 @@ export function restoreLoginPrepareSql(): string {
     "   WHERE d.datname = pg_catalog.current_database();",
     "  EXECUTE pg_catalog.format('ALTER ROLE %I VALID UNTIL %L', l,",
     "    (pg_catalog.now() + interval '1 hour')::text);",
-    "  FOR r IN SELECT n.nspname AS name, n.nspowner AS owner,",
-    "                  pg_catalog.pg_get_userbyid(n.nspowner) AS owner_name",
+    "  FOR r IN SELECT n.nspname AS name",
     "             FROM pg_catalog.pg_namespace n",
     "            WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'",
-    "              AND n.nspowner <> o LOOP",
-    `    IF ${actsAsSuperuserSql("r.owner")} THEN`,
-    "      EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.name,",
-    "        pg_catalog.pg_get_userbyid(o));",
-    "    ELSIF r.owner_name !~ '^pg_' THEN",
-    "      EXECUTE pg_catalog.format('GRANT %I TO %I WITH INHERIT TRUE, SET FALSE',",
-    "        r.owner_name, l);",
-    "    END IF;",
+    "              AND n.nspowner <> o",
+    "              AND n.nspowner <> 'pg_database_owner'::pg_catalog.regrole LOOP",
+    "    EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.name,",
+    "      pg_catalog.pg_get_userbyid(o));",
     "  END LOOP;",
     "END",
     "$tp_restore_login$;",

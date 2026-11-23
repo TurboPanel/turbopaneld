@@ -552,11 +552,12 @@ ProxySQL to enforce. Canonical policy:
      drops stale `tp_restore_*` logins, creates a throwaway login
      `tp_restore_<12 hex>` (`LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
      NOREPLICATION NOBYPASSRLS`, connection limit 2, random password, valid for
-     an hour) that is a member of the owner role, hands superuser-owned schemas
-     to the owner and grants the other schema owners to the login with
-     `INHERIT TRUE, SET FALSE` (it can use their rights to drop their schemas
-     but never switch to them: the only role it, and the dump code, can assume
-     is the owner role); stale logins are dropped only once their hour has run
+     an hour) that is a member of the owner role and moves every schema of the
+     database that the owner role does not own to the owner role (a schema can
+     only be dropped by its owner; the login gets no other membership, not even
+     an inheriting one, because a schema owner may hold rights in other
+     databases; a failed restore leaves those schemas with the owner role, and
+     the next apply repairs per-login schemas); stale logins are dropped only once their hour has run
      out, so two restores at once keep their own logins; (2) one transaction on a TLS connection as that
      login, to the container's own address (production `pg_hba` admits a
      non-admin login only over `hostssl` with a password from the managed
