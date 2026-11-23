@@ -50,9 +50,13 @@ test("persistDemotedVolumeFence plants postgres standby.signal on the data volum
     await Deno.writeTextFile(`${root}/docker-compose.yml`, POSTGRES_COMPOSE);
 
     const touched: string[] = [];
+    const mountsByScript: Record<string, string[]> = {};
     const run = (args: string[]): Promise<DockerCliResult> => {
       if (args[0] === "run") {
         const script = args.at(-1) ?? "";
+        mountsByScript[script.split(" ")[0]] = args.filter((arg, i) =>
+          args[i - 1] === "-v" && arg.startsWith("fence_data:")
+        );
         if (script.startsWith("touch ")) touched.push(script);
         return Promise.resolve({
           success: true,
@@ -72,6 +76,11 @@ test("persistDemotedVolumeFence plants postgres standby.signal on the data volum
     await persistDemotedVolumeFence(layout, managedId, "postgres", run);
     assertEquals(touched.length, 1);
     assert(touched[0]!.includes("standby.signal"));
+    // The existence probe only reads; the write mounts the volume rw.
+    assertEquals(mountsByScript["touch"], [
+      "fence_data:/var/lib/postgresql:rw",
+    ]);
+    assertEquals(mountsByScript["test"], ["fence_data:/var/lib/postgresql:ro"]);
   });
 });
 

@@ -95,9 +95,14 @@ async function sourceFiles(
 function findUnmodedVolumeArgs(path: string, text: string): string[] {
   const lines = text.split("\n");
   const bad: string[] = [];
-  for (let i = 0; i < lines.length - 1; i++) {
-    if (!/^\s*(- )?["']?-v["']?,?$/.test(lines[i])) continue;
-    const spec = lines[i + 1].trim();
+  for (let i = 0; i < lines.length; i++) {
+    const inline = /^\s*(?:- )?["']?(?:-v|--volume)["']?,\s*(\S.*)$/.exec(
+      lines[i],
+    );
+    if (
+      !inline && !/^\s*(- )?["']?(-v|--volume)["']?,?$/.test(lines[i])
+    ) continue;
+    const spec = (inline ? inline[1] : lines[i + 1] ?? "").trim();
     if (/ON_ERROR_STOP/.test(spec)) continue;
     if (!MODE_END.test(spec)) bad.push(`${path}:${i + 2}: ${spec}`);
   }
@@ -147,6 +152,33 @@ test("every compose volumes list in the Ansible roles states a mode", async () =
   }
   assert(scanned > 0, "the scan sees at least one compose volumes list");
   assertEquals(bad, []);
+});
+
+test("every volumeMountArgs caller outside the probe keeps the rw default", async () => {
+  const callers = (await sourceFiles("src", [".ts"], true)).filter((path) =>
+    !path.endsWith("standby-probe.ts")
+  );
+  const calls: string[] = [];
+  for (const path of callers) {
+    for (const line of (await Deno.readTextFile(path)).split("\n")) {
+      if (/volumeMountArgs\(/.test(line) && !line.includes("import")) {
+        calls.push(`${path}: ${line.trim()}`);
+      }
+    }
+  }
+  assertEquals(calls.length, 6, calls.join("\n"));
+  for (const call of calls) {
+    assert(/volumeMountArgs\([\w.]+\)/.test(call), `rw default: ${call}`);
+  }
+});
+
+test("the scan flags one-line -v and --volume arguments without a mode", () => {
+  assertEquals(findUnmodedVolumeArgs("x.ts", '"-v", `${d}:/x`,').length, 1);
+  assertEquals(
+    findUnmodedVolumeArgs("x.ts", '"--volume", `${d}:/x`,').length,
+    1,
+  );
+  assertEquals(findUnmodedVolumeArgs("x.ts", '"-v", `${d}:/x:rw`,'), []);
 });
 
 test("the scan flags a -v argument without a mode", () => {
