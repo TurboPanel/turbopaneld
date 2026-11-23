@@ -206,7 +206,7 @@ test({
         [...created].sort(),
       );
     } finally {
-      for (const name of created) await docker(["rm", "-f", name]);
+      for (const name of created) await docker(["rm", "-f", "-v", name]);
       await gate.stop();
       for (const id of [projectId, otherProjectId]) {
         await Deno.remove(join(LAYOUT.runDir, "deployments", id), {
