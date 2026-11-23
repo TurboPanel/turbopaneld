@@ -205,10 +205,122 @@ export function restoreResetSql(): string {
 }
 
 /**
+ * SQL expression: the role is a superuser, or holds the rights of one through
+ * a membership. `roleOid` is a SQL expression for the role's oid.
+ */
+function actsAsSuperuserSql(roleOid: string): string {
+  return `EXISTS (SELECT 1 FROM pg_catalog.pg_roles s WHERE s.rolsuper AND pg_catalog.pg_has_role(${roleOid}, s.oid, 'USAGE'))`;
+}
+
+/**
+ * First step of a restore, run as the engine superuser on the target
+ * database, before any dump content is read. It runs no tenant-defined code.
+ *
+ * psql variables: `tp_login` (the throwaway login's name) and `tp_pw` (its
+ * password, only ever on stdin). The statement logging switches keep the
+ * password out of the server log; the terse error format keeps it out of an
+ * error report.
+ *
+ * - Refuses a database whose owner is a superuser (or holds one's rights):
+ *   the replay runs as the owner, so there is nothing safe to run it as.
+ * - Makes the login: `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION
+ *   NOBYPASSRLS`, valid for an hour, member of the database owner role. It is
+ *   dropped when the restore ends; a leftover from a killed run is dropped by
+ *   the next one.
+ * - The reset in the replay transaction drops every user schema, so the login
+ *   needs the rights of each schema's owner: a schema owned by a superuser
+ *   (or by a role that holds one's rights) moves to the database owner, any
+ *   other schema owner is granted to the login.
+ */
+export function restoreLoginPrepareSql(): string {
+  return [
+    "SET log_statement = 'none';",
+    "SET log_min_duration_statement = -1;",
+    "SET log_min_error_statement = panic;",
+    "\\set VERBOSITY terse",
+    "BEGIN;",
+    "SET LOCAL lock_timeout = '30s';",
+    "SELECT r.rolname AS tp_owner FROM pg_catalog.pg_database d",
+    "  JOIN pg_catalog.pg_roles r ON r.oid = d.datdba",
+    " WHERE d.datname = pg_catalog.current_database() \\gset",
+    "SELECT pg_catalog.set_config('tp.restore_login', :'tp_login', true);",
+    "DO $tp_restore_check$",
+    "DECLARE o pg_catalog.pg_roles%ROWTYPE; r record;",
+    "BEGIN",
+    "  SELECT x.* INTO o FROM pg_catalog.pg_roles x",
+    "    JOIN pg_catalog.pg_database d ON d.datdba = x.oid",
+    "   WHERE d.datname = pg_catalog.current_database();",
+    `  IF ${actsAsSuperuserSql("o.oid")} THEN`,
+    "    RAISE EXCEPTION 'restore refused: database % is owned by % which has superuser rights, not by a database owner role; convert it to an owner role first',",
+    "      pg_catalog.current_database(), o.rolname;",
+    "  END IF;",
+    "  FOR r IN SELECT x.rolname FROM pg_catalog.pg_roles x",
+    "            WHERE x.rolname ~ '^tp_restore_[0-9a-f]+$' LOOP",
+    "    BEGIN",
+    "      EXECUTE pg_catalog.format('DROP ROLE %I', r.rolname);",
+    "    EXCEPTION WHEN OTHERS THEN",
+    "      RAISE WARNING 'stale restore login % left in place: %', r.rolname, SQLERRM;",
+    "    END;",
+    "  END LOOP;",
+    "END",
+    "$tp_restore_check$;",
+    "CREATE ROLE :\"tp_login\" LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS CONNECTION LIMIT 2 PASSWORD :'tp_pw';",
+    'GRANT :"tp_owner" TO :"tp_login";',
+    "DO $tp_restore_login$",
+    "DECLARE o oid; l text := pg_catalog.current_setting('tp.restore_login'); r record;",
+    "BEGIN",
+    "  SELECT d.datdba INTO o FROM pg_catalog.pg_database d",
+    "   WHERE d.datname = pg_catalog.current_database();",
+    "  EXECUTE pg_catalog.format('ALTER ROLE %I VALID UNTIL %L', l,",
+    "    (pg_catalog.now() + interval '1 hour')::text);",
+    "  FOR r IN SELECT n.nspname AS name, n.nspowner AS owner,",
+    "                  pg_catalog.pg_get_userbyid(n.nspowner) AS owner_name",
+    "             FROM pg_catalog.pg_namespace n",
+    "            WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'",
+    "              AND n.nspowner <> o LOOP",
+    `    IF ${actsAsSuperuserSql("r.owner")} THEN`,
+    "      EXECUTE pg_catalog.format('ALTER SCHEMA %I OWNER TO %I', r.name,",
+    "        pg_catalog.pg_get_userbyid(o));",
+    "    ELSIF r.owner_name !~ '^pg_' THEN",
+    "      EXECUTE pg_catalog.format('GRANT %I TO %I', r.owner_name, l);",
+    "    END IF;",
+    "  END LOOP;",
+    // Per-login schemas of the read-write logins are recreated at the end of
+    // the replay, which needs the restore login to be a member of each.
+    `  FOR r IN ${RW_LOGIN_SCHEMA_ROLES_SQL}`,
+    "  LOOP",
+    "    EXECUTE pg_catalog.format('GRANT %I TO %I', r.rolname, l);",
+    "  END LOOP;",
+    "END",
+    "$tp_restore_login$;",
+    "COMMIT;",
+  ].join("\n");
+}
+
+/**
+ * Platform logins that own a per-login schema in a database not held by its
+ * owner role: read-write logins (connect and temp, no create).
+ * Yields one row `rolname` per login; the connected database is the target.
+ */
+const RW_LOGIN_SCHEMA_ROLES_SQL = [
+  "SELECT rol.rolname",
+  "  FROM pg_catalog.pg_roles rol",
+  " WHERE rol.rolcanlogin",
+  "   AND NOT rol.rolsuper",
+  "   AND pg_catalog.has_database_privilege(",
+  "         rol.oid, pg_catalog.current_database(), 'CONNECT')",
+  "   AND pg_catalog.has_database_privilege(",
+  "         rol.oid, pg_catalog.current_database(), 'TEMPORARY')",
+  "   AND NOT pg_catalog.has_database_privilege(",
+  "         rol.oid, pg_catalog.current_database(), 'CREATE')",
+].join("\n");
+
+/**
  * Recreate per-login schemas for every read-write platform login on the
  * connected database. The schema reset drops them; the dump does not contain
- * logins created after the backup. Idempotent — run after `pg_restore` in the
- * same transaction, before `COMMIT`.
+ * logins created after the backup. Idempotent. Run in the replay transaction
+ * after the dump, as the restore login after `RESET ROLE` (the prepare step
+ * made it a member of each of these logins, which `AUTHORIZATION` needs).
  */
 export function restoreReadWriteLoginSchemasSql(): string {
   return [
@@ -222,17 +334,7 @@ export function restoreReadWriteLoginSchemasSql(): string {
     "                AND o.rolname = 'tp_' || d.datname || '_owner') THEN",
     "    RETURN;",
     "  END IF;",
-    "  FOR r IN",
-    "    SELECT rol.rolname",
-    "      FROM pg_catalog.pg_roles rol",
-    "     WHERE rol.rolcanlogin",
-    "       AND NOT rol.rolsuper",
-    "       AND pg_catalog.has_database_privilege(",
-    "             rol.oid, pg_catalog.current_database(), 'CONNECT')",
-    "       AND pg_catalog.has_database_privilege(",
-    "             rol.oid, pg_catalog.current_database(), 'TEMPORARY')",
-    "       AND NOT pg_catalog.has_database_privilege(",
-    "             rol.oid, pg_catalog.current_database(), 'CREATE')",
+    `  FOR r IN ${RW_LOGIN_SCHEMA_ROLES_SQL}`,
     "  LOOP",
     "    IF NOT EXISTS (",
     "      SELECT 1 FROM pg_catalog.pg_namespace n WHERE n.nspname = r.rolname",
@@ -244,6 +346,22 @@ export function restoreReadWriteLoginSchemasSql(): string {
     "  END LOOP;",
     "END",
     "$tp_rw_schemas$;",
+  ].join("\n");
+}
+
+/**
+ * Last step inside the replay transaction, run as the throwaway login (psql
+ * variable `tp_login`) after the dump: recreates the per-login schemas, then
+ * whatever the login itself ended up
+ * owning, or holding privileges on, goes to the database owner or is revoked,
+ * so the login can be dropped.
+ */
+export function restoreLoginFinishSql(): string {
+  return [
+    "RESET ROLE;",
+    restoreReadWriteLoginSchemasSql(),
+    'REASSIGN OWNED BY :"tp_login" TO :"tp_owner";',
+    'DROP OWNED BY :"tp_login";',
   ].join("\n");
 }
 

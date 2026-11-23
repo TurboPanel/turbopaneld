@@ -77,7 +77,7 @@ Orchestrator self-heal: `restart: always` does not bring back a container that w
 
 **Postgres read-write is data only, like MySQL and MariaDB.** `read-write` (the plain login or the `_rw` group) holds SELECT, INSERT, UPDATE and DELETE on tables and USAGE, SELECT and UPDATE on sequences. TRUNCATE and REFERENCES belong to the `owner` (migration) level only, on both the owner-role path (`postgres-owner-role-sql.ts`) and the older per-login path (`postgres-sql.ts`). Every apply also takes both away from a read-write login or group that an earlier release gave them, on existing tables and in the default privileges for later ones, and writes nothing when they are already gone (`postgres-grants.real-pg.test.ts` runs both paths on real Postgres 16 and 18, including a repeated apply that rewrites no ACL).
 
-Backup restore skips per-login schemas on an owner-role database; a restored table is handed to the owner role in the same transaction.
+Backup restore skips per-login schemas on an owner-role database; a restored table belongs to the owner role (the dump is replayed as that role, never as the engine superuser).
 
 **Backup login (`credentials[].kind: "backup"`, feature `managed-backup-login-v1`).** The control plane sends the cluster's backup login as `role: "user"` with `kind: "backup"`, every database of the cluster and no privileges; an unknown `kind` is ignored (an ordinary login). Its rights are fixed whatever `privileges` or `grantMode` say: PostgreSQL `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS` + `GRANT pg_read_all_data` + `CONNECT` on exactly the listed databases (it is kept out of the per-level reconcile, so no table grants, owner-role rights or schema of its own); MySQL `SELECT, SHOW VIEW, TRIGGER, EVENT, SHOW_ROUTINE, FLUSH_TABLES` and MariaDB `SELECT, SHOW VIEW, TRIGGER, EVENT, LOCK TABLES, SHOW CREATE ROUTINE`, both **global** (`ON *.*`, one `GRANT` per account host). Global because a database made with plain `CREATE DATABASE` is never in `databases`, and a per-database grant left the dump refused on it (1044). The listed `databases` are ignored on these engines, so older control planes keep working unchanged; database-level grants an older daemon wrote are a subset and stay. The scope includes the system schemas: `mysql` (account rows with password hashes, which a full restore needs), `sys` and `performance_schema`. Neither engine can exclude one schema from a global grant (MySQL only with `partial_revokes`, a server-wide switch; MariaDB not at all), and a wildcard database grant (`` `%`.* ``) matches `mysql` too. `TRIGGER` and `EVENT` also let the login create and drop triggers and events, now in every database: the engines check the same rights for reading their definitions, so a dump needs them; such objects run as the backup login, which can only read. No write, DDL (tables, databases) or account right. The one administrative right is MySQL `FLUSH_TABLES` (dynamic, global only): on a server with GTIDs on, which every managed MySQL server is, `mysqldump --single-transaction` takes `FLUSH TABLES WITH READ LOCK` around the start of its snapshot, then `UNLOCK TABLES`, and stops with 1227 without the right (only `--set-gtid-purged=OFF` got past). Each dump holds that lock for a moment, after waiting for running statements to finish, so one long query holds writers up for that long. The right also lets the login take the global read lock by hand, which blocks every write on the server until it unlocks or disconnects, so treat the backup password like an admin password. The grant is written on every apply, so an existing backup login gets it on the next apply of its cluster, not when the daemon is updated. `mysqldump` without `PROCESS` needs `--no-tablespaces` to skip a tablespace warning. No `RELOAD` (it would also flush logs, hosts and privileges) / `REPLICATION CLIENT` (binlog position) and no PostgreSQL large-object grants yet. On ProxySQL it is a tool login (writer hostgroup, no split rules) and every tool login's user row says `transaction_persistent=1`, so a dump in one transaction stays on one backend. `backup-login-sql.test.ts` pins the SQL; `backup-login.docker.test.ts` (MySQL 8.4 with GTIDs on and the standard dump flags, MariaDB 11.8; it also pins `SHOW GRANTS`, the `mysql.user` read and that every refusal says denied) and `postgres-grants.real-pg.test.ts` (Postgres 16 and 18) dump through the real engines as that login.
 
@@ -541,24 +541,55 @@ ProxySQL to enforce. Canonical policy:
      `runDocker`, for dump/restore.
    - **Checksum before restore.** Verify size/checksum before touching the
      engine container.
-   - **A restore returns the database to the backup's state, all or nothing.**
-     Postgres runs one transaction: `restoreResetSql` drops every user schema
-     (only `public` is recreated, with its owner and privileges; the dump
-     creates the others), then the dump is replayed as plain SQL
-     (`pg_restore --no-owner --clean --if-exists -f -` into `psql`), then
-     `restoreReadWriteLoginSchemasSql` recreates per-login read-write schemas.
+   - **A restore returns the database to the backup's state, all or nothing,
+     and the dump never runs on a superuser session.** The dump holds tenant
+     code (functions, CHECK constraints, expression indexes and materialized
+     views run while it is replayed), so Postgres replays it as the database
+     owner, not as the engine superuser. Order: (1) as the engine superuser,
+     over the socket, a prepare step that runs no dump content
+     (`restoreLoginPrepareSql`): it refuses a database owned by a superuser (or
+     by a role with a superuser's rights; convert it to an owner role first),
+     drops stale `tp_restore_*` logins, creates a throwaway login
+     `tp_restore_<12 hex>` (`LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+     NOREPLICATION NOBYPASSRLS`, connection limit 2, random password, valid for
+     an hour) that is a member of the owner role, hands superuser-owned schemas
+     to the owner and makes the login a member of the other schema owners and
+     the read-write logins; (2) one transaction on a TLS connection as that
+     login, to the container's own address (production `pg_hba` admits a
+     non-admin login only over `hostssl` with a password from the managed
+     network): `restoreResetSql` drops every user schema (only `public` is
+     recreated, with its owner and privileges; the dump creates the others),
+     `SET LOCAL ROLE` to the owner, the dump as plain SQL (`pg_restore
+     --no-owner --clean --if-exists -f -`), then `restoreLoginFinishSql`
+     (`RESET ROLE`, per-login read-write schemas back
+     (`restoreReadWriteLoginSchemasSql`), `REASSIGN OWNED` / `DROP OWNED` of the
+     login); (3) a shell `trap` drops the login on any exit. `SET ROLE` alone
+     would not be enough (tenant code can `RESET ROLE`), which is why the
+     session user is itself a non-superuser. The password is made in the
+     container, lives in shell variables, the prepare step's stdin and the
+     `PGPASSWORD` of the one replay client; never in argv, and the prepare step
+     turns statement logging off for its session. One transaction on the real
+     database (not a scratch database that is swapped in) keeps the database's
+     oid, settings, connect rights and replication slots and needs no second
+     copy on disk.
+     A filter (`PG_RESTORE_FILTER_AWK`, `COPY` data untouched) sits between
+     `pg_restore` and `psql`: it drops the large-object section's own
+     `BEGIN;` / `COMMIT;` (that `COMMIT;` would end the restore transaction
+     early) and `ALTER DEFAULT PRIVILEGES FOR ROLE <other role>` entries, which
+     the owner's session may not replay; those belong to the platform's logins,
+     survive a restore and are set again by every apply.
      `COMMIT` is sent only when `pg_restore`
      succeeded, and the script fails unless the server confirmed the commit,
      so a truncated dump, a failing statement or a lock timeout (30 s) leaves
      the data untouched. Rows, tables and schemas made after the backup are
      gone. Roles, the database itself and its connect rights are not touched.
-     The replay creates objects as the platform admin (`--no-owner`); inside the
-     same transaction `handOverPlatformObjectsSql` then gives them to the
-     database's owner (`tp_<db>_owner`, or the chosen owner login), so a
-     migrations login keeps working on restored tables. A database still owned by
-     the platform admin is left as it is. Every apply of an owner-role database
-     runs the same hand-over for objects the platform admin or root login made,
-     which repairs databases restored by an earlier release. The hand-over covers
+     The replay runs with `--no-owner` as the owner role, so restored objects
+     belong to it and a migrations login keeps working on them. Dump items that
+     need a superuser (event triggers, untrusted extensions, publications `FOR
+     ALL TABLES`) make the restore fail loudly and roll back; nothing falls back
+     to a superuser session. Every apply of an owner-role database still runs
+     the hand-over for objects the platform admin or root login made, which
+     repairs databases restored by an earlier release. The hand-over covers
      schemas, tables, views, materialized views, foreign tables, standalone
      sequences, routines and types; operators, collations, text search
      configurations and dictionaries, conversions, extended statistics, foreign
