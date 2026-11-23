@@ -453,8 +453,8 @@ export function normalizeReconnectDelayMs(reconnectDelayMs?: number): number {
 export const STABLE_SESSION_MS = 5_000;
 /** Delay after sending update-result before restarting, so the instance can persist it. */
 export const UPDATE_RESULT_HANDOFF_DELAY_MS = 2_000;
-/** Longest an update waits for running deploys, builds and other commands before installing anyway. */
-export const UPDATE_DRAIN_CAP_MS = 20 * 60_000;
+/** Longest an update waits for running deploys, builds and other commands before installing anyway. Kept well inside the control plane's 15 minute step window, which restarts at the stage reported before the wait. */
+export const UPDATE_DRAIN_CAP_MS = 10 * 60_000;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
@@ -3460,10 +3460,16 @@ export class InstanceClient {
    * logged and the update goes ahead. The gate reopens when the update fails
    * or does not restart the daemon (`endUpdateDrain` in `#applyUpdate`).
    */
-  async #drainCommandsForUpdate(): Promise<void> {
+  async #drainCommandsForUpdate(upgradeId?: string): Promise<void> {
     beginUpdateDrain();
     const waiting = runningCommandCount();
     if (waiting > 0) {
+      // The control plane re-sends a step that reports nothing for 5 minutes,
+      // so say why the install has not started.
+      this.#reportUpdateStage("preparing", {
+        upgradeId,
+        detail: `waiting for ${waiting} running command(s) to finish`,
+      });
       logInfo(
         "update",
         `waiting for ${waiting} running command(s) before installing`,
@@ -3501,7 +3507,7 @@ export class InstanceClient {
       return false;
     }
 
-    await this.#drainCommandsForUpdate();
+    await this.#drainCommandsForUpdate(options.upgradeId);
 
     if (this.#isColocatedSocketMode()) {
       // The daemon on a self-hosted control-plane host: refresh it in socket
@@ -3773,25 +3779,39 @@ export class InstanceClient {
       logError("update", "failed:", sanitizeForLog(error));
     }
 
-    if (ok && shouldRestart) {
-      const restartError = await this.#restartAfterUpdate(upgradeId);
-      if (restartError) {
-        ok = false;
-        error = restartError;
-        errorCode = "restart_failed";
+    try {
+      if (ok && shouldRestart) {
+        let restartError: string | undefined;
+        try {
+          restartError = await this.#restartAfterUpdate(upgradeId);
+        } catch (err) {
+          restartError = describeUnknown(err);
+          logError("update", "restart threw:", sanitizeForLog(restartError));
+        }
+        if (restartError) {
+          ok = false;
+          error = restartError;
+          errorCode = "restart_failed";
+        }
+      } else if (ok && !shouldRestart) {
+        this.#reportUpdateStage("done", { upgradeId });
       }
-    } else if (ok && !shouldRestart) {
-      this.#reportUpdateStage("done", { upgradeId });
-    }
 
-    await this.#updateProgress.flush();
-    if (!ok || !shouldRestart) {
-      endUpdateDrain();
-      await clearActiveUpgradeContext();
+      await this.#updateProgress.flush();
+      if (!ok || !shouldRestart) {
+        await clearActiveUpgradeContext();
+      }
+      this.#sendUpdateResult(ws, message.id, ok, error, {
+        errorCode,
+        upgradeId,
+      });
+    } finally {
+      // Whatever went wrong above, a daemon that stays up takes commands and
+      // updates again; only a successful install keeps the gate shut until
+      // the restart.
+      if (!ok || !shouldRestart) endUpdateDrain();
+      this.#updateInstallInProgress = false;
     }
-    this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
-
-    this.#updateInstallInProgress = false;
   }
 
   /**

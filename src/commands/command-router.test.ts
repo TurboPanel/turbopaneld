@@ -82,8 +82,8 @@ test({
         type: "command-dispatch",
         id: "req-drain",
         commandId: "cmd-drain",
-        commandType: "daemon.ping",
-        payload: {},
+        commandType: "server.hostname.set",
+        payload: { hostname: "drain-test" },
         at: new Date().toISOString(),
       }, mock as unknown as WebSocket);
       const frames = parseFrames(mock.sentFrames);
@@ -95,6 +95,32 @@ test({
       assertMatch(String(frames[1]?.error), /installing a TurboPanel update/);
       assertEquals(frames[1]?.result, undefined);
       assertEquals(gate.runningCommandCount(), 0);
+    } finally {
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch still answers a ping while a daemon update drains",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    gate.beginUpdateDrain();
+    try {
+      const mock = new MockWebSocket();
+      await handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-drain-ping",
+        commandId: "cmd-drain-ping",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      assertEquals(parseFrames(mock.sentFrames)[1]?.ok, true);
     } finally {
       gate.resetBootConvergeForTests();
     }

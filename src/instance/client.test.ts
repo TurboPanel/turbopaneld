@@ -5115,12 +5115,14 @@ it({
 function installDrainTestHooks(opts: {
   onReconcile: () => Promise<void>;
   sleep: (ms: number) => Promise<void>;
+  restart?: () => Promise<boolean>;
+  currentCommit?: string;
 }): () => void {
   return installClientTestHooks({
     updateResultHandoffDelayMs: 0,
-    restartDaemonService: () => Promise.resolve(true),
+    restartDaemonService: opts.restart ?? (() => Promise.resolve(true)),
     getBuildInfo: () => ({
-      commit: "old",
+      commit: opts.currentCommit ?? "old",
       buildId: "dev-old",
       builtAt: "2026-08-01T00:00:00Z",
       channel: "trunk",
@@ -5240,6 +5242,114 @@ it({
       );
       assertEquals(result.ok, false);
       assertEquals(reconcileCalls, 1);
+      assertEquals(isUpdateDraining(), false);
+    } finally {
+      finishCommand();
+      await command;
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "a restart that throws reopens the gate and lets the next update run",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => Promise.resolve(),
+      sleep: () => new Promise<void>(() => {}),
+      restart: () => Promise.reject(new Error("sudo not found")),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-throw",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "restart failure update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-throw"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "restart_failed");
+      assertEquals(isUpdateDraining(), false);
+      // The in-progress flag is cleared too: a second update is not refused.
+      socket.receive({
+        type: "update",
+        id: "upd-throw-2",
+        at: new Date().toISOString(),
+      });
+      const second = await waitFor(
+        "second update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-throw-2"
+          ) as { errorCode?: string } | undefined,
+      );
+      assertEquals(second.errorCode, "restart_failed");
+    } finally {
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "an update to the build already running does not drain or refuse work",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    const restoreHooks = installDrainTestHooks({
+      currentCommit: "commit-one",
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      sleep: () => new Promise<void>(() => {}),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-same",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unchanged update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-same"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(reconcileCalls, 0);
       assertEquals(isUpdateDraining(), false);
     } finally {
       finishCommand();

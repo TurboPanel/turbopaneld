@@ -173,10 +173,17 @@ half-way. After the manifest checks pass and before the installer runs,
 (`src/orchestration/boot-converge-gate.ts`): new `command-dispatch` messages
 are refused whole with a failed outcome (nothing runs), and the update waits
 for every command that got past the gate (`withCommandRunning`), up to
-`UPDATE_DRAIN_CAP_MS` (20 minutes); at the cap it logs what still runs and
+`UPDATE_DRAIN_CAP_MS` (10 minutes, inside the control plane's 15 minute step window); at the cap it logs what still runs and
 installs anyway. The gate reopens (`endUpdateDrain`) when the update fails or
 installs nothing; after an install it stays closed until the restart. No wire
 message is involved. A command the daemon was running when it stopped anyway
 is reported failed ("The daemon restarted while this command was running")
 from its journal after the restart. Work that is not a dispatched command
 (scheduled backups, terminal sessions) is not counted.
+
+Before the wait it reports the `preparing` stage with the reason: a step that
+reports nothing for 5 minutes is sent again by the control plane. `daemon.ping`
+and `server.firewall.confirm` still run during the wait. A thrown restart
+reopens the gate like a failed one. Not drained: the dev-sync restart
+(`#applyDevSync` path in `client.ts`, development hosts only) and the
+update-guard rollback, which acts on root's own record outside the daemon.
