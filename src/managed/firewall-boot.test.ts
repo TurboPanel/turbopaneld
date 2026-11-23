@@ -392,3 +392,81 @@ test("routable address classification", () => {
     assertEquals(isPubliclyRoutableIpv4(address), false, address);
   }
 });
+
+const COMPOSE_10 =
+  'services:\n  db:\n    ports:\n      - "10.10.0.151:45000:3306"\n';
+
+test("the exact private record apply wrote parses as private with no listener", async () => {
+  await withState(async (layout, dir) => {
+    await putFile(
+      dir,
+      ID_A,
+      "listener-scope.json",
+      '{"public":false,"address":"","port":0,"peers":[]}\n',
+    );
+    await putFile(dir, ID_A, "docker-compose.yml", COMPOSE_10);
+    // The record exists, so compose (a 10.x bind) is never consulted.
+    assertEquals(await listBootPublicListeners(layout), []);
+  });
+});
+
+test("a private apply round-trips to no boot listener and a public one to its listener", async () => {
+  await withState(async (layout, dir) => {
+    await Deno.mkdir(join(dir, "managed", ID_A), { recursive: true });
+    await putFile(dir, ID_A, "docker-compose.yml", COMPOSE_10);
+    const privatePayload = {
+      managedId: ID_A,
+      privateListener: {
+        address: "10.10.0.151",
+        port: 45000,
+        transport: "private",
+      },
+      peers: [{ address: "10.10.0.154", transport: "private" }],
+    } as unknown as ManagedApplyPayload;
+    await recordManagedListenerCleared(layout, privatePayload);
+    assertEquals(await scopeFile(dir), {
+      public: false,
+      address: "",
+      port: 0,
+      peers: [],
+    });
+    assertEquals(await listBootPublicListeners(layout), []);
+    await reconcileManagedFirewallBefore(
+      layout,
+      publicPayload(["198.51.100.7"]),
+      noFirewall,
+    );
+    assertEquals(await listBootPublicListeners(layout), [
+      {
+        managedId: ID_A,
+        address: "203.0.113.50",
+        port: 45001,
+        peers: ["198.51.100.7"],
+      },
+    ]);
+  });
+});
+
+test("a private record with a stray port is still private, a public one without a port is invalid", async () => {
+  await withState(async (layout, dir) => {
+    await putFile(
+      dir,
+      ID_A,
+      "listener-scope.json",
+      '{"public":false,"port":99999}',
+    );
+    assertEquals(await listBootPublicListeners(layout), []);
+    await putFile(
+      dir,
+      ID_B,
+      "listener-scope.json",
+      '{"public":true,"address":"203.0.113.9","port":0}',
+    );
+    await putFile(dir, ID_B, "docker-compose.yml", COMPOSE_10);
+    // Invalid public record: falls back to compose, DROP only.
+    assertEquals(
+      (await listBootPublicListeners(layout)).map((l) => l.managedId),
+      [ID_B],
+    );
+  });
+});

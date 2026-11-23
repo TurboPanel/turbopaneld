@@ -119,11 +119,24 @@ function isValidPort(value: unknown): value is number {
 function parseScope(text: string, managedId: string): ScopeRead {
   try {
     const value = JSON.parse(text) as Record<string, unknown>;
+    // A private record names no listener, so it needs no address or port
+    // (apply writes `port: 0` for it); only a public one must carry both.
     if (
-      typeof value.public !== "boolean" || typeof value.address !== "string" ||
-      !isValidPort(value.port)
+      typeof value.public !== "boolean" ||
+      (value.public &&
+        (typeof value.address !== "string" || !isValidPort(value.port)))
     ) {
+      logWarn(
+        "managed",
+        `listener scope record invalid managedId=${sanitizeForLog(managedId)}`,
+      );
       return { kind: "invalid" };
+    }
+    if (!value.public) {
+      return {
+        kind: "record",
+        record: { public: false, address: "", port: 0, peers: [] },
+      };
     }
     let peers: string[] | null = [];
     if (value.peers !== undefined) {
@@ -146,9 +159,9 @@ function parseScope(text: string, managedId: string): ScopeRead {
     return {
       kind: "record",
       record: {
-        public: value.public,
-        address: value.address,
-        port: value.port,
+        public: true,
+        address: value.address as string,
+        port: value.port as number,
         peers: peers ?? [],
         // Only an explicit `false` skips the boot chain; anything else is
         // scoped, so a narrowed `[]` still gets a DROP-only chain.
@@ -156,6 +169,10 @@ function parseScope(text: string, managedId: string): ScopeRead {
       },
     };
   } catch {
+    logWarn(
+      "managed",
+      `listener scope record unparseable managedId=${sanitizeForLog(managedId)}`,
+    );
     return { kind: "invalid" };
   }
 }
