@@ -61,6 +61,7 @@ import {
   setHostingCaddyReadyForTest,
   setIngressHostCommandForTest,
   siteBindAddresses,
+  siteBoundLayout,
   siteSnippet,
   snippetSiteAddresses,
   sortCaddySiteRoutes,
@@ -2196,10 +2197,11 @@ function fakeCaddyRefusal(layout: LayoutPaths): string | null {
   for (const entry of Deno.readDirSync(sites)) {
     const text = Deno.readTextFileSync(join(sites, entry.name));
     if (text.includes("BAD")) return `unrecognized directive in ${entry.name}`;
+    // A name is ambiguous per listen address: the same name on another bind
+    // is another site.
     const own = new Set(
-      [...text.matchAll(/^(?:http:\/\/)?([a-z0-9.-]+) \{$/gm)].map((m) =>
-        m[1]!
-      ),
+      [...text.matchAll(/^(?:http:\/\/)?([a-z0-9.-]+) \{\n(?: {2}bind (.+)\n)?/gm)]
+        .map((m) => `${m[1]!}@${m[2] ?? ""}`),
     );
     for (const host of own) {
       if (seen.has(host)) return `ambiguous site definition: ${host}`;
@@ -2363,6 +2365,45 @@ test("a stale snippet already on disk is set aside, not allowed to fail every ot
     await assertRejects(
       () => Deno.stat(join(sitesDir, "env-old.caddy.quarantined")),
       Deno.errors.NotFound,
+    );
+  } finally {
+    restore();
+    await cleanup();
+  }
+});
+
+test("a stale site set aside while judging leaves no repeated block of its names in the catch-all", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  const restore = setIngressHostCommandForTest(fakeHostRun(layout));
+  try {
+    const sitesDir = join(layout.configDir, "hosting", "sites");
+    await Deno.mkdir(sitesDir, { recursive: true });
+    await Deno.writeTextFile(
+      join(sitesDir, "env-bound.caddy"),
+      "bound.example.com {\n  bind 127.0.0.1\n}\n",
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-good.caddy"),
+      "good.example.com {\n}\n",
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-old.caddy"),
+      "BAD.example.com {\n}\n",
+    );
+    await rewriteHostingCaddySites(
+      layout,
+      hostingPayload("env-new", "new.example.com"),
+      undefined,
+      noGrant,
+    );
+    const fallback = await Deno.readTextFile(
+      join(sitesDir, "00-fallback.caddy"),
+    );
+    assertStringIncludes(fallback, "good.example.com {\n  bind 127.0.0.1\n");
+    assertEquals(fallback.includes("BAD"), false);
+    assertEquals(
+      (await Deno.stat(join(sitesDir, "env-old.caddy.quarantined"))).isFile,
+      true,
     );
   } finally {
     restore();
@@ -5923,6 +5964,67 @@ test("ensureHostingFallback adds a catch-all for the scheme and address of a bou
     );
   } finally {
     restore();
+    await cleanup();
+  }
+});
+
+test("hostingFallbackSnippet repeats a block with no bind on each bound address of its scheme once", () => {
+  const texts = [
+    "http://u.test {\n  redir https://{host}{uri} permanent\n}\n\nu.test {\n  tls internal\n  respond ok\n}\n",
+    "http://b.test {\n  bind 127.0.0.1\n  respond b\n}\n\nb.test {\n  bind 127.0.0.1 10.0.0.5\n  respond b\n}\n",
+    "https://:9443 {\n  respond x\n}\n",
+  ];
+  const layout = siteBoundLayout(texts);
+  assertEquals(layout.http, ["127.0.0.1"]);
+  assertEquals(layout.https, ["10.0.0.5", "127.0.0.1"]);
+  const out = hostingFallbackSnippet(false, false, layout);
+  assertStringIncludes(
+    out,
+    "u.test {\n  bind 10.0.0.5\n  tls internal\n  respond ok\n}\n",
+  );
+  assertStringIncludes(
+    out,
+    "u.test {\n  bind 127.0.0.1\n  tls internal\n  respond ok\n}\n",
+  );
+  assertStringIncludes(
+    out,
+    "http://u.test {\n  bind 127.0.0.1\n  redir https://{host}{uri} permanent\n}\n",
+  );
+  assertEquals(out.includes("http://u.test {\n  bind 10.0.0.5"), false);
+  // Bound blocks and ones on another port are never repeated.
+  assertEquals(out.includes("b.test {\n  bind 127.0.0.1\n  respond b"), false);
+  assertEquals(out.includes(":9443"), false);
+});
+
+test("hostingFallbackSnippet does not repeat a block where another block of the same name already binds", () => {
+  const layout = siteBoundLayout([
+    "u.test {\n  respond ok\n}\n",
+    "u.test {\n  bind 127.0.0.1\n  respond ok\n}\n",
+    "b.test {\n  bind 127.0.0.1 10.0.0.5\n  respond b\n}\n",
+  ]);
+  const out = hostingFallbackSnippet(false, false, layout);
+  assertEquals(out.includes("u.test {\n  bind 127.0.0.1"), false);
+  assertStringIncludes(out, "u.test {\n  bind 10.0.0.5\n  respond ok");
+});
+
+test("plannedFallbackForSites repeats the unbound sites of the files on disk on a pending bound address", async () => {
+  const { layout, cleanup } = await makeTestLayout();
+  try {
+    const sitesDir = await sitesDirOf(layout);
+    await Deno.writeTextFile(
+      join(sitesDir, "00-fallback.caddy"),
+      hostingFallbackSnippet(false, true),
+    );
+    await Deno.writeTextFile(
+      join(sitesDir, "env-u.caddy"),
+      "u.test {\n  respond ok\n}\n",
+    );
+    const planned = await plannedFallbackForSites(
+      sitesDir,
+      new Map([["env-b.caddy", "b.test {\n  bind 127.0.0.1\n}\n"]]),
+    );
+    assertStringIncludes(planned!, "u.test {\n  bind 127.0.0.1\n  respond ok\n}");
+  } finally {
     await cleanup();
   }
 });

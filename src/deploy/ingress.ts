@@ -2222,6 +2222,14 @@ ${html}    HTML 404
  * block with the same answer. Caddy refuses a repeated site address per
  * listen address, not per `bind` set, so the list holds every address once
  * even where sets overlap, never one block per set.
+ *
+ * A listener on a specific address also takes every connection to that
+ * address from the one that listens everywhere, so a site with no `bind`
+ * would answer on it with the page above (a request to 127.0.0.1 or the LAN
+ * address for a hosted name, once any other site binds there). Each such
+ * site block is therefore repeated here with the bind, once per bound address
+ * on its scheme (`bindAddresses.unbound`), so the name keeps answering on
+ * every address of the machine.
  */
 export function hostingFallbackSnippet(
   hideWebServerNames: boolean | undefined,
@@ -2252,13 +2260,66 @@ ${hide}${page}}
 ${HOSTING_FALLBACK_HOSTNAME} {
   tls internal
 ${hide}${page}}
-${bound}`;
+${bound}${unboundSiteCopies(bindAddresses)}`;
+}
+
+/**
+ * Each site block with no `bind`, repeated for every address its scheme is
+ * bound on elsewhere, unless a block of the same address already binds there.
+ */
+function unboundSiteCopies(bindAddresses: BoundAddresses): string {
+  const { unbound = [], bindTaken = [] } = bindAddresses;
+  const taken = new Set(bindTaken);
+  const copies = unbound.map((block) =>
+    bindAddresses[block.scheme]
+      .filter((address) => {
+        const key = `${block.address}@${address}`;
+        if (taken.has(key)) return false;
+        // One copy per name and address, so two files serving a name leave
+        // one copy and never a repeated site address.
+        taken.add(key);
+        return true;
+      })
+      .map((address) => `
+# ${block.address} on ${address}.
+${block.address} {
+  bind ${address}
+${block.body}}
+`).join("")
+  ).join("");
+  return copies === "" ? "" : FALLBACK_COPIES_MARKER + copies;
+}
+
+/**
+ * Starts the repeated site blocks, the last part of the catch-all file. The
+ * copies are of other files' text, so judging one file at a time leaves them
+ * out ({@link withoutFallbackCopies}): a stale site file must not take the
+ * catch-all down with it.
+ */
+const FALLBACK_COPIES_MARKER =
+  "\n# Site blocks with no bind, repeated on the addresses other sites bind.";
+
+/** The catch-all file without its repeated site blocks. */
+function withoutFallbackCopies(text: string): string {
+  const at = text.indexOf(FALLBACK_COPIES_MARKER);
+  return at === -1 ? text : text.slice(0, at);
 }
 
 /** The addresses site blocks bind to, by the scheme the block serves. */
 export type BoundAddresses = {
   readonly http: readonly string[];
   readonly https: readonly string[];
+  /** Site blocks with no `bind`, to repeat on the bound addresses. */
+  readonly unbound?: readonly UnboundSiteBlock[];
+  /** `address@bound address` of blocks that already bind, never repeated. */
+  readonly bindTaken?: readonly string[];
+};
+
+/** A top-level site block with no `bind`: its address line and body. */
+export type UnboundSiteBlock = {
+  readonly scheme: "http" | "https";
+  readonly address: string;
+  readonly body: string;
 };
 
 const NO_BOUND_ADDRESSES: BoundAddresses = { http: [], https: [] };
@@ -2289,6 +2350,34 @@ export function siteBindAddresses(texts: readonly string[]): BoundAddresses {
   const sorted = (set: Set<string>) =>
     [...set].sort((a, b) => a.localeCompare(b));
   return { http: sorted(found.http), https: sorted(found.https) };
+}
+
+/** A site address that is one host name on the default port. */
+const PLAIN_SITE_ADDRESS_RE = /^(?:https?:\/\/)?[A-Za-z0-9*][A-Za-z0-9.*-]*$/;
+
+/**
+ * {@link siteBindAddresses} plus the site blocks that have no `bind`, which
+ * {@link hostingFallbackSnippet} repeats on the bound addresses.
+ */
+export function siteBoundLayout(texts: readonly string[]): BoundAddresses {
+  const bound = siteBindAddresses(texts);
+  const unbound: UnboundSiteBlock[] = [];
+  const bindTaken: string[] = [];
+  for (const text of texts) {
+    for (const block of text.matchAll(SITE_BLOCK_RE)) {
+      const bind = SITE_BIND_LINE_RE.exec(block[2]);
+      const address = block[1];
+      if (bind !== null) {
+        for (const token of bind[1].split(" ")) {
+          bindTaken.push(`${address}@${token}`);
+        }
+      } else if (PLAIN_SITE_ADDRESS_RE.test(address)) {
+        const scheme = address.startsWith("http://") ? "http" : "https";
+        unbound.push({ scheme, address, body: block[2] });
+      }
+    }
+  }
+  return { ...bound, unbound, bindTaken };
 }
 
 /** Adds the IP literals the `bind` lines of one site file's blocks name. */
@@ -2324,7 +2413,7 @@ async function liveBindAddresses(
         readTextIfPresent(join(sitesDir, name)).catch(() => undefined)
       ),
   );
-  return siteBindAddresses([
+  return siteBoundLayout([
     ...texts.filter((text) => text !== undefined),
     ...pending.values(),
   ]);
@@ -3230,7 +3319,15 @@ async function findUnloadableSnippets(
   const bad: Array<{ name: string; reason: string }> = [];
   await forEachSequential(names, async (name) => {
     const staged = join(candidate.sitesDir, name);
-    await Deno.copyFile(join(sitesDir, name), staged);
+    if (name === HOSTING_FALLBACK_SITE) {
+      await Deno.writeTextFile(
+        staged,
+        withoutFallbackCopies(await Deno.readTextFile(join(sitesDir, name))),
+        { mode: 0o640 },
+      );
+    } else {
+      await Deno.copyFile(join(sitesDir, name), staged);
+    }
     const refusal = await hostingCandidateRefusal(layout, candidate);
     if (refusal !== null) {
       await Deno.remove(staged);
@@ -3386,6 +3483,13 @@ export async function validateHostingCaddyCandidate(
         Deno.remove(join(candidate.sitesDir, name)).catch(() => {})
       ),
     );
+    if (fallbackContents !== undefined) {
+      await Deno.writeTextFile(
+        join(candidate.sitesDir, HOSTING_FALLBACK_SITE),
+        withoutFallbackCopies(fallbackContents),
+        { mode: 0o640 },
+      );
+    }
     const bad = await findUnloadableSnippets(
       layout,
       candidate,
@@ -3393,6 +3497,19 @@ export async function validateHostingCaddyCandidate(
       others,
     );
     await quarantineHostingSnippets(sitesDir, bad);
+    if (fallbackContents !== undefined) {
+      // The repeated blocks come from the files that are left; the validated
+      // set is then the one the deploy goes on to write.
+      await Deno.writeTextFile(
+        join(candidate.sitesDir, HOSTING_FALLBACK_SITE),
+        bad.length === 0 ? fallbackContents : hostingFallbackSnippet(
+          deletesHeader(fallbackContents, "Server"),
+          !deletesHeader(fallbackContents, "Via"),
+          await liveBindAddresses(sitesDir, new Map([[siteFile, contents]])),
+        ),
+        { mode: 0o640 },
+      );
+    }
     await Deno.writeTextFile(join(candidate.sitesDir, siteFile), contents, {
       mode: 0o640,
     });
@@ -3899,9 +4016,16 @@ async function rewriteHostingCaddySitesLocked(
 
   if (hostnames.length > 0) await enableHostingCaddy();
 
+  // A site file set aside while judging leaves the repeated blocks of its
+  // names out of the catch-all, as the judged set did.
+  const fallbackToWrite = hostingFallbackSnippet(
+    payload.hideWebServerNames === true,
+    payload.sendViaHeader,
+    await liveBindAddresses(sitesDir, new Map([[siteFile, siteContent]])),
+  );
   await activateHostingSites([
     { live: join(sitesDir, siteFile), contents: siteContent },
-    { live: join(sitesDir, HOSTING_FALLBACK_SITE), contents: fallbackContent },
+    { live: join(sitesDir, HOSTING_FALLBACK_SITE), contents: fallbackToWrite },
     ...(tunnelToWrite === undefined
       ? []
       : [{ live: join(sitesDir, TUNNEL_SITE_FILE), contents: tunnelToWrite }]),

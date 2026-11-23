@@ -10,6 +10,7 @@ import {
 import {
   hostingFallbackSnippet,
   siteBindAddresses,
+  siteBoundLayout,
   siteSnippet,
 } from "./ingress.ts";
 
@@ -68,7 +69,7 @@ type Probe = readonly ["http" | "https", string, string];
 async function ask(
   siteTexts: readonly string[],
   probes: readonly Probe[],
-  withBoundFallback = true,
+  withBoundFallback: boolean | "addresses-only" = true,
 ): Promise<Answer[]> {
   const root = await Deno.makeTempDir({ prefix: "tp-bound-fallback-" });
   const httpPort = freePort();
@@ -78,7 +79,11 @@ async function ask(
   const fallback = hostingFallbackSnippet(
     false,
     false,
-    withBoundFallback ? siteBindAddresses(siteTexts) : undefined,
+    withBoundFallback === "addresses-only"
+      ? siteBindAddresses(siteTexts)
+      : withBoundFallback
+      ? siteBoundLayout(siteTexts)
+      : undefined,
   );
   const config = join(root, "Caddyfile");
   await Deno.writeTextFile(
@@ -242,5 +247,64 @@ test({
       assertEquals(answers[0], { status: 200, body: "hi" });
       // The tunnel's own HTTPS address answers an unhosted name with the page.
       assertEquals(answers[1].status, 404);
+    }),
+});
+
+test({
+  name:
+    "a name with no bind still answers on an address another site binds, over HTTP and HTTPS",
+  ...options,
+  fn: () =>
+    withUpstream(async (up) => {
+      const bound = site("b.test", { bindAddress: "127.0.0.1" }, up);
+      const unbound = site("u.test", {}, up);
+      const answers = await ask([bound, unbound], [
+        ["https", "127.0.0.1", "u.test"],
+        ["http", "127.0.0.1", "u.test"],
+        ["https", "127.0.0.1", "b.test"],
+        ["https", "127.0.0.1", "not-deployed.test"],
+      ]);
+      assertEquals(answers[0], { status: 200, body: "hi" });
+      // Plain HTTP for a forced-HTTPS name is its redirect, not the page.
+      assertEquals(answers[1].status, 301);
+      assertEquals(answers[2], { status: 200, body: "hi" });
+      assertEquals(answers[3].status, 404);
+    }),
+});
+
+test({
+  name:
+    "a name with no bind answers on the loopback and peer addresses a tunnel name binds",
+  ...options,
+  fn: () =>
+    withUpstream(async (up) => {
+      const tunnel = site("t.test", {
+        bindAddress: "127.0.0.2",
+        tunnel: { lock: false, peers: [], extraBind: ["127.0.0.1"] },
+      }, up);
+      const unbound = site("u.test", {}, up);
+      const answers = await ask([tunnel, unbound], [
+        ["https", "127.0.0.1", "u.test"],
+        ["https", "127.0.0.2", "u.test"],
+      ]);
+      assertEquals(answers[0], { status: 200, body: "hi" });
+      assertEquals(answers[1], { status: 200, body: "hi" });
+    }),
+});
+
+test({
+  name:
+    "without the repeated blocks a name with no bind gets the default page on a bound address",
+  ...options,
+  fn: () =>
+    withUpstream(async (up) => {
+      const bound = site("b.test", { bindAddress: "127.0.0.1" }, up);
+      const unbound = site("u.test", {}, up);
+      const [answer] = await ask(
+        [bound, unbound],
+        [["https", "127.0.0.1", "u.test"]],
+        "addresses-only",
+      );
+      assertEquals(answer.status, 404);
     }),
 });
