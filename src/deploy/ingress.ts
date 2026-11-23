@@ -2325,8 +2325,74 @@ export type UnboundSiteBlock = {
 const NO_BOUND_ADDRESSES: BoundAddresses = { http: [], https: [] };
 
 /** A top-level block of a site file: its address line and its body. */
-const SITE_BLOCK_RE = /^(\S[^\n]*?) \{\n([\s\S]*?)^\}$/gm;
+const SITE_OPEN_RE = /^(\S[^\n]*?) \{$/;
 const SITE_BIND_LINE_RE = /^ {2}bind (\S+(?: \S+)*)$/m;
+
+/** The line with quoted text and a trailing `#` comment taken out. */
+function unquoted(line: string): string {
+  let out = "";
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote !== "") {
+      if (ch === "\\" && quote !== "`") i++;
+      else if (ch === quote) quote = "";
+    } else if (ch === '"' || ch === "`") {
+      quote = ch;
+    } else if (ch === "#" && (i === 0 || /\s/.test(line[i - 1]))) {
+      break;
+    } else {
+      out += ch;
+    }
+  }
+  return out;
+}
+
+/** How much one line opens or closes braces, outside quotes and comments. */
+function braceDelta(line: string): number {
+  let delta = 0;
+  for (const ch of unquoted(line)) {
+    if (ch === "{") delta++;
+    else if (ch === "}") delta--;
+  }
+  return delta;
+}
+
+/** The index just past the line that closes the block opened at `from`, or -1. */
+function blockEnd(lines: readonly string[], from: number): number {
+  let depth = 1;
+  for (let end = from + 1; end < lines.length; end++) {
+    depth += braceDelta(lines[end]);
+    if (depth === 0) return end + 1;
+  }
+  return -1;
+}
+
+/**
+ * The top-level blocks of a site file: each address line and the body up to
+ * the brace that closes the block. Inner blocks may close in column 0 (the
+ * upstream snippet does), so the end is found by counting braces.
+ */
+function* siteBlocks(
+  text: string,
+): Generator<{ readonly address: string; readonly body: string }> {
+  const lines = text.split("\n");
+  let i = 0;
+  while (i < lines.length) {
+    const open = SITE_OPEN_RE.exec(lines[i]);
+    const end = open === null ? -1 : blockEnd(lines, i);
+    if (open === null || end === -1) {
+      i++;
+      continue;
+    }
+    const body = lines.slice(i + 1, end - 1);
+    yield {
+      address: open[1],
+      body: body.length === 0 ? "" : body.join("\n") + "\n",
+    };
+    i = end;
+  }
+}
 
 function isBindToken(token: string): boolean {
   const bare = token.startsWith("[") && token.endsWith("]")
@@ -2364,16 +2430,16 @@ export function siteBoundLayout(texts: readonly string[]): BoundAddresses {
   const unbound: UnboundSiteBlock[] = [];
   const bindTaken: string[] = [];
   for (const text of texts) {
-    for (const block of text.matchAll(SITE_BLOCK_RE)) {
-      const bind = SITE_BIND_LINE_RE.exec(block[2]);
-      const address = block[1];
+    for (const block of siteBlocks(text)) {
+      const bind = SITE_BIND_LINE_RE.exec(block.body);
+      const address = block.address;
       if (bind !== null) {
         for (const token of bind[1].split(" ")) {
           bindTaken.push(`${address}@${token}`);
         }
       } else if (PLAIN_SITE_ADDRESS_RE.test(address)) {
         const scheme = address.startsWith("http://") ? "http" : "https";
-        unbound.push({ scheme, address, body: block[2] });
+        unbound.push({ scheme, address, body: block.body });
       }
     }
   }
@@ -2385,10 +2451,10 @@ function collectBlockBindings(
   text: string,
   found: { readonly http: Set<string>; readonly https: Set<string> },
 ): void {
-  for (const block of text.matchAll(SITE_BLOCK_RE)) {
-    const bind = SITE_BIND_LINE_RE.exec(block[2]);
+  for (const block of siteBlocks(text)) {
+    const bind = SITE_BIND_LINE_RE.exec(block.body);
     if (bind === null) continue;
-    const scheme = block[1].startsWith("http://") ? "http" : "https";
+    const scheme = block.address.startsWith("http://") ? "http" : "https";
     for (const token of bind[1].split(" ")) {
       if (isBindToken(token)) found[scheme].add(token);
     }
