@@ -80,11 +80,21 @@ function embeddedV4(g: number[]): number[] | null {
   return [g[6]! >> 8, g[6]! & 255, g[7]! >> 8, g[7]! & 255];
 }
 
-function ipv6Class(host: string): "loopback" | "private" | "other" {
+/**
+ * How an IPv6 host is treated. A literal that cannot be read as eight groups
+ * is refused like loopback (fail closed). Exported for tests: `new URL` already
+ * normalises what reaches it, so the odd forms can only be fed here.
+ */
+export function ipv6Class(host: string): "loopback" | "private" | "other" {
   const h = host.replace(/^\[|\]$/g, "").toLowerCase();
-  if (h === "::1" || h === "::" || h.startsWith("fe80:")) return "loopback";
   const groups = v6Groups(h);
-  const v4 = groups ? embeddedV4(groups) : null;
+  if (!groups) return "loopback";
+  if (groups.slice(0, 7).every((x) => x === 0) && groups[7]! <= 1) {
+    return "loopback"; // `::` and `::1`
+  }
+  // fe80::/10 is the whole link-local range, not only the fe80: prefix.
+  if ((groups[0]! & 0xffc0) === 0xfe80) return "loopback";
+  const v4 = embeddedV4(groups);
   if (v4) {
     if (isLoopbackOrLinkLocalV4(v4)) return "loopback";
     return isPrivateV4(v4) ? "private" : "other";

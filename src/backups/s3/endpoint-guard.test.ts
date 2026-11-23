@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert";
-import { endpointRefusal } from "./endpoint-guard.ts";
+import { endpointRefusal, ipv6Class } from "./endpoint-guard.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -78,4 +78,44 @@ test("tests can allow loopback over http", () => {
     typeof endpointRefusal("https://169.254.169.254", { allowLoopback: true }),
     "string",
   );
+});
+
+test("an IPv6 literal that cannot be read is refused, not allowed", () => {
+  for (
+    const host of [
+      "[1::2::3]",
+      "[1:2:3:4:5:6:7]",
+      "[1:2:3:4:5:6:7:8:9]",
+      "[1:2:3:4::5:6:7:8]",
+      "[g::1]",
+      "[::12345]",
+      "[::ffff:300.1.1.1]",
+    ]
+  ) {
+    assertEquals(ipv6Class(host), "loopback", host);
+  }
+});
+
+test("a dotted-quad tail is read as two groups", () => {
+  assertEquals(ipv6Class("[::ffff:127.0.0.1]"), "loopback");
+  assertEquals(ipv6Class("[::ffff:10.1.2.3]"), "private");
+  assertEquals(ipv6Class("[::ffff:8.8.8.8]"), "other");
+  assertEquals(ipv6Class("[64:ff9b::192.168.1.1]"), "private");
+});
+
+test("all of fe80::/10 is link-local, and fec0:: is not", () => {
+  for (
+    const url of [
+      "https://[fe80::1]",
+      "https://[fe9a::1]",
+      "https://[febf::1]",
+    ]
+  ) {
+    assertEquals(typeof endpointRefusal(url), "string", url);
+  }
+  assertEquals(ipv6Class("[fec0::1]"), "other");
+  assertEquals(ipv6Class("[::]"), "loopback");
+  assertEquals(ipv6Class("[::1]"), "loopback");
+  assertEquals(ipv6Class("[fd00:ec2::254]"), "loopback");
+  assertEquals(ipv6Class("[fd12::1]"), "private");
 });
