@@ -152,7 +152,52 @@ test("materializeLocation creates docker volume via runDocker", async () => {
         "",
       );
       assertEquals(name, "tp-00000000-cache");
-      assertEquals(calls[0], ["volume", "create", "tp-00000000-cache"]);
+      assertEquals(calls[0], [
+        "volume",
+        "create",
+        "--label",
+        "io.turbopanel.storage=stor-vol",
+        "tp-00000000-cache",
+      ]);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("materializeLocation leaves an external docker volume unlabeled", async () => {
+  await withTempLayout(async (layout) => {
+    const calls: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      runRaw: (_command, args) => {
+        calls.push([...args]);
+        return Promise.resolve({
+          success: true,
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      },
+    });
+    try {
+      await materializeLocation(
+        layout,
+        "org-1",
+        {
+          storageId: "stor-ext",
+          locationId: "loc-ext",
+          kind: "volume",
+          name: "data",
+          provider: "docker",
+          volumeName: "shared-data",
+          managed: false,
+          serverId: "srv",
+          mounts: [],
+        },
+        undefined,
+        "",
+      );
+      assertEquals(calls[0], ["volume", "create", "shared-data"]);
     } finally {
       restore();
     }

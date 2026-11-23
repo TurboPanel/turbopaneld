@@ -16,6 +16,7 @@ import {
   type RunFn,
 } from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
+import { LABEL_STORAGE } from "./labels.ts";
 import { directoryExists } from "../permissions/privileged-read.ts";
 
 const STORAGE_ROOT = "storage";
@@ -166,7 +167,18 @@ async function materializeDockerVolume(
     );
   }
   const volumeName = entry.volumeName;
-  const create = await runDocker(["volume", "create", volumeName]);
+  // A volume the control plane manages carries the owner label so the Docker
+  // gate lets a later Destroy remove it. A volume the compose file names as
+  // external is not ours and stays unlabeled.
+  const labelArgs = entry.managed === false
+    ? []
+    : ["--label", `${LABEL_STORAGE}=${entry.storageId}`];
+  const create = await runDocker([
+    "volume",
+    "create",
+    ...labelArgs,
+    volumeName,
+  ]);
   if (!create.success) {
     throw new Error(
       create.stderr || `Failed to create docker volume ${volumeName}`,

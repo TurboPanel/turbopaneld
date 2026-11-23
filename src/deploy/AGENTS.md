@@ -133,7 +133,7 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    (`locationId` is the frozen wire field for a storage copy; `materializeLocation`
    in `materialize-storage.ts`); `docker volume create`
    for `kind=volume` + `provider=docker` using instance-supplied **`volumeName`**
-   (the storage UUID). Optional `chown` when a
+   (the storage UUID), stamping `io.turbopanel.storage=<storageId>` on a managed one (never on an external one): the Docker gate refuses to remove a volume that carries no Compose project and no `io.turbopanel.*` label (`unowned-volume`), so an unlabeled volume could never be deleted by a Destroy that deletes data. Volumes created before the label stay unlabeled (Docker cannot relabel a volume). Optional `chown` when a
    principal is linked. The instance owns Docker volume naming. Path-provider
    directory/file entries arrive with `sourcePath` — principal-owned defaults
    are `/srv/users/<username>/volumes/<storageId>`; a `sourcePath` outside the
