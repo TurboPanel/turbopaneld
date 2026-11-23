@@ -79,10 +79,10 @@
       ansible.builtin.import_role:
         name: docker
         tasks_from: converge-builder
-    # Existing Docker hosts get the observe-mode gate on their next converge;
+    # Existing Docker hosts get the enforcing gate on their next converge;
     # the role is a no-op where Docker is absent (docker-setup installs it
     # there, via the docker role).
-    - name: Docker gate (no-op without Docker, observe mode)
+    - name: Docker gate (no-op without Docker, enforce mode)
       ansible.builtin.import_role:
         name: docker-gate
     # Repairs that a fresh install makes but an update never reached. Both are

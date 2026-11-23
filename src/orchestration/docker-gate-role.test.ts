@@ -111,7 +111,7 @@ type UnitVars = {
 };
 
 const DEFAULT_VARS: UnitVars = {
-  docker_gate_mode: "observe",
+  docker_gate_mode: "enforce",
   docker_gate_gid: "9999",
   docker_gate_dir: "/opt/turbopanel/lib/docker-gate",
   docker_gate_deno_bin: "/opt/turbopanel/vendor/deno/current/deno",
@@ -191,25 +191,45 @@ const jinjaTest = (name: string, fn: () => Promise<void>) =>
   });
 
 jinjaTest("the unit's mode comes from docker_gate_mode", async () => {
-  const unit = await renderUnit({ docker_gate_mode: "enforce" });
+  const unit = await renderUnit({ docker_gate_mode: "observe" });
   assert(
     directives(unit, "Service").includes(
-      "Environment=TP_DOCKER_GATE_MODE=enforce",
+      "Environment=TP_DOCKER_GATE_MODE=observe",
     ),
   );
 });
 
+test("the gate enforces by default, the load check and the unit agree, and enforce needs Traefik's gate socket", async () => {
+  const defaults = await read("defaults/main.yml");
+  assertStringIncludes(defaults, "docker_gate_mode: enforce");
+  assertFalse(/^docker_gate_mode: observe/m.test(defaults));
+  const main = await read("tasks/main.yml");
+  const guard = main.indexOf(
+    "- name: Refuse an enforcing gate with Traefik's gate socket switched off",
+  );
+  assert(
+    guard >= 0 && guard < main.indexOf("block:"),
+    "guard sits before the block",
+  );
+  assertStringIncludes(
+    main.slice(guard, guard + 500),
+    "(docker_gate_mode | string) != 'enforce'",
+  );
+  // A missing Deno is a failed converge in enforce mode, not a warning: the
+  // daemon has no other route to Docker.
+  assertStringIncludes(
+    main,
+    "Fail when the vendored Deno is missing and the gate is meant to enforce",
+  );
+});
+
 jinjaTest(
-  "the unit is observe-only, root-owned and pinned to the gate's own socket",
+  "the unit enforces by default, is root-owned and pinned to the gate's own socket",
   async () => {
     const unit = await renderUnit();
     const service = directives(unit, "Service");
     assert(service.includes("User=root"));
-    assert(service.includes("Environment=TP_DOCKER_GATE_MODE=observe"));
-    assertFalse(
-      /enforce/i.test(unit),
-      "this stage has no enforce mode anywhere",
-    );
+    assert(service.includes("Environment=TP_DOCKER_GATE_MODE=enforce"));
     assert(
       service.includes(
         "Environment=TP_DOCKER_GATE_SOCKET=/run/turbopanel-gate/docker.sock",
@@ -667,7 +687,32 @@ test("the gate is never fatal in stage 1, never installed for dev, and is wired 
   assertStringIncludes(converge, "name: docker-gate");
 });
 
-test("nothing routes through the gate yet: no DOCKER_HOST or socket override is set anywhere", async () => {
+test("the daemon routes Docker through the gate: the launch role's paths equal the gate role's, and only the daemon units carry them", async () => {
+  const launch = await Deno.readTextFile(
+    join(ORCHESTRATION, "roles/daemon-launch/defaults/main.yml"),
+  );
+  const gateDefaults = await read("defaults/main.yml");
+  assertStringIncludes(
+    launch,
+    `turbopanel_docker_gate_run_dir: ${DEFAULT_VARS.docker_gate_run_dir}`,
+  );
+  assertStringIncludes(
+    gateDefaults,
+    `docker_gate_run_dir: ${DEFAULT_VARS.docker_gate_run_dir}`,
+  );
+  assertStringIncludes(
+    launch,
+    'turbopanel_docker_gate_build_dir: "{{ turbopanel_docker_gate_run_dir }}/build"',
+  );
+  assertStringIncludes(
+    gateDefaults,
+    'docker_gate_build_run_dir: "{{ docker_gate_run_dir }}/build"',
+  );
+  assertStringIncludes(
+    launch,
+    `turbopanel_docker_gate_service: ${DEFAULT_VARS.docker_gate_service_name}.service`,
+  );
+  // The gate role itself never exports the client variables.
   const roleFiles: string[] = [];
   async function walk(dir: string): Promise<void> {
     for await (const entry of Deno.readDir(dir)) {
@@ -680,16 +725,67 @@ test("nothing routes through the gate yet: no DOCKER_HOST or socket override is 
   for (const path of roleFiles) {
     const body = await Deno.readTextFile(path);
     assertFalse(
-      /DOCKER_HOST/.test(body),
-      `${path} must not export DOCKER_HOST`,
+      /DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET/.test(body),
+      `${path} must not export the client variables`,
     );
-    assertFalse(/TURBOPANEL_DOCKER_SOCKET/.test(body), path);
   }
-  for (const unit of ["turbopaneld.service.j2"]) {
-    const body = await Deno.readTextFile(
-      join(ORCHESTRATION, "roles/daemon-launch/templates", unit),
+});
+
+test("the wait script: no gate unit means no wait, a live gate means no delay, a dead gate is bounded and warns", async () => {
+  const script = join(ORCHESTRATION, "scripts/wait-docker-gate.sh");
+  const tmp = await Deno.makeTempDir({ prefix: "tp-wait-gate-" });
+  try {
+    const bin = join(tmp, "bin");
+    await Deno.mkdir(bin);
+    // A stand-in systemctl: LOAD and ACTIVE come from the environment.
+    await Deno.writeTextFile(
+      join(bin, "systemctl"),
+      `#!/bin/sh
+case "$1" in
+  show) printf '%s\\n' "$FAKE_LOAD" ;;
+  is-active) [ "$FAKE_ACTIVE" = yes ] ;;
+esac
+`,
+      { mode: 0o755 },
     );
-    assertFalse(/DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET/.test(body), unit);
+    const sock = join(tmp, "docker.sock");
+    const listener = Deno.listen({ transport: "unix", path: sock });
+    const run = async (env: Record<string, string>, seconds: string) => {
+      const started = Date.now();
+      const { code, stderr } = await new Deno.Command("sh", {
+        args: [script, "gate.service", sock, seconds],
+        env: { PATH: `${bin}:/usr/bin:/bin`, ...env },
+        clearEnv: true,
+        stdout: "null",
+        stderr: "piped",
+      }).output();
+      return {
+        code,
+        stderr: new TextDecoder().decode(stderr),
+        ms: Date.now() - started,
+      };
+    };
+    const missing = await run(
+      { FAKE_LOAD: "not-found", FAKE_ACTIVE: "no" },
+      "5",
+    );
+    assertEquals(missing.code, 0);
+    assertEquals(missing.stderr, "");
+    assert(missing.ms < 2000, "an uninstalled gate is not waited for");
+    const live = await run({ FAKE_LOAD: "loaded", FAKE_ACTIVE: "yes" }, "5");
+    assertEquals(live.code, 0);
+    assertEquals(live.stderr, "");
+    assert(live.ms < 2000, "a serving gate is not waited for");
+    const dead = await run({ FAKE_LOAD: "loaded", FAKE_ACTIVE: "no" }, "2");
+    assertEquals(dead.code, 0, "the daemon still starts; Docker fails closed");
+    assertStringIncludes(dead.stderr, "Docker calls will fail closed");
+    assert(
+      dead.ms >= 1500 && dead.ms < 8000,
+      `bounded wait, took ${dead.ms}ms`,
+    );
+    listener.close();
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
   }
 });
 

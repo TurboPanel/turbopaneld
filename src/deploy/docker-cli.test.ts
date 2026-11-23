@@ -1,7 +1,11 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
+import { createHash } from "node:crypto";
 import {
+  DOCKER_BUILD_CONTEXT,
+  dockerBuilderName,
   type DockerCliResult,
   dockerConfigDir,
+  dockerConfigEnv,
   dockerEngineProbe,
   dockerEngineReachable,
   resetDockerInvocation,
@@ -919,5 +923,155 @@ test("when nothing can be trusted docker gets no flag and the reason is logged o
     const { args, warnings } = await configDirCalls(`${blocker}/docker-config`);
     assertEquals(args, ["ps"]);
     assertEquals(warnings.length, 1);
+  });
+});
+
+const GATE_SOCKET = "/run/turbopanel-gate/docker.sock";
+const BUILD_SOCKET = "/run/turbopanel-gate/build/docker.sock";
+
+test("with a build socket, compose and buildx run in a context the daemon wrote, other verbs do not", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const calls: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      dockerSocket: GATE_SOCKET,
+      buildSocket: BUILD_SOCKET,
+      runRaw: (_command, args) => {
+        calls.push([...args]);
+        return Promise.resolve(ok("x"));
+      },
+    });
+    try {
+      await runDocker(["compose", "up", "-d"]);
+      await runDocker(["buildx", "build", "."]);
+      await runDocker(["ps"]);
+      assertEquals(calls[0], [
+        "--config",
+        config,
+        "--context",
+        DOCKER_BUILD_CONTEXT,
+        "compose",
+        "up",
+        "-d",
+      ]);
+      assertEquals(calls[1]?.slice(0, 5), [
+        "--config",
+        config,
+        "--context",
+        DOCKER_BUILD_CONTEXT,
+        "buildx",
+      ]);
+      assertEquals(calls[2], ["--config", config, "ps"]);
+      assertEquals(dockerBuilderName(), DOCKER_BUILD_CONTEXT);
+      // The CLI's own store layout: contexts/meta/<sha256 of the name>/meta.json.
+      const id = createHash("sha256").update(DOCKER_BUILD_CONTEXT).digest(
+        "hex",
+      );
+      const metaPath = `${config}/contexts/meta/${id}/meta.json`;
+      const meta = JSON.parse(await Deno.readTextFile(metaPath));
+      assertEquals(meta.Name, DOCKER_BUILD_CONTEXT);
+      assertEquals(meta.Endpoints.docker.Host, `unix://${BUILD_SOCKET}`);
+      assertEquals(((await Deno.stat(metaPath)).mode ?? 0) & 0o777, 0o600);
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("with no build socket there is no context and the builder stays default", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const calls: string[][] = [];
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      dockerSocket: GATE_SOCKET,
+      runRaw: (_command, args) => {
+        calls.push([...args]);
+        return Promise.resolve(ok("x"));
+      },
+    });
+    try {
+      await runDocker(["compose", "up"]);
+      assertEquals(calls[0], ["--config", config, "compose", "up"]);
+      assertEquals(dockerBuilderName(), "default");
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("a relative build socket is ignored: no context is written", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      buildSocket: "build/docker.sock",
+      runRaw: () => Promise.resolve(ok("x")),
+    });
+    try {
+      assertEquals(dockerBuilderName(), "default");
+      await assertRejects(() => Deno.stat(`${config}/contexts`));
+    } finally {
+      restore();
+    }
+  });
+});
+
+test("the gate socket becomes DOCKER_HOST for every spawn, and survives the sudo rungs as env words", async () => {
+  await withTempDir(async (dir) => {
+    const config = `${dir}/docker-config`;
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const restore = setDockerCliIoForTest({
+      configDir: config,
+      dockerSocket: GATE_SOCKET,
+      runRaw: (command, args) => {
+        calls.push({ command, args: [...args] });
+        return Promise.resolve(
+          command === "/usr/bin/docker"
+            ? fail(
+              "permission denied while trying to connect to the Docker daemon socket",
+            )
+            : ok("ok"),
+        );
+      },
+    });
+    const previousUser = Deno.env.get("USER");
+    Deno.env.set("USER", "tp");
+    try {
+      assertEquals(dockerConfigEnv(), {
+        DOCKER_CONFIG: config,
+        DOCKER_HOST: `unix://${GATE_SOCKET}`,
+      });
+      await runDocker(["ps"]);
+      // sudo resets the environment, so the rung re-states both variables.
+      const sudo = calls[1];
+      assertEquals(sudo?.command, "/usr/bin/sudo");
+      const at = sudo?.args.indexOf("/usr/bin/env") ?? -1;
+      assertEquals(sudo?.args.slice(at, at + 3), [
+        "/usr/bin/env",
+        `DOCKER_CONFIG=${config}`,
+        `DOCKER_HOST=unix://${GATE_SOCKET}`,
+      ]);
+    } finally {
+      if (previousUser === undefined) Deno.env.delete("USER");
+      else Deno.env.set("USER", previousUser);
+      restore();
+    }
+  });
+});
+
+test("with no gate socket configured DOCKER_HOST is never set", async () => {
+  await withTempDir(async (dir) => {
+    const restore = setDockerCliIoForTest({
+      configDir: `${dir}/docker-config`,
+      runRaw: () => Promise.resolve(ok("x")),
+    });
+    try {
+      assertEquals(Object.keys(dockerConfigEnv()), ["DOCKER_CONFIG"]);
+      await assertRejects(() => Deno.stat(`${dir}/docker-config/contexts`));
+    } finally {
+      restore();
+    }
   });
 });

@@ -4,17 +4,32 @@ import { logWarn } from "../util/logger.ts";
 // Docker Engine speaks plain HTTP over the Unix socket; there is no TLS hop.
 export const DOCKER_HTTP_ORIGIN = "http://docker"; // NOSONAR typescript:S5332 — Unix-socket Docker API, not a cleartext network endpoint
 
+/** The Docker gate's socket on a managed host (`orchestration/roles/docker-gate`). */
+export const DOCKER_GATE_SOCKET = "/run/turbopanel-gate/docker.sock";
+
+function socketExists(path: string): boolean {
+  try {
+    return Deno.statSync(path).isSocket === true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Absolute path to the Docker Engine Unix socket.
  *
- * Override with `TURBOPANEL_DOCKER_SOCKET`, otherwise fall back to the root
- * Docker default.
+ * Override with `TURBOPANEL_DOCKER_SOCKET` (the managed daemon unit sets it to
+ * the gate). Without it the gate's socket is still preferred when it exists, so
+ * a process started without the unit's environment never reaches the engine
+ * around the gate; otherwise the root Docker default.
  */
 export function resolveDockerSocket(
   env: Record<string, string | undefined> = Deno.env.toObject(),
+  gateSocketExists: (path: string) => boolean = socketExists,
 ): string {
   const override = env.TURBOPANEL_DOCKER_SOCKET?.trim();
   if (override) return override;
+  if (gateSocketExists(DOCKER_GATE_SOCKET)) return DOCKER_GATE_SOCKET;
 
   // Future: when docker_rootless is enabled, resolve /run/user/<uid>/docker.sock here
   return "/var/run/docker.sock";

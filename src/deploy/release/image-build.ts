@@ -56,6 +56,7 @@ import { pinnedImage } from "../../util/image-pins.ts";
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import {
+  dockerBuilderName,
   type DockerCliResult,
   dockerConfigEnv,
   runDockerStreamed,
@@ -933,14 +934,16 @@ export function imageBuildBuildxArgs(
   >,
   planPath: string,
   cgroupParent?: string,
+  builder = "default",
 ): string[] {
   return [
     "buildx",
     "build",
     // The Engine's own builder (docker driver), never a docker-container
-    // builder a stray `docker buildx use` may have selected.
+    // builder a stray `docker buildx use` may have selected. Behind the Docker
+    // gate it is the builder of the build-socket context (`dockerBuilderName`).
     "--builder",
-    "default",
+    builder,
     "--progress=plain",
     // The build's own slice. The pinned frontend does not apply it to the
     // build steps yet (scripts/image-build-cgroup-proof.sh checks that).
@@ -1155,7 +1158,12 @@ export async function runImageBuildBuild(
       deps?.runCommand ?? runDefault,
     );
 
-    const args = imageBuildBuildxArgs(params, planPath, cgroupParent);
+    const args = imageBuildBuildxArgs(
+      params,
+      planPath,
+      cgroupParent,
+      dockerBuilderName(),
+    );
     params.onOutput?.(
       "stdout",
       `$ docker buildx build (${

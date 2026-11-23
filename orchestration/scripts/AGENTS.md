@@ -4,6 +4,12 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 
 ## Privileged Host Scripts
 
+- **wait-docker-gate.sh** — run by the `turbopaneld` unit's `ExecStartPre` on
+  managed hosts: waits (bounded) for the gate service to be active and its
+  socket to exist, so the daemon never starts Docker work before the gate. It
+  exits 0 when the gate unit is not installed or on timeout (Docker then fails
+  closed: there is no direct fallback).
+
 - **sudo** — `roles/turbopanel-user/templates/sudoers.j2` grants root exactly
   four commands: **`tp-host`** (`orchestration/scripts/tp-host`, installed
   `root:root 0755` at `<install>/lib/tp-host`), `tp-orchestrate`, and the two

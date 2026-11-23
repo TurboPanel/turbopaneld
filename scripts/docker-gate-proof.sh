@@ -13,8 +13,11 @@
 #      a host-root bind, the Docker socket, host networking, an added
 #      capability): each is LOGGED as docker-gate.would-deny, and each still
 #      runs (observe mode refuses nothing);
-#   4. nothing routes through the gate by default: the daemon's environment has
-#      no DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET.
+#   4. the daemon's own env file does not pin DOCKER_HOST (the unit sets it).
+#
+# This script proves the observe-mode behaviour: it expects every probe to run.
+# On an enforcing host (the default) stop after section 1 or set the gate to
+# observe first; the enforce proof is the deny lines in the gate journal.
 #
 # Stage 2 adds: the ownership observation (a container nothing stamped is
 # logged as unowned-container when stopped through the gate), a rejected signed
@@ -226,9 +229,9 @@ if printf '%s\n' "$_log" | grep '"event":"docker-gate.approval"' | grep -q '"res
 if printf '%s\n' "$_log" | grep -q 'bm90LWEtdG9rZW4'; then fail "an approval token reached the journal"; else pass "approval token is never logged"; fi
 if printf '%s\n' "$_log" | grep -q '"level":"error"'; then fail "the gate logged an error (see below)"; printf '%s\n' "$_log" | grep '"level":"error"' | head -5; else pass "no error-level gate log lines"; fi
 
-echo "== 4. nothing routes through the gate by default"
+echo "== 4. the env file does not pin the Docker socket (the unit does)"
 if grep -Eq '^(export )?(DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET)=' "$DAEMON_ENV" 2>/dev/null; then
-  echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (an opt-in canary flip, not the default)"
+  echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (the unit sets these; the env file should not)"
 else
   pass "$DAEMON_ENV sets neither DOCKER_HOST nor TURBOPANEL_DOCKER_SOCKET"
 fi

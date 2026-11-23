@@ -31,11 +31,13 @@ docker_gate_ro_socket: "{{ docker_gate_ro_run_dir }}/docker.sock"
 # writes the root-owned switch file on every converge, false removes it, empty
 # leaves it as it is. Set false to keep the socket-proxy container.
 docker_gate_ingress_socket: true
-# The gate's mode: observe (log findings, refuse nothing) or enforce (stage 4:
-# refuse a request with findings). Once it is enforce, a gate that cannot be
-# installed or swapped in fails the converge: an older, laxer gate must never
-# stay behind with only a warning.
-docker_gate_mode: observe
+# The gate's mode: enforce (the default: refuse a request with findings, 403
+# before the engine is reached) or observe (log findings, refuse nothing; a
+# break-glass setting for an operator, never a default). In enforce mode a gate
+# that cannot be installed or swapped in fails the converge: an older, laxer
+# gate must never stay behind with only a warning, and the daemon talks to
+# Docker only through the gate.
+docker_gate_mode: enforce
 docker_gate_ingress_switch_file: "{{ docker_gate_dir }}/ingress-socket.on"
 docker_gate_upstream_socket: /var/run/docker.sock
 # How long a deploy waits for dockerd itself (retries x delay seconds) before

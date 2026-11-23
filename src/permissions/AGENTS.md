@@ -12,12 +12,11 @@ controls below do not close:
    socket access is root (`docker run -v /:/h`). There is no sudo grant for
    Docker any more; the group is the residual. Closing it is under way with an
    authorizing proxy in front of the socket: **stages 1-3 are installed** (the
-   root-owned `turbopanel-docker-gate` service, observe mode: it forwards
-   everything and logs what the strict profile would refuse, with a platform
-   allowance, ownership observation and a signed-approval verifier; plus a
-   read-only listener Traefik can use instead of the Tecnativa socket proxy
-   behind a per-host switch, off by default; nothing of the daemon's own is
-   routed through it yet and `tp` is still in the group) — see
+   root-owned `turbopanel-docker-gate` service, enforcing: it refuses what the
+   strict profile forbids, with a platform allowance, ownership checks and a
+   signed-approval verifier; plus a read-only listener Traefik can use instead
+   of the Tecnativa socket proxy; the daemon's own Docker traffic is routed
+   through it, and only the group membership of `tp` remains) — see
    `orchestration/roles/docker-gate/AGENTS.md` for the stages.
 2. **Closed: the hosting Caddy no longer runs as root.**
    `turbopanel-hosting-caddy.service` runs as `tpedge` (not in group `tp`)

@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
+  DOCKER_GATE_SOCKET,
   DOCKER_HTTP_ORIGIN,
   DockerClient,
   type DockerEvent,
@@ -25,10 +26,30 @@ test("resolveDockerSocket uses TURBOPANEL_DOCKER_SOCKET when set", () => {
 
 test("resolveDockerSocket falls back when override is blank", () => {
   assertEquals(
-    resolveDockerSocket({ TURBOPANEL_DOCKER_SOCKET: "   " }),
+    resolveDockerSocket({ TURBOPANEL_DOCKER_SOCKET: "   " }, () => false),
     "/var/run/docker.sock",
   );
-  assertEquals(resolveDockerSocket({}), "/var/run/docker.sock");
+  assertEquals(resolveDockerSocket({}, () => false), "/var/run/docker.sock");
+});
+
+test("resolveDockerSocket prefers the gate's socket over the engine's when it exists", () => {
+  const asked: string[] = [];
+  assertEquals(
+    resolveDockerSocket({}, (path) => {
+      asked.push(path);
+      return true;
+    }),
+    DOCKER_GATE_SOCKET,
+  );
+  assertEquals(asked, ["/run/turbopanel-gate/docker.sock"]);
+  // An explicit override still wins, and is not second-guessed.
+  assertEquals(
+    resolveDockerSocket(
+      { TURBOPANEL_DOCKER_SOCKET: "/run/custom.sock" },
+      () => true,
+    ),
+    "/run/custom.sock",
+  );
 });
 
 test("parseEventLines skips blanks and invalid JSON", () => {
