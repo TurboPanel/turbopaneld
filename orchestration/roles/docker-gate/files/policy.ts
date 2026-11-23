@@ -10,6 +10,7 @@
  * Dependency-free on purpose (see http.ts).
  */
 
+import { APPROVABLE_RULES } from "./approval.ts";
 import {
   BACKUP_ROOT,
   DEFAULT_INGRESS_SOCKET_DIR,
@@ -624,12 +625,14 @@ async function checkBindSource(
   if (platform) return platform;
   // A source that cannot be resolved (a link loop, a directory the gate cannot
   // traverse) is judged on its spelling alone, which a link defeats; refuse it
-  // instead. No approval relaxes this rule.
+  // instead. A lexical finding an approval could clear (`bind-outside-roots`)
+  // must not mask this: the unresolvable finding replaces it, and no approval
+  // relaxes it. A finding no approval relaxes keeps its own, more specific name.
   const violation = bindViolation(resolved, ctx.config);
-  if (violation) return { violation };
-  return resolveOk
-    ? {}
-    : { violation: { rule: "bind-unresolvable", detail: resolved } };
+  if (!resolveOk && (!violation || violation.rule in APPROVABLE_RULES)) {
+    return { violation: { rule: "bind-unresolvable", detail: resolved } };
+  }
+  return violation ? { violation } : {};
 }
 
 function bindIsReadOnly(spec: string): boolean {

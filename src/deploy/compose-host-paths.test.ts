@@ -1744,8 +1744,27 @@ test("state tree: an approved bind whose path cannot be resolved is refused, not
           ),
         ComposeHostPathError,
       );
-      assert(err.message.includes("cannot"), err.message);
+      assert(err.message.includes("cannot be resolved on this host"), err.message);
     }
+    // A path inside the own location the account cannot read, while the
+    // location itself resolves, is refused as leading somewhere unknown.
+    const lockedInOwn = join(own, "locked");
+    await Deno.mkdir(lockedInOwn);
+    const inOwn = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({ type: "bind", source: lockedInOwn, target: "/s" })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            hostLevelApproved: true,
+            stateTree: tree,
+            realPath: failingRealPath(lockedInOwn),
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(inOwn.message.includes("unreadable path"), inOwn.message);
     // The same path resolves fine when the engine can read it.
     await assertComposeHostPathsConfined(
       [binds({ type: "bind", source: blockedOutside, target: "/s" })],

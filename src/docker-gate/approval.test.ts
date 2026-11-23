@@ -12,6 +12,11 @@ import {
   verifyApproval,
 } from "../../orchestration/roles/docker-gate/files/approval.ts";
 import {
+  DEFAULT_POLICY_CONFIG,
+  evaluateRequest,
+  type Violation,
+} from "../../orchestration/roles/docker-gate/files/policy.ts";
+import {
   generateKeys,
   payloadFor,
   signToken,
@@ -279,6 +284,51 @@ test("an approval relaxes only the rules its features name", async () => {
   ]);
 });
 
+test("a host-paths approval leaves an unresolvable bind in remaining", async () => {
+  const keys = await generateKeys();
+  const trusted = await importApprovalKeys(keys.rawB64);
+  const result = await verifyApproval(
+    await signToken(keys, payloadFor(NOW, { features: ["host-paths"] })),
+    trusted,
+    PROJECT,
+    TEST_BODY_DIGEST,
+    TEST_CONTAINER_NAME,
+    NOW,
+  );
+  assert(result.ok);
+  const bindFindings = async (
+    source: string,
+    resolve: (path: string) => Promise<string>,
+  ): Promise<Violation[]> =>
+    (await evaluateRequest(
+      {
+        method: "POST",
+        path: "/containers/create",
+        query: new URLSearchParams(),
+        body: { HostConfig: { Binds: [`${source}:/x`] } },
+      },
+      DEFAULT_POLICY_CONFIG,
+      resolve,
+      () => true,
+    )).filter((v) => v.rule.startsWith("bind-"));
+  const resolvable = await bindFindings(
+    "/opt/x/data",
+    (path) => Promise.resolve(path),
+  );
+  assertEquals(resolvable.map((v) => v.rule), ["bind-outside-roots"]);
+  const loop = await bindFindings(
+    "/opt/x/loop",
+    () => Promise.reject(new Error("too many levels of symbolic links")),
+  );
+  assertEquals(loop.map((v) => v.rule), ["bind-unresolvable"]);
+  const { remaining, approved } = splitApproved(
+    [...resolvable, ...loop],
+    result.payload,
+  );
+  assertEquals(approved.map((v) => v.rule), ["bind-outside-roots"]);
+  assertEquals(remaining.map((v) => v.rule), ["bind-unresolvable"]);
+});
+
 test("the approvable set never includes the unconditional rules", () => {
   for (
     const rule of [
@@ -287,6 +337,7 @@ test("the approvable set never includes the unconditional rules", () => {
       "bind-state-dir",
       "bind-unresolvable",
       "volume-bind-state-dir",
+      "volume-bind-unresolvable",
       "bind-noncanonical-path",
       "userns-mode-host",
       "volumes-from",

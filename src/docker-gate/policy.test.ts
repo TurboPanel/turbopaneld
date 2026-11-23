@@ -406,6 +406,32 @@ test("a resolver that throws keeps lexical refusals and refuses the rest", async
   );
 });
 
+test("an unresolvable source outside the roots is bind-unresolvable, not the approvable bind-outside-roots", async () => {
+  const broken: ResolvePath = () =>
+    Promise.reject(new Error("too many levels of symbolic links"));
+  assertEquals(
+    ruleNames(await createVerdict({ Binds: ["/opt/x/loop:/x"] }, broken)),
+    ["bind-unresolvable"],
+  );
+  assertEquals(
+    ruleNames(
+      await createVerdict(
+        {
+          Binds: [],
+          Mounts: [{ Type: "bind", Source: "/opt/x/loop", Target: "/x" }],
+        },
+        broken,
+      ),
+    ),
+    ["bind-unresolvable"],
+  );
+  // The same path that does resolve is the approvable finding.
+  assertEquals(
+    ruleNames(await createVerdict({ Binds: ["/opt/x/loop:/x"] })),
+    ["bind-outside-roots"],
+  );
+});
+
 test("non-canonical bind sources are refused with the cleaned path", async () => {
   const found = await createVerdict({
     Binds: ["/srv/users/../../etc:/x"],
