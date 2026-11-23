@@ -235,6 +235,12 @@ import {
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { RepoKeyReporter } from "./repo-key-reporter.ts";
+import {
+  beginUpdateDrain,
+  endUpdateDrain,
+  runningCommandCount,
+  waitForCommandsToDrain,
+} from "../orchestration/boot-converge-gate.ts";
 import { repoKeyLedgerFor } from "../orchestration/repo-key-changes.ts";
 import {
   FabricPeerReporter,
@@ -447,6 +453,8 @@ export function normalizeReconnectDelayMs(reconnectDelayMs?: number): number {
 export const STABLE_SESSION_MS = 5_000;
 /** Delay after sending update-result before restarting, so the instance can persist it. */
 export const UPDATE_RESULT_HANDOFF_DELAY_MS = 2_000;
+/** Longest an update waits for running deploys, builds and other commands before installing anyway. */
+export const UPDATE_DRAIN_CAP_MS = 20 * 60_000;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
@@ -3445,6 +3453,34 @@ export class InstanceClient {
     }
   }
 
+  /**
+   * Installing a build stops the daemon, which would kill a deploy or build
+   * half-way. Stop taking new commands (they are refused whole), then wait for
+   * the running ones, up to the cap; a command still running at the cap is
+   * logged and the update goes ahead. The gate reopens when the update fails
+   * or does not restart the daemon (`endUpdateDrain` in `#applyUpdate`).
+   */
+  async #drainCommandsForUpdate(): Promise<void> {
+    beginUpdateDrain();
+    const waiting = runningCommandCount();
+    if (waiting > 0) {
+      logInfo(
+        "update",
+        `waiting for ${waiting} running command(s) before installing`,
+      );
+    }
+    const left = await waitForCommandsToDrain(
+      clientTestHooks.updateDrainCapMs,
+      clientTestHooks.updateDrainSleep,
+    );
+    if (left > 0) {
+      logWarn(
+        "update",
+        `${left} command(s) still running after the wait; installing anyway`,
+      );
+    }
+  }
+
   async #reconcileToLatestUpdate(
     config: UpdateChannelConfig,
     options: {
@@ -3464,6 +3500,8 @@ export class InstanceClient {
       );
       return false;
     }
+
+    await this.#drainCommandsForUpdate();
 
     if (this.#isColocatedSocketMode()) {
       // The daemon on a self-hosted control-plane host: refresh it in socket
@@ -3748,6 +3786,7 @@ export class InstanceClient {
 
     await this.#updateProgress.flush();
     if (!ok || !shouldRestart) {
+      endUpdateDrain();
       await clearActiveUpgradeContext();
     }
     this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
@@ -4699,6 +4738,10 @@ type ClientTestHooks = {
   runDockerSetup: typeof runDockerSetup;
   /** Override UPDATE_RESULT_HANDOFF_DELAY_MS for host-free update tests. */
   updateResultHandoffDelayMs: number;
+  /** Longest an update waits for running commands before it goes ahead. */
+  updateDrainCapMs: number;
+  /** Pause used by that wait; tests pass a promise they settle themselves. */
+  updateDrainSleep: (ms: number) => Promise<void>;
 };
 
 let clientTestHooks: ClientTestHooks = {
@@ -4720,6 +4763,8 @@ let clientTestHooks: ClientTestHooks = {
   syncHostDockerNetworking,
   runDockerSetup,
   updateResultHandoffDelayMs: UPDATE_RESULT_HANDOFF_DELAY_MS,
+  updateDrainCapMs: UPDATE_DRAIN_CAP_MS,
+  updateDrainSleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
 /**

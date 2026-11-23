@@ -69,6 +69,40 @@ test({
 
 test({
   name:
+    "handleCommandDispatch refuses new work whole while a daemon update drains",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    gate.beginUpdateDrain();
+    try {
+      const mock = new MockWebSocket();
+      await handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-drain",
+        commandId: "cmd-drain",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      const frames = parseFrames(mock.sentFrames);
+      assertEquals(frames.map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+      assertEquals(frames[1]?.ok, false);
+      assertMatch(String(frames[1]?.error), /installing a TurboPanel update/);
+      assertEquals(frames[1]?.result, undefined);
+      assertEquals(gate.runningCommandCount(), 0);
+    } finally {
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch acks at once but runs nothing until the boot converge has finished",
   permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {

@@ -164,3 +164,19 @@ the decision is `head`, the signed manifest at the channel head is fetched with
 pinned manifest) and its `version` is compared; any refusal is `manifest_pinned`.
 Tests: `src/instance/client.test.ts` (unsigned) and
 `src/instance/client-signed-session.test.ts` (signed).
+
+## Update waits for running commands
+
+Installing a build stops the daemon, which would kill a deploy or build
+half-way. After the manifest checks pass and before the installer runs,
+`#drainCommandsForUpdate` (`src/instance/client.ts`) calls `beginUpdateDrain`
+(`src/orchestration/boot-converge-gate.ts`): new `command-dispatch` messages
+are refused whole with a failed outcome (nothing runs), and the update waits
+for every command that got past the gate (`withCommandRunning`), up to
+`UPDATE_DRAIN_CAP_MS` (20 minutes); at the cap it logs what still runs and
+installs anyway. The gate reopens (`endUpdateDrain`) when the update fails or
+installs nothing; after an install it stays closed until the restart. No wire
+message is involved. A command the daemon was running when it stopped anyway
+is reported failed ("The daemon restarted while this command was running")
+from its journal after the restart. Work that is not a dispatched command
+(scheduled backups, terminal sessions) is not counted.
