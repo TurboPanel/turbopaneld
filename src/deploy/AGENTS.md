@@ -249,8 +249,16 @@ Root context: `../../AGENTS.md`. Instance-side command pipeline: `../../../turbo
    HTTP-only site gets no HTTPS block and a locked tunnel site no HTTP block.
    It is one block per address, never per `bind` set: Caddy refuses a repeated
    site address per listen address, so overlapping sets would make it refuse
-   every deploy. A deploy, a tunnel table apply that relocks sites, a site
-   removal (validated first, one reload) and the
+   every deploy. A listener on a specific address also takes every connection
+   to it from the one that listens everywhere, so a site with no `bind` would
+   answer there with the default page (127.0.0.1 or the LAN address, once any
+   site binds it). The file therefore also repeats each no-`bind` site block of
+   the written sites with `bind <address>` for every address its scheme is
+   bound on (`siteBoundLayout`), behind a marker line; judging one file at a
+   time leaves those repeats out so a stale site file cannot take the
+   catch-all down, and a deploy recomputes them from the files left and the
+   forward blocks it writes. A deploy, a tunnel table apply that relocks sites,
+   a site removal (validated first, one reload) and the
    start-time check keep the addresses current. HTTPS shows one fixed internal
    certificate for the reserved
    name `unconfigured.invalid`, given to every other name by the Caddyfile's

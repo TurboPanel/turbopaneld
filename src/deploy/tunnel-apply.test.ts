@@ -100,11 +100,17 @@ function fakeHost(
           stderr: `unrecognized directive in ${entry.name}`,
         });
       }
-      const own = new Set(
-        [...text.matchAll(/^(?:http:\/\/)?([a-z0-9.-]+) \{$/gm)].map((m) =>
-          m[1]!
-        ),
-      );
+      // A name is ambiguous per listen address, as in Caddy.
+      const own = new Set<string>();
+      for (
+        const m of text.matchAll(
+          /^(?:http:\/\/)?([a-z0-9.-]+) \{\n(?: {2}bind (.+)\n)?/gm,
+        )
+      ) {
+        for (const address of (m[2] ?? "").split(" ")) {
+          own.add(`${m[1]!}@${address}`);
+        }
+      }
       for (const host of own) {
         if (seen.has(host)) {
           return Promise.resolve({
@@ -1259,5 +1265,88 @@ test("a table with no peerClientAuth renders as before, whatever the certificate
     const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
     assertEquals(file.includes("client_auth"), false);
     assertEquals(file.includes("tls_client_auth"), false);
+  });
+});
+
+/** A site on 127.0.0.1, so the catch-all has an address to repeat names on. */
+async function bindSite(sitesDir: string): Promise<void> {
+  await Deno.mkdir(sitesDir, { recursive: true });
+  await Deno.writeTextFile(
+    join(sitesDir, "env-b.caddy"),
+    "b.example.com {\n  bind 127.0.0.1\n}\n",
+  );
+}
+
+const readFallback = (sitesDir: string) =>
+  Deno.readTextFile(join(sitesDir, "00-fallback.caddy"));
+
+test("a name that moves here is repeated from its own site, not from the forward block it had", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    await applyTunnelRoutes(layout, table(), {
+      decryptSecrets: decrypt,
+      grantRead: noGrant,
+    });
+    assertStringIncludes(
+      await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE)),
+      "10.0.0.5:",
+    );
+    await bindSite(sitesDir);
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    const fallback = await readFallback(sitesDir);
+    assertStringIncludes(fallback, "app.example.com {\n  bind 127.0.0.1\n");
+    assertEquals(fallback.includes("10.0.0.5:"), false);
+  });
+});
+
+test("a name that leaves is repeated from the forward block the deploy writes", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(layout, table(), deps);
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    await bindSite(sitesDir);
+    assertEquals(
+      (await readFallback(sitesDir)).includes("10.0.0.5:"),
+      false,
+    );
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "other.example.com"),
+      undefined,
+      noGrant,
+    );
+    const fallback = await readFallback(sitesDir);
+    assertStringIncludes(fallback, "app.example.com {\n  bind 127.0.0.1\n");
+    assertStringIncludes(fallback, "10.0.0.5:");
+  });
+});
+
+test("a forward file set aside for the deploy leaves no stale forward block in the catch-all", async () => {
+  await withHost(async ({ layout, sitesDir, refuse }) => {
+    await applyTunnelRoutes(layout, table(), {
+      decryptSecrets: decrypt,
+      grantRead: noGrant,
+    });
+    await bindSite(sitesDir);
+    refuse.tunnel = true;
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    assertEquals(await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE)), "");
+    const fallback = await readFallback(sitesDir);
+    assertStringIncludes(fallback, "app.example.com {\n  bind 127.0.0.1\n");
+    assertEquals(fallback.includes("10.0.0.5:"), false);
   });
 });
