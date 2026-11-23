@@ -6,7 +6,7 @@
 #
 # It proves four things and exits non-zero if any fails:
 #   1. the gate service is active, its socket is root:tp 0660 in a root-owned
-#      directory, and the daemon account can open it but is still in `docker`;
+#      directory, the daemon account can open it, and is NOT in `docker`;
 #   2. real Docker traffic flows through it unchanged: run, exec -i, logs,
 #      events, and a Compose deploy;
 #   3. the strict profile would refuse the root-equivalent shapes (privileged,
@@ -164,7 +164,7 @@ if [[ "$_mode" == "root:$DAEMON_ACCOUNT 660" ]]; then pass "socket is $_mode"; e
 _dir=$(stat -c "$STAT_FMT" "$GATE_DIR" 2>/dev/null)
 if [[ "$_dir" == "root:$DAEMON_ACCOUNT 750" ]]; then pass "socket directory is $_dir"; else fail "socket directory is '$_dir', want root:$DAEMON_ACCOUNT 750"; fi
 check "daemon account can use Docker through the gate" gate_docker version
-check "daemon account is still in the docker group (stage 1 changes nothing)" sh -c "id -nG $DAEMON_ACCOUNT | tr ' ' '\n' | grep -qx docker"
+check "daemon account is not in the docker group (stage 5)" sh -c "! id -nG $DAEMON_ACCOUNT | tr ' ' '\n' | grep -qx docker"
 GATE_MAIN=/opt/turbopanel/lib/docker-gate/main.ts
 if [[ "$(stat -c %U "$GATE_MAIN" 2>/dev/null)" == root ]] && ! sudo -n -u "$DAEMON_ACCOUNT" test -w "$GATE_MAIN"; then
   pass "gate source is root-owned and not writable by the daemon"

@@ -2,16 +2,21 @@
 # Stage 5 of the Docker gate: the daemon account is not in the docker group on a
 # managed host, so the real socket is root-only for it. Idempotent: reads the
 # account's groups first and only calls gpasswd when it is still a member.
+# The unit's ExecStartPre also drops the group on every start, so a daemon that
+# was running with it never keeps it past its next restart.
 # Also the converge entry (`tasks_from: converge-group`).
 
 - name: Read the daemon user's groups
-  ansible.builtin.command: "id -nG {{ docker_user }}"
+  ansible.builtin.command:
+    argv: [id, -nG, "{{ docker_user }}"]
   register: _docker_daemon_groups
   changed_when: false
   failed_when: false
+  check_mode: false
 
 - name: Remove the daemon user from the docker group
-  ansible.builtin.command: "gpasswd -d {{ docker_user }} docker"
+  ansible.builtin.command:
+    argv: [gpasswd, -d, "{{ docker_user }}", docker]
   changed_when: true
   when:
     - _docker_daemon_groups.rc == 0

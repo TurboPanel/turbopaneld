@@ -41,6 +41,11 @@ Environment=TURBOPANEL_DOCKER_BUILD_SOCKET={{ turbopanel_docker_gate_build_dir }
 {% endif %}
 ExecStartPre={{ turbopanel_orchestration_dir }}/scripts/ensure-single-daemon.sh
 {% if (turbopanel_dev_user | default('') | length) == 0 %}
+{# Root, failure ignored (no docker group, not a member): the daemon always
+   starts without the docker group, so a host converged from an already-grouped
+   process never keeps it. The converge removal covers the group file; this
+   covers the process. #}
+ExecStartPre=+-/usr/bin/gpasswd -d {{ turbopanel_user }} docker
 ExecStartPre=/bin/sh {{ turbopanel_orchestration_dir }}/scripts/wait-docker-gate.sh {{ turbopanel_docker_gate_service }} {{ turbopanel_docker_gate_run_dir }}/docker.sock {{ turbopanel_docker_gate_wait_seconds }}
 {% endif %}
 {% if turbopanel_daemon_exec_mode | default('source') == 'native' %}

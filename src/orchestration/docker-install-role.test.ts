@@ -1,4 +1,4 @@
-import { assertEquals, assertStringIncludes } from "@std/assert";
+import { assertEquals, assertMatch, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import { DAEMON_ROOT } from "./assets.ts";
 
@@ -299,9 +299,9 @@ test("the daemon user is in the docker group only on a co-located dev host", asy
   assertStringIncludes(add, "groups: docker");
   assertStringIncludes(add, "turbopanel_dev_user | length > 0");
   // A managed host takes it out, on install and on every converge.
-  assertStringIncludes(
+  assertMatch(
     main,
-    "include_tasks: remove-daemon-from-group.yml\n  when: turbopanel_dev_user | length == 0",
+    /include_tasks: remove-daemon-from-group\.yml\s+when: turbopanel_dev_user \| length == 0/,
   );
   const converge = await Deno.readTextFile(
     join(DOCKER_ROLE, "tasks", "converge-group.yml"),
@@ -311,7 +311,7 @@ test("the daemon user is in the docker group only on a co-located dev host", asy
   const remove = await Deno.readTextFile(
     join(DOCKER_ROLE, "tasks", "remove-daemon-from-group.yml"),
   );
-  assertStringIncludes(remove, "gpasswd -d {{ docker_user }} docker");
+  assertMatch(remove, /gpasswd,\s*-d,\s*"\{\{ docker_user \}\}",\s*docker/);
   assertStringIncludes(
     remove,
     "'docker' in _docker_daemon_groups.stdout.split()",
