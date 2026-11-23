@@ -69,6 +69,102 @@ test({
 
 test({
   name:
+    "handleCommandDispatch refuses new work whole while a daemon update drains",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    gate.beginUpdateDrain();
+    try {
+      const mock = new MockWebSocket();
+      await handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-drain",
+        commandId: "cmd-drain",
+        commandType: "server.hostname.set",
+        payload: { hostname: "drain-test" },
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      const frames = parseFrames(mock.sentFrames);
+      assertEquals(frames.map((f) => f.type), [
+        "command-ack",
+        "command-outcome",
+      ]);
+      assertEquals(frames[1]?.ok, false);
+      assertMatch(String(frames[1]?.error), /installing a TurboPanel update/);
+      assertEquals(frames[1]?.result, undefined);
+      assertEquals(gate.runningCommandCount(), 0);
+    } finally {
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch still answers a ping while a daemon update drains",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch } = await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    gate.beginUpdateDrain();
+    try {
+      const mock = new MockWebSocket();
+      await handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-drain-ping",
+        commandId: "cmd-drain-ping",
+        commandType: "daemon.ping",
+        payload: {},
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      assertEquals(parseFrames(mock.sentFrames)[1]?.ok, true);
+    } finally {
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
+    "handleCommandDispatch still runs a firewall confirm while a daemon update drains",
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
+  fn: async () => {
+    const { handleCommandDispatch, setCommandRouterHandlersForTests } =
+      await import("./command-router.ts");
+    const gate = await import("../orchestration/boot-converge-gate.ts");
+    gate.resetBootConvergeForTests();
+    gate.beginUpdateDrain();
+    let confirmed = 0;
+    setCommandRouterHandlersForTests({
+      handleFirewallConfirm: () => {
+        confirmed += 1;
+        return Promise.resolve({ confirmed: true } as never);
+      },
+    });
+    try {
+      const mock = new MockWebSocket();
+      await handleCommandDispatch({
+        type: "command-dispatch",
+        id: "req-drain-fw",
+        commandId: "cmd-drain-fw",
+        commandType: "server.firewall.confirm",
+        payload: { digest: "a".repeat(64) },
+        at: new Date().toISOString(),
+      }, mock as unknown as WebSocket);
+      assertEquals(confirmed, 1);
+      assertEquals(parseFrames(mock.sentFrames)[1]?.ok, true);
+    } finally {
+      setCommandRouterHandlersForTests(null);
+      gate.resetBootConvergeForTests();
+    }
+  },
+});
+
+test({
+  name:
     "handleCommandDispatch acks at once but runs nothing until the boot converge has finished",
   permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {

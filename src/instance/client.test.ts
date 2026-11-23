@@ -32,6 +32,11 @@ import {
   TUNNEL_TOKEN_REMOTE_REFUSAL,
   writeKeyId,
 } from "./client.ts";
+import {
+  isUpdateDraining,
+  resetBootConvergeForTests,
+  withCommandRunning,
+} from "../orchestration/boot-converge-gate.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
   deliverCommandOutcome,
@@ -5101,6 +5106,278 @@ it({
       assertEquals(result.errorCode, "preflight_manifest");
       assertEquals(result.upgradeId, "up-sig");
     } finally {
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+function installDrainTestHooks(opts: {
+  onReconcile: () => Promise<void>;
+  sleep: (ms: number) => Promise<void>;
+  restart?: () => Promise<boolean>;
+  currentCommit?: string;
+}): () => void {
+  return installClientTestHooks({
+    updateResultHandoffDelayMs: 0,
+    restartDaemonService: opts.restart ?? (() => Promise.resolve(true)),
+    getBuildInfo: () => ({
+      commit: opts.currentCommit ?? "old",
+      buildId: "dev-old",
+      builtAt: "2026-08-01T00:00:00Z",
+      channel: "trunk",
+      sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+    }),
+    resolveUpdate: () => Promise.resolve(sampleUpdateInfo("commit-one")),
+    downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+    executeRunReconcile: opts.onReconcile,
+    updateDrainSleep: opts.sleep,
+  });
+}
+
+it({
+  name:
+    "update reports why it waits, waits for a running command, then installs",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      sleep: () => new Promise<void>(() => {}),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-drain",
+        upgradeId: "up-drain",
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "update drain to begin",
+        () => isUpdateDraining() || undefined,
+      );
+      const waiting = await waitFor(
+        "the waiting progress frame",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { detail?: string }).detail?.includes(
+              "waiting for 1 running command",
+            )
+          ) as { stage?: string; unit?: string; id?: string } | undefined,
+      );
+      assertEquals(waiting.stage, "preparing");
+      assertEquals(waiting.unit, "daemon");
+      assertEquals(waiting.id, "upd-drain");
+      // The install has not started while the frame is out.
+      assertEquals(reconcileCalls, 0);
+      finishCommand();
+      await command;
+      const result = await waitFor(
+        "drained update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-drain"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(reconcileCalls, 1);
+      // A build was installed and the daemon restarts, so new work stays refused.
+      assertEquals(isUpdateDraining(), true);
+    } finally {
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "update installs at the wait cap, and a failed install takes commands again",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    let capReached!: () => void;
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.reject(new Error("install failed"));
+      },
+      sleep: () => new Promise<void>((resolve) => (capReached = resolve)),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-cap",
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "update drain to begin",
+        () => isUpdateDraining() || undefined,
+      );
+      await waitFor("cap timer to start", () => capReached || undefined);
+      assertEquals(reconcileCalls, 0);
+      capReached();
+      const result = await waitFor(
+        "capped update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-cap"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(reconcileCalls, 1);
+      assertEquals(isUpdateDraining(), false);
+    } finally {
+      finishCommand();
+      await command;
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "a restart that throws reopens the gate and lets the next update run",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => Promise.resolve(),
+      sleep: () => new Promise<void>(() => {}),
+      restart: () => Promise.reject(new Error("sudo not found")),
+    });
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-throw",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "restart failure update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-throw"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "restart_failed");
+      assertEquals(isUpdateDraining(), false);
+      // The in-progress flag is cleared too: a second update is not refused.
+      socket.receive({
+        type: "update",
+        id: "upd-throw-2",
+        at: new Date().toISOString(),
+      });
+      const second = await waitFor(
+        "second update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-throw-2"
+          ) as { errorCode?: string } | undefined,
+      );
+      assertEquals(second.errorCode, "restart_failed");
+    } finally {
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "an update to the build already running does not drain or refuse work",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    const restoreHooks = installDrainTestHooks({
+      currentCommit: "commit-one",
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      sleep: () => new Promise<void>(() => {}),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-same",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unchanged update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-same"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(reconcileCalls, 0);
+      assertEquals(isUpdateDraining(), false);
+    } finally {
+      finishCommand();
+      await command;
+      resetBootConvergeForTests();
       await restore();
       restoreHooks();
     }
