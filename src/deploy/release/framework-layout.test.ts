@@ -90,6 +90,10 @@ test("the recipes share storage (Laravel) or uploads (WordPress) and nothing els
       "storage/framework/views",
       "storage/logs",
     ],
+  }, {
+    path: "public/storage",
+    text: "../shared/storage/app/public",
+    sharedFolders: [],
   }]);
   assertEquals(platformLayoutLinks("wordpress"), [{
     path: "wp-content/uploads",
@@ -120,6 +124,25 @@ test("only the exact path with the exact text is the platform's link", () => {
   ) {
     assertEquals(isRecipeLink("laravel", link), false, JSON.stringify(link));
   }
+  // The public disk's link: its own path with its own text, in either order.
+  assertEquals(
+    isRecipeLink("laravel", {
+      path: "public/storage",
+      text: "../shared/storage/app/public",
+    }),
+    true,
+  );
+  for (
+    const link of [
+      { path: "public/storage", text: "../shared/storage" },
+      { path: "public/storage", text: "../shared/storage/app/public/x" },
+      { path: "public/storage", text: "../../shared/storage/app/public" },
+      { path: "public/other", text: "../shared/storage/app/public" },
+      { path: "storage", text: "../shared/storage/app/public" },
+    ]
+  ) {
+    assertEquals(isRecipeLink("laravel", link), false, JSON.stringify(link));
+  }
   // A release whose record names no layout excuses nothing.
   assertEquals(
     isRecipeLink(undefined, { path: "storage", text: "shared/storage" }),
@@ -137,6 +160,7 @@ test("only the exact path with the exact text is the platform's link", () => {
 test("a recipe link resolves into its folder in shared/", () => {
   assertEquals(recipeLinkTargets("laravel", "/srv/site"), [
     "/srv/site/shared/storage",
+    "/srv/site/shared/storage/app/public",
   ]);
   assertEquals(recipeLinkTargets("wordpress", "/srv/site"), [
     "/srv/site/shared/uploads",
