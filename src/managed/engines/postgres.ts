@@ -255,7 +255,7 @@ rc=$?
 set -e
 last=$(printf '%s\n' "$out" | tail -n 1)
 if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then
-  echo 'restore was not committed; the database is unchanged' >&2
+  echo 'restore was not committed; the database is unchanged apart from schema owners, which may now be the database owner role' >&2
   exit 1
 fi
 if ! printf 'SET search_path = pg_catalog, pg_temp;\n%s\n' "$6" | admin >/dev/null; then

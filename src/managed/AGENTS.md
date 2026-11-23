@@ -556,8 +556,8 @@ ProxySQL to enforce. Canonical policy:
      database that the owner role does not own to the owner role (a schema can
      only be dropped by its owner; the login gets no other membership, not even
      an inheriting one, because a schema owner may hold rights in other
-     databases; a failed restore leaves those schemas with the owner role, and
-     the next apply repairs per-login schemas); stale logins are dropped only once their hour has run
+     databases; a failed restore leaves those schemas with the owner role, the same
+     as a successful `--no-owner` replay does); stale logins are dropped only once their hour has run
      out, so two restores at once keep their own logins; (2) one transaction on a TLS connection as that
      login, to the container's own address (production `pg_hba` admits a
      non-admin login only over `hostssl` with a password from the managed
