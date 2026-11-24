@@ -827,6 +827,10 @@ test("the text captures in installer-screen-frames match the real output", async
           ["Checking this server", "Debian 13, 4 CPU, 8 GiB"],
           ["Verifying the release", "signature verified"],
           ["Downloading TurboPanel", "control plane 1.8.2, web app 1.8.2"],
+          [
+            "Installing orchestration runtime",
+            "runtime and task library ready",
+          ],
         ],
         "Installing TurboPanel database",
         [
