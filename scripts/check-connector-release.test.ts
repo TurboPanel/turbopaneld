@@ -106,3 +106,14 @@ test("a failed lookup or an odd tag is an error, never a report", async () => {
   await latestRelease(odd).catch(() => (failed = true));
   assertEquals(failed, true);
 });
+
+test("latestRelease sends the token as a bearer header only when given one", async () => {
+  const seen: Array<string | undefined> = [];
+  const fake = ((_url: string, init?: RequestInit) => {
+    seen.push((init?.headers as Record<string, string>)?.Authorization);
+    return Promise.resolve(Response.json({ tag_name: "2026.6.0" }));
+  }) as unknown as typeof fetch;
+  await latestRelease(fake);
+  await latestRelease(fake, "token-value");
+  assertEquals(seen, [undefined, "Bearer token-value"]);
+});

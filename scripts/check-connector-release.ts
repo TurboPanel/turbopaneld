@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net=api.github.com --allow-read --allow-write
+#!/usr/bin/env -S deno run --allow-net=api.github.com --allow-env=GITHUB_TOKEN --allow-read --allow-write
 /**
  * Look for a newer tunnel connector release than the version this daemon pins
  * (`CLOUDFLARED_VERSION` in `src/orchestration/assets.ts`) and write a short
@@ -43,13 +43,20 @@ export function isNewer(candidate: string, current: string): boolean {
   return false;
 }
 
-/** The newest published release, reduced to what the report needs. */
+/**
+ * The newest published release, reduced to what the report needs. With a
+ * token the lookup is authenticated, which lifts the unauthenticated rate
+ * limit that shared CI runners hit.
+ */
 export async function latestRelease(
   fetchFn: typeof fetch = fetch,
+  token?: string,
 ): Promise<Release> {
-  const res = await fetchFn(RELEASE_API, {
-    headers: { Accept: "application/vnd.github+json" },
-  });
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetchFn(RELEASE_API, { headers });
   if (!res.ok) throw new Error(`release lookup failed: HTTP ${res.status}`);
   const body = await res.json() as {
     tag_name?: unknown;
@@ -126,10 +133,19 @@ export function renderReport(
   return lines.filter((l, i) => !(l === "" && lines[i - 1] === "")).join("\n");
 }
 
+/** The token from the environment, or undefined when unset or not permitted. */
+function tokenFromEnv(): string | undefined {
+  try {
+    return Deno.env.get("GITHUB_TOKEN") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
   const reportFile = Deno.args[0];
   if (!reportFile) throw new Error("usage: check-connector-release <file>");
-  const release = await latestRelease();
+  const release = await latestRelease(fetch, tokenFromEnv());
   if (!isNewer(release.tag, CLOUDFLARED_VERSION)) {
     console.log("current");
     return;
