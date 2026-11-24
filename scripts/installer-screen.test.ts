@@ -1,7 +1,8 @@
 /**
  * Pins the installer screen layer (scripts/lib/installer-screen.sh) through the
- * simulated install in scripts/installer-screen-demo.sh: the ledger layout
- * (done, now with three detail slots, next), the finish and failure screens,
+ * simulated install in scripts/installer-screen-demo.sh: the compact header,
+ * the check rows with the current area and its three detail slots, the
+ * collapsed finish and the failure screen,
  * the plain fallbacks, truncation, color depth, cursor restore and POSIX sh
  * compatibility. The text captures in scripts/installer-screen-frames/ are
  * compared with real output; UPDATE_FRAMES=1 rewrites them.
@@ -134,22 +135,22 @@ function render(out: string): string[] {
 function driver(
   dir: string,
   body: string,
-  plan = "a b c",
+  plan = "Aa Bb Cc",
   mode = "panel",
 ): Promise<string> {
   const file = join(dir, "driver.sh");
   return Deno.writeTextFile(
     file,
-    `. "${LIB}"\nscreen_init 9.9.9 canary ${mode} "${
+    `. "${LIB}"\nscreen_init 1.8.2 canary ${mode} "${
       join(dir, "d.log")
     }" ${plan}\n${body}\n`,
   ).then(() => file);
 }
 
-/** Row index of the "now" line in a rendered screen. */
+/** Row index of the current area (spinner or cross, not a check row). */
 function nowRow(rows: string[]): number {
-  const at = rows.findIndex((l) => l.startsWith("  now   "));
-  assert(at >= 0, `no now line in:\n${rows.join("\n")}`);
+  const at = rows.findIndex((l) => /^ {2}[^\s✓+] \S/.test(l) && !/→/.test(l));
+  assert(at >= 0, `no current area row in:\n${rows.join("\n")}`);
   return at;
 }
 
@@ -172,13 +173,13 @@ test("without a TTY the demo prints one plain line per event and no escape codes
       r.out,
       "TurboPanel installer 1.8.2 (channel release, mode daemon)",
     );
-    assertStringIncludes(r.out, "[1/8] preflight ...");
+    assertStringIncludes(r.out, "[1/8] Preflight ...");
     assertStringIncludes(r.out, "      - prerequisites: checking");
     assert(
-      /\[1\/8\] ok {3}preflight: Debian 13, amd64, 4 CPU, 8 GiB RAM \(\d+s\)/
+      /\[1\/8\] ok {3}Preflight: Debian 13, 4 CPU, 8 GiB \(\d+s\)/
         .test(r.out),
     );
-    assertStringIncludes(r.out, "== Server enrolled (");
+    assertStringIncludes(r.out, "== Enrolled in ");
     assertStringIncludes(r.out, "   server: server-a.example.lan");
     assertStringIncludes(r.out, "   panel: panel.example.net");
     assertStringIncludes(r.out, "   warning: clock is 2.1 s off");
@@ -203,7 +204,7 @@ test("the control plane summary lists both URLs", async () => {
       join(dir, "i.log"),
     ], PLAIN_ENV);
     assertEquals(r.code, 0);
-    assertStringIncludes(r.out, "== TurboPanel 1.8.2 is ready (");
+    assertStringIncludes(r.out, "== Ready in ");
     assertStringIncludes(r.out, "   public: https://192.0.2.10:8443");
     assertStringIncludes(r.out, "   private: https://10.0.0.5:8443");
     assertStringIncludes(r.out, "   warning: port 8443 is open");
@@ -227,7 +228,7 @@ test("NO_COLOR, TERM=dumb and an unset TERM force plain output even on a TTY", a
       ], env);
       assertEquals(r.code, 0);
       assert(!r.out.includes(ESC), JSON.stringify(env));
-      assertStringIncludes(r.out, "[8/8] ok   kernel:");
+      assertStringIncludes(r.out, "[8/8] ok   Kernel:");
     }
   });
 });
@@ -293,7 +294,7 @@ test("the live screen is cut to 60 columns in every state", async () => {
   });
 });
 
-test("the live screen shows done, now and next, and the cursor comes back", async () => {
+test("the live screen shows a one-line header, check rows and the current area, and the cursor comes back", async () => {
   await withTemp(async (dir) => {
     const r = await run(
       ["dash"],
@@ -303,18 +304,36 @@ test("the live screen shows done, now and next, and the cursor comes back", asyn
     assertEquals(r.code, 0);
     assertStringIncludes(r.out, HIDE);
     assert(r.out.endsWith(SHOW), "cursor shown again at the very end");
-    assertStringIncludes(r.out, `${ESC}[6A`);
     for (const line of visible(r.out)) assert([...line].length <= 79, line);
     const text = visible(r.out).join("\n");
-    assertStringIncludes(text, "  done  preflight · release · download");
-    assertStringIncludes(text, "  now   runtimes");
-    assertStringIncludes(
-      text,
-      "  next  ansible · services · enrolment · kernel",
-    );
-    for (const gone of ["━", "╭", "│", "✓", "3/8"]) {
-      assert(!text.includes(gone), `no ${gone} in the ledger layout`);
+    assertStringIncludes(text, " ▟█▙ TurboPanel  1.8.2 · server");
+    assertStringIncludes(text, "  ✓ Preflight    Debian 13, 4 CPU, 8 GiB");
+    assertStringIncludes(text, "  ✓ Release      signature verified");
+    assertStringIncludes(text, "  ⠋ Runtimes");
+    for (const gone of ["━", "╭", "│", "3/8", "▄███▀", "next  ", "done  "]) {
+      assert(!text.includes(gone), `no ${gone} in the compact layout`);
     }
+    assert(
+      !/\d+s\b/.test(text.split("Enrolled in")[0]),
+      "no timers while running",
+    );
+    const mid = render(
+      (await run(["dash"], [
+        await driver(
+          dir,
+          "screen_area_start Aa\nscreen_area_done fact\nscreen_area_start Bb\nscreen_sub one\nkill -KILL $$",
+        ),
+      ], { ...LIVE_ENV, SCREEN_COLS: "80" })).out,
+    );
+    assertEquals(mid.slice(0, 4), [
+      "",
+      " ▟█▙ TurboPanel  1.8.2 · control plane",
+      "",
+      "  ✓ Aa    fact",
+    ]);
+    assertEquals(mid.length, 6);
+    assertEquals(mid[5], "      one");
+    assert(/^ {2}\S Bb$/.test(mid[4]), "pending areas are not shown");
   });
 });
 
@@ -343,12 +362,11 @@ test("detail lines start in the first slot, fill downward and scroll only on the
       const rows = render(r.out);
       const at = nowRow(rows);
       assertEquals(
-        [1, 2, 3].map((n) => rows[at + n].trim()),
+        [1, 2, 3].map((n) => (rows[at + n] ?? "").trim()),
         slots,
         `after ${i + 1} detail lines`,
       );
-      assert(rows[at + 1] === "" || rows[at + 1].startsWith("          "));
-      assertEquals(rows[at + 4].trim().startsWith("next"), true);
+      assert(rows[at + 1].startsWith("      "), "details sit under the name");
     }
   });
 });
@@ -364,58 +382,14 @@ test("detail lines with a value line up, and a known key updates in place", asyn
     const rows = render(r.out);
     const at = nowRow(rows);
     assertEquals(rows.slice(at + 1, at + 4), [
-      "          postgres 18   ready",
-      "          redis 8       pulling image",
-      "          rabbitmq 4    waiting",
+      "      postgres 18   ready",
+      "      redis 8       pulling image",
+      "      rabbitmq 4    waiting",
     ]);
   });
 });
 
-test("when done overflows the newest names stay and a count stands in for the older ones", async () => {
-  await withTemp(async (dir) => {
-    const names = [
-      "preflight",
-      "release",
-      "download",
-      "runtimes",
-      "ansible",
-      "database",
-      "services",
-      "health",
-    ];
-    const body = names.slice(0, 7).map((n) =>
-      `screen_area_start ${n}\nscreen_area_done`
-    ).join("\n");
-    const file = await driver(
-      dir,
-      `${body}\nscreen_area_start health\nkill -KILL $$`,
-      names.join(" "),
-    );
-    const wide = render(
-      (await run(["dash"], [file], { ...LIVE_ENV, SCREEN_COLS: "80" })).out,
-    );
-    const narrow = render(
-      (await run(["dash"], [file], { ...LIVE_ENV, SCREEN_COLS: "60" })).out,
-    );
-    for (const [rows, cols] of [[wide, 80], [narrow, 60]] as const) {
-      const done = rows.find((l) => l.startsWith("  done  "));
-      assert(done !== undefined);
-      assert([...done].length <= cols - 1, done);
-      const m = /^ {2}done {2}\+(\d+) · (.*?) +0s$/.exec(done);
-      assert(m, `a count is shown at ${cols} columns: ${done}`);
-      const older = Number(m[1]);
-      assertEquals(m[2].split(" · "), names.slice(older, 7));
-      assert(older >= 1 && !done.includes("preflight"));
-    }
-    assert(
-      render(
-        (await run(["dash"], [file], { ...LIVE_ENV, SCREEN_COLS: "120" })).out,
-      ).some((l) => l.includes("done  preflight · release")),
-    );
-  });
-});
-
-test("the finish replaces the body with the ready header, the URLs, the warning and the log path", async () => {
+test("the finish collapses the check rows to one wrapped row, then the ready line, URLs, warning and log", async () => {
   await withTemp(async (dir) => {
     const log = join(dir, "install.log");
     const r = await run(
@@ -424,28 +398,42 @@ test("the finish replaces the body with the ready header, the URLs, the warning 
       { ...LIVE_ENV, SCREEN_COLS: "80" },
     );
     assertEquals(r.code, 0);
-    const rows = render(r.out);
-    assertEquals(rows.slice(7), [
-      "  https://192.0.2.10:8443   public",
-      "  https://10.0.0.5:8443     private",
+    assertEquals(render(r.out), [
+      "",
+      " ▟█▙ TurboPanel  1.8.2 · control plane",
+      "",
+      "  ✓ Preflight · Release · Download · Runtimes · Ansible · Database · Services",
+      "    Health",
+      "",
+      "  Ready in 1m 12s",
+      "",
+      "  → https://192.0.2.10:8443   public",
+      "  → https://10.0.0.5:8443     private",
       "",
       "  ! port 8443 is open to the internet",
       `  log  ${log}`,
     ]);
-    assertStringIncludes(rows[3], "TurboPanel 1.8.2 is ready  0s");
-    assert(rows[2].includes("▀"), "the logo block is the header");
-    assert(!rows.some((l) => /^ {2}(done|now|next) /.test(l)));
+    const narrow = render(
+      (await run(
+        ["dash"],
+        [DEMO, "--mode", "panel", "--fast", "--log", log],
+        { ...LIVE_ENV, SCREEN_COLS: "60" },
+      )).out,
+    );
+    const first = narrow.findIndex((l) => l.startsWith("  ✓ Preflight"));
+    assertEquals(narrow.slice(first, first + 2), [
+      "  ✓ Preflight · Release · Download · Runtimes · Ansible",
+      "    Database · Services · Health",
+    ]);
     const d = await run(
       ["dash"],
       [DEMO, "--mode", "daemon", "--fast", "--log", log],
       { ...LIVE_ENV, SCREEN_COLS: "80" },
     );
     const daemon = render(d.out);
-    assertStringIncludes(daemon[3], "Server enrolled  0s");
-    assertEquals(daemon.slice(7, 9), [
-      "  server-a.example.lan   server",
-      "  panel.example.net      panel",
-    ]);
+    assert(daemon.includes("  Enrolled in 1m 12s"));
+    assert(daemon.includes("  → server-a.example.lan   server"));
+    assert(daemon.includes("  → panel.example.net      panel"));
     assert(!daemon.some((l) => l.includes("https://")));
   });
 });
@@ -457,14 +445,17 @@ test("the total time shows as minutes and seconds past a minute", async () => {
       file,
       `. "${LIB}"\n_ss_now() { cat "${join(dir, "t")}"; }\necho 0 > "${
         join(dir, "t")
-      }"\nscreen_init 9.9.9 canary panel "${
+      }"\nscreen_init 1.8.2 canary panel "${
         join(dir, "d.log")
-      }" a\nscreen_area_start a\necho 72 > "${
+      }" Aa\nscreen_area_start Aa\necho 72 > "${
         join(dir, "t")
-      }"\nscreen_summary "TurboPanel 9.9.9 is ready"\nscreen_finish\n`,
+      }"\nscreen_summary "Ready in"\nscreen_finish\n`,
     );
-    const r = await run(["dash"], [file], LIVE_ENV);
-    assertStringIncludes(render(r.out)[3], "is ready  1m 12s");
+    const r = await run(["dash"], [file], {
+      ...LIVE_ENV,
+      SCREEN_FIXED_CLOCK: "",
+    });
+    assert(render(r.out).includes("  Ready in 1m 12s"));
   });
 });
 
@@ -519,28 +510,23 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
     assertStringIncludes(r.out, `${ESC}[38;5;210m`);
     const rows = render(r.out);
     const at = nowRow(rows);
-    assert(rows[at].includes("runtimes") && rows[at].endsWith("✗"));
-    assertEquals(
-      rows[at - 1].startsWith("  done  preflight · release · download"),
-      true,
-    );
-    assertEquals(rows.slice(at + 1, at + 4), [
-      "          postgres 18   starting",
-      "          redis 8       waiting",
-      "          rabbitmq 4    waiting",
+    assertEquals(rows[at], "  ✗ Runtimes");
+    assertEquals(rows.slice(at - 3, at), [
+      "  ✓ Preflight    Debian 13, 4 CPU, 8 GiB",
+      "  ✓ Release      signature verified",
+      "  ✓ Download     control plane 1.8.2, web app 1.8.2",
     ]);
-    assertEquals(
-      rows[at + 4],
-      "  next  ansible · database · services · health",
-    );
-    assertEquals(rows.slice(at + 5), [
+    assertEquals(rows.slice(at + 1), [
+      "      postgres 18   starting",
+      "      redis 8       waiting",
+      "      rabbitmq 4    waiting",
       "",
-      "  fail  Postgres 18 did not start: port 5432 is in use",
-      `  log   ${log}`,
-      "  try   stop whatever listens on port 5432, then run the installer again",
+      "  Postgres 18 did not start: port 5432 is in use",
+      `  log  ${log}`,
+      "  try  stop whatever listens on port 5432, then run the installer again",
     ]);
-    assert(!rows.some((l) => l.includes("is ready")));
-    assertStringIncludes(await Deno.readTextFile(log), "-- FAILED: runtimes");
+    assert(!rows.some((l) => l.includes("Ready in")));
+    assertStringIncludes(await Deno.readTextFile(log), "-- FAILED: Runtimes");
   });
 });
 
@@ -556,7 +542,7 @@ test("plain output reports a failure with the log path, a next step and a non-ze
       log,
     ], PLAIN_ENV);
     assertEquals(r.code, 1);
-    assertStringIncludes(r.out, "[2/8] FAIL release: The release manifest");
+    assertStringIncludes(r.out, "[2/8] FAIL Release: The release manifest");
     assertStringIncludes(r.out, `      see ${log}`);
     assertStringIncludes(r.out, "      next: check the clock");
     assertStringIncludes(r.out, "stopped at step 2/8");
@@ -576,7 +562,7 @@ test("TERM, INT and HUP mid-area close the area as failed and restore the cursor
       assertEquals(r.code, code, sig);
       assert(r.out.endsWith(`${ESC}[0m${SHOW}`), sig);
       const rows = render(r.out);
-      assert(rows[nowRow(rows)].endsWith("✗"), sig);
+      assert(rows[nowRow(rows)].startsWith("  ✗ "), sig);
       assert(rows.some((l) => l.includes("doing a thing")), sig);
     }
   });
@@ -667,22 +653,24 @@ test("the library does not depend on bash or tput", async () => {
 async function frozen(
   dir: string,
   cols: string,
-  done: string[],
+  done: string[][],
   now: string,
   subs: string[][],
 ): Promise<string> {
   const names = [
-    "preflight",
-    "release",
-    "download",
-    "runtimes",
-    "ansible",
-    "database",
-    "services",
-    "health",
+    "Preflight",
+    "Release",
+    "Download",
+    "Runtimes",
+    "Ansible",
+    "Database",
+    "Services",
+    "Health",
   ];
   const body = [
-    ...done.map((n) => `screen_area_start ${n}\nscreen_area_done`),
+    ...done.map(([n, fact]) =>
+      `screen_area_start ${n}\nscreen_area_done "${fact}"`
+    ),
     `screen_area_start ${now}`,
     ...subs.map(([k, v]) => `screen_sub "${k}" "${v}"`),
     "kill -KILL $$",
@@ -716,8 +704,12 @@ test("the text captures in installer-screen-frames match the real output", async
       "panel-running.txt": await frozen(
         dir,
         "80",
-        ["preflight", "release", "download"],
-        "runtimes",
+        [
+          ["Preflight", "Debian 13, 4 CPU, 8 GiB"],
+          ["Release", "signature verified"],
+          ["Download", "control plane 1.8.2, web app 1.8.2"],
+        ],
+        "Runtimes",
         [
           ["postgres 18", "installing"],
           ["redis 8", "waiting"],
@@ -729,8 +721,15 @@ test("the text captures in installer-screen-frames match the real output", async
       "panel-running-60-columns.txt": await frozen(
         dir,
         "60",
-        ["preflight", "release", "download", "runtimes", "ansible", "database"],
-        "services",
+        [
+          ["Preflight", "Debian 13, 4 CPU, 8 GiB"],
+          ["Release", "signature verified"],
+          ["Download", "control plane 1.8.2, web app 1.8.2"],
+          ["Runtimes", "Postgres 18, Redis 8, RabbitMQ 4"],
+          ["Ansible", "Ansible 2.20, 63 tasks, 0 failed"],
+          ["Database", "schema is up to date"],
+        ],
+        "Services",
         [
           ["control plane", "ready"],
           ["caddy", "starting"],

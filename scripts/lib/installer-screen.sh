@@ -11,38 +11,45 @@
 #
 # API
 #   screen_init <version> <channel> <mode> <log-file> <area-name>...
-#       mode is "daemon" or "panel". The area names are the whole plan, in
-#       order (they feed the "next" line). Draws the logo header, hides the
-#       cursor and installs the INT, TERM, HUP and EXIT handlers that restore it.
-#   screen_area_start <name>     make <name> the "now" line, with a spinner
-#   screen_sub <text> [<value>]  a detail line under "now". Three slots that
-#                                fill top-down and scroll only when a fourth
-#                                arrives; with a value the lines align as
-#                                key and value, and a key that is already shown
-#                                is updated in place.
+#       mode is "daemon" or "panel". The area names (Title Case) are the whole
+#       plan: they give the step count and the name column width. Draws the
+#       one-line header, hides the cursor and installs the INT, TERM, HUP and
+#       EXIT handlers that restore it.
+#   screen_area_start <name>     make <name> the current area, with a spinner
+#   screen_sub <text> [<value>]  a detail line under the current area. Three
+#                                slots that fill top-down and scroll only when
+#                                a fourth arrives; with a value the lines align
+#                                as key and value, and a key that is already
+#                                shown is updated in place.
 #   screen_run <cmd> [args...]   run a real command: output goes to the log
 #                                file, the spinner keeps turning meanwhile
-#   screen_area_done [detail]    move <name> to the "done" line (detail: log only)
+#   screen_area_done [fact]      collapse the area to one check row with a
+#                                short dim fact
 #   screen_area_fail <reason> [<next step>]
-#                                "now" turns red with a cross and keeps its
-#                                detail lines; then the reason, the log path
-#                                and one next step
-#   screen_summary <title>       the finish: the logo block with <title> and the
-#                                total time replaces the body
+#                                the current row turns red with a cross and
+#                                keeps its detail lines; then the reason, the
+#                                log path and one thing to try
+#   screen_summary <prefix>      the finish: the check rows collapse to one
+#                                wrapped row, then "<prefix> <total time>"
+#                                ("Ready in 1m 12s", "Enrolled in 1m 12s")
 #   screen_summary_item <value> <note>   URLs or names, aligned, note dim
 #   screen_summary_warn <text>   things to act on (after the items)
 #   screen_finish                log path, cursor restored
 #   screen_restore               restore the terminal only (for a caller's own
 #                                EXIT trap; screen_init already installs one)
 #
-# Layout while running (a fixed six rows, repainted in place):
-#   done  preflight . release . download    14s
-#   now   runtimes                           spinner
-#           postgres 18   ready
-#           redis 8       pulling image
-#   next  database . services . health
-# When "done" would overflow, the newest names stay and a count stands in for
-# the older ones: +3 . health . services.
+# Layout while running (finished areas stay as one row each; pending areas
+# are not shown):
+#    [mark] TurboPanel  1.8.2 . control plane
+#
+#     ok Preflight    Debian 13, amd64, 4 CPU
+#     ok Release      signature verified
+#     spinner Runtimes
+#         postgres 18   ready
+#         redis 8       pulling image
+#
+# The mark is one row, three cells wide, drawn from the brand logo in brand
+# blue and green; SCREEN_UNICODE=0 gives [T].
 #
 # Environment
 #   NO_COLOR (non-empty), TERM=dumb or unset, stdout not a TTY
@@ -51,7 +58,8 @@
 #   SCREEN_COLS            terminal width override (also truncates plain output)
 #   SCREEN_FORCE_TTY=1     draw as if stdout were a TTY (frame capture, tests)
 #   SCREEN_UNICODE=0|1     force ASCII or Unicode glyphs (default: from locale)
-#   SCREEN_FIXED_CLOCK=1   show 0s everywhere (reproducible captures, tests)
+#   SCREEN_FIXED_CLOCK=1   area times read 0s and the total reads 1m 12s
+#                          (reproducible captures, tests)
 #
 # Text passed in is shown on one line: control characters are dropped and long
 # text is cut to the terminal width with an ellipsis, never wrapped. Pass ASCII
@@ -87,9 +95,9 @@ _ss_k2=
 _ss_v2=
 _ss_k3=
 _ss_v3=
-_ss_plan=
 _ss_done_list=
-_ss_hdr_rows=0
+_ss_done_rows=0
+_ss_nw=12
 _ss_in=0
 _ss_items_out=0
 _ss_tx=
@@ -102,6 +110,15 @@ _ss_now() {
     printf '0'
   else
     date +%s
+  fi
+}
+
+# The total time shown at the finish (1m 12s with the fixed clock).
+_ss_total_dur() {
+  if [ "${SCREEN_FIXED_CLOCK:-}" = 1 ]; then
+    _ss_dur 72
+  else
+    _ss_dur $(($(_ss_now) - _ss_t0))
   fi
 }
 
@@ -221,6 +238,8 @@ _ss_setup_style() {
     _ss_ell='…'
     _ss_ellw=1
     _ss_no='✗'
+    _ss_ok='✓'
+    _ss_arrow='→'
     _ss_sep=' · '
     _ss_spin_1='⠋'
     _ss_spin_2='⠙'
@@ -237,6 +256,8 @@ _ss_setup_style() {
     _ss_ell='...'
     _ss_ellw=3
     _ss_no='x'
+    _ss_ok='+'
+    _ss_arrow='>'
     _ss_sep=' / '
     _ss_spin_1='|'
     _ss_spin_2='/'
@@ -246,216 +267,49 @@ _ss_setup_style() {
   fi
 }
 
-# The logo as a 18x10 pixel grid (g green, b blue), drawn two pixels per cell
-# with half blocks. Shapes follow ui/assets/brand/turbopanel-logo-square.svg.
-_ss_logo_row() {
-  case $1 in
-    0) _l_t='..gg.ggbbbbbbbbbbb' _l_b='.gg.ggbbbbbbbbbbb.' ;;
-    1) _l_t='gg.ggbbbbbbbbbbb..' _l_b='........bbbb......' ;;
-    2) _l_t='.......bbbb.......' _l_b='......bbbb........' ;;
-    3) _l_t='......bbbb........' _l_b='.....bbbb.........' ;;
-    4) _l_t='....bbbb..........' _l_b='....bbbb..........' ;;
-  esac
-  _l_out=
-  while [ -n "$_l_t" ]; do
-    _l_a=${_l_t%"${_l_t#?}"}
-    _l_c=${_l_b%"${_l_b#?}"}
-    _l_t=${_l_t#?}
-    _l_b=${_l_b#?}
-    if [ "$_l_a" = "$_l_c" ]; then
-      case $_l_a in
-        .) _l_out="$_l_out " ;;
-        g) _l_out="$_l_out${_ss_GREEN}█" ;;
-        b) _l_out="$_l_out${_ss_BLUE}█" ;;
-      esac
-    elif [ "$_l_c" = . ]; then
-      case $_l_a in
-        g) _l_out="$_l_out${_ss_GREEN}▀" ;;
-        b) _l_out="$_l_out${_ss_BLUE}▀" ;;
-      esac
-    elif [ "$_l_a" = . ]; then
-      case $_l_c in
-        g) _l_out="$_l_out${_ss_GREEN}▄" ;;
-        b) _l_out="$_l_out${_ss_BLUE}▄" ;;
-      esac
-    else
-      case $_l_a in
-        g) _l_out="$_l_out${_ss_GREEN}$(_ss_rgb 51 102 204 bg)▀" ;;
-        b) _l_out="$_l_out${_ss_BLUE}$(_ss_rgb 61 214 140 bg)▀" ;;
-      esac
-    fi
-  done
-  printf '%s%s' "$_l_out" "$_ss_RST"
+# The brand mark, one row and three cells wide: a green slash and the blue
+# stem of the logo (ui/assets/brand/turbopanel-logo-square.svg). ASCII: [T].
+_ss_mark() {
+  if [ "$_ss_utf" = 1 ]; then
+    printf '%s▟%s█▙%s' "$_ss_GREEN" "$_ss_BLUE" "$_ss_RST"
+  else
+    printf '%s[%sT%s]%s' "$_ss_BLUE" "$_ss_GREEN" "$_ss_BLUE" "$_ss_RST"
+  fi
 }
 
 _ss_mode_label() {
   case $_ss_mode in
-    daemon) printf 'daemon' ;;
+    daemon) printf 'server' ;;
     *) printf 'control plane' ;;
   esac
 }
 
-# _ss_header_draw <colored-text>: the logo block with one line of text beside
-# it. Sets _ss_hdr_rows to the number of rows it took.
-_ss_header_draw() {
-  if [ "$_ss_utf" = 1 ]; then
-    printf '%s' "$_ss_NL"
-    printf ' %s%s' "$(_ss_logo_row 0)" "$_ss_NL"
-    printf ' %s%s' "$(_ss_logo_row 1)" "$_ss_NL"
-    printf ' %s   %s%s' "$(_ss_logo_row 2)" "$1" "$_ss_NL"
-    printf ' %s%s' "$(_ss_logo_row 3)" "$_ss_NL"
-    printf ' %s%s' "$(_ss_logo_row 4)" "$_ss_NL"
-    printf '%s' "$_ss_NL"
-    _ss_hdr_rows=7
-  else
-    printf '%s %s%s%s' "$_ss_NL" "$1" "$_ss_NL" "$_ss_NL"
-    _ss_hdr_rows=3
-  fi
-}
-
-# Room for the header text, in columns.
-_ss_header_room() {
-  if [ "$_ss_utf" = 1 ]; then
-    printf '%s' $((_ss_cols - 1 - 22))
-  else
-    printf '%s' $((_ss_cols - 2))
-  fi
-}
-
+# The header is one line: mark, bold name, version, dim mode.
 _ss_header() {
   _h_ver=$(_ss_clean "$1")
   if [ "$_ss_live" != 1 ]; then
     _h_ch=$(_ss_clean "$2")
-    _ss_say "TurboPanel installer $_h_ver (channel $_h_ch, mode $(_ss_mode_label))"
+    _ss_say "TurboPanel installer $_h_ver (channel $_h_ch, mode $_ss_mode)"
     _ss_say "log: $_ss_log"
     return 0
   fi
   _h_lab=$(_ss_mode_label)
-  _h_head=$(_ss_fit "TurboPanel $_h_ver" $(($(_ss_header_room) - 3 - ${#_h_lab})))
-  _ss_header_draw "${_ss_BOLD}${_h_head}${_ss_RST}${_ss_DIM}${_ss_sep}${_h_lab}${_ss_RST}"
+  _h_ver=$(_ss_fit "$_h_ver" $((_ss_cols - 1 - 5 - 10 - 2 - 3 - ${#_h_lab})))
+  printf '%s %s %sTurboPanel%s  %s%s%s%s%s%s%s' "$_ss_NL" "$(_ss_mark)" \
+    "$_ss_BOLD" "$_ss_RST" "$_h_ver" "$_ss_DIM" "$_ss_sep" "$_h_lab" "$_ss_RST" "$_ss_NL" "$_ss_NL"
 }
 
-# _ss_done_text <room>: the finished area names joined with the separator. When
-# they do not fit, the oldest are replaced by a count: +3 . health . services.
-# Sets _ss_tx (text) and _ss_tw (its width in columns).
-_ss_done_text() {
-  _dt_room=$1
-  _ss_tx=
-  _ss_tw=0
-  [ -n "$_ss_done_list" ] || return 0
-  _dt_oifs=$IFS
-  case $- in
-    *f*) _dt_f=1 ;;
-    *)
-      _dt_f=0
-      set -f
-      ;;
-  esac
-  IFS='|'
-  # shellcheck disable=SC2086
-  set -- $_ss_done_list
-  IFS=$_dt_oifs
-  [ "$_dt_f" = 1 ] || set +f
-  _dt_n=$#
-  _dt_k=0
-  while :; do
-    _dt_txt=
-    _dt_w=0
-    if [ "$_dt_k" -gt 0 ]; then
-      _dt_txt="+$_dt_k"
-      _dt_w=$((1 + ${#_dt_k}))
-    fi
-    _dt_i=0
-    for _dt_a in "$@"; do
-      _dt_i=$((_dt_i + 1))
-      [ "$_dt_i" -gt "$_dt_k" ] || continue
-      if [ -n "$_dt_txt" ]; then
-        _dt_txt="$_dt_txt$_ss_sep"
-        _dt_w=$((_dt_w + 3))
-      fi
-      _dt_txt="$_dt_txt$_dt_a"
-      _dt_w=$((_dt_w + ${#_dt_a}))
-    done
-    if [ "$_dt_w" -le "$_dt_room" ] || [ "$_dt_k" -ge $((_dt_n - 1)) ]; then
-      break
-    fi
-    _dt_k=$((_dt_k + 1))
-  done
-  if [ "$_dt_w" -gt "$_dt_room" ]; then
-    _dt_txt=$(_ss_fit "$_dt_a" "$_dt_room")
-    _dt_w=$_dt_room
-    [ "$_dt_w" -ge 0 ] || _dt_w=0
-  fi
-  _ss_tx=$_dt_txt
-  _ss_tw=$_dt_w
-}
-
-# _ss_next_text <room>: the areas after the active one, cut with an ellipsis.
-_ss_next_text() {
-  _nx_room=$1
-  _ss_tx=
-  [ -n "$_ss_plan" ] || return 0
-  _nx_oifs=$IFS
-  case $- in
-    *f*) _nx_f=1 ;;
-    *)
-      _nx_f=0
-      set -f
-      ;;
-  esac
-  IFS='|'
-  # shellcheck disable=SC2086
-  set -- $_ss_plan
-  IFS=$_nx_oifs
-  [ "$_nx_f" = 1 ] || set +f
-  _nx_lim=$_nx_room
-  _nx_cut=0
-  while :; do
-    _nx_i=0
-    _nx_txt=
-    _nx_w=0
-    _nx_over=0
-    for _nx_a in "$@"; do
-      _nx_i=$((_nx_i + 1))
-      [ "$_nx_i" -gt "$_ss_n" ] || continue
-      _nx_add=${#_nx_a}
-      [ -z "$_nx_txt" ] || _nx_add=$((_nx_add + 3))
-      if [ $((_nx_w + _nx_add)) -gt "$_nx_lim" ]; then
-        _nx_over=1
-        break
-      fi
-      if [ -n "$_nx_txt" ]; then
-        _nx_txt="$_nx_txt$_ss_sep"
-      fi
-      _nx_txt="$_nx_txt$_nx_a"
-      _nx_w=$((_nx_w + _nx_add))
-    done
-    if [ "$_nx_over" = 0 ] || [ "$_nx_cut" = 1 ]; then
-      break
-    fi
-    _nx_cut=1
-    _nx_lim=$((_nx_room - _ss_ellw))
-  done
-  if [ "$_nx_over" = 1 ]; then
-    if [ -z "$_nx_txt" ]; then
-      _nx_txt=$(_ss_fit "$_nx_a" "$_nx_room")
-    else
-      _nx_txt="$_nx_txt$_ss_ell"
-    fi
-  fi
-  _ss_tx=$_nx_txt
-}
-
-# The body is six rows, always: done, now, three detail slots, next.
+# One finished area: green check, name in a column, one short dim fact.
 _ss_row_done() {
-  [ -n "$_ss_done_list" ] || return 0
-  _rd_el=$(_ss_dur $(($(_ss_now) - _ss_t0)))
-  _ss_done_text $((_ss_cols - 1 - 8 - 2 - ${#_rd_el}))
-  printf '  %sdone%s  %s%s%s%s%s%s%s' "$_ss_GREEN" "$_ss_RST" \
-    "$_ss_DIM" "$_ss_tx" "$_ss_RST" "$(_ss_pad $((_ss_cols - 1 - 8 - _ss_tw - ${#_rd_el})))" \
-    "$_ss_DIM" "$_rd_el" "$_ss_RST"
+  _rd_nm=$(_ss_fit "$1" $((_ss_cols - 1 - 4)))
+  printf '  %s%s%s %s' "$_ss_GREEN" "$_ss_ok" "$_ss_RST" "$_rd_nm"
+  _rd_room=$((_ss_cols - 1 - 4 - _ss_nw))
+  if [ -n "$2" ] && [ "$_rd_room" -ge 4 ]; then
+    printf '%s%s%s%s' "$(_ss_pad $((_ss_nw - ${#_rd_nm})))" "$_ss_DIM" "$(_ss_fit "$2" "$_rd_room")" "$_ss_RST"
+  fi
 }
 
+# The current area: spinner (red cross when failed) and the bold name.
 _ss_row_now() {
   if [ "$_ss_failed" = 1 ]; then
     _rn_c=$_ss_BAD
@@ -464,33 +318,26 @@ _ss_row_now() {
     _rn_c=$_ss_BLUE
     _rn_m=$(eval "printf '%s' \"\$_ss_spin_$((_ss_frame % _ss_spin_n + 1))\"")
   fi
-  _rn_nm=$(_ss_fit "$_ss_name" $((_ss_cols - 1 - 8 - 2)))
-  printf '  %snow%s   %s%s%s%s%s%s%s%s' "$_ss_DIM" "$_ss_RST" \
-    "$_ss_BOLD" "$_rn_c" "$_rn_nm" "$_ss_RST" "$(_ss_pad $((_ss_cols - 1 - 8 - 1 - ${#_rn_nm})))" \
-    "$_rn_c" "$_rn_m" "$_ss_RST"
+  printf '  %s%s%s %s%s%s%s' "$_rn_c" "$_rn_m" "$_ss_RST" \
+    "$_ss_BOLD" "$_rn_c" "$(_ss_fit "$_ss_name" $((_ss_cols - 1 - 4)))" "$_ss_RST"
 }
 
 # _ss_row_slot <1-3>: one detail line, key and value aligned when it has both.
 _ss_row_slot() {
   [ "$1" -le "$_ss_ns" ] || return 0
   eval "_sl_k=\$_ss_k$1 _sl_v=\$_ss_v$1"
-  _sl_room=$((_ss_cols - 1 - 10))
+  _sl_room=$((_ss_cols - 1 - 6))
   if [ -z "$_sl_v" ]; then
-    printf '          %s' "$(_ss_fit "$_sl_k" "$_sl_room")"
+    printf '      %s' "$(_ss_fit "$_sl_k" "$_sl_room")"
     return 0
   fi
   _sl_kf=$(_ss_fit "$_sl_k" "$_ss_kw")
-  printf '          %s%s   %s%s%s' "$_sl_kf" "$(_ss_pad $((_ss_kw - ${#_sl_kf})))" \
+  printf '      %s%s   %s%s%s' "$_sl_kf" "$(_ss_pad $((_ss_kw - ${#_sl_kf})))" \
     "$_ss_DIM" "$(_ss_fit "$_sl_v" $((_sl_room - _ss_kw - 3)))" "$_ss_RST"
 }
 
-_ss_row_next() {
-  _ss_next_text $((_ss_cols - 1 - 8))
-  [ -n "$_ss_tx" ] || return 0
-  printf '  %snext  %s%s' "$_ss_DIM" "$_ss_tx" "$_ss_RST"
-}
-
-# Repaint the body in place: move up over what was drawn, rewrite all six rows.
+# Repaint the current area in place: the name row and three detail rows. With
+# an argument the unused detail rows are left out (the failure screen).
 _ss_paint() {
   [ "$_ss_live" = 1 ] || return 0
   _p_o=
@@ -508,15 +355,55 @@ _ss_paint() {
   done
   [ "$_ss_kw" -le 20 ] || _ss_kw=20
   _p_c="${_ss_CR}${_ss_ESC}[2K"
-  _p_o="${_p_o}${_p_c}$(_ss_row_done)${_ss_NL}"
   _p_o="${_p_o}${_p_c}$(_ss_row_now)${_ss_NL}"
-  _p_o="${_p_o}${_p_c}$(_ss_row_slot 1)${_ss_NL}"
-  _p_o="${_p_o}${_p_c}$(_ss_row_slot 2)${_ss_NL}"
-  _p_o="${_p_o}${_p_c}$(_ss_row_slot 3)${_ss_NL}"
-  _p_o="${_p_o}${_p_c}$(_ss_row_next)${_ss_NL}"
-  printf '%s' "$_p_o"
-  _ss_drawn=6
+  _ss_drawn=1
+  _p_i=1
+  while [ "$_p_i" -le 3 ]; do
+    if [ -z "${1:-}" ] || [ "$_p_i" -le "$_ss_ns" ]; then
+      _p_o="${_p_o}${_p_c}$(_ss_row_slot "$_p_i")${_ss_NL}"
+      _ss_drawn=$((_ss_drawn + 1))
+    fi
+    _p_i=$((_p_i + 1))
+  done
+  printf '%s%s[J' "$_p_o" "$_ss_ESC"
   _ss_frame=$((_ss_frame + 1))
+}
+
+# The finished names as one check row, wrapped to the width; continuation
+# lines sit under the first name.
+_ss_collapsed() {
+  [ -n "$_ss_done_list" ] || return 0
+  _cc_oifs=$IFS
+  case $- in
+    *f*) _cc_f=1 ;;
+    *)
+      _cc_f=0
+      set -f
+      ;;
+  esac
+  IFS='|'
+  # shellcheck disable=SC2086
+  set -- $_ss_done_list
+  IFS=$_cc_oifs
+  [ "$_cc_f" = 1 ] || set +f
+  printf '  %s%s%s ' "$_ss_GREEN" "$_ss_ok" "$_ss_RST"
+  _cc_w=4
+  _cc_first=1
+  for _cc_a in "$@"; do
+    _cc_a=$(_ss_fit "$_cc_a" $((_ss_cols - 1 - 4)))
+    if [ "$_cc_first" = 1 ]; then
+      printf '%s' "$_cc_a"
+      _cc_w=$((4 + ${#_cc_a}))
+      _cc_first=0
+    elif [ $((_cc_w + 3 + ${#_cc_a})) -gt $((_ss_cols - 1)) ]; then
+      printf '%s    %s' "$_ss_NL" "$_cc_a"
+      _cc_w=$((4 + ${#_cc_a}))
+    else
+      printf '%s%s%s%s' "$_ss_DIM" "$_ss_sep" "$_ss_RST" "$_cc_a"
+      _cc_w=$((_cc_w + 3 + ${#_cc_a}))
+    fi
+  done
+  printf '%s' "$_ss_NL"
 }
 
 # _ss_put_sub <key> <value>: a detail line goes in the first free slot and
@@ -602,17 +489,14 @@ screen_init() {
   else
     shift $#
   fi
-  _ss_plan=
   _ss_total=0
+  _ss_nw=0
   for _in_a in "$@"; do
     _in_a=$(printf '%s' "$_in_a" | tr -d '\000-\037\177|')
-    if [ -n "$_ss_plan" ]; then
-      _ss_plan="$_ss_plan|$_in_a"
-    else
-      _ss_plan=$_in_a
-    fi
+    [ "${#_in_a}" -le "$_ss_nw" ] || _ss_nw=${#_in_a}
     _ss_total=$((_ss_total + 1))
   done
+  _ss_nw=$((_ss_nw + 4))
   _ss_live=0
   if [ "${SCREEN_FORCE_TTY:-}" = 1 ] || [ -t 1 ]; then
     _ss_live=1
@@ -633,6 +517,7 @@ screen_init() {
   _ss_active=0
   _ss_drawn=0
   _ss_done_list=
+  _ss_done_rows=0
   _ss_clear_subs
   _ss_ready=1
   _ss_cleaned=0
@@ -698,14 +583,19 @@ screen_area_done() {
   else
     _ss_done_list=$_ss_name
   fi
-  if [ "$_ss_live" != 1 ]; then
+  if [ "$_ss_live" = 1 ]; then
+    printf '%s[%sA%s%s[2K%s%s%s[J' "$_ss_ESC" "$_ss_drawn" "$_ss_CR" "$_ss_ESC" \
+      "$(_ss_row_done "$_ss_name" "$_d_det")" "$_ss_NL" "$_ss_ESC"
+    _ss_drawn=0
+    _ss_done_rows=$((_ss_done_rows + 1))
+  else
     _ss_say "[$_ss_n/$_ss_total] ok   $_ss_name: $_d_det ($_d_el)"
   fi
 }
 
-# screen_area_fail <reason> [<next step>]: the active line turns red with a
-# cross and keeps its detail lines; done and next stay, so it is clear where
-# it stopped. The reason, the log path and one next step follow.
+# screen_area_fail <reason> [<next step>]: the current row turns red with a
+# cross and keeps its detail lines, the finished rows above stay. The reason,
+# the log path and one thing to try follow.
 screen_area_fail() {
   [ "$_ss_active" = 1 ] || return 0
   _fl_why=$(_ss_clean "${1:-failed}")
@@ -715,11 +605,11 @@ screen_area_fail() {
   _ss_active=0
   _ss_failed=1
   if [ "$_ss_live" = 1 ]; then
-    _ss_paint
+    _ss_paint compact
     printf '%s' "$_ss_NL"
-    printf '  %sfail%s  %s%s' "$_ss_BAD" "$_ss_RST" "$(_ss_fit "$_fl_why" $((_ss_cols - 1 - 8)))" "$_ss_NL"
-    printf '  %slog%s   %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 8)))" "$_ss_NL"
-    printf '  %stry%s   %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_fl_try" $((_ss_cols - 1 - 8)))" "$_ss_NL"
+    printf '  %s%s%s%s' "$_ss_BAD" "$(_ss_fit "$_fl_why" $((_ss_cols - 1 - 2)))" "$_ss_RST" "$_ss_NL"
+    printf '  %slog%s  %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 7)))" "$_ss_NL"
+    printf '  %stry%s  %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_fl_try" $((_ss_cols - 1 - 7)))" "$_ss_NL"
     _ss_drawn=0
   else
     _ss_say "[$_ss_n/$_ss_total] FAIL $_ss_name: $_fl_why ($_fl_el)"
@@ -748,24 +638,29 @@ screen_run() {
   return "$_ru_rc"
 }
 
-# screen_summary <title>: the finish. The body and the header are replaced by
-# the logo block with the title beside it and the total time.
+# screen_summary <prefix>: the finish. The header stays; the check rows
+# collapse to one wrapped row, then "<prefix> <total time>" in bold green.
 screen_summary() {
   [ "$_ss_failed" = 0 ] || return 0
   if [ "$_ss_active" = 1 ]; then
     screen_area_done
   fi
   _sm_title=$(_ss_clean "$1")
-  _sm_tot=$(_ss_dur $(($(_ss_now) - _ss_t0)))
+  _sm_tot=$(_ss_total_dur)
   _ss_sum_open=1
-  _ss_logf "== summary: $_sm_title ($_sm_tot)"
+  _ss_logf "== summary: $_sm_title $_sm_tot"
   if [ "$_ss_live" = 1 ]; then
-    printf '%s[%sA%s%s[J' "$_ss_ESC" $((_ss_hdr_rows + _ss_drawn)) "$_ss_CR" "$_ss_ESC"
+    if [ "$_ss_done_rows" -gt 0 ]; then
+      printf '%s[%sA' "$_ss_ESC" "$_ss_done_rows"
+    fi
+    printf '%s%s[J' "$_ss_CR" "$_ss_ESC"
     _ss_drawn=0
-    _sm_title=$(_ss_fit "$_sm_title" $(($(_ss_header_room) - 2 - ${#_sm_tot})))
-    _ss_header_draw "${_ss_BOLD}${_sm_title}${_ss_RST}  ${_ss_DIM}${_sm_tot}${_ss_RST}"
+    _ss_collapsed
+    printf '%s' "$_ss_NL"
+    printf '  %s%s%s %s%s%s%s' "$_ss_BOLD" "$_ss_GREEN" \
+      "$(_ss_fit "$_sm_title" $((_ss_cols - 1 - 3 - ${#_sm_tot})))" "$_sm_tot" "$_ss_RST" "$_ss_NL" "$_ss_NL"
   else
-    _ss_say "== $_sm_title ($_sm_tot)"
+    _ss_say "== $_sm_title $_sm_tot"
   fi
 }
 
@@ -800,11 +695,11 @@ _ss_items_flush() {
     [ "${#_if_v}" -le "$_if_w" ] || _if_w=${#_if_v}
     _if_i=$((_if_i + 1))
   done
-  [ "$_if_w" -le $((_ss_cols - 1 - 2)) ] || _if_w=$((_ss_cols - 1 - 2))
+  [ "$_if_w" -le $((_ss_cols - 1 - 4)) ] || _if_w=$((_ss_cols - 1 - 4))
   _if_i=1
   while [ "$_if_i" -le "$_ss_in" ]; do
     eval "_if_v=\$_ss_iv_$_if_i _if_n=\$_ss_in_$_if_i"
-    _if_room=$((_ss_cols - 1 - 2))
+    _if_room=$((_ss_cols - 1 - 4))
     _if_nr=$((_if_room - _if_w - 3))
     if [ "$_if_nr" -lt 1 ]; then
       _if_n=
@@ -816,12 +711,11 @@ _ss_items_flush() {
       http://* | https://*) _if_c=$_ss_LINK ;;
       *) _if_c=$_ss_BOLD ;;
     esac
+    printf '  %s%s%s %s%s%s' "$_ss_GREEN" "$_ss_arrow" "$_ss_RST" "$_if_c" "$_if_v" "$_ss_RST"
     if [ -n "$_if_n" ]; then
-      printf '  %s%s%s%s   %s%s%s%s' "$_if_c" "$_if_v" "$_ss_RST" "$(_ss_pad $((_if_w - ${#_if_v})))" \
-        "$_ss_DIM" "$_if_n" "$_ss_RST" "$_ss_NL"
-    else
-      printf '  %s%s%s%s' "$_if_c" "$_if_v" "$_ss_RST" "$_ss_NL"
+      printf '%s   %s%s%s' "$(_ss_pad $((_if_w - ${#_if_v})))" "$_ss_DIM" "$_if_n" "$_ss_RST"
     fi
+    printf '%s' "$_ss_NL"
     _if_i=$((_if_i + 1))
   done
   printf '%s' "$_ss_NL"
@@ -840,16 +734,14 @@ screen_summary_warn() {
 }
 
 screen_finish() {
-  _fi_tot=$(_ss_dur $(($(_ss_now) - _ss_t0)))
-  _ss_logf "== finished in $_fi_tot"
+  _ss_logf "== finished in $(_ss_total_dur)"
   if [ "$_ss_live" = 1 ]; then
     if [ "$_ss_sum_open" = 1 ]; then
       _ss_items_flush
-      printf '  %slog%s  %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 7)))" "$_ss_NL"
+      printf '  %slog  %s%s%s' "$_ss_DIM" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 7)))" "$_ss_RST" "$_ss_NL"
     fi
   else
     _ss_say "log: $_ss_log"
-    _ss_say "total: $_fi_tot"
   fi
   _ss_cleanup
 }

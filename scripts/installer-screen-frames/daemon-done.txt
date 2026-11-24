@@ -1,12 +1,13 @@
 
-  ▄█▀▄█▀██████████▀
- ▀▀ ▀▀▀▀▀████▀▀▀▀
-       ▄███▀          Server enrolled  0s
-      ▄███▀
-     ████
+ ▟█▙ TurboPanel  1.8.2 · server
 
-  server-a.example.lan   server
-  panel.example.net      panel
+  ✓ Preflight · Release · Download · Runtimes · Ansible · Services · Enrolment
+    Kernel
+
+  Enrolled in 1m 12s
+
+  → server-a.example.lan   server
+  → panel.example.net      panel
 
   ! clock is 2.1 s off, time sync is on
   log  install.log

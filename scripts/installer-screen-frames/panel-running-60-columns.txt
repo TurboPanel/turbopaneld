@@ -1,13 +1,13 @@
 
-  ▄█▀▄█▀██████████▀
- ▀▀ ▀▀▀▀▀████▀▀▀▀
-       ▄███▀          TurboPanel 9.9.9 · control plane
-      ▄███▀
-     ████
+ ▟█▙ TurboPanel  1.8.2 · control plane
 
-  done  +2 · download · runtimes · ansible · database    0s
-  now   services                                          ⠸
-          control plane   ready
-          caddy           starting
-          daemon          waiting
-  next  health
+  ✓ Preflight    Debian 13, 4 CPU, 8 GiB
+  ✓ Release      signature verified
+  ✓ Download     control plane 1.8.2, web app 1.8.2
+  ✓ Runtimes     Postgres 18, Redis 8, RabbitMQ 4
+  ✓ Ansible      Ansible 2.20, 63 tasks, 0 failed
+  ✓ Database     schema is up to date
+  ⠸ Services
+      control plane   ready
+      caddy           starting
+      daemon          waiting

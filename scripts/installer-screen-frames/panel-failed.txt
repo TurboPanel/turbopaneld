@@ -1,17 +1,14 @@
 
-  ▄█▀▄█▀██████████▀
- ▀▀ ▀▀▀▀▀████▀▀▀▀
-       ▄███▀          TurboPanel 1.8.2 · control plane
-      ▄███▀
-     ████
+ ▟█▙ TurboPanel  1.8.2 · control plane
 
-  done  preflight · release · download                                       0s
-  now   runtimes                                                              ✗
-          postgres 18   starting
-          redis 8       waiting
-          rabbitmq 4    waiting
-  next  ansible · database · services · health
+  ✓ Preflight    Debian 13, 4 CPU, 8 GiB
+  ✓ Release      signature verified
+  ✓ Download     control plane 1.8.2, web app 1.8.2
+  ✗ Runtimes
+      postgres 18   starting
+      redis 8       waiting
+      rabbitmq 4    waiting
 
-  fail  Postgres 18 did not start: port 5432 is in use
-  log   install.log
-  try   stop whatever listens on port 5432, then run the installer again
+  Postgres 18 did not start: port 5432 is in use
+  log  install.log
+  try  stop whatever listens on port 5432, then run the installer again
