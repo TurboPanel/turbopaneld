@@ -178,6 +178,8 @@ import {
 import {
   materializeStorageEntries,
   resolveVolumeOwnerIds,
+  storageHostPath,
+  storageRootPath,
   type VolumeOwnerIds,
 } from "../deploy/materialize-storage.ts";
 import {
@@ -292,6 +294,7 @@ import {
   collectAuthoredHostPaths,
   collectResolvedHostPaths,
   priorWritableMounts,
+  type StateTreeOptions,
 } from "../deploy/compose-host-paths.ts";
 import {
   configHostDirectory,
@@ -1755,6 +1758,30 @@ export function ownedVolumeRoots(
 }
 
 /**
+ * The daemon's own state trees and the storage locations of this deploy: the
+ * only places inside them a bind source may name (`compose-host-paths.ts`).
+ */
+export function ownedStateTree(
+  layout: Pick<LayoutPaths, "stateDir" | "daemonStateDir">,
+  payload: Pick<EnvironmentDeployPayload, "organizationId" | "storageMaterial">,
+): StateTreeOptions {
+  return {
+    storageRoot: storageRootPath(layout),
+    stateDirs: [layout.stateDir, layout.daemonStateDir],
+    locations: (payload.storageMaterial ?? [])
+      .filter((entry) => entry.kind !== "volume" && entry.provider !== "docker")
+      .map((entry) =>
+        storageHostPath(
+          layout,
+          payload.organizationId,
+          entry.storageId,
+          entry.locationId,
+        )
+      ),
+  };
+}
+
+/**
  * A container whose compose file names a numeric user other than the site
  * owner's gets an access entry on the volume folder for that uid. Never fails
  * the deploy: see `deploy/volume-access.ts`.
@@ -2621,6 +2648,12 @@ async function deployContainerServices(
     // `extends` already expanded): host-level service fields need the control
     // plane's approval, and built images may not take platform image names.
     assertComposePolicy(resolved.document ?? {}, {
+      volumeNamespace: {
+        project: parsedPayload.projectName,
+        owned: (parsedPayload.storageMaterial ?? []).flatMap((entry) =>
+          entry.volumeName ? [entry.volumeName] : []
+        ),
+      },
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
       allowNetworkShares: parsedPayload.allowNetworkShares === true,
       platformNetworks: [
@@ -2680,6 +2713,7 @@ async function deployContainerServices(
           homeRoot: layout.principalHomeRoot,
           volumes: ownedVolumeRoots(layout, parsedPayload),
         },
+        stateTree: ownedStateTree(layout, parsedPayload),
         priorWritableMounts: await priorWritableMounts(
           parsedPayload.projectName,
           deploymentDir,

@@ -10,6 +10,7 @@
  * Dependency-free on purpose (see http.ts).
  */
 
+import { APPROVABLE_RULES } from "./approval.ts";
 import {
   BACKUP_ROOT,
   DEFAULT_INGRESS_SOCKET_DIR,
@@ -40,6 +41,21 @@ export type PolicyConfig = {
    * (see `principalViolation`). Applies on top of `bindRoots`.
    */
   principalRoots: readonly string[];
+  /**
+   * The daemon's storage roots (`<state>/storage`, shared by every
+   * organization): below one, only `<org>/<storage>/<location>/data` (and
+   * below it) may be bound, never the root or an organization's or storage's
+   * directory (see `storageViolation`). Applies on top of `bindRoots`.
+   */
+  storageRoots: readonly string[];
+  /**
+   * The daemon's state directories (`/var/lib/turbopanel`). A bind source
+   * above one (`/var/lib`, `/var`), at one, or below one outside the storage
+   * roots (`deployments/`, secrets records, the spool) is refused by the
+   * `bind-state-dir` rule, which no approval can relax (see
+   * `stateDirViolation`).
+   */
+  stateDirs: readonly string[];
   /** Host paths (and everything under them) a bind mount may never reach. */
   denyPrefixes: readonly string[];
   /** The engine socket in every spelling the host uses. */
@@ -62,6 +78,8 @@ export type PolicyConfig = {
 export const DEFAULT_POLICY_CONFIG: PolicyConfig = {
   bindRoots: ["/srv/users", "/var/lib/turbopanel/storage"],
   principalRoots: ["/srv/users"],
+  storageRoots: ["/var/lib/turbopanel/storage"],
+  stateDirs: ["/var/lib/turbopanel"],
   denyPrefixes: [
     "/etc",
     "/var/run",
@@ -399,6 +417,51 @@ function principalViolation(
     : { rule: "bind-principal-path", detail: resolved };
 }
 
+/** Ids the daemon writes below a storage root: one plain segment, no dot names. */
+const STORAGE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/**
+ * Below a storage root only `<org>/<storage>/<location>/data[/...]`, the shape
+ * the daemon builds (`storageHostPath`). The root, an organization's folder, a
+ * storage's folder and a location's folder (which holds more than `data`) are
+ * outside. The gate cannot tell whose organization a container belongs to, so
+ * another organization's well-formed location still passes here; the daemon
+ * checks that against the deploy's own storage before it asks for the bind.
+ */
+function storageViolation(
+  resolved: string,
+  config: PolicyConfig,
+): Violation | undefined {
+  const root = config.storageRoots.find((r) => within(resolved, r));
+  if (root === undefined) return undefined;
+  const [org, storage, location, data] = resolved.slice(root.length)
+    .split("/").filter((part) => part !== "");
+  const ok =
+    [org, storage, location].every((part) =>
+      part !== undefined && STORAGE_SEGMENT.test(part)
+    ) && data === "data";
+  return ok ? undefined : { rule: "bind-storage-path", detail: resolved };
+}
+
+/**
+ * The daemon's state directory, its `deployments/` and every ancestor of them
+ * (`/var/lib`, `/var`): a bind there reaches the deploy records and secret
+ * material of every project on the host. Unlike `bind-outside-roots`, which a
+ * host-level approval relaxes, this one is never approvable. Only the storage
+ * roots below a state directory stay reachable (judged by `storageViolation`).
+ */
+function stateDirViolation(
+  resolved: string,
+  config: PolicyConfig,
+): Violation | undefined {
+  const hit = config.stateDirs.some((dir) => {
+    if (within(dir, resolved)) return true; // the directory or an ancestor
+    return within(resolved, dir) &&
+      !config.storageRoots.some((root) => within(resolved, root));
+  });
+  return hit ? { rule: "bind-state-dir", detail: resolved } : undefined;
+}
+
 /** The cases a bind source can break, most specific first. */
 function bindViolation(
   resolved: string,
@@ -411,10 +474,13 @@ function bindViolation(
   if (config.denyPrefixes.some((prefix) => within(resolved, prefix))) {
     return { rule: "bind-forbidden-path", detail: resolved };
   }
+  const state = stateDirViolation(resolved, config);
+  if (state) return state;
   if (!config.bindRoots.some((root) => within(resolved, root))) {
     return { rule: "bind-outside-roots", detail: resolved };
   }
-  return principalViolation(resolved, config);
+  return storageViolation(resolved, config) ??
+    principalViolation(resolved, config);
 }
 
 /** One bind as authored: its source and whether it was asked read-only. */
@@ -557,7 +623,15 @@ async function checkBindSource(
   }
   const platform = platformOutcome(resolved, entry, ctx);
   if (platform) return platform;
+  // A source that cannot be resolved (a link loop, a directory the gate cannot
+  // traverse) is judged on its spelling alone, which a link defeats; refuse it
+  // instead. A lexical finding an approval could clear (`bind-outside-roots`)
+  // must not mask this: the unresolvable finding replaces it, and no approval
+  // relaxes it. A finding no approval relaxes keeps its own, more specific name.
   const violation = bindViolation(resolved, ctx.config);
+  if (!resolveOk && (!violation || violation.rule in APPROVABLE_RULES)) {
+    return { violation: { rule: "bind-unresolvable", detail: resolved } };
+  }
   return violation ? { violation } : {};
 }
 

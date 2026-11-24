@@ -104,6 +104,18 @@ function isSafeRepoPath(path: string): boolean {
   return /^[A-Za-z0-9._/-]+$/.test(path);
 }
 
+/**
+ * A clone URL or ref comes from the control plane and ends up as a positional
+ * argument to git, so a leading `-` would be read as an option
+ * (`--upload-pack=…`). Checked here whatever transport is in use, on top of the
+ * `--` every call puts before them.
+ */
+function assertNotOptionLike(value: string, what: string): void {
+  if (value.startsWith("-")) {
+    throw new Error(`${what} must not start with "-"`);
+  }
+}
+
 /** Everything the per-path helpers need from an opened bare fetch. */
 type RepoReadContext = {
   scratchDir: string;
@@ -127,11 +139,12 @@ async function fetchRef(ctx: RepoReadContext, ref: string): Promise<void> {
     "--depth",
     "1",
     "--filter=blob:none",
+    "--",
     "origin",
     ref,
   ]);
   if (!fetched.success) {
-    fetched = await gitIn(ctx, ["fetch", "--depth", "1", "origin", ref]);
+    fetched = await gitIn(ctx, ["fetch", "--depth", "1", "--", "origin", ref]);
   }
   if (!fetched.success) throw new Error(fetched.stderr || "git fetch failed");
 }
@@ -225,6 +238,7 @@ export async function resolveDefaultBranch(
   scratchRoot = "/tmp",
   transport: RepoReadTransport = PUBLIC_REMOTE,
 ): Promise<ResolveDefaultBranchResult> {
+  assertNotOptionLike(cloneUrl, "the clone URL");
   transport.checkUrl(cloneUrl);
   const scratchDir = await Deno.makeTempDir({
     dir: scratchRoot,
@@ -241,7 +255,7 @@ export async function resolveDefaultBranch(
 
   try {
     const result = await runGit(
-      ["ls-remote", "--symref", cloneUrl, "HEAD"],
+      ["ls-remote", "--symref", "--", cloneUrl, "HEAD"],
       scratchDir,
       env,
       controller.signal,
@@ -265,6 +279,8 @@ export async function readRemoteFiles(
 ): Promise<ReadRemoteFilesResult> {
   // Before the scratch dir and the credential files: a refused address
   // never gets a credential written for it.
+  assertNotOptionLike(params.cloneUrl, "the clone URL");
+  assertNotOptionLike(params.ref, "the ref");
   transport.checkUrl(params.cloneUrl);
   const scratchDir = await Deno.makeTempDir({
     dir: scratchRoot,
@@ -303,6 +319,7 @@ export async function readRemoteFiles(
     const remote = await gitIn(ctx, [
       "remote",
       "add",
+      "--",
       "origin",
       params.cloneUrl,
     ]);

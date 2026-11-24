@@ -1104,6 +1104,26 @@ owner's folder and a sibling volume are refused even when host-level features
 are approved, and a link left inside a volume must still resolve inside it.
 Container paths and volume subpaths are shape-checked (`assertMountShape`).
 
+The daemon's state directories are never bind sources, whatever host-level
+approval says (`stateTree` in `compose-host-paths.ts`, mirrored for the storage
+root by the Docker gate): the storage root, any other organization's storage,
+the deployments tree and every ancestor (`/var/lib/turbopanel`, `/var/lib`,
+`/`) are refused, checked on the path and on where it resolves. The one
+exception is a storage location this deploy was sent
+(`<state>/storage/<org>/<storage>/<location>/data`), and only with host-level
+approval and only while it resolves inside that location. With host-level
+approval a path that cannot be resolved at all (not merely missing) is refused,
+never judged on its spelling. `stateTreeOutcome` hands the own-location case to
+`ownLocationOutcome`.
+
+Named volumes stay in the deploy's namespace (`volumeNamespace` in
+`compose-final-policy.ts`, approved or not): a top-level volume's effective name
+(`name:` when set, else the key for `external: true`, else `<project>_<key>`)
+must start with `<project>_` or be the `volumeName` of a docker storage entry
+this deploy was sent. `external: true` or `name:` pointing at another project's
+or a managed engine's volume is refused. The Docker gate cannot tell a volume's
+owner from its name, so this is enforced in the daemon only.
+
 ## Native Node/Next runtime
 
 Moved to [`native/AGENTS.md`](./native/AGENTS.md) — host-run Node/Next services

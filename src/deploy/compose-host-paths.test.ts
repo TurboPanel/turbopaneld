@@ -12,6 +12,7 @@ import {
   type ComposeHostPathScan,
   type HostPathEntry,
   priorWritableMounts,
+  type StateTreeOptions,
   writableMountSources,
 } from "./compose-host-paths.ts";
 
@@ -1498,4 +1499,283 @@ test("a symlink in the checkout to a daemon file in the deployment directory is 
       ComposeHostPathError,
     );
     assert(err.message.includes("a file in it"));
+  }));
+
+/** The fixture root is the daemon state dir; `storage/<org>/<storage>/<loc>/data` is one location. */
+async function withStateTree(
+  fn: (
+    f: Fixture,
+    tree: StateTreeOptions,
+    own: string,
+    other: string,
+  ) => Promise<void>,
+): Promise<void> {
+  await withFixture(async (f) => {
+    const stateDir = join(f.root, "state");
+    const storageRoot = join(stateDir, "storage");
+    const own = join(storageRoot, "org-a", "st-1", "loc-1", "data");
+    const other = join(storageRoot, "org-b", "st-9", "loc-9", "data");
+    await Deno.mkdir(own, { recursive: true });
+    await Deno.mkdir(other, { recursive: true });
+    await fn(
+      f,
+      {
+        storageRoot,
+        stateDirs: [stateDir],
+        locations: [own],
+      },
+      own,
+      other,
+    );
+  });
+}
+
+async function stateTreeRefusal(
+  f: Fixture,
+  tree: StateTreeOptions,
+  source: string,
+  approved = true,
+): Promise<string> {
+  const err = await assertRejects(
+    () =>
+      assertComposeHostPathsConfined(
+        [binds({ type: "bind", source, target: "/s" })],
+        {
+          deploymentDir: f.dir,
+          stageDir: f.stage,
+          hostLevelApproved: approved,
+          stateTree: tree,
+        },
+      ),
+    ComposeHostPathError,
+  );
+  return err.message;
+}
+
+test("state tree: with host-level approval the storage root, its ancestors and another organization's storage are refused", () =>
+  withStateTree(async (f, tree, _own, other) => {
+    const parent = join(f.root, "..");
+    for (
+      const source of [
+        tree.storageRoot,
+        join(tree.storageRoot, "org-a"),
+        join(tree.storageRoot, "org-a", "st-1"),
+        join(tree.storageRoot, "org-a", "st-1", "loc-1"),
+        other,
+        join(other, "sub"),
+        f.root,
+        parent,
+        join(f.root, "state"),
+        "/",
+      ]
+    ) {
+      assert(
+        (await stateTreeRefusal(f, tree, source)).includes(
+          "daemon's state directory",
+        ),
+        source,
+      );
+    }
+  }));
+
+test("state tree: this deploy's own location is accepted with approval, and refused without it", () =>
+  withStateTree(async (f, tree, own) => {
+    await assertComposeHostPathsConfined(
+      [binds({ type: "bind", source: own, target: "/s" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+      },
+    );
+    await Deno.mkdir(join(own, "sub"));
+    await assertComposeHostPathsConfined(
+      [binds({ type: "bind", source: join(own, "sub"), target: "/t" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+      },
+    );
+    assert(
+      (await stateTreeRefusal(f, tree, own, false)).includes(
+        "host-level Compose features",
+      ),
+    );
+  }));
+
+test("state tree: a link inside the own location to another organization's storage is refused", () =>
+  withStateTree(async (f, tree, own, other) => {
+    await Deno.symlink(other, join(own, "escape"));
+    assert(
+      (await stateTreeRefusal(f, tree, join(own, "escape"))).includes(
+        "outside its storage location",
+      ),
+    );
+  }));
+
+test("state tree: a link from elsewhere into the storage root is refused", () =>
+  withStateTree(async (f, tree, _own, other) => {
+    const link = join(f.outside, "link");
+    await Deno.symlink(other, link);
+    assert(
+      (await stateTreeRefusal(f, tree, link)).includes(
+        "daemon's state directory",
+      ),
+    );
+  }));
+
+test("state tree: a path clear of the state trees is still host-level only", () =>
+  withStateTree(async (f, tree) => {
+    await assertComposeHostPathsConfined(
+      [binds({ type: "bind", source: f.outside, target: "/o" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+      },
+    );
+  }));
+
+test("state tree: a build path in the own location is refused, and relative sources still work", () =>
+  withStateTree(async (f, tree, own) => {
+    await Deno.mkdir(join(f.stage, "data"));
+    await assertComposeHostPathsConfined(
+      [binds({ type: "bind", source: "./data", target: "/d" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: false,
+        stateTree: tree,
+      },
+    );
+    await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [collectResolvedHostPaths({
+            services: { web: { build: { context: own } } },
+          })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            hostLevelApproved: true,
+            stateTree: tree,
+          },
+        ),
+      ComposeHostPathError,
+    );
+  }));
+
+function deviceScan(device: string): ComposeHostPathScan {
+  return collectResolvedHostPaths({
+    services: { web: { image: "x" } },
+    volumes: {
+      data: { driver_opts: { type: "none", o: "bind", device } },
+    },
+  });
+}
+
+test("state tree: a driver_opts device bind into the own location is accepted with approval, and its escapes and neighbours are refused", () =>
+  withStateTree(async (f, tree, own, other) => {
+    const base = {
+      deploymentDir: f.dir,
+      stageDir: f.stage,
+      hostLevelApproved: true,
+      stateTree: tree,
+    };
+    await Deno.mkdir(join(own, "sub"));
+    await assertComposeHostPathsConfined([deviceScan(own)], base);
+    await assertComposeHostPathsConfined(
+      [deviceScan(join(own, "sub"))],
+      base,
+    );
+    // A path Docker has yet to create resolves through its existing ancestor.
+    await assertComposeHostPathsConfined(
+      [deviceScan(join(own, "sub", "new"))],
+      base,
+    );
+    await Deno.symlink(other, join(own, "escape"));
+    for (const device of [join(own, "escape"), other, tree.storageRoot]) {
+      await assertRejects(
+        () => assertComposeHostPathsConfined([deviceScan(device)], base),
+        ComposeHostPathError,
+      );
+    }
+    await assertRejects(
+      () =>
+        assertComposeHostPathsConfined([deviceScan(own)], {
+          ...base,
+          hostLevelApproved: false,
+        }),
+      ComposeHostPathError,
+    );
+  }));
+
+/** A realpath that fails with an error other than "not found" for paths under `blocked`. */
+function failingRealPath(blocked: string) {
+  return (path: string): Promise<string> =>
+    path === blocked || path.startsWith(`${blocked}/`)
+      ? Promise.reject(new Deno.errors.PermissionDenied("denied"))
+      : Deno.realPath(path);
+}
+
+test("state tree: an approved bind whose path cannot be resolved is refused, not judged on its spelling", () =>
+  withStateTree(async (f, tree, own) => {
+    const blockedOutside = join(f.outside, "locked");
+    await Deno.mkdir(blockedOutside);
+    for (
+      const [source, blocked] of [[own, own], [blockedOutside, blockedOutside]]
+    ) {
+      const options = {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+        realPath: failingRealPath(blocked!),
+      };
+      const err = await assertRejects(
+        () =>
+          assertComposeHostPathsConfined(
+            [binds({ type: "bind", source: source!, target: "/s" })],
+            options,
+          ),
+        ComposeHostPathError,
+      );
+      assert(
+        err.message.includes("cannot be resolved on this host"),
+        err.message,
+      );
+    }
+    // A path inside the own location the account cannot read, while the
+    // location itself resolves, is refused as leading somewhere unknown.
+    const lockedInOwn = join(own, "locked");
+    await Deno.mkdir(lockedInOwn);
+    const inOwn = await assertRejects(
+      () =>
+        assertComposeHostPathsConfined(
+          [binds({ type: "bind", source: lockedInOwn, target: "/s" })],
+          {
+            deploymentDir: f.dir,
+            stageDir: f.stage,
+            hostLevelApproved: true,
+            stateTree: tree,
+            realPath: failingRealPath(lockedInOwn),
+          },
+        ),
+      ComposeHostPathError,
+    );
+    assert(inOwn.message.includes("unreadable path"), inOwn.message);
+    // The same path resolves fine when the engine can read it.
+    await assertComposeHostPathsConfined(
+      [binds({ type: "bind", source: blockedOutside, target: "/s" })],
+      {
+        deploymentDir: f.dir,
+        stageDir: f.stage,
+        hostLevelApproved: true,
+        stateTree: tree,
+      },
+    );
   }));
