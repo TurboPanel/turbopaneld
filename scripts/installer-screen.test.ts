@@ -81,9 +81,13 @@ async function withTemp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   }
 }
 
-/** The screen as text: escape sequences and carriage returns removed. */
+/** The screen as text: escape sequences removed; a cursor move starts a new line. */
 function visible(out: string): string[] {
-  return out.replace(ANSI, "").replaceAll("\r", "").split("\n");
+  return out.replace(/\x1b\[\d*[AB]/g, "\n").replace(ANSI, "").replaceAll(
+    "\r",
+    "",
+  )
+    .split("\n");
 }
 
 /**
@@ -105,7 +109,10 @@ function render(out: string): string[] {
         i += [...m[0]].length;
         const [, arg, cmd] = m;
         if (cmd === "A") r = Math.max(0, r - Number(arg || 1));
-        else if (cmd === "K") rows[r] = [];
+        else if (cmd === "B") {
+          r += Number(arg || 1);
+          while (rows.length <= r) rows.push([]);
+        } else if (cmd === "K") rows[r] = [];
         else if (cmd === "J") {
           rows.length = r + 1;
           rows[r] = rows[r].slice(0, c);
@@ -306,11 +313,11 @@ test("the live screen shows a one-line header, check rows and the current area, 
     assert(r.out.endsWith(SHOW), "cursor shown again at the very end");
     for (const line of visible(r.out)) assert([...line].length <= 79, line);
     const text = visible(r.out).join("\n");
-    assertStringIncludes(text, " ▟█▙ TurboPanel  1.8.2 · server");
+    assertStringIncludes(text, "  TurboPanel  1.8.2 · server");
     assertStringIncludes(text, "  ✓ Preflight    Debian 13, 4 CPU, 8 GiB");
     assertStringIncludes(text, "  ✓ Release      signature verified");
     assertStringIncludes(text, "  ⠋ Runtimes");
-    for (const gone of ["━", "╭", "│", "3/8", "▄███▀", "next  ", "done  "]) {
+    for (const gone of ["▟█▙", "[T]", "╭", "│", "▄███▀", "next  ", "done  "]) {
       assert(!text.includes(gone), `no ${gone} in the compact layout`);
     }
     assert(
@@ -325,15 +332,16 @@ test("the live screen shows a one-line header, check rows and the current area, 
         ),
       ], { ...LIVE_ENV, SCREEN_COLS: "80" })).out,
     );
-    assertEquals(mid.slice(0, 4), [
+    assertEquals(mid.slice(0, 5), [
       "",
-      " ▟█▙ TurboPanel  1.8.2 · control plane",
+      "  TurboPanel  1.8.2 · control plane",
+      `  ${"━".repeat(10)}${"─".repeat(22)}  2/3  Bb`,
       "",
       "  ✓ Aa    fact",
     ]);
-    assertEquals(mid.length, 6);
-    assertEquals(mid[5], "      one");
-    assert(/^ {2}\S Bb$/.test(mid[4]), "pending areas are not shown");
+    assertEquals(mid.length, 7);
+    assertEquals(mid[6], "      one");
+    assert(/^ {2}\S Bb$/.test(mid[5]), "pending areas are not shown");
   });
 });
 
@@ -400,10 +408,11 @@ test("the finish collapses the check rows to one wrapped row, then the ready lin
     assertEquals(r.code, 0);
     assertEquals(render(r.out), [
       "",
-      " ▟█▙ TurboPanel  1.8.2 · control plane",
+      "  TurboPanel  1.8.2 · control plane",
+      `  ${"━".repeat(32)}  8/8`,
       "",
-      "  ✓ Preflight · Release · Download · Runtimes · Ansible · Database · Services",
-      "    Health",
+      "  ✓ Preflight · Release · Download · Runtimes",
+      "    Ansible · Database · Services · Health",
       "",
       "  Ready in 1m 12s",
       "",
@@ -422,8 +431,8 @@ test("the finish collapses the check rows to one wrapped row, then the ready lin
     );
     const first = narrow.findIndex((l) => l.startsWith("  ✓ Preflight"));
     assertEquals(narrow.slice(first, first + 2), [
-      "  ✓ Preflight · Release · Download · Runtimes · Ansible",
-      "    Database · Services · Health",
+      "  ✓ Preflight · Release · Download · Runtimes",
+      "    Ansible · Database · Services · Health",
     ]);
     const d = await run(
       ["dash"],
@@ -511,6 +520,11 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
     const rows = render(r.out);
     const at = nowRow(rows);
     assertEquals(rows[at], "  ✗ Runtimes");
+    assertEquals(
+      rows[2],
+      `  ${"━".repeat(12)}${"─".repeat(20)}  4/8  Runtimes`,
+    );
+    assertStringIncludes(r.out, `${ESC}[38;5;210m${"━".repeat(12)}`);
     assertEquals(rows.slice(at - 3, at), [
       "  ✓ Preflight    Debian 13, 4 CPU, 8 GiB",
       "  ✓ Release      signature verified",
@@ -527,6 +541,113 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
     ]);
     assert(!rows.some((l) => l.includes("Ready in")));
     assertStringIncludes(await Deno.readTextFile(log), "-- FAILED: Runtimes");
+  });
+});
+
+test("the progress bar is 32 cells, fills by finished areas and redraws in place", async () => {
+  await withTemp(async (dir) => {
+    const bar = async (body: string, extra: Record<string, string> = {}) =>
+      render(
+        (await run(["dash"], [await driver(dir, body, "A B C D")], {
+          ...LIVE_ENV,
+          SCREEN_COLS: "80",
+          ...extra,
+        })).out,
+      );
+    const start = await bar("kill -KILL $$");
+    assertEquals(start.slice(0, 2), [
+      "",
+      "  TurboPanel  1.8.2 · control plane",
+    ]);
+    assertEquals(start[2], `  ${"─".repeat(32)}  0/4`);
+    const first = await bar("screen_area_start A\nkill -KILL $$");
+    assertEquals(first[2], `  ${"─".repeat(32)}  1/4  A`);
+    const mid = await bar(
+      "screen_area_start A\nscreen_area_done\nscreen_area_start B\nscreen_area_done\nscreen_area_start C\nkill -KILL $$",
+    );
+    assertEquals(mid[2], `  ${"━".repeat(16)}${"─".repeat(16)}  3/4  C`);
+    assertEquals(mid.length, 7, "the bar redraws in place, no extra rows");
+    const done = await bar(
+      "for a in A B C D; do screen_area_start $a; screen_area_done; done\nscreen_summary Ready\nscreen_finish",
+    );
+    assertEquals(done[2], `  ${"━".repeat(32)}  4/4`);
+    const failed = await bar(
+      "screen_area_start A\nscreen_area_done\nscreen_area_start B\nscreen_area_fail why",
+    );
+    assertEquals(failed[2], `  ${"━".repeat(8)}${"─".repeat(24)}  2/4  B`);
+    const ascii = await bar(
+      "screen_area_start A\nscreen_area_done\nkill -KILL $$",
+      {
+        SCREEN_UNICODE: "0",
+      },
+    );
+    assertEquals(ascii[2], `  ${"#".repeat(8)}${"-".repeat(24)}  1/4  A`);
+    const narrow = await bar(
+      "screen_area_start A\nkill -KILL $$",
+      { SCREEN_COLS: "40" },
+    );
+    assert([...narrow[2]].length <= 39, "the bar shrinks on a narrow screen");
+    assert(!narrow[2].includes("━".repeat(32)));
+    const raw = (await run(["dash"], [
+      await driver(
+        dir,
+        "screen_area_start A\nscreen_area_done\nscreen_summary Ready\nscreen_finish",
+        "A",
+      ),
+    ], { ...LIVE_ENV, COLORTERM: "truecolor", SCREEN_COLS: "80" })).out;
+    assertStringIncludes(raw, `${ESC}[38;2;61;214;140m${"━".repeat(32)}`);
+    assertStringIncludes(raw, `${ESC}[38;2;51;102;204m`);
+  });
+});
+
+test("plain output never prints a progress bar", async () => {
+  await withTemp(async (dir) => {
+    const r = await run(
+      ["dash"],
+      [DEMO, "--mode", "panel", "--fast", "--log", join(dir, "i.log")],
+      PLAIN_ENV,
+    );
+    assertEquals(r.code, 0);
+    for (const bar of ["━", "─", "####", "----"]) {
+      assert(!r.out.includes(bar), `no ${bar} in plain output`);
+    }
+    assertStringIncludes(r.out, "[3/8] Download ...");
+  });
+});
+
+test("a long collapsed check row splits into two balanced lines, never a lone word", async () => {
+  await withTemp(async (dir) => {
+    const wrapped = async (plan: string, cols: string) => {
+      const body = plan.split(" ").map((a) =>
+        `screen_area_start ${a}\nscreen_area_done`
+      )
+        .join("\n") + "\nscreen_summary Ready\nscreen_finish";
+      const rows = render(
+        (await run(["dash"], [await driver(dir, body, plan)], {
+          ...LIVE_ENV,
+          SCREEN_COLS: cols,
+        })).out,
+      );
+      const at = rows.findIndex((l) => l.startsWith("  ✓"));
+      return rows.slice(at, rows.indexOf("", at));
+    };
+    assertEquals(await wrapped("Aa Bb Cc", "80"), ["  ✓ Aa · Bb · Cc"]);
+    assertEquals(
+      await wrapped(
+        "Preflight Release Download Runtimes Ansible Database Services Health",
+        "80",
+      ),
+      [
+        "  ✓ Preflight · Release · Download · Runtimes",
+        "    Ansible · Database · Services · Health",
+      ],
+    );
+    const odd = await wrapped(
+      "Alpha Bravo Charlie Delta Echo Foxtrot Golf Hotel India",
+      "60",
+    );
+    assertEquals(odd.length, 2);
+    assert(odd[1].trim().split(" · ").length > 1, "no lone word on line two");
   });
 });
 

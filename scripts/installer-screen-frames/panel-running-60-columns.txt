@@ -1,5 +1,6 @@
 
- ▟█▙ TurboPanel  1.8.2 · control plane
+  TurboPanel  1.8.2 · control plane
+  ━━━━━━━━━━━━━━━━━━━━━━━━────────  7/8  Services
 
   ✓ Preflight    Debian 13, 4 CPU, 8 GiB
   ✓ Release      signature verified

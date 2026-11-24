@@ -30,7 +30,7 @@
 #                                keeps its detail lines; then the reason, the
 #                                log path and one thing to try
 #   screen_summary <prefix>      the finish: the check rows collapse to one
-#                                wrapped row, then "<prefix> <total time>"
+#                                row (two balanced lines if too wide), then "<prefix> <total time>"
 #                                ("Ready in 1m 12s", "Enrolled in 1m 12s")
 #   screen_summary_item <value> <note>   URLs or names, aligned, note dim
 #   screen_summary_warn <text>   things to act on (after the items)
@@ -40,7 +40,8 @@
 #
 # Layout while running (finished areas stay as one row each; pending areas
 # are not shown):
-#    [mark] TurboPanel  1.8.2 . control plane
+#     TurboPanel  1.8.2 . control plane
+#     ========------------  3/8  Runtimes   (32 cells, redrawn in place)
 #
 #     ok Preflight    Debian 13, amd64, 4 CPU
 #     ok Release      signature verified
@@ -48,8 +49,8 @@
 #         postgres 18   ready
 #         redis 8       pulling image
 #
-# The mark is one row, three cells wide, drawn from the brand logo in brand
-# blue and green; SCREEN_UNICODE=0 gives [T].
+# The bar fills by finished areas, brand blue (green when done, red when an
+# area failed); SCREEN_UNICODE=0 gives # and - . Plain output has no bar.
 #
 # Environment
 #   NO_COLOR (non-empty), TERM=dumb or unset, stdout not a TTY
@@ -98,6 +99,7 @@ _ss_v3=
 _ss_done_list=
 _ss_done_rows=0
 _ss_nw=12
+_ss_bar_state=run
 _ss_in=0
 _ss_items_out=0
 _ss_tx=
@@ -239,6 +241,8 @@ _ss_setup_style() {
     _ss_ellw=1
     _ss_no='✗'
     _ss_ok='✓'
+    _ss_bar_on='━'
+    _ss_bar_off='─'
     _ss_arrow='→'
     _ss_sep=' · '
     _ss_spin_1='⠋'
@@ -257,6 +261,8 @@ _ss_setup_style() {
     _ss_ellw=3
     _ss_no='x'
     _ss_ok='+'
+    _ss_bar_on='#'
+    _ss_bar_off='-'
     _ss_arrow='>'
     _ss_sep=' / '
     _ss_spin_1='|'
@@ -267,16 +273,6 @@ _ss_setup_style() {
   fi
 }
 
-# The brand mark, one row and three cells wide: a green slash and the blue
-# stem of the logo (ui/assets/brand/turbopanel-logo-square.svg). ASCII: [T].
-_ss_mark() {
-  if [ "$_ss_utf" = 1 ]; then
-    printf '%s▟%s█▙%s' "$_ss_GREEN" "$_ss_BLUE" "$_ss_RST"
-  else
-    printf '%s[%sT%s]%s' "$_ss_BLUE" "$_ss_GREEN" "$_ss_BLUE" "$_ss_RST"
-  fi
-}
-
 _ss_mode_label() {
   case $_ss_mode in
     daemon) printf 'server' ;;
@@ -284,7 +280,8 @@ _ss_mode_label() {
   esac
 }
 
-# The header is one line: mark, bold name, version, dim mode.
+# The header is one line: bold name, version, dim mode. The progress bar
+# (second line) and a blank line follow.
 _ss_header() {
   _h_ver=$(_ss_clean "$1")
   if [ "$_ss_live" != 1 ]; then
@@ -294,9 +291,66 @@ _ss_header() {
     return 0
   fi
   _h_lab=$(_ss_mode_label)
-  _h_ver=$(_ss_fit "$_h_ver" $((_ss_cols - 1 - 5 - 10 - 2 - 3 - ${#_h_lab})))
-  printf '%s %s %sTurboPanel%s  %s%s%s%s%s%s%s' "$_ss_NL" "$(_ss_mark)" \
-    "$_ss_BOLD" "$_ss_RST" "$_h_ver" "$_ss_DIM" "$_ss_sep" "$_h_lab" "$_ss_RST" "$_ss_NL" "$_ss_NL"
+  _h_ver=$(_ss_fit "$_h_ver" $((_ss_cols - 1 - 2 - 10 - 2 - 3 - ${#_h_lab})))
+  printf '%s  %sTurboPanel%s  %s%s%s%s%s%s' "$_ss_NL" \
+    "$_ss_BOLD" "$_ss_RST" "$_h_ver" "$_ss_DIM" "$_ss_sep" "$_h_lab" "$_ss_RST" "$_ss_NL"
+  _ss_bar_line
+  printf '%s%s' "$_ss_NL" "$_ss_NL"
+}
+
+# _ss_rep <char> <n>: the character n times.
+_ss_rep() {
+  _rp_i=0
+  while [ "$_rp_i" -lt "$2" ]; do
+    printf '%s' "$1"
+    _rp_i=$((_rp_i + 1))
+  done
+}
+
+# The progress bar line (no newline): filled part for the finished areas, dim
+# track, "n/total" and the current area name. A full green bar and no name once
+# finished; the filled part and the label turn red when an area failed.
+# _ss_bar_state is run, done or failed.
+_ss_bar_line() {
+  _b_cnt="$_ss_n/$_ss_total"
+  _b_nm=$_ss_name
+  _b_c=$_ss_BLUE
+  _b_fill=$_ss_done_rows
+  case $_ss_bar_state in
+    done)
+      _b_c=$_ss_GREEN
+      _b_fill=$_ss_total
+      _b_cnt="$_ss_total/$_ss_total"
+      _b_nm=
+      ;;
+    failed) _b_c=$_ss_BAD ;;
+  esac
+  [ "$_ss_n" -gt 0 ] || _b_nm=
+  _b_w=32
+  while [ "$_b_w" -gt 10 ] && [ $((2 + _b_w + 2 + ${#_b_cnt} + 2 + ${#_b_nm})) -gt $((_ss_cols - 1)) ]; do
+    _b_w=$((_b_w - 1))
+  done
+  if [ "$_ss_total" -gt 0 ]; then
+    _b_f=$((_b_fill * _b_w / _ss_total))
+  else
+    _b_f=0
+  fi
+  printf '  %s%s%s%s%s%s  %s%s%s' "$_b_c" "$(_ss_rep "$_ss_bar_on" "$_b_f")" "$_ss_RST" \
+    "$_ss_DIM" "$(_ss_rep "$_ss_bar_off" $((_b_w - _b_f)))" "$_ss_RST" \
+    "$([ "$_ss_bar_state" = failed ] && printf '%s' "$_ss_BAD" || printf '%s' "$_ss_DIM")" "$_b_cnt" "$_ss_RST"
+  _b_room=$((_ss_cols - 1 - 2 - _b_w - 2 - ${#_b_cnt} - 2))
+  if [ -n "$_b_nm" ] && [ "$_b_room" -ge 1 ]; then
+    printf '  %s%s%s' "$([ "$_ss_bar_state" = failed ] && printf '%s' "$_ss_BAD")" "$(_ss_fit "$_b_nm" "$_b_room")" "$_ss_RST"
+  fi
+}
+
+# Redraw the bar line in place: up over the rows below it (blank line, check
+# rows, current area), rewrite it, and come back down.
+_ss_bar_update() {
+  [ "$_ss_live" = 1 ] || return 0
+  _bu_n=$((_ss_drawn + _ss_done_rows + 2))
+  printf '%s[%sA%s%s[2K%s%s[%sB%s' "$_ss_ESC" "$_bu_n" "$_ss_CR" "$_ss_ESC" \
+    "$(_ss_bar_line)" "$_ss_ESC" "$_bu_n" "$_ss_CR"
 }
 
 # One finished area: green check, name in a column, one short dim fact.
@@ -371,6 +425,12 @@ _ss_paint() {
 
 # The finished names as one check row, wrapped to the width; continuation
 # lines sit under the first name.
+# True when the check row breaks before item _cc_i (split point, or full line).
+_ss_wrap_here() {
+  [ "$_cc_i" = $((_cc_sp + 1)) ] && return 0
+  [ "$_cc_sp" = -1 ] && [ $((_cc_w + 3 + ${#_cc_a})) -gt "$_cc_lim" ]
+}
+
 _ss_collapsed() {
   [ -n "$_ss_done_list" ] || return 0
   _cc_oifs=$IFS
@@ -386,16 +446,48 @@ _ss_collapsed() {
   set -- $_ss_done_list
   IFS=$_cc_oifs
   [ "$_cc_f" = 1 ] || set +f
+  _cc_lim=$((_ss_cols - 1))
+  _cc_n=$#
+  _cc_i=0
+  _cc_sum=0
+  while [ "$_cc_i" -lt "$_cc_n" ]; do
+    _cc_a=$(_ss_fit "$1" $((_cc_lim - 4)))
+    shift
+    set -- "$@" "$_cc_a"
+    _cc_sum=$((_cc_sum + ${#_cc_a}))
+    _cc_i=$((_cc_i + 1))
+  done
+  # Fits on one line: keep it. Otherwise split into two balanced lines, so the
+  # second never holds a lone trailing word; fall back to filling lines when
+  # even the best split is too wide.
+  _cc_sp=0
+  if [ $((4 + _cc_sum + 3 * (_cc_n - 1))) -gt "$_cc_lim" ]; then
+    _cc_best=0
+    _cc_pre=0
+    _cc_i=1
+    for _cc_a in "$@"; do
+      [ "$_cc_i" -lt "$_cc_n" ] || break
+      _cc_pre=$((_cc_pre + ${#_cc_a}))
+      _cc_w1=$((4 + _cc_pre + 3 * (_cc_i - 1)))
+      _cc_w2=$((4 + _cc_sum - _cc_pre + 3 * (_cc_n - _cc_i - 1)))
+      [ "$_cc_w1" -ge "$_cc_w2" ] || _cc_w1=$_cc_w2
+      if [ "$_cc_best" = 0 ] || [ "$_cc_w1" -lt "$_cc_best" ]; then
+        _cc_best=$_cc_w1
+        _cc_sp=$_cc_i
+      fi
+      _cc_i=$((_cc_i + 1))
+    done
+    [ "$_cc_best" -le "$_cc_lim" ] || _cc_sp=-1
+  fi
   printf '  %s%s%s ' "$_ss_GREEN" "$_ss_ok" "$_ss_RST"
   _cc_w=4
-  _cc_first=1
+  _cc_i=0
   for _cc_a in "$@"; do
-    _cc_a=$(_ss_fit "$_cc_a" $((_ss_cols - 1 - 4)))
-    if [ "$_cc_first" = 1 ]; then
+    _cc_i=$((_cc_i + 1))
+    if [ "$_cc_i" = 1 ]; then
       printf '%s' "$_cc_a"
       _cc_w=$((4 + ${#_cc_a}))
-      _cc_first=0
-    elif [ $((_cc_w + 3 + ${#_cc_a})) -gt $((_ss_cols - 1)) ]; then
+    elif _ss_wrap_here; then
       printf '%s    %s' "$_ss_NL" "$_cc_a"
       _cc_w=$((4 + ${#_cc_a}))
     else
@@ -518,6 +610,8 @@ screen_init() {
   _ss_drawn=0
   _ss_done_list=
   _ss_done_rows=0
+  _ss_bar_state=run
+  _ss_name=
   _ss_clear_subs
   _ss_ready=1
   _ss_cleaned=0
@@ -546,6 +640,7 @@ screen_area_start() {
   _ss_logf "== [$_ss_n/$_ss_total] $_ss_name"
   if [ "$_ss_live" = 1 ]; then
     _ss_paint
+    _ss_bar_update
   else
     _ss_say "[$_ss_n/$_ss_total] $_ss_name ..."
   fi
@@ -588,6 +683,7 @@ screen_area_done() {
       "$(_ss_row_done "$_ss_name" "$_d_det")" "$_ss_NL" "$_ss_ESC"
     _ss_drawn=0
     _ss_done_rows=$((_ss_done_rows + 1))
+    _ss_bar_update
   else
     _ss_say "[$_ss_n/$_ss_total] ok   $_ss_name: $_d_det ($_d_el)"
   fi
@@ -606,6 +702,8 @@ screen_area_fail() {
   _ss_failed=1
   if [ "$_ss_live" = 1 ]; then
     _ss_paint compact
+    _ss_bar_state=failed
+    _ss_bar_update
     printf '%s' "$_ss_NL"
     printf '  %s%s%s%s' "$_ss_BAD" "$(_ss_fit "$_fl_why" $((_ss_cols - 1 - 2)))" "$_ss_RST" "$_ss_NL"
     printf '  %slog%s  %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 7)))" "$_ss_NL"
@@ -650,6 +748,8 @@ screen_summary() {
   _ss_sum_open=1
   _ss_logf "== summary: $_sm_title $_sm_tot"
   if [ "$_ss_live" = 1 ]; then
+    _ss_bar_state=done
+    _ss_bar_update
     if [ "$_ss_done_rows" -gt 0 ]; then
       printf '%s[%sA' "$_ss_ESC" "$_ss_done_rows"
     fi
