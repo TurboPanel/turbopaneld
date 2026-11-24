@@ -235,7 +235,7 @@ test("NO_COLOR, TERM=dumb and an unset TERM force plain output even on a TTY", a
       ], env);
       assertEquals(r.code, 0);
       assert(!r.out.includes(ESC), JSON.stringify(env));
-      assertStringIncludes(r.out, "[8/8] ok   Tuning the kernel:");
+      assertStringIncludes(r.out, "[8/8] ok   Checking health:");
     }
   });
 });
@@ -316,13 +316,13 @@ test("the live screen shows a one-line header, check rows and the current area, 
     assertStringIncludes(text, "  TurboPanel  1.8.2 · server");
     assertStringIncludes(
       text,
-      "  ✓ Checking this server       Debian 13, 4 CPU, 8 GiB",
+      "  ✓ Checking this server                Debian 13, 4 CPU, 8 GiB",
     );
     assertStringIncludes(
       text,
-      "  ✓ Verifying the release      signature verified",
+      "  ✓ Verifying the release               signature verified",
     );
-    assertStringIncludes(text, "  ⠋ Installing the runtimes");
+    assertStringIncludes(text, "  ⠋ Installing orchestration runtime");
     for (const gone of ["▟█▙", "[T]", "╭", "│", "▄███▀", "next  ", "done  "]) {
       assert(!text.includes(gone), `no ${gone} in the compact layout`);
     }
@@ -511,7 +511,7 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
       "--mode",
       "panel",
       "--fail-at",
-      "4",
+      "5",
       "--fast",
       "--log",
       log,
@@ -521,21 +521,24 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
     assertStringIncludes(r.out, `${ESC}[38;5;210m`);
     const rows = render(r.out);
     const at = nowRow(rows);
-    assertEquals(rows[at], "  ✗ Installing data services");
+    assertEquals(rows[at], "  ✗ Installing TurboPanel database");
     assertEquals(
       rows[2],
-      `  ${"█".repeat(12)}${"░".repeat(20)}  4/8  Installing data services`,
+      `  ${"█".repeat(16)}${
+        "░".repeat(16)
+      }  5/8  Installing TurboPanel database`,
     );
-    assertStringIncludes(r.out, `${ESC}[38;5;210m${"█".repeat(12)}`);
-    assertEquals(rows.slice(at - 3, at), [
-      "  ✓ Checking this server        Debian 13, 4 CPU, 8 GiB",
-      "  ✓ Verifying the release       signature verified",
-      "  ✓ Downloading TurboPanel      control plane 1.8.2, web app 1.8.2",
+    assertStringIncludes(r.out, `${ESC}[38;5;210m${"█".repeat(16)}`);
+    assertEquals(rows.slice(at - 4, at), [
+      "  ✓ Checking this server                  Debian 13, 4 CPU, 8 GiB",
+      "  ✓ Verifying the release                 signature verified",
+      "  ✓ Downloading TurboPanel                control plane 1.8.2, web app 1.8.2",
+      "  ✓ Installing orchestration runtime      runtime and task library ready",
     ]);
     assertEquals(rows.slice(at + 1), [
-      "      database        starting",
-      "      cache           waiting",
-      "      message queue   waiting",
+      "      database     starting",
+      "      roles        waiting",
+      "      migrations   waiting",
       "",
       "  The TurboPanel database did not start: port 5432 is in use",
       `  log  ${log}`,
@@ -544,7 +547,7 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
     assert(!rows.some((l) => l.includes("Ready in")));
     assertStringIncludes(
       await Deno.readTextFile(log),
-      "-- FAILED: Installing data services",
+      "-- FAILED: Installing TurboPanel database",
     );
   });
 });
@@ -777,10 +780,10 @@ async function frozen(
     "Checking this server",
     "Verifying the release",
     "Downloading TurboPanel",
-    "Installing data services",
-    "Configuring the instance",
-    "Preparing the database",
-    "Starting services",
+    "Installing orchestration runtime",
+    "Installing TurboPanel database",
+    "Installing cache and message queue",
+    "Installing instance",
     "Checking health",
   ];
   const body = [
@@ -825,13 +828,11 @@ test("the text captures in installer-screen-frames match the real output", async
           ["Verifying the release", "signature verified"],
           ["Downloading TurboPanel", "control plane 1.8.2, web app 1.8.2"],
         ],
-        "Installing data services",
+        "Installing TurboPanel database",
         [
-          ["database", "installing"],
-          ["cache", "waiting"],
-          ["message queue", "waiting"],
           ["database", "ready"],
-          ["cache", "pulling image"],
+          ["roles", "creating"],
+          ["migrations", "waiting"],
         ],
       ),
       "panel-running-60-columns.txt": await frozen(
@@ -841,11 +842,17 @@ test("the text captures in installer-screen-frames match the real output", async
           ["Checking this server", "Debian 13, 4 CPU, 8 GiB"],
           ["Verifying the release", "signature verified"],
           ["Downloading TurboPanel", "control plane 1.8.2, web app 1.8.2"],
-          ["Installing data services", "database, cache, message queue"],
-          ["Configuring the instance", "63 tasks, 0 failed"],
-          ["Preparing the database", "schema is up to date"],
+          [
+            "Installing orchestration runtime",
+            "runtime and task library ready",
+          ],
+          ["Installing TurboPanel database", "schema is up to date"],
+          [
+            "Installing cache and message queue",
+            "cache and message queue ready",
+          ],
         ],
-        "Starting services",
+        "Installing instance",
         [
           ["control plane", "ready"],
           ["web gateway", "starting"],
@@ -858,7 +865,7 @@ test("the text captures in installer-screen-frames match the real output", async
         "--mode",
         "panel",
         "--fail-at",
-        "4",
+        "5",
       ]),
       "plain-output.txt": await demo("0", ["--mode", "panel"], {
         ...PLAIN_ENV,

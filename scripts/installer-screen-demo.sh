@@ -6,7 +6,7 @@
 #
 #   sh scripts/installer-screen-demo.sh --mode daemon
 #   sh scripts/installer-screen-demo.sh --mode panel
-#   sh scripts/installer-screen-demo.sh --mode panel --fail-at 4
+#   sh scripts/installer-screen-demo.sh --mode panel --fail-at 5
 #
 # Options
 #   --mode daemon|panel   daemon (enrol a server) or panel (self-hosted control plane)
@@ -127,21 +127,21 @@ daemon_2() { area "Verifying the release" "signature verified" "The release mani
 daemon_3() { area "Downloading TurboPanel" "turbopaneld $VERSION, native, 61 MiB" "SHA-256 of turbopaneld does not match the manifest" \
   "run the installer again to fetch the archive anew" \
   "turbopaneld $VERSION|downloading" "archive|waiting" "binary|waiting" "turbopaneld $VERSION|ready"; }
-daemon_4() { area "Installing the runtimes" "script runtime, package tool" "The script runtime did not unpack: no space left on device" \
+daemon_4() { area "Installing orchestration runtime" "runtime and task library ready" "The orchestration runtime did not install: no space left on device" \
   "free up space under /opt, then run the installer again" \
-  "script runtime|installing" "package tool|waiting" "digests|waiting" "script runtime|ready" "package tool|installing" "package tool|ready"; }
-daemon_5() { area "Configuring this server" "41 tasks, 0 failed" "Task daemon-config: write env failed" \
-  "read the task output in the log, fix it, then run the installer again" \
-  "orchestration|installing" "task library|waiting" "plan|waiting" "orchestration|ready" "task library|ready" "plan|running" "daemon settings|applying" "daemon launch|waiting"; }
-daemon_6() { area "Starting services" "turbopaneld active, update guard armed" "turbopaneld.service exited with status 1" \
+  "runtime|installing" "task library|waiting" "plan|waiting" "runtime|ready" "task library|ready" "plan|ready"; }
+daemon_5() { area "Tuning the kernel" "cgroup v2, user namespaces" "Kernel feature check failed" \
+  "enable cgroup v2 and user namespaces, then run the installer again" \
+  "cgroup v2|checking" "user namespaces|checking"; }
+daemon_6() { area "Installing instance" "turbopaneld active, update guard armed" "turbopaneld.service exited with status 1" \
   "read the unit log with journalctl -u turbopaneld, then run the installer again" \
-  "turbopaneld.service|writing" "update guard|waiting" "turbopaneld.service|starting" "update guard|armed"; }
+  "daemon settings|applying" "turbopaneld.service|writing" "update guard|waiting" "turbopaneld.service|starting" "update guard|armed"; }
 daemon_7() { area "Enrolling this server" "enrolled as server-a.example.lan" "No answer from panel.example.net after 120 s" \
   "check that this host can reach panel.example.net, then run the installer again" \
   "panel.example.net|waiting for it to accept this server" "handshake|waiting" "configuration|waiting" "handshake|ready"; }
-daemon_8() { area "Tuning the kernel" "cgroup v2, user namespaces" "Kernel feature check failed" \
-  "enable cgroup v2 and user namespaces, then run the installer again" \
-  "cgroup v2|checking" "user namespaces|checking"; }
+daemon_8() { area "Checking health" "healthy in 3 s" "The daemon did not report healthy in 60 s" \
+  "read the daemon log with journalctl -u turbopaneld, then run the installer again" \
+  "daemon|waiting" "panel link|waiting" "daemon|ready" "panel link|ready"; }
 
 panel_1() { area "Checking this server" "Debian 13, 4 CPU, 8 GiB" "Only 2.1 GiB free on /opt, 10 GiB needed" \
   "free up space on /opt, then run the installer again" \
@@ -152,19 +152,19 @@ panel_2() { area "Verifying the release" "signature verified" "The release manif
 panel_3() { area "Downloading TurboPanel" "control plane $VERSION, web app $VERSION" "SHA-256 of the control plane package does not match" \
   "run the installer again to fetch the package anew" \
   "control plane $VERSION|downloading" "web app $VERSION|waiting" "unpack|waiting" "control plane $VERSION|ready" "web app $VERSION|downloading" "web app $VERSION|ready"; }
-panel_4() { area "Installing data services" "database, cache, message queue" "The TurboPanel database did not start: port 5432 is in use" \
+panel_4() { area "Installing orchestration runtime" "runtime and task library ready" "The orchestration runtime did not install: no space left on device" \
+  "free up space under /opt, then run the installer again" \
+  "runtime|installing" "task library|waiting" "plan|waiting" "runtime|ready" "task library|ready" "plan|ready"; }
+panel_5() { area "Installing TurboPanel database" "schema is up to date" "The TurboPanel database did not start: port 5432 is in use" \
   "stop whatever listens on port 5432, then run the installer again" \
-  "database|installing" "cache|waiting" "message queue|waiting" "database|starting" \
-  "database|ready" "cache|pulling image" "cache|ready" "message queue|installing" "web gateway|waiting" "message queue|ready" "web gateway|installing" "web gateway|ready"; }
-panel_5() { area "Configuring the instance" "63 tasks, 0 failed" "Task instance-user: create account failed" \
-  "read the task output in the log, fix it, then run the installer again" \
-  "orchestration|installing" "plan|waiting" "instance launch|waiting" "orchestration|ready" "plan|running" "instance launch|applying" "instance certificates|applying"; }
-panel_6() { area "Preparing the database" "schema is up to date" "A migration failed: see the log" \
-  "read the migration error in the log, then run the installer again" \
-  "roles|creating" "migrations|waiting" "schema|waiting" "roles|ready" "migrations|running" "migrations|ready" "schema|checking" "schema|ready"; }
-panel_7() { area "Starting services" "control plane, web gateway and daemon active" "turbopanel.service exited with status 1" \
+  "database|installing" "roles|waiting" "migrations|waiting" "database|starting" \
+  "database|ready" "roles|creating" "roles|ready" "migrations|running" "migrations|ready" "schema|waiting" "schema|checking" "schema|ready"; }
+panel_6() { area "Installing cache and message queue" "cache and message queue ready" "The message queue did not start: port 5672 is in use" \
+  "stop whatever listens on port 5672, then run the installer again" \
+  "cache|installing" "message queue|waiting" "cache|pulling image" "cache|ready" "message queue|installing" "message queue|ready"; }
+panel_7() { area "Installing instance" "control plane, web gateway and daemon active" "turbopanel.service exited with status 1" \
   "read the unit log with journalctl -u turbopanel, then run the installer again" \
-  "control plane|starting" "web gateway|waiting" "daemon|waiting" "control plane|ready" "web gateway|starting" "web gateway|ready" "daemon|starting" "daemon|ready"; }
+  "instance settings|applying" "control plane|waiting" "web gateway|waiting" "daemon|waiting" "control plane|starting" "control plane|ready" "web gateway|starting" "web gateway|ready" "daemon|starting" "daemon|ready"; }
 panel_8() { area "Checking health" "healthy in 4 s" "The control plane did not answer /api/health in 60 s" \
   "read the control plane log, then run the installer again" \
   "/api/health|waiting" "web interface|waiting" "daemon|waiting" "/api/health|ready"; }
@@ -172,13 +172,13 @@ panel_8() { area "Checking health" "healthy in 4 s" "The control plane did not a
 if [ "$MODE" = panel ]; then
   screen_init "$VERSION" "$CHANNEL" "$MODE" "$LOG" \
     "Checking this server" "Verifying the release" "Downloading TurboPanel" \
-    "Installing data services" "Configuring the instance" "Preparing the database" \
-    "Starting services" "Checking health"
+    "Installing orchestration runtime" "Installing TurboPanel database" \
+    "Installing cache and message queue" "Installing instance" "Checking health"
 else
   screen_init "$VERSION" "$CHANNEL" "$MODE" "$LOG" \
     "Checking this server" "Verifying the release" "Downloading TurboPanel" \
-    "Installing the runtimes" "Configuring this server" "Starting services" \
-    "Enrolling this server" "Tuning the kernel"
+    "Installing orchestration runtime" "Tuning the kernel" "Installing instance" \
+    "Enrolling this server" "Checking health"
 fi
 
 TOTAL=8

@@ -41,11 +41,11 @@
 # Layout while running (finished areas stay as one row each; pending areas
 # are not shown):
 #     TurboPanel  1.8.2 . control plane
-#     ████████░░░░░░░░  3/8  Installing data services   (32 cells)
+#     ████████░░░░░░░░  3/8  Installing TurboPanel database   (32 cells)
 #
 #     ok Checking this server   Debian 13, amd64, 4 CPU
 #     ok Verifying the release   signature verified
-#     spinner Installing data services
+#     spinner Installing TurboPanel database
 #         database      ready
 #         cache         pulling image
 #
