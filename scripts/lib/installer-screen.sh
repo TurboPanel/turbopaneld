@@ -101,8 +101,6 @@ _ss_nw=12
 _ss_bar_state=run
 _ss_in=0
 _ss_items_out=0
-_ss_tx=
-_ss_tw=0
 _ss_log=/dev/null
 _ss_t0=0
 
@@ -137,17 +135,17 @@ _ss_fit() {
   fi
   if [ "${#_f_t}" -le "$_f_w" ]; then
     printf '%s' "$_f_t"
-  elif [ "$_f_w" -le "${#_ss_ell}" ]; then
+  elif [ "$_f_w" -le "$_ss_ellw" ]; then
     printf '%s' "$_ss_ell" | cut -c1-"$_f_w"
   else
-    printf '%s%s' "$(printf '%s' "$_f_t" | cut -c1-$((_f_w - ${#_ss_ell})))" "$_ss_ell"
+    printf '%s%s' "$(printf '%s' "$_f_t" | cut -c1-$((_f_w - _ss_ellw)))" "$_ss_ell"
   fi
 }
 
 # _ss_pad <n>: n spaces (nothing when n <= 0).
 _ss_pad() {
   if [ "$1" -gt 0 ]; then
-    printf "%$1s" ''
+    printf '%*s' "$1" ''
   fi
 }
 
@@ -162,10 +160,15 @@ _ss_dur() {
 
 # _ss_rgb <r> <g> <b> <fg|bg>: the color escape for the detected depth.
 _ss_rgb() {
-  if [ "$_ss_truecolor" = 1 ]; then
-    printf '%s[%s;2;%s;%s;%sm' "$_ss_ESC" "$([ "$4" = bg ] && echo 48 || echo 38)" "$1" "$2" "$3"
+  if [ "$4" = bg ]; then
+    _r_p=48
   else
-    printf '%s[%s;5;%sm' "$_ss_ESC" "$([ "$4" = bg ] && echo 48 || echo 38)" \
+    _r_p=38
+  fi
+  if [ "$_ss_truecolor" = 1 ]; then
+    printf '%s[%s;2;%s;%s;%sm' "$_ss_ESC" "$_r_p" "$1" "$2" "$3"
+  else
+    printf '%s[%s;5;%sm' "$_ss_ESC" "$_r_p" \
       $((16 + 36 * (($1 * 5 + 127) / 255) + 6 * (($2 * 5 + 127) / 255) + (($3 * 5 + 127) / 255)))
   fi
 }
@@ -334,9 +337,14 @@ _ss_bar_line() {
   else
     _b_f=0
   fi
+  if [ "$_ss_bar_state" = failed ]; then
+    _b_cc=$_ss_BAD
+  else
+    _b_cc=$_ss_DIM
+  fi
   printf '  %s%s%s%s%s%s  %s%s%s' "$_b_c" "$(_ss_rep "$_ss_bar_on" "$_b_f")" "$_ss_RST" \
     "$_ss_DIM" "$(_ss_rep "$_ss_bar_off" $((_b_w - _b_f)))" "$_ss_RST" \
-    "$([ "$_ss_bar_state" = failed ] && printf '%s' "$_ss_BAD" || printf '%s' "$_ss_DIM")" "$_b_cnt" "$_ss_RST"
+    "$_b_cc" "$_b_cnt" "$_ss_RST"
   _b_room=$((_ss_cols - 1 - 2 - _b_w - 2 - ${#_b_cnt} - 2))
   if [ -n "$_b_nm" ] && [ "$_b_room" -ge 1 ]; then
     printf '  %s%s%s' "$([ "$_ss_bar_state" = failed ] && printf '%s' "$_ss_BAD")" "$(_ss_fit "$_b_nm" "$_b_room")" "$_ss_RST"
@@ -543,7 +551,7 @@ screen_init() {
   _ss_warns=0
   _ss_active=0
   _ss_drawn=0
-    _ss_done_rows=0
+  _ss_done_rows=0
   _ss_bar_state=run
   _ss_name=
   _ss_clear_subs

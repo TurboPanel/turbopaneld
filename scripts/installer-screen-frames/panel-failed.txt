@@ -11,6 +11,6 @@
       roles        waiting
       migrations   waiting
 
-  The TurboPanel database did not start: port 5432 is in use
+  The TurboPanel database did not start: its port is already in use
   log  install.log
-  try  stop whatever listens on port 5432, then run the installer again
+  try  stop whatever uses that port, then run the installer again

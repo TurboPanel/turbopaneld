@@ -27,6 +27,7 @@ const ESC = String.fromCharCode(27);
 const HIDE = `${ESC}[?25l`;
 const SHOW = `${ESC}[?25h`;
 const ANSI = new RegExp(`${ESC}\\[[0-9;?]*[A-Za-z]`, "g");
+const CURSOR_VERTICAL = new RegExp(`${ESC}\\[\\d*[AB]`, "g");
 const ANSI_PARTS = new RegExp(`^${ESC}\\[([0-9;?]*)([A-Za-z])`);
 
 interface Run {
@@ -83,7 +84,7 @@ async function withTemp<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 
 /** The screen as text: escape sequences removed; a cursor move starts a new line. */
 function visible(out: string): string[] {
-  return out.replace(/\x1b\[\d*[AB]/g, "\n").replace(ANSI, "").replaceAll(
+  return out.replace(CURSOR_VERTICAL, "\n").replace(ANSI, "").replaceAll(
     "\r",
     "",
   )
@@ -540,9 +541,9 @@ test("a failed area turns red, keeps its detail lines, and shows the reason, the
       "      roles        waiting",
       "      migrations   waiting",
       "",
-      "  The TurboPanel database did not start: port 5432 is in use",
+      "  The TurboPanel database did not start: its port is already in use",
       `  log  ${log}`,
-      "  try  stop whatever listens on port 5432, then run the installer again",
+      "  try  stop whatever uses that port, then run the installer again",
     ]);
     assert(!rows.some((l) => l.includes("Ready in")));
     assertStringIncludes(
@@ -888,7 +889,7 @@ test("the text captures in installer-screen-frames match the real output", async
 
 test("no vendor or third-party product name appears in the demo output or any frame", async () => {
   const banned =
-    /postgres|redis|rabbit|ansible|caddy|docker|\bdeno\b|\bnode\b|\buv\b|nginx|apache|systemd/i;
+    /postgres|redis|rabbit|ansible|caddy|docker|\bdeno\b|\bnode\b|\buv\b|nginx|apache|systemd|valkey|kubernetes|k8s|mysql|mariadb|podman|incus|lxc|traefik|haproxy|journalctl|systemctl/i;
   await withTemp(async (dir) => {
     for (const mode of ["panel", "daemon"]) {
       for (const fail of ["0", "1", "2", "3", "4", "5", "6", "7", "8"]) {

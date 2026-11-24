@@ -134,13 +134,13 @@ daemon_5() { area "Tuning the kernel" "cgroup v2, user namespaces" "Kernel featu
   "enable cgroup v2 and user namespaces, then run the installer again" \
   "cgroup v2|checking" "user namespaces|checking"; }
 daemon_6() { area "Installing instance" "turbopaneld active, update guard armed" "turbopaneld.service exited with status 1" \
-  "read the unit log with journalctl -u turbopaneld, then run the installer again" \
+  "read the service log, then run the installer again" \
   "daemon settings|applying" "turbopaneld.service|writing" "update guard|waiting" "turbopaneld.service|starting" "update guard|armed"; }
 daemon_7() { area "Enrolling this server" "enrolled as server-a.example.lan" "No answer from panel.example.net after 120 s" \
   "check that this host can reach panel.example.net, then run the installer again" \
   "panel.example.net|waiting for it to accept this server" "handshake|waiting" "configuration|waiting" "handshake|ready"; }
 daemon_8() { area "Checking health" "healthy in 3 s" "The daemon did not report healthy in 60 s" \
-  "read the daemon log with journalctl -u turbopaneld, then run the installer again" \
+  "read the service log, then run the installer again" \
   "daemon|waiting" "panel link|waiting" "daemon|ready" "panel link|ready"; }
 
 panel_1() { area "Checking this server" "Debian 13, 4 CPU, 8 GiB" "Only 2.1 GiB free on /opt, 10 GiB needed" \
@@ -155,15 +155,15 @@ panel_3() { area "Downloading TurboPanel" "control plane $VERSION, web app $VERS
 panel_4() { area "Installing orchestration runtime" "runtime and task library ready" "The orchestration runtime did not install: no space left on device" \
   "free up space under /opt, then run the installer again" \
   "runtime|installing" "task library|waiting" "plan|waiting" "runtime|ready" "task library|ready" "plan|ready"; }
-panel_5() { area "Installing TurboPanel database" "schema is up to date" "The TurboPanel database did not start: port 5432 is in use" \
-  "stop whatever listens on port 5432, then run the installer again" \
+panel_5() { area "Installing TurboPanel database" "schema is up to date" "The TurboPanel database did not start: its port is already in use" \
+  "stop whatever uses that port, then run the installer again" \
   "database|installing" "roles|waiting" "migrations|waiting" "database|starting" \
   "database|ready" "roles|creating" "roles|ready" "migrations|running" "migrations|ready" "schema|waiting" "schema|checking" "schema|ready"; }
-panel_6() { area "Installing cache and message queue" "cache and message queue ready" "The message queue did not start: port 5672 is in use" \
-  "stop whatever listens on port 5672, then run the installer again" \
+panel_6() { area "Installing cache and message queue" "cache and message queue ready" "The message queue did not start: its port is already in use" \
+  "stop whatever uses that port, then run the installer again" \
   "cache|installing" "message queue|waiting" "cache|pulling image" "cache|ready" "message queue|installing" "message queue|ready"; }
 panel_7() { area "Installing instance" "control plane, web gateway and daemon active" "turbopanel.service exited with status 1" \
-  "read the unit log with journalctl -u turbopanel, then run the installer again" \
+  "read the service log, then run the installer again" \
   "instance settings|applying" "control plane|waiting" "web gateway|waiting" "daemon|waiting" "control plane|starting" "control plane|ready" "web gateway|starting" "web gateway|ready" "daemon|starting" "daemon|ready"; }
 panel_8() { area "Checking health" "healthy in 4 s" "The control plane did not answer /api/health in 60 s" \
   "read the control plane log, then run the installer again" \
