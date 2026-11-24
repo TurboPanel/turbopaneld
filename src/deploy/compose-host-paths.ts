@@ -632,11 +632,45 @@ function touchesStateTree(path: string, tree: StateTreeOptions): boolean {
 }
 
 /**
+ * This deploy's own storage location, bound only with host-level approval and
+ * only while it really resolves inside that location. The caller has already
+ * resolved `real` (`undefined` when that failed): a path that cannot be
+ * resolved is refused, because the lexical check alone cannot see a link.
+ * `undefined` when no host-level approval was given (the host-level rule then
+ * refuses it like any other absolute source).
+ */
+async function ownLocationOutcome(
+  entry: HostPathEntry,
+  label: string,
+  location: string,
+  real: string | undefined,
+  ctx: ConfinementContext,
+): Promise<EntryOutcome | undefined> {
+  if (!ctx.opts.hostLevelApproved) return undefined;
+  let realLocation: string;
+  try {
+    realLocation = await resolveExistingPrefix(location, ctx.realPath);
+  } catch (err) {
+    return finding(
+      `${label} cannot be resolved on this host (${(err as Error).message})`,
+    );
+  }
+  return real !== undefined && isWithin(real, realLocation)
+    ? { kind: "checked", checked: { entry, real } }
+    : finding(
+      `${label} resolves through a symlink to ${
+        real ?? "an unreadable path"
+      }, outside its storage location`,
+    );
+}
+
+/**
  * Rule for the daemon's state trees (see {@link StateTreeOptions}): checked on
  * the lexical path and on where it really resolves, so a link from somewhere
- * else cannot reach in. `undefined` for a path that stays clear of them, and
- * for this deploy's own location when no host-level approval was given (the
- * host-level rule then refuses it like any other absolute source).
+ * else cannot reach in. A path that cannot be resolved is refused when
+ * host-level approval was given, since the approval would otherwise rest on the
+ * lexical path alone. `undefined` for a path that stays clear of them, and for
+ * this deploy's own location when no host-level approval was given.
  */
 async function stateTreeOutcome(
   entry: HostPathEntry,
@@ -647,32 +681,19 @@ async function stateTreeOutcome(
   const tree = ctx.opts.stateTree;
   if (!tree) return undefined;
   let real: string | undefined;
+  let unresolved: string | undefined;
   try {
     real = await resolveExistingPrefix(staged, ctx.realPath);
-  } catch {
-    // A directory this account cannot traverse cannot be one of its own trees.
-    real = undefined;
+  } catch (err) {
+    // Not a path Docker has yet to create (that resolves through its
+    // ancestor): the account cannot read it, so where it leads is unknown.
+    unresolved = (err as Error).message;
   }
   const location = tree.locations.map((root) => normalize(root)).find((root) =>
     isWithin(staged, root)
   );
   if (location !== undefined && !entry.build) {
-    if (!ctx.opts.hostLevelApproved) return undefined;
-    let realLocation: string;
-    try {
-      realLocation = await resolveExistingPrefix(location, ctx.realPath);
-    } catch (err) {
-      return finding(
-        `${label} cannot be resolved on this host (${(err as Error).message})`,
-      );
-    }
-    return real !== undefined && isWithin(real, realLocation)
-      ? { kind: "checked", checked: { entry, real } }
-      : finding(
-        `${label} resolves through a symlink to ${
-          real ?? "an unreadable path"
-        }, outside its storage location`,
-      );
+    return ownLocationOutcome(entry, label, location, real, ctx);
   }
   if (
     touchesStateTree(staged, tree) ||
@@ -680,6 +701,11 @@ async function stateTreeOutcome(
   ) {
     return finding(
       `${label} is, holds or sits inside the daemon's state directory — ${STATE_TREE_NOTE}`,
+    );
+  }
+  if (unresolved !== undefined && ctx.opts.hostLevelApproved) {
+    return finding(
+      `${label} cannot be resolved on this host (${unresolved}), so it cannot be checked against the daemon's state directory`,
     );
   }
   return undefined;
