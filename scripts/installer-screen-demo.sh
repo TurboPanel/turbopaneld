@@ -73,13 +73,15 @@ done
 case $MODE in daemon | panel) ;; *) usage 2 ;; esac
 case $FAIL_AT in '' | *[!0-9]*) usage 2 ;; esac
 
-TOTAL=8
 AREA=0
 
 # One simulated sub-step: show it, run a stand-in command whose output goes
-# to the log file.
+# to the log file. "key|value" shows as an aligned key and value.
 step() {
-  screen_sub "$1"
+  case $1 in
+    *'|'*) screen_sub "${1%%|*}" "${1#*|}" ;;
+    *) screen_sub "$1" ;;
+  esac
   if [ "$FAST" = 1 ]; then
     screen_run sh -c 'printf "%s\n" "demo step: $0"' "$1"
   else
@@ -87,61 +89,95 @@ step() {
   fi
 }
 
-# area <name> <result detail> <failure reason>, then the sub-steps on stdin
-# are read from the positional list set by the caller via steps().
+# area <name> <result detail> <failure reason> <next step> <sub-steps...>
+# When this is the area chosen with --fail-at, only the first third of the
+# sub-steps run before it fails, so the detail lines show where it stopped.
 area() {
   AREA=$((AREA + 1))
   _name=$1
   _detail=$2
   _why=$3
+  _hint=$4
   screen_area_start "$_name"
-  shift 3
+  shift 4
+  _count=$#
+  _stop=$((_count / 3))
+  [ "$_stop" -ge 1 ] || _stop=1
+  _ran=0
   for _s in "$@"; do
+    if [ "$AREA" -eq "$FAIL_AT" ] && [ "$_ran" -ge "$_stop" ]; then
+      break
+    fi
     step "$_s"
+    _ran=$((_ran + 1))
   done
   if [ "$AREA" -eq "$FAIL_AT" ]; then
-    screen_area_fail "$_why"
+    screen_area_fail "$_why" "$_hint"
     exit 1
   fi
   screen_area_done "$_detail"
 }
 
-daemon_1() { area "Preflight" "Debian 13, amd64, 4 CPU, 8 GiB RAM" "Only 2.1 GiB free on /opt, 10 GiB needed" \
-  "Checking host operating system" "Checking host prerequisites" "Checking the install command against the panel's key"; }
-daemon_2() { area "Release" "channel $CHANNEL, signature verified" "The release manifest signature did not verify" \
-  "Fetching release manifest" "Verifying the manifest signature" "Fetching the Platform CA"; }
-daemon_3() { area "Download" "turbopaneld $VERSION, native, 61 MiB" "SHA-256 of turbopaneld does not match the manifest" \
-  "Downloading daemon release (amd64)" "Verifying SHA-256 of the archive" "Probing native daemon binary"; }
-daemon_4() { area "Runtimes" "Deno 2.9.8, uv 0.11.21" "Deno 2.9.8 did not unpack: no space left on device" \
-  "Installing Deno 2.9.8" "Installing uv 0.11.21" "Checking runtime digests"; }
-daemon_5() { area "Ansible" "Ansible 2.20, 41 tasks, 0 failed" "Task daemon-config: write env failed" \
-  "Installing Ansible 2.20" "Installing collections" "Running the install playbook" "Applying role daemon-config" "Applying role daemon-launch"; }
-daemon_6() { area "Services" "turbopaneld active, update guard armed" "turbopaneld.service exited with status 1" \
-  "Writing turbopaneld.service" "Arming the update guard" "Starting turbopaneld.service"; }
-daemon_7() { area "Enrolment" "enrolled as server-a.example.lan" "No answer from panel.example.net after 120 s" \
-  "Waiting for the control plane to accept this server" "Handshake with panel.example.net" "Receiving the first configuration"; }
-daemon_8() { area "Kernel" "cgroup v2, user namespaces" "Kernel feature check failed" \
-  "Checking cgroup v2" "Checking user namespaces"; }
+daemon_1() { area "preflight" "Debian 13, amd64, 4 CPU, 8 GiB RAM" "Only 2.1 GiB free on /opt, 10 GiB needed" \
+  "free up space on /opt, then run the installer again" \
+  "host system|Debian 13" "prerequisites|checking" "install key|checking" "prerequisites|ready"; }
+daemon_2() { area "release" "channel $CHANNEL, signature verified" "The release manifest signature did not verify" \
+  "check the clock and the channel name, then run the installer again" \
+  "manifest|fetching" "signature|waiting" "platform CA|waiting" "manifest|ready"; }
+daemon_3() { area "download" "turbopaneld $VERSION, native, 61 MiB" "SHA-256 of turbopaneld does not match the manifest" \
+  "run the installer again to fetch the archive anew" \
+  "turbopaneld $VERSION|downloading" "archive|waiting" "binary|waiting" "turbopaneld $VERSION|ready"; }
+daemon_4() { area "runtimes" "Deno 2.9.8, uv 0.11.21" "Deno 2.9.8 did not unpack: no space left on device" \
+  "free up space under /opt, then run the installer again" \
+  "deno 2.9.8|installing" "uv 0.11.21|waiting" "digests|waiting" "deno 2.9.8|ready" "uv 0.11.21|installing" "uv 0.11.21|ready"; }
+daemon_5() { area "ansible" "Ansible 2.20, 41 tasks, 0 failed" "Task daemon-config: write env failed" \
+  "read the task output in the log, fix it, then run the installer again" \
+  "ansible 2.20|installing" "collections|waiting" "playbook|waiting" "ansible 2.20|ready" "collections|ready" "playbook|running" "role daemon-config|applying" "role daemon-launch|waiting"; }
+daemon_6() { area "services" "turbopaneld active, update guard armed" "turbopaneld.service exited with status 1" \
+  "read the unit log with journalctl -u turbopaneld, then run the installer again" \
+  "turbopaneld.service|writing" "update guard|waiting" "turbopaneld.service|starting" "update guard|armed"; }
+daemon_7() { area "enrolment" "enrolled as server-a.example.lan" "No answer from panel.example.net after 120 s" \
+  "check that this host can reach panel.example.net, then run the installer again" \
+  "panel.example.net|waiting for it to accept this server" "handshake|waiting" "configuration|waiting" "handshake|ready"; }
+daemon_8() { area "kernel" "cgroup v2, user namespaces" "Kernel feature check failed" \
+  "enable cgroup v2 and user namespaces, then run the installer again" \
+  "cgroup v2|checking" "user namespaces|checking"; }
 
-panel_1() { area "Preflight" "Debian 13, amd64, 4 CPU, 8 GiB RAM" "Only 2.1 GiB free on /opt, 10 GiB needed" \
-  "Checking host operating system" "Checking host prerequisites" "Checking ports 80, 443 and 8443"; }
-panel_2() { area "Release" "channel $CHANNEL, signature verified" "The release manifest signature did not verify" \
-  "Fetching release manifest" "Finding the control plane release (channel $CHANNEL)" "Finding the web app release"; }
-panel_3() { area "Download" "control plane $VERSION, web app $VERSION" "SHA-256 of the control plane package does not match" \
-  "Downloading control plane package (amd64)" "Downloading UI export" "Unpacking under /opt/turbopanel"; }
-panel_4() { area "Runtimes" "Postgres 18, Redis 8, RabbitMQ 4" "Postgres 18 did not start: port 5432 is in use" \
-  "Installing Postgres 18" "Installing Redis 8" "Installing RabbitMQ 4" "Installing Caddy 2.11.4"; }
-panel_5() { area "Ansible" "Ansible 2.20, 63 tasks, 0 failed" "Task instance-user: create account failed" \
-  "Installing Ansible 2.20" "Running the install playbook" "Applying role instance-launch" "Applying role instance-certs"; }
-panel_6() { area "Database" "schema is up to date" "A migration failed: see the log" \
-  "Creating database roles" "Running migrations" "Checking the schema"; }
-panel_7() { area "Services" "control plane, Caddy and daemon active" "turbopanel.service exited with status 1" \
-  "Starting the control plane" "Starting Caddy" "Starting the co-located daemon"; }
-panel_8() { area "Health" "healthy in 4 s" "The control plane did not answer /api/health in 60 s" \
-  "Waiting for /api/health" "Checking the web interface" "Enrolling the co-located daemon"; }
+panel_1() { area "preflight" "Debian 13, amd64, 4 CPU, 8 GiB RAM" "Only 2.1 GiB free on /opt, 10 GiB needed" \
+  "free up space on /opt, then run the installer again" \
+  "host system|Debian 13" "prerequisites|checking" "ports 80, 443, 8443|checking" "prerequisites|ready"; }
+panel_2() { area "release" "channel $CHANNEL, signature verified" "The release manifest signature did not verify" \
+  "check the clock and the channel name, then run the installer again" \
+  "manifest|fetching" "control plane|waiting" "web app|waiting" "manifest|ready"; }
+panel_3() { area "download" "control plane $VERSION, web app $VERSION" "SHA-256 of the control plane package does not match" \
+  "run the installer again to fetch the package anew" \
+  "control plane $VERSION|downloading" "web app $VERSION|waiting" "unpack|waiting" "control plane $VERSION|ready" "web app $VERSION|downloading" "web app $VERSION|ready"; }
+panel_4() { area "runtimes" "Postgres 18, Redis 8, RabbitMQ 4" "Postgres 18 did not start: port 5432 is in use" \
+  "stop whatever listens on port 5432, then run the installer again" \
+  "postgres 18|installing" "redis 8|waiting" "rabbitmq 4|waiting" "postgres 18|starting" \
+  "postgres 18|ready" "redis 8|pulling image" "redis 8|ready" "rabbitmq 4|installing" "caddy 2.11.4|waiting" "rabbitmq 4|ready" "caddy 2.11.4|installing" "caddy 2.11.4|ready"; }
+panel_5() { area "ansible" "Ansible 2.20, 63 tasks, 0 failed" "Task instance-user: create account failed" \
+  "read the task output in the log, fix it, then run the installer again" \
+  "ansible 2.20|installing" "playbook|waiting" "role instance-launch|waiting" "ansible 2.20|ready" "playbook|running" "role instance-launch|applying" "role instance-certs|applying"; }
+panel_6() { area "database" "schema is up to date" "A migration failed: see the log" \
+  "read the migration error in the log, then run the installer again" \
+  "roles|creating" "migrations|waiting" "schema|waiting" "roles|ready" "migrations|running" "migrations|ready" "schema|checking" "schema|ready"; }
+panel_7() { area "services" "control plane, Caddy and daemon active" "turbopanel.service exited with status 1" \
+  "read the unit log with journalctl -u turbopanel, then run the installer again" \
+  "control plane|starting" "caddy|waiting" "daemon|waiting" "control plane|ready" "caddy|starting" "caddy|ready" "daemon|starting" "daemon|ready"; }
+panel_8() { area "health" "healthy in 4 s" "The control plane did not answer /api/health in 60 s" \
+  "read the control plane log, then run the installer again" \
+  "/api/health|waiting" "web interface|waiting" "daemon|waiting" "/api/health|ready"; }
 
-screen_init "$VERSION" "$CHANNEL" "$MODE" "$TOTAL" "$LOG"
+if [ "$MODE" = panel ]; then
+  screen_init "$VERSION" "$CHANNEL" "$MODE" "$LOG" \
+    preflight release download runtimes ansible database services health
+else
+  screen_init "$VERSION" "$CHANNEL" "$MODE" "$LOG" \
+    preflight release download runtimes ansible services enrolment kernel
+fi
 
+TOTAL=8
 _n=1
 while [ "$_n" -le "$TOTAL" ]; do
   "${MODE}_${_n}"
@@ -149,17 +185,14 @@ while [ "$_n" -le "$TOTAL" ]; do
 done
 
 if [ "$MODE" = panel ]; then
-  screen_summary "Control plane is ready"
-  screen_summary_item "Public" "https://192.0.2.10:8443"
-  screen_summary_item "Private" "https://10.0.0.5:8443"
-  screen_summary_item "Next" "open a URL and create the first administrator"
-  screen_summary_warn "Port 8443 is open to the internet: limit it in your firewall"
-  screen_summary_warn "No swap is configured: add 2 GiB before hosting databases"
+  screen_summary "TurboPanel $VERSION is ready"
+  screen_summary_item "https://192.0.2.10:8443" "public"
+  screen_summary_item "https://10.0.0.5:8443" "private"
+  screen_summary_warn "port 8443 is open to the internet"
 else
   screen_summary "Server enrolled"
-  screen_summary_item "Server" "server-a.example.lan"
-  screen_summary_item "Panel" "panel.example.net"
-  screen_summary_item "Channel" "$CHANNEL"
-  screen_summary_warn "Clock is 2.1 s off: time sync was enabled, check it in a minute"
+  screen_summary_item "server-a.example.lan" "server"
+  screen_summary_item "panel.example.net" "panel"
+  screen_summary_warn "clock is 2.1 s off, time sync is on"
 fi
 screen_finish

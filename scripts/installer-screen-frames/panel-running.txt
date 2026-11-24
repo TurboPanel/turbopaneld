@@ -1,15 +1,13 @@
+
   ▄█▀▄█▀██████████▀
- ▀▀ ▀▀▀▀▀████▀▀▀▀     TurboPanel installer
-       ▄███▀          v1.8.2  channel release
-      ▄███▀           mode control plane
+ ▀▀ ▀▀▀▀▀████▀▀▀▀
+       ▄███▀          TurboPanel 9.9.9 · control plane
+      ▄███▀
      ████
 
- ✓ Preflight           Debian 13, amd64, 4 CPU, 8 GiB RAM                    0s
- ✓ Release             channel release, signature verified                   0s
- ✓ Download            control plane 1.8.2, web app 1.8.2                    0s
- ⠴ Runtimes                                                                  0s
-      Installing Postgres 18
-      Installing Redis 8
-    › Installing RabbitMQ 4
-
- ━━━━━━━━━━━━────────────────────  3/8  0s
+  done  preflight · release · download                                       0s
+  now   runtimes                                                              ⠴
+          postgres 18   ready
+          redis 8       pulling image
+          rabbitmq 4    waiting
+  next  ansible · database · services · health
