@@ -1,9 +1,8 @@
 
   TurboPanel  1.8.2 · control plane
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  8/8
+  ████████████████████████████████  8/8
 
-  ✓ Preflight · Release · Download · Runtimes
-    Ansible · Database · Services · Health
+  ✓ 8 steps done
 
   Ready in 1m 12s
 

@@ -1,9 +1,8 @@
 
   TurboPanel  1.8.2 · server
-  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  8/8
+  ████████████████████████████████  8/8
 
-  ✓ Preflight · Release · Download · Runtimes
-    Ansible · Services · Enrolment · Kernel
+  ✓ 8 steps done
 
   Enrolled in 1m 12s
 

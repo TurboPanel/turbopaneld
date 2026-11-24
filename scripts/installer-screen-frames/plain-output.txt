@@ -1,49 +1,49 @@
 TurboPanel installer 1.8.2 (channel release, mode panel)
 log: install.log
-[1/8] Preflight ...
+[1/8] Checking this server ...
       - host system: Debian 13
       - prerequisites: checking
       - ports 80, 443, 8443: checking
       - prerequisites: ready
-[1/8] ok   Preflight: Debian 13, 4 CPU, 8 GiB (0s)
-[2/8] Release ...
+[1/8] ok   Checking this server: Debian 13, 4 CPU, 8 GiB (0s)
+[2/8] Verifying the release ...
       - manifest: fetching
       - control plane: waiting
       - web app: waiting
       - manifest: ready
-[2/8] ok   Release: signature verified (0s)
-[3/8] Download ...
+[2/8] ok   Verifying the release: signature verified (0s)
+[3/8] Downloading TurboPanel ...
       - control plane 1.8.2: downloading
       - web app 1.8.2: waiting
       - unpack: waiting
       - control plane 1.8.2: ready
       - web app 1.8.2: downloading
       - web app 1.8.2: ready
-[3/8] ok   Download: control plane 1.8.2, web app 1.8.2 (0s)
-[4/8] Runtimes ...
-      - postgres 18: installing
-      - redis 8: waiting
-      - rabbitmq 4: waiting
-      - postgres 18: starting
-      - postgres 18: ready
-      - redis 8: pulling image
-      - redis 8: ready
-      - rabbitmq 4: installing
-      - caddy 2.11.4: waiting
-      - rabbitmq 4: ready
-      - caddy 2.11.4: installing
-      - caddy 2.11.4: ready
-[4/8] ok   Runtimes: Postgres 18, Redis 8, RabbitMQ 4 (0s)
-[5/8] Ansible ...
-      - ansible 2.20: installing
-      - playbook: waiting
-      - role instance-launch: waiting
-      - ansible 2.20: ready
-      - playbook: running
-      - role instance-launch: applying
-      - role instance-certs: applying
-[5/8] ok   Ansible: Ansible 2.20, 63 tasks, 0 failed (0s)
-[6/8] Database ...
+[3/8] ok   Downloading TurboPanel: control plane 1.8.2, web app 1.8.2 (0s)
+[4/8] Installing data services ...
+      - database: installing
+      - cache: waiting
+      - message queue: waiting
+      - database: starting
+      - database: ready
+      - cache: pulling image
+      - cache: ready
+      - message queue: installing
+      - web gateway: waiting
+      - message queue: ready
+      - web gateway: installing
+      - web gateway: ready
+[4/8] ok   Installing data services: database, cache, message queue (0s)
+[5/8] Configuring the instance ...
+      - orchestration: installing
+      - plan: waiting
+      - instance launch: waiting
+      - orchestration: ready
+      - plan: running
+      - instance launch: applying
+      - instance certificates: applying
+[5/8] ok   Configuring the instance: 63 tasks, 0 failed (0s)
+[6/8] Preparing the database ...
       - roles: creating
       - migrations: waiting
       - schema: waiting
@@ -52,23 +52,23 @@ log: install.log
       - migrations: ready
       - schema: checking
       - schema: ready
-[6/8] ok   Database: schema is up to date (0s)
-[7/8] Services ...
+[6/8] ok   Preparing the database: schema is up to date (0s)
+[7/8] Starting services ...
       - control plane: starting
-      - caddy: waiting
+      - web gateway: waiting
       - daemon: waiting
       - control plane: ready
-      - caddy: starting
-      - caddy: ready
+      - web gateway: starting
+      - web gateway: ready
       - daemon: starting
       - daemon: ready
-[7/8] ok   Services: control plane, Caddy and daemon active (0s)
-[8/8] Health ...
+[7/8] ok   Starting services: control plane, web gateway and daemon active (0s)
+[8/8] Checking health ...
       - /api/health: waiting
       - web interface: waiting
       - daemon: waiting
       - /api/health: ready
-[8/8] ok   Health: healthy in 4 s (0s)
+[8/8] ok   Checking health: healthy in 4 s (0s)
 == Ready in 1m 12s
    public: https://192.0.2.10:8443
    private: https://10.0.0.5:8443

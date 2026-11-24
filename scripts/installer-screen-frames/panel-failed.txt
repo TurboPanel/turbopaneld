@@ -1,15 +1,15 @@
 
   TurboPanel  1.8.2 · control plane
-  ━━━━━━━━━━━━────────────────────  4/8  Runtimes
+  ████████████░░░░░░░░░░░░░░░░░░░░  4/8  Installing data services
 
-  ✓ Preflight    Debian 13, 4 CPU, 8 GiB
-  ✓ Release      signature verified
-  ✓ Download     control plane 1.8.2, web app 1.8.2
-  ✗ Runtimes
-      postgres 18   starting
-      redis 8       waiting
-      rabbitmq 4    waiting
+  ✓ Checking this server        Debian 13, 4 CPU, 8 GiB
+  ✓ Verifying the release       signature verified
+  ✓ Downloading TurboPanel      control plane 1.8.2, web app 1.8.2
+  ✗ Installing data services
+      database        starting
+      cache           waiting
+      message queue   waiting
 
-  Postgres 18 did not start: port 5432 is in use
+  The TurboPanel database did not start: port 5432 is in use
   log  install.log
   try  stop whatever listens on port 5432, then run the installer again

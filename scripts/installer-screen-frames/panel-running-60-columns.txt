@@ -1,14 +1,14 @@
 
   TurboPanel  1.8.2 · control plane
-  ━━━━━━━━━━━━━━━━━━━━━━━━────────  7/8  Services
+  ████████████████████████░░░░░░░░  7/8  Starting services
 
-  ✓ Preflight    Debian 13, 4 CPU, 8 GiB
-  ✓ Release      signature verified
-  ✓ Download     control plane 1.8.2, web app 1.8.2
-  ✓ Runtimes     Postgres 18, Redis 8, RabbitMQ 4
-  ✓ Ansible      Ansible 2.20, 63 tasks, 0 failed
-  ✓ Database     schema is up to date
-  ⠸ Services
+  ✓ Checking this server        Debian 13, 4 CPU, 8 GiB
+  ✓ Verifying the release       signature verified
+  ✓ Downloading TurboPanel      control plane 1.8.2, web…
+  ✓ Installing data services    database, cache, message…
+  ✓ Configuring the instance    63 tasks, 0 failed
+  ✓ Preparing the database      schema is up to date
+  ⠸ Starting services
       control plane   ready
-      caddy           starting
+      web gateway     starting
       daemon          waiting

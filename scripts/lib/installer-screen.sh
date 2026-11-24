@@ -30,7 +30,7 @@
 #                                keeps its detail lines; then the reason, the
 #                                log path and one thing to try
 #   screen_summary <prefix>      the finish: the check rows collapse to one
-#                                row (two balanced lines if too wide), then "<prefix> <total time>"
+#                                row ("8 steps done"), then "<prefix> <total time>"
 #                                ("Ready in 1m 12s", "Enrolled in 1m 12s")
 #   screen_summary_item <value> <note>   URLs or names, aligned, note dim
 #   screen_summary_warn <text>   things to act on (after the items)
@@ -41,13 +41,13 @@
 # Layout while running (finished areas stay as one row each; pending areas
 # are not shown):
 #     TurboPanel  1.8.2 . control plane
-#     ========------------  3/8  Runtimes   (32 cells, redrawn in place)
+#     ████████░░░░░░░░  3/8  Installing data services   (32 cells)
 #
-#     ok Preflight    Debian 13, amd64, 4 CPU
-#     ok Release      signature verified
-#     spinner Runtimes
-#         postgres 18   ready
-#         redis 8       pulling image
+#     ok Checking this server   Debian 13, amd64, 4 CPU
+#     ok Verifying the release   signature verified
+#     spinner Installing data services
+#         database      ready
+#         cache         pulling image
 #
 # The bar fills by finished areas, brand blue (green when done, red when an
 # area failed); SCREEN_UNICODE=0 gives # and - . Plain output has no bar.
@@ -96,7 +96,6 @@ _ss_k2=
 _ss_v2=
 _ss_k3=
 _ss_v3=
-_ss_done_list=
 _ss_done_rows=0
 _ss_nw=12
 _ss_bar_state=run
@@ -241,8 +240,8 @@ _ss_setup_style() {
     _ss_ellw=1
     _ss_no='✗'
     _ss_ok='✓'
-    _ss_bar_on='━'
-    _ss_bar_off='─'
+    _ss_bar_on='█'
+    _ss_bar_off='░'
     _ss_arrow='→'
     _ss_sep=' · '
     _ss_spin_1='⠋'
@@ -423,79 +422,15 @@ _ss_paint() {
   _ss_frame=$((_ss_frame + 1))
 }
 
-# The finished names as one check row, wrapped to the width; continuation
-# lines sit under the first name.
-# True when the check row breaks before item _cc_i (split point, or full line).
-_ss_wrap_here() {
-  [ "$_cc_i" = $((_cc_sp + 1)) ] && return 0
-  [ "$_cc_sp" = -1 ] && [ $((_cc_w + 3 + ${#_cc_a})) -gt "$_cc_lim" ]
-}
-
+# The finished areas as one short check row: "8 steps done".
 _ss_collapsed() {
-  [ -n "$_ss_done_list" ] || return 0
-  _cc_oifs=$IFS
-  case $- in
-    *f*) _cc_f=1 ;;
-    *)
-      _cc_f=0
-      set -f
-      ;;
-  esac
-  IFS='|'
-  # shellcheck disable=SC2086
-  set -- $_ss_done_list
-  IFS=$_cc_oifs
-  [ "$_cc_f" = 1 ] || set +f
-  _cc_lim=$((_ss_cols - 1))
-  _cc_n=$#
-  _cc_i=0
-  _cc_sum=0
-  while [ "$_cc_i" -lt "$_cc_n" ]; do
-    _cc_a=$(_ss_fit "$1" $((_cc_lim - 4)))
-    shift
-    set -- "$@" "$_cc_a"
-    _cc_sum=$((_cc_sum + ${#_cc_a}))
-    _cc_i=$((_cc_i + 1))
-  done
-  # Fits on one line: keep it. Otherwise split into two balanced lines, so the
-  # second never holds a lone trailing word; fall back to filling lines when
-  # even the best split is too wide.
-  _cc_sp=0
-  if [ $((4 + _cc_sum + 3 * (_cc_n - 1))) -gt "$_cc_lim" ]; then
-    _cc_best=0
-    _cc_pre=0
-    _cc_i=1
-    for _cc_a in "$@"; do
-      [ "$_cc_i" -lt "$_cc_n" ] || break
-      _cc_pre=$((_cc_pre + ${#_cc_a}))
-      _cc_w1=$((4 + _cc_pre + 3 * (_cc_i - 1)))
-      _cc_w2=$((4 + _cc_sum - _cc_pre + 3 * (_cc_n - _cc_i - 1)))
-      [ "$_cc_w1" -ge "$_cc_w2" ] || _cc_w1=$_cc_w2
-      if [ "$_cc_best" = 0 ] || [ "$_cc_w1" -lt "$_cc_best" ]; then
-        _cc_best=$_cc_w1
-        _cc_sp=$_cc_i
-      fi
-      _cc_i=$((_cc_i + 1))
-    done
-    [ "$_cc_best" -le "$_cc_lim" ] || _cc_sp=-1
+  [ "$_ss_done_rows" -gt 0 ] || return 0
+  if [ "$_ss_done_rows" = 1 ]; then
+    _cc_s=step
+  else
+    _cc_s=steps
   fi
-  printf '  %s%s%s ' "$_ss_GREEN" "$_ss_ok" "$_ss_RST"
-  _cc_w=4
-  _cc_i=0
-  for _cc_a in "$@"; do
-    _cc_i=$((_cc_i + 1))
-    if [ "$_cc_i" = 1 ]; then
-      printf '%s' "$_cc_a"
-      _cc_w=$((4 + ${#_cc_a}))
-    elif _ss_wrap_here; then
-      printf '%s    %s' "$_ss_NL" "$_cc_a"
-      _cc_w=$((4 + ${#_cc_a}))
-    else
-      printf '%s%s%s%s' "$_ss_DIM" "$_ss_sep" "$_ss_RST" "$_cc_a"
-      _cc_w=$((_cc_w + 3 + ${#_cc_a}))
-    fi
-  done
-  printf '%s' "$_ss_NL"
+  printf '  %s%s%s %s %s done%s' "$_ss_GREEN" "$_ss_ok" "$_ss_RST" "$_ss_done_rows" "$_cc_s" "$_ss_NL"
 }
 
 # _ss_put_sub <key> <value>: a detail line goes in the first free slot and
@@ -608,8 +543,7 @@ screen_init() {
   _ss_warns=0
   _ss_active=0
   _ss_drawn=0
-  _ss_done_list=
-  _ss_done_rows=0
+    _ss_done_rows=0
   _ss_bar_state=run
   _ss_name=
   _ss_clear_subs
@@ -673,11 +607,6 @@ screen_area_done() {
   _d_el=$(_ss_dur $(($(_ss_now) - _ss_t0)))
   _ss_logf "-- ok: $_ss_name: $_d_det ($_d_el)"
   _ss_active=0
-  if [ -n "$_ss_done_list" ]; then
-    _ss_done_list="$_ss_done_list|$_ss_name"
-  else
-    _ss_done_list=$_ss_name
-  fi
   if [ "$_ss_live" = 1 ]; then
     printf '%s[%sA%s%s[2K%s%s%s[J' "$_ss_ESC" "$_ss_drawn" "$_ss_CR" "$_ss_ESC" \
       "$(_ss_row_done "$_ss_name" "$_d_det")" "$_ss_NL" "$_ss_ESC"
