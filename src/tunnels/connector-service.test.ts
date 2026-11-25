@@ -384,7 +384,7 @@ test("a failed unit install keeps the token copy of a tunnel that already runs",
 
 const unitOf = (id: string, slot: "a" | "b" = "a") =>
   `turbopanel-tunnel-${id}${slot === "b" ? "-b" : ""}.service`;
-const NEW = "2026.11.1";
+const NEW = "2026.11.2";
 
 async function readRecordFile(h: Harness, id: string) {
   return JSON.parse(await Deno.readTextFile(join(h.io.workDir, `${id}.json`)));
