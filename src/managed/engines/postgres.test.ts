@@ -403,30 +403,56 @@ test("backup dump/restore argv always target the stable platform admin regardles
   const restoreArgv = engine.backup.restoreArgv(ctx, { database: "appdb" });
 
   assertEquals(dumpArgv, ["pg_dump", "-Fc", "-U", "postgres", "-d", "appdb"]);
-  // The restore runs as one script; the admin and database travel as
-  // positional arguments, never inside the script text.
+  // The restore runs as one script; the admin, the database and the SQL
+  // pieces travel as positional arguments, never inside the script text.
   assertEquals(restoreArgv.slice(0, 2), ["sh", "-c"]);
   assertEquals(restoreArgv.slice(3, 6), ["tp-restore", "postgres", "appdb"]);
+  assertEquals(restoreArgv.length, 10);
+  const script = restoreArgv[2];
+  assertEquals(script.includes("appdb"), false);
+  // Admin session: prepare only; the dump is replayed as the temporary login.
   assertStringIncludes(
-    restoreArgv[2],
-    'psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2"',
+    script,
+    'admin() { psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$root" -d "$db"; }',
   );
-  assertEquals(restoreArgv[2].includes("appdb"), false);
+  assertStringIncludes(script, "sslmode=require");
   assertStringIncludes(
-    restoreArgv[2],
+    script,
+    'psql -X -q -A -t -v ON_ERROR_STOP=1 "host=$host',
+  );
+  // The password never reaches a command line.
+  assertEquals(/psql[^\n]*\$pw/.test(script), false);
+  assertStringIncludes(script, 'PGPASSWORD="$pw"');
+  assertStringIncludes(
+    script,
     "pg_restore --no-owner --clean --if-exists -f - | sed -E",
   );
-  assertStringIncludes(restoreArgv[2], "[Ll][Oo][Cc][Kk]_");
+  assertStringIncludes(script, "[Ll][Oo][Cc][Kk]_");
   // BusyBox sed (Alpine image) has no `I` flag: the address must end in `/d`.
-  assertEquals(restoreArgv[2].includes("/Id'"), false);
-  assertStringIncludes(restoreArgv[2], "/d'; then");
+  assertEquals(script.includes("/Id'"), false);
+  assertStringIncludes(script, "/d' | awk");
   assertStringIncludes(
-    restoreArgv[2],
+    script,
     String.raw`BEGIN;\nSET LOCAL client_min_messages = warning;\n`,
   );
-  assertStringIncludes(restoreArgv[2], "set -o pipefail");
-  assertStringIncludes(restoreArgv[2], "set +e");
-  assertStringIncludes(restoreArgv[7], "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(script, "SET LOCAL ROLE :");
+  assertStringIncludes(script, "trap drop_login EXIT");
+  assertStringIncludes(script, "set -o pipefail");
+  assertStringIncludes(script, "set +e");
+  assertStringIncludes(restoreArgv[6], "NOSUPERUSER");
+  assertStringIncludes(restoreArgv[6], "log_statement = 'none'");
+  // The restore login never assumes another role: schemas of other owners
+  // move to the owner role in the prepare step (no memberships), and
+  // per-login schemas are made by the superuser step after the commit.
+  assertEquals(restoreArgv[6].includes("INHERIT"), false);
+  assertEquals(restoreArgv[6].includes("GRANT"), true);
+  assertEquals(restoreArgv[6].includes("rolvaliduntil"), true);
+  assertStringIncludes(restoreArgv[8], "REASSIGN OWNED BY");
+  assertEquals(restoreArgv[8].includes("CREATE SCHEMA"), false);
+  assertStringIncludes(restoreArgv[9], "CREATE SCHEMA %I AUTHORIZATION %I");
+  assertStringIncludes(script, "trap 'exit 143' TERM");
+  assertStringIncludes(script, "SET search_path = pg_catalog, pg_temp;");
+  assertStringIncludes(script, "Type: BLOBS;");
 });
 
 function standbyReplicationSpec() {
