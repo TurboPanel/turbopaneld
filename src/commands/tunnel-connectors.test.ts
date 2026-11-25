@@ -170,7 +170,7 @@ for (const state of ["inactive", "failed"]) {
 /** An io that records the unit text at each `install` and can lose its unit or its token copy. */
 function unitRecorder(base: ConnectorIo, calls: string[]) {
   const units: string[] = [];
-  const lost = { unit: false, tokenCopy: false };
+  const lost = { unit: false, tokenCopy: false, same: false };
   const io: ConnectorIo = {
     ...base,
     unitExists: () => Promise.resolve(!lost.unit),
@@ -191,8 +191,9 @@ function unitRecorder(base: ConnectorIo, calls: string[]) {
           stderr: "",
         };
       }
-      // The unit on disk never equals the new text (a fresh or a lost unit).
-      if (verb === "cmp") return { success: false, stdout: "", stderr: "" };
+      // The unit on disk does not equal the new text (a fresh or a lost unit)
+      // until a test says the repaired unit is what is installed.
+      if (verb === "cmp") return { success: lost.same, stdout: "", stderr: "" };
       if (verb === "restart" && lost.tokenCopy) {
         return { success: false, stdout: "", stderr: "Job failed" };
       }
@@ -235,6 +236,7 @@ test("a connector whose unit file is gone is written again like a fresh install,
     assertEquals(calls.filter((c) => c.includes("tunnel-env-install")), []);
     // The record carries the version that now runs, so no pointless update.
     lost.unit = false;
+    lost.same = true;
     assertEquals((await updateConnector(io, ID_A)).kind, "current");
   });
 });
@@ -345,8 +347,10 @@ test("a stopped connector the host refuses to start fails the command so it is s
   });
 });
 
-test("a connector whose run token changed is restarted on the new one and reported as installed", async () => {
-  await withIo(async (io, calls) => {
+test("a connector whose run token changed moves to a new unit on the new token, with no restart, and is reported as installed", async () => {
+  await withIo(async (base, calls) => {
+    const ready = { kind: "ready", connections: 4 } as const;
+    const io: ConnectorIo = { ...base, probe: () => Promise.resolve(ready) };
     await handleTunnelConnectors(payload(), "now", {
       io,
       decryptSecrets: unseal(),
@@ -354,14 +358,19 @@ test("a connector whose run token changed is restarted on the new one and report
     calls.length = 0;
     const rotated = "bmV3".repeat(16);
     const result = await handleTunnelConnectors(payload(), "now", {
-      io,
+      io: unitIn(io, calls, "active"),
       decryptSecrets: (envelopes: string[]) =>
         Promise.resolve(envelopes.map(() => rotated as string | null)),
     });
     assertEquals(result, { installed: [ID_A], unchanged: [], removed: [] });
     const unit = `turbopanel-tunnel-${ID_A}`;
     assert(calls.some((c) => c.includes(`tunnel-env-install ${ID_A}`)));
-    assert(calls.some((c) => c.includes(" restart ") && c.includes(unit)));
+    assert(
+      calls.some((c) =>
+        c.includes(" start ") && c.includes(`${unit.replace(".service", "")}-b`)
+      ),
+    );
+    assertEquals(calls.filter((c) => c.includes(" restart ")), []);
     // The token itself is on no command line.
     assertEquals(calls.filter((c) => c.includes(rotated)), []);
     // Sent again with the same new token: left alone.

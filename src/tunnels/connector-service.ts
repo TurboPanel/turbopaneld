@@ -465,10 +465,11 @@ async function installConnectorNow(
 
   // A running tunnel keeps its slot, and its unit file as it is: a resend
   // never swaps the connector program. Moving to a new version without a gap
-  // is `updateConnector`'s job; a changed token alone restarts that unit.
+  // is `updateConnector`'s job; a changed token starts a new unit beside the
+  // old one, like a version change, so no path restarts a working connector.
   const slot: ConnectorSlot = previous?.slot ?? "a";
   const exists = io.unitExists ?? defaultUnitExists;
-  const keepUnit = previous !== undefined &&
+  const keepUnit = previous != null &&
     await exists(tunnelUnitPath(id, undefined, slot));
   const stagedUnit = join(io.workDir, `${id}${slotSuffix(slot)}.service`);
   let unitChanged = false;
@@ -501,6 +502,14 @@ async function installConnectorNow(
   await lockMetricsPorts(io);
   const unit = tunnelUnitName(id, slot);
   await systemctl(io, ["reset-failed", unit]);
+  if (keepUnit && previous && previous.tokenDigest !== tokenDigest) {
+    // The token copy is already replaced; the running unit read the old one
+    // at start and keeps it. The record keeps the old digest until the new
+    // unit is committed, so a failed switch is retried by the next send.
+    const outcome = await switchSlot(io, previous, tokenDigest);
+    if (outcome.kind === "rolled-back") throw new Error(outcome.reason);
+    return;
+  }
   if (previous && !unitChanged && previous.tokenDigest === tokenDigest) {
     await mustSystemctl(io, ["enable", "--now", unit]);
   } else {
@@ -567,6 +576,9 @@ async function unitStillRuns(io: ConnectorIo, unit: string): Promise<boolean> {
  * finds the stray unit and tries again. Callers that drop the old connector
  * after a switch report that loudly; this never touches any other unit.
  */
+/** The unit stopped but its file could not be removed. */
+class UnitFileRemoveError extends Error {}
+
 async function dropSlotUnit(
   io: ConnectorIo,
   id: string,
@@ -589,7 +601,9 @@ async function dropSlotUnit(
     hostSudoArgs(["-n", "rm", "-f", "--", tunnelUnitPath(id, undefined, slot)]),
   );
   if (!rm.success) {
-    throw new Error(`removing ${unit} failed: ${rm.stderr || "no detail"}`);
+    throw new UnitFileRemoveError(
+      `removing ${unit} failed: ${rm.stderr || "no detail"}`,
+    );
   }
   await systemctl(io, ["reset-failed", unit]);
 }
@@ -1005,14 +1019,23 @@ async function retireOldConnector(
 ): Promise<void> {
   const id = record.id;
   let stopFailure: string | undefined;
+  let leftover: string | undefined;
   try {
     await dropSlotUnit(io, id, record.slot);
   } catch (err) {
-    stopFailure = err instanceof Error ? err.message : "the stop failed";
-    logError(
-      "tunnels",
-      `connector ${id}: the old connector (${record.version}) is still running: ${stopFailure}`,
-    );
+    const detail = err instanceof Error ? err.message : "the stop failed";
+    if (err instanceof UnitFileRemoveError) {
+      // It stopped; only its file is left, which the next round removes.
+      leftover =
+        `the old connector (${record.version}) stopped but its unit file was not removed: ${detail}`;
+      logError("tunnels", `connector ${id}: ${leftover}`);
+    } else {
+      stopFailure = detail;
+      logError(
+        "tunnels",
+        `connector ${id}: the old connector (${record.version}) is still running: ${detail}`,
+      );
+    }
   }
   try {
     await mustSystemctl(io, ["daemon-reload"]);
@@ -1024,18 +1047,18 @@ async function retireOldConnector(
       }`,
     );
   }
-  if (!stopFailure) {
+  if (!stopFailure && !leftover) {
     await pruneSuperseded(io);
     return;
   }
+  const reason = leftover ??
+    `the old connector (${record.version}) did not stop: ${stopFailure}`;
   await writeRecord(io, {
     ...committed,
     lastUpdate: {
       outcome: "updated",
       at: new Date().toISOString(),
-      reason:
-        `the old connector (${record.version}) did not stop: ${stopFailure}`
-          .slice(0, MAX_LAST_UPDATE_REASON),
+      reason: reason.slice(0, MAX_LAST_UPDATE_REASON),
     },
   }).catch(() => undefined);
 }
@@ -1047,6 +1070,7 @@ async function retireOldConnector(
 async function switchSlot(
   io: ConnectorIo,
   record: ConnectorRecord,
+  tokenDigest?: string,
 ): Promise<ConnectorUpdateOutcome> {
   const id = record.id;
   const next = otherSlot(record.slot);
@@ -1123,6 +1147,7 @@ async function switchSlot(
     port,
     version: io.version,
     slot: next,
+    ...(tokenDigest ? { tokenDigest } : {}),
     lastUpdate: { outcome: "updated", at: new Date().toISOString() },
   };
   await writeRecord(io, committed);

@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { waitFor } from "../testing/wait-for.ts";
 import type { RunResult } from "../deploy/ensure-principal.ts";
 import type { ConnectorIo } from "./connector-service.ts";
 import {
@@ -146,11 +147,10 @@ test("a daemon start with a changed pin runs the whole rolling update in order",
     io.unitExists = () => Promise.resolve(false);
     io.sleep = () => Promise.resolve();
     io.unitTexts = () => Promise.resolve([]);
-    let done!: () => void;
-    const pruned = new Promise<void>((resolve) => (done = resolve));
+    let prunedDone = false;
     io.pruneVersions = (keep) => {
       steps.push(`prune keep=${[...keep].join(",")}`);
-      done();
+      prunedDone = true;
       return Promise.resolve();
     };
     const run = io.run;
@@ -165,7 +165,9 @@ test("a daemon start with a changed pin runs the whole rolling update in order",
         : run(command, args);
     };
     await startTunnels(new AbortController().signal);
-    await pruned;
+    await waitFor("the old versions to be pruned", () => prunedDone, {
+      timeoutMs: 60_000,
+    });
     const order = ["download-and-verify", "start-new", "ready", "stop-old"];
     const seen = steps.filter((s) => order.includes(s));
     assertEquals([...new Set(seen)], order, steps.join("\n"));

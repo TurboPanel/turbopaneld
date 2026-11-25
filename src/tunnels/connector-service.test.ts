@@ -119,6 +119,8 @@ async function withHarness(
           text: await Deno.readTextFile(path),
         });
       }
+      if (text.startsWith("install ")) onDisk.add(text.split(" ").at(-1)!);
+      if (text.startsWith("rm -f ")) onDisk.delete(text.split(" ").at(-1)!);
       if (text.startsWith("install ")) {
         installedUnits.push(await Deno.readTextFile(text.split(" ").at(-2)!));
       }
@@ -191,17 +193,21 @@ test("installing again with the same token and unit does not restart the service
   });
 });
 
-test("a new token restarts the service on the same port", async () => {
+test("a new token starts a new unit beside the running one and never restarts it", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.calls.length = 0;
     h.state.unchanged = true;
     await installConnector(h.io, ID_A, `${TOKEN}AA`);
-    assert(h.calls.some((c) => c.startsWith("systemctl restart")));
-    const record = JSON.parse(
-      await Deno.readTextFile(join(h.io.workDir, `${ID_A}.json`)),
+    assert(!h.calls.some((c) => c.startsWith("systemctl restart")));
+    const start = h.calls.indexOf(`systemctl start ${unitOf(ID_A, "b")}`);
+    const stop = h.calls.findIndex((c) =>
+      c.startsWith(`systemctl disable --now ${unitOf(ID_A, "a")}`)
     );
-    assertEquals(record.port, 20300);
+    assert(start >= 0 && stop > start, h.calls.join("\n"));
+    const record = await readRecordFile(h, ID_A);
+    assertEquals(record.slot, "b");
+    assert(record.tokenDigest !== undefined);
   });
 });
 
@@ -365,16 +371,22 @@ test("the record is written only after the service starts, and a retry restarts 
   });
 });
 
-test("a retry after a failed token change restarts even though the unit is unchanged", async () => {
+test("a retry after a failed token change switches again and the old unit keeps running meanwhile", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.state.unchanged = true;
-    h.state.fail.add("systemctl restart");
+    h.state.fail.add(`systemctl start ${unitOf(ID_A, "b")}`);
+    h.calls.length = 0;
     await assertRejects(() => installConnector(h.io, ID_A, `${TOKEN}AA`));
+    assert(
+      !h.calls.some((c) => c.includes(`disable --now ${unitOf(ID_A, "a")}`)),
+    );
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
     h.state.fail.clear();
     h.calls.length = 0;
     await installConnector(h.io, ID_A, `${TOKEN}AA`);
-    assert(h.calls.some((c) => c.startsWith("systemctl restart")));
+    assert(h.calls.includes(`systemctl start ${unitOf(ID_A, "b")}`));
+    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
   });
 });
 
@@ -548,16 +560,17 @@ test("the verbs follow the recorded slot, and the next update goes back to slot 
   });
 });
 
-test("a token change on an updated tunnel restarts the unit in the slot that carries it", async () => {
+test("a token change on an updated tunnel moves back to the other slot without a restart", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.io.version = NEW;
     await updateConnector(h.io, ID_A);
     h.calls.length = 0;
     await installConnector(h.io, ID_A, "b3RoZXI".repeat(6));
-    const second = unitOf(ID_A, "b");
-    assert(h.calls.includes(`systemctl restart ${second}`), h.calls.join("\n"));
-    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
+    const other = unitOf(ID_A, "a");
+    assert(h.calls.includes(`systemctl start ${other}`), h.calls.join("\n"));
+    assert(!h.calls.some((c) => c.startsWith("systemctl restart")));
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
   });
 });
 
@@ -818,6 +831,28 @@ test("an old connector that will not stop is reported loudly and the new one is 
     // The old unit file stays so the next round retries, and nothing is pruned.
     assert(!h.calls.includes(`rm -f /etc/systemd/system/${unitOf(ID_A)}`));
     assertEquals(h.pruned.length, 0);
+  });
+});
+
+test("an old connector that stopped but whose unit file stays is reported as exactly that", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.state.fail.add(`rm -f /etc/systemd/system/${unitOf(ID_A)}`);
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "updated", from: "2026.10.7", to: NEW });
+    const record = await readRecordFile(h, ID_A);
+    assertStringIncludes(record.lastUpdate.reason, "stopped but its unit file");
+    assert(!record.lastUpdate.reason.includes("still running"));
+  });
+});
+
+test("a first install with a leftover unit file at the slot path writes the unit", async () => {
+  await withHarness(async (h) => {
+    h.onDisk.add(`/etc/systemd/system/${unitOf(ID_A)}`);
+    await installConnector(h.io, ID_A, TOKEN);
+    assertEquals(h.installedUnits.length, 1);
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
   });
 });
 
