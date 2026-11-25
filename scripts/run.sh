@@ -2213,9 +2213,12 @@ _ss_clear_subs() {
 }
 
 # Stop the spinner process screen_busy_start began (nothing when none runs).
+# KILL, not TERM: it only repaints, so it has nothing to clean up, and a TERM
+# that lands before the new process has dropped the parent's TERM trap is
+# lost (the spinner would loop and the wait below would never return).
 _ss_busy_off() {
   if [ -n "$_ss_tick" ]; then
-    kill "$_ss_tick" 2>/dev/null || :
+    kill -KILL "$_ss_tick" 2>/dev/null || :
     wait "$_ss_tick" 2>/dev/null || :
     _ss_tick=
   fi
@@ -2646,8 +2649,10 @@ tp_ui_neutral() {
       gsub(/PostgreSQL/, "database", t); gsub(/Postgres/, "database", t)
       gsub(/Ansible/, "installer", t); gsub(/ansible/, "installer", t)
       gsub(/Deno/, "script runtime", t); gsub(/deno/, "script runtime", t)
-      gsub(/Docker/, "container engine", t); gsub(/Caddy/, "web server", t)
-      gsub(/Redis/, "cache", t); gsub(/Valkey/, "cache", t)
+      gsub(/Docker/, "container engine", t); gsub(/docker/, "container engine", t)
+      gsub(/Caddy/, "web server", t); gsub(/caddy/, "web server", t)
+      gsub(/Redis/, "cache", t); gsub(/redis/, "cache", t)
+      gsub(/Valkey/, "cache", t); gsub(/valkey/, "cache", t)
       gsub(/RabbitMQ/, "message queue", t)
       return t
     }
@@ -2660,15 +2665,26 @@ tp_ui_neutral() {
       if (w == "systemd") return "service manager"
       return ""
     }
-    function fix(t,   lead, trail, core, r) {
+    BEGIN { Q = sprintf("%c", 39) }
+    function isopen(c) { return c != "" && (c == "(" || c == "[" || c == "\"" || c == Q) }
+    function isclose(c) { return c != "" && (c == ")" || c == "]" || c == "," || c == ";" || c == ":" || c == "." || c == "\"" || c == Q) }
+    function named(w) {
+      return w ~ /^(Ansible|Deno|Docker|Caddy|Redis|Valkey|RabbitMQ|Postgres|PostgreSQL)$/
+    }
+    function fix(t,   lead, trail, core, r, n, parts, i, ok) {
       if (index(t, "://") > 0) return t
       if (t ~ /orchestration\/ansible\.cfg/) { sub(/orchestration\/ansible\.cfg/, "installer files", t); return t }
       if (t ~ /^(\/|\.\/|~)/) return t
       lead = ""; trail = ""; core = t
-      while (core ~ /^[(\[]/) { lead = lead substr(core, 1, 1); core = substr(core, 2) }
-      while (core ~ /[,;:.)\]]$/) { trail = substr(core, length(core), 1) trail; core = substr(core, 1, length(core) - 1) }
+      while (isopen(substr(core, 1, 1))) { lead = lead substr(core, 1, 1); core = substr(core, 2) }
+      while (isclose(substr(core, length(core), 1))) { trail = substr(core, length(core), 1) trail; core = substr(core, 1, length(core) - 1) }
       r = tool(core)
       if (r != "") return lead r trail
+      if (core ~ /\// && core !~ /^\//) {
+        n = split(core, parts, "/"); ok = 1
+        for (i = 1; i <= n; i++) if (!named(parts[i])) ok = 0
+        if (ok) return lead brand(core) trail
+      }
       if (core ~ /[\/]/ || core ~ /[A-Za-z0-9]\.[A-Za-z0-9]/) return t
       return lead brand(core) trail
     }

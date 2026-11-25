@@ -770,6 +770,38 @@ test("screen_wait and the busy spinner return, keep the screen intact and leave 
   });
 });
 
+test("stopping the spinner right after starting it never hangs", async () => {
+  await withTemp(async (dir) => {
+    const file = await driver(
+      dir,
+      "screen_area_start Aa\ni=0\nwhile [ $i -lt 300 ]; do\n  screen_busy_start\n  screen_busy_stop\n  i=$((i + 1))\ndone\n" +
+        "screen_area_done ok\nscreen_finish\necho stress-done",
+    );
+    const outFile = join(dir, "stress.out");
+    // Output to a file and a hard deadline: a regression fails, not hangs.
+    const script = `dash '${file}' >'${outFile}' 2>&1 </dev/null`;
+    const child = new Deno.Command("sh", {
+      args: ["-c", script],
+      clearEnv: true,
+      env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin", ...LIVE_ENV },
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }, 60_000);
+    const status = await child.status;
+    clearTimeout(timer);
+    const shown = await Deno.readTextFile(outFile);
+    assertEquals(status.code, 0, "the spinner stop hung or failed");
+    assertStringIncludes(shown, "stress-done");
+  });
+});
+
 test("both files are valid POSIX sh and run under dash and busybox ash", async () => {
   const shells: string[][] = [];
   if (await haveShell("dash")) shells.push(["dash"]);

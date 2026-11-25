@@ -191,25 +191,42 @@ test("an interrupt after a quiet runtime step still stops the spinner and restor
     // Output goes to files and the run has a deadline, so a spinner left
     // running on a regression turns the test red instead of hanging it.
     const outFile = join(dir, "out.txt");
-    const out = await new Deno.Command("sh", {
+    const child = new Deno.Command("sh", {
       args: ["-c", `sh '${file}' >'${outFile}' 2>&1 </dev/null`],
       clearEnv: true,
       env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin", ...LIVE },
       stdout: "null",
       stderr: "null",
-      signal: AbortSignal.timeout(20_000),
-    }).output();
+    }).spawn();
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }, 20_000);
+    const out = await child.status;
+    clearTimeout(timer);
     const shown = await Deno.readTextFile(outFile);
-    assertEquals(out.code, 130, shown);
-    assertStringIncludes(shown, "\x1b[?25h", "the cursor was not restored");
     const pid = Number((await Deno.readTextFile(tick)).trim());
-    assert(pid > 0);
+    const stop = () => {
+      // Never leave a stray spinner behind, pass or fail.
+      try {
+        Deno.kill(pid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    };
     let alive = true;
     try {
       Deno.kill(pid, "SIGCONT");
     } catch {
       alive = false;
     }
+    stop();
+    assertEquals(out.code, 130, shown);
+    assertStringIncludes(shown, "\x1b[?25h", "the cursor was not restored");
+    assert(pid > 0);
     assert(!alive, "the spinner keeps running after the interrupt");
   });
 });
@@ -242,6 +259,8 @@ test("the screen shows a neutral OS line and role names for tools, and leaves UR
       "https://192.0.2.10:8443/install",
       "192.0.2.10:8443",
       "./bin/curl-wrapper",
+      "https://deno.example.net/x/docker",
+      "vendor/deno/bin",
     ];
     const file = await script(
       dir,
@@ -249,6 +268,7 @@ test("the screen shows a neutral OS line and role names for tools, and leaves UR
         "ID=debian; VERSION_ID=13",
         'echo "OS=$(tp_os_line)"',
         'echo "S1=$(tp_ui_neutral "zstd is required to unpack it (apt install zstd); curl and openssl too, and Deno, Ansible.")"',
+        `echo "Q1=$(tp_ui_neutral "docker, Deno and Ansible/Deno need a curl and 'tar' or \\"curl\\"")"`,
         ...same.map((v, i) =>
           `echo "U${i}=$(tp_ui_neutral "Failed to download ${v} now")"`
         ),
@@ -261,6 +281,11 @@ test("the screen shows a neutral OS line and role names for tools, and leaves UR
     assertEquals(
       line,
       "S1=archive tool is required to unpack it (install the missing tool; the log has the exact package); download tool and certificate tool too, and script runtime, installer.",
+    );
+    const quoted = r.out.split("\n").find((l) => l.startsWith("Q1=")) ?? "";
+    assertEquals(
+      quoted,
+      "Q1=container engine, script runtime and installer/script runtime need a download tool and 'archive tool' or \"download tool\"",
     );
     same.forEach((v, i) =>
       assertStringIncludes(r.out, `U${i}=Failed to download ${v} now`)

@@ -514,9 +514,12 @@ _ss_clear_subs() {
 }
 
 # Stop the spinner process screen_busy_start began (nothing when none runs).
+# KILL, not TERM: it only repaints, so it has nothing to clean up, and a TERM
+# that lands before the new process has dropped the parent's TERM trap is
+# lost (the spinner would loop and the wait below would never return).
 _ss_busy_off() {
   if [ -n "$_ss_tick" ]; then
-    kill "$_ss_tick" 2>/dev/null || :
+    kill -KILL "$_ss_tick" 2>/dev/null || :
     wait "$_ss_tick" 2>/dev/null || :
     _ss_tick=
   fi
