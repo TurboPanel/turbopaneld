@@ -2638,18 +2638,48 @@ tp_ui_sub() {
 # The screen names roles, not products: neutralise the product words in a
 # message before it is shown (the log keeps the original).
 tp_ui_neutral() {
-  printf '%s' "$1" | sed \
-    -e 's#orchestration/ansible\.cfg#installer files#g' \
-    -e 's/Ansible/installer/g' -e 's/ansible/installer/g' \
-    -e 's/Deno/script runtime/g' -e 's/deno/script runtime/g' \
-    -e 's/Docker/container engine/g' -e 's/Caddy/web server/g' \
-    -e 's/PostgreSQL/database/g' -e 's/Postgres/database/g' \
-    -e 's/Redis/cache/g' -e 's/Valkey/cache/g' -e 's/RabbitMQ/message queue/g' \
-    -e 's/ (apt install [a-z0-9]*)//' \
-    -e 's/\bzstd\b/archive tool/g' -e 's/\bpython3\b/scripting tool/g' \
-    -e 's/\bopenssl\b/certificate tool/g' -e 's/\bcurl\b/download tool/g' \
-    -e 's/\bsudo\b/privilege tool/g' -e 's/\btar\b/archive tool/g' \
-    -e 's/\bsystemd\b/service manager/g'
+  # Whitespace-delimited tokens: URLs and paths pass through untouched; tool
+  # names change only as whole words; product names change inside plain words
+  # (not dotted host names).
+  printf '%s' "$1" | sed -e 's/ (apt install [^)]*)/ (install the missing tool; the log has the exact package)/' | awk '
+    function brand(t) {
+      gsub(/PostgreSQL/, "database", t); gsub(/Postgres/, "database", t)
+      gsub(/Ansible/, "installer", t); gsub(/ansible/, "installer", t)
+      gsub(/Deno/, "script runtime", t); gsub(/deno/, "script runtime", t)
+      gsub(/Docker/, "container engine", t); gsub(/Caddy/, "web server", t)
+      gsub(/Redis/, "cache", t); gsub(/Valkey/, "cache", t)
+      gsub(/RabbitMQ/, "message queue", t)
+      return t
+    }
+    function tool(w) {
+      if (w == "zstd" || w == "tar") return "archive tool"
+      if (w == "python3") return "scripting tool"
+      if (w == "openssl") return "certificate tool"
+      if (w == "curl") return "download tool"
+      if (w == "sudo") return "privilege tool"
+      if (w == "systemd") return "service manager"
+      return ""
+    }
+    function fix(t,   lead, trail, core, r) {
+      if (index(t, "://") > 0) return t
+      if (t ~ /orchestration\/ansible\.cfg/) { sub(/orchestration\/ansible\.cfg/, "installer files", t); return t }
+      if (t ~ /^(\/|\.\/|~)/) return t
+      lead = ""; trail = ""; core = t
+      while (core ~ /^[(\[]/) { lead = lead substr(core, 1, 1); core = substr(core, 2) }
+      while (core ~ /[,;:.)\]]$/) { trail = substr(core, length(core), 1) trail; core = substr(core, 1, length(core) - 1) }
+      r = tool(core)
+      if (r != "") return lead r trail
+      if (core ~ /[\/]/ || core ~ /[A-Za-z0-9]\.[A-Za-z0-9]/) return t
+      return lead brand(core) trail
+    }
+    {
+      out = ""; rest = $0
+      while (match(rest, /[^ \t]+/)) {
+        out = out substr(rest, 1, RSTART - 1) fix(substr(rest, RSTART, RLENGTH))
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+      print out rest
+    }'
 }
 
 # An error while the screen is up: the open area turns red with the reason,

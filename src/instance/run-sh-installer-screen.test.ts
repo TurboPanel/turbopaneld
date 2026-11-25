@@ -188,9 +188,20 @@ test("an interrupt after a quiet runtime step still stops the spinner and restor
         "exit 0",
       ].join("\n"),
     );
-    const r = await runScript(file, LIVE);
-    assertEquals(r.code, 130, r.out + r.err);
-    assertStringIncludes(r.out, "\x1b[?25h", "the cursor was not restored");
+    // Output goes to files and the run has a deadline, so a spinner left
+    // running on a regression turns the test red instead of hanging it.
+    const outFile = join(dir, "out.txt");
+    const out = await new Deno.Command("sh", {
+      args: ["-c", `sh '${file}' >'${outFile}' 2>&1 </dev/null`],
+      clearEnv: true,
+      env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin", ...LIVE },
+      stdout: "null",
+      stderr: "null",
+      signal: AbortSignal.timeout(20_000),
+    }).output();
+    const shown = await Deno.readTextFile(outFile);
+    assertEquals(out.code, 130, shown);
+    assertStringIncludes(shown, "\x1b[?25h", "the cursor was not restored");
     const pid = Number((await Deno.readTextFile(tick)).trim());
     assert(pid > 0);
     let alive = true;
@@ -221,23 +232,39 @@ test("a problem that does not stop the install is a summary warning, not a faile
   });
 });
 
-test("the screen shows a neutral OS line and role names for tools", async () => {
+test("the screen shows a neutral OS line and role names for tools, and leaves URLs and paths alone", async () => {
   await withTemp(async (dir) => {
+    const same = [
+      "https://dl.example.com/tar/ui.tar.gz",
+      "https://tar.example.com:8443/install",
+      "/opt/turbopanel/vendor/deno/bin/deno",
+      "python3.13",
+      "https://192.0.2.10:8443/install",
+      "192.0.2.10:8443",
+      "./bin/curl-wrapper",
+    ];
     const file = await script(
       dir,
       [
         "ID=debian; VERSION_ID=13",
         'echo "OS=$(tp_os_line)"',
-        'echo "$(tp_ui_neutral "zstd is missing (apt install zstd); curl and openssl too")"',
+        'echo "S1=$(tp_ui_neutral "zstd is required to unpack it (apt install zstd); curl and openssl too, and Deno, Ansible.")"',
+        ...same.map((v, i) =>
+          `echo "U${i}=$(tp_ui_neutral "Failed to download ${v} now")"`
+        ),
       ].join("\n"),
     );
     const r = await runScript(file, PLAIN);
     assertEquals(r.code, 0, r.err);
     assertStringIncludes(r.out, "OS=Debian 13");
-    for (const word of ["zstd", "curl", "openssl", "apt install"]) {
-      assert(!r.out.includes(word), r.out);
-    }
-    assertStringIncludes(r.out, "archive tool");
+    const line = r.out.split("\n").find((l) => l.startsWith("S1=")) ?? "";
+    assertEquals(
+      line,
+      "S1=archive tool is required to unpack it (install the missing tool; the log has the exact package); download tool and certificate tool too, and script runtime, installer.",
+    );
+    same.forEach((v, i) =>
+      assertStringIncludes(r.out, `U${i}=Failed to download ${v} now`)
+    );
   });
 });
 
