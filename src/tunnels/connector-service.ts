@@ -448,6 +448,47 @@ export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
   return false;
 }
 
+/**
+ * Write the unit for one slot (and reload systemd when it changed). Returns
+ * whether the installed text changed.
+ */
+async function installSlotUnit(
+  io: ConnectorIo,
+  params: {
+    id: string;
+    binary: string;
+    port: number;
+    slot: ConnectorSlot;
+    firstInstall: boolean;
+  },
+): Promise<boolean> {
+  const { id, slot } = params;
+  const stagedUnit = join(io.workDir, `${id}${slotSuffix(slot)}.service`);
+  let unitChanged: boolean;
+  try {
+    unitChanged = await installUnitFile(io.run, {
+      stagedPath: stagedUnit,
+      installedPath: tunnelUnitPath(id, undefined, slot),
+      contents: renderTunnelUnit({
+        id,
+        binary: params.binary,
+        port: params.port,
+        envFile: tunnelEnvPath(io.layout, id),
+        slot,
+      }),
+    });
+  } catch (err) {
+    // A token copy no unit names is a secret left for nothing; a tunnel
+    // that already ran keeps the copy its unit still points at.
+    if (params.firstInstall) await removeEnvCopy(io, id).catch(() => undefined);
+    throw err;
+  } finally {
+    await Deno.remove(stagedUnit).catch(() => undefined);
+  }
+  if (unitChanged) await mustSystemctl(io, ["daemon-reload"]);
+  return unitChanged;
+}
+
 async function installConnectorNow(
   io: ConnectorIo,
   id: string,
@@ -471,31 +512,13 @@ async function installConnectorNow(
   const exists = io.unitExists ?? defaultUnitExists;
   const keepUnit = previous != null &&
     await exists(tunnelUnitPath(id, undefined, slot));
-  const stagedUnit = join(io.workDir, `${id}${slotSuffix(slot)}.service`);
-  let unitChanged = false;
-  if (!keepUnit) {
-    try {
-      unitChanged = await installUnitFile(io.run, {
-        stagedPath: stagedUnit,
-        installedPath: tunnelUnitPath(id, undefined, slot),
-        contents: renderTunnelUnit({
-          id,
-          binary,
-          port,
-          envFile: tunnelEnvPath(io.layout, id),
-          slot,
-        }),
-      });
-    } catch (err) {
-      // A token copy no unit names is a secret left for nothing; a tunnel
-      // that already ran keeps the copy its unit still points at.
-      if (!previous) await removeEnvCopy(io, id).catch(() => undefined);
-      throw err;
-    } finally {
-      await Deno.remove(stagedUnit).catch(() => undefined);
-    }
-    if (unitChanged) await mustSystemctl(io, ["daemon-reload"]);
-  }
+  const unitChanged = keepUnit ? false : await installSlotUnit(io, {
+    id,
+    binary,
+    port,
+    slot,
+    firstInstall: !previous,
+  });
 
   // Before the connector listens, so its metrics port is never open to
   // local accounts (the boot unit loads the same table after a reboot).
@@ -567,6 +590,9 @@ async function unitStillRuns(io: ConnectorIo, unit: string): Promise<boolean> {
     word === "deactivating" || word === "reloading";
 }
 
+/** The unit stopped but its file could not be removed. */
+class UnitFileRemoveError extends Error {}
+
 /**
  * Stop and delete one slot's unit file. Missing units are not an error.
  *
@@ -576,9 +602,6 @@ async function unitStillRuns(io: ConnectorIo, unit: string): Promise<boolean> {
  * finds the stray unit and tries again. Callers that drop the old connector
  * after a switch report that loudly; this never touches any other unit.
  */
-/** The unit stopped but its file could not be removed. */
-class UnitFileRemoveError extends Error {}
-
 async function dropSlotUnit(
   io: ConnectorIo,
   id: string,
@@ -1148,13 +1171,19 @@ async function switchSlot(
     version: io.version,
     slot: next,
     ...(tokenDigest ? { tokenDigest } : {}),
-    lastUpdate: { outcome: "updated", at: new Date().toISOString() },
+    lastUpdate: {
+      outcome: "updated",
+      at: new Date().toISOString(),
+      ...(tokenDigest ? { reason: "the run token changed" } : {}),
+    },
   };
   await writeRecord(io, committed);
   await retireOldConnector(io, record, committed);
   logInfo(
     "tunnels",
-    `connector ${id} moved from ${record.version} to ${io.version}`,
+    tokenDigest
+      ? `connector ${id} moved to a new unit for a changed run token`
+      : `connector ${id} moved from ${record.version} to ${io.version}`,
   );
   return { kind: "updated", from: record.version, to: io.version };
 }

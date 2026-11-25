@@ -208,6 +208,7 @@ test("a new token starts a new unit beside the running one and never restarts it
     const record = await readRecordFile(h, ID_A);
     assertEquals(record.slot, "b");
     assert(record.tokenDigest !== undefined);
+    assertEquals(record.lastUpdate.reason, "the run token changed");
   });
 });
 

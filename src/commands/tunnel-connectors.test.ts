@@ -366,9 +366,7 @@ test("a connector whose run token changed moves to a new unit on the new token, 
     const unit = `turbopanel-tunnel-${ID_A}`;
     assert(calls.some((c) => c.includes(`tunnel-env-install ${ID_A}`)));
     assert(
-      calls.some((c) =>
-        c.includes(" start ") && c.includes(`${unit.replace(".service", "")}-b`)
-      ),
+      calls.some((c) => c.includes(" start ") && c.includes(`${unit}-b`)),
     );
     assertEquals(calls.filter((c) => c.includes(" restart ")), []);
     // The token itself is on no command line.
