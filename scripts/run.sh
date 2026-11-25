@@ -2622,18 +2622,21 @@ tp_ui() {
 }
 
 tp_ui_area() {
-  tp_ui screen_area_start "$1"
+  _ua_name=$1
+  tp_ui screen_area_start "$_ua_name"
   tp_ui screen_busy_start
   return 0
 }
 
 tp_ui_done() {
-  tp_ui screen_area_done "${1:-}"
+  _ud_note=${1:-}
+  tp_ui screen_area_done "$_ud_note"
   return 0
 }
 
 tp_ui_sub() {
-  tp_ui screen_sub "$1"
+  _us_name=$1
+  tp_ui screen_sub "$_us_name"
   tp_ui screen_busy_start
   return 0
 }
@@ -2642,9 +2645,11 @@ tp_ui_sub() {
 # message before it is shown (the log keeps the original).
 tp_ui_neutral() {
   # Whitespace-delimited tokens: URLs and paths pass through untouched; tool
-  # names change only as whole words; product names change inside plain words
+  # names change only as whole words; host:port tokens are left alone like
+  # URLs; product names change inside plain words
   # (not dotted host names).
-  printf '%s' "$1" | sed -e 's/ (apt install [^)]*)/ (install the missing tool; the log has the exact package)/' | awk '
+  _un_text=$1
+  printf '%s' "$_un_text" | sed -e 's/ (apt install [^)]*)/ (install the missing tool; the log has the exact package)/' | awk '
     function brand(t) {
       gsub(/PostgreSQL/, "database", t); gsub(/Postgres/, "database", t)
       gsub(/Ansible/, "installer", t); gsub(/ansible/, "installer", t)
@@ -2680,6 +2685,9 @@ tp_ui_neutral() {
       while (isclose(substr(core, length(core), 1))) { trail = substr(core, length(core), 1) trail; core = substr(core, 1, length(core) - 1) }
       r = tool(core)
       if (r != "") return lead r trail
+      if (core == "dockerd") return lead "container service" trail
+      if (core == "docker-compose") return lead "container tooling" trail
+      if (core ~ /^[A-Za-z0-9_.-]+:[0-9]+$/) return t
       if (core ~ /\// && core !~ /^\//) {
         n = split(core, parts, "/"); ok = 1
         for (i = 1; i <= n; i++) if (!named(parts[i])) ok = 0
@@ -2702,7 +2710,8 @@ tp_ui_neutral() {
 # the log path and a next step. Without an open area the line goes to the
 # real stderr.
 tp_ui_fail() {
-  _uf_msg="$(tp_ui_neutral "$1")"
+  _uf_in=$1
+  _uf_msg="$(tp_ui_neutral "$_uf_in")"
   if [ "${_ss_active:-0}" = 1 ]; then
     tp_ui screen_area_fail "$_uf_msg"
     tp_ui screen_restore
@@ -2793,7 +2802,8 @@ tp_ui_finish() {
   [ "${TP_UI:-0}" = 1 ] || return 0
   _uf_prefix="$1"
   shift
-  tp_ui screen_area_done "${1:-}"
+  _uf_note=${1:-}
+  tp_ui screen_area_done "$_uf_note"
   tp_ui screen_summary "$_uf_prefix"
   if [ -n "${TP_UI_URL:-}" ]; then
     tp_ui screen_summary_item "$TP_UI_URL" "${TP_UI_URL_NOTE:-}"

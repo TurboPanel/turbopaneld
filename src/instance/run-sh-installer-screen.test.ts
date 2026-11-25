@@ -261,6 +261,9 @@ test("the screen shows a neutral OS line and role names for tools, and leaves UR
       "./bin/curl-wrapper",
       "https://deno.example.net/x/docker",
       "vendor/deno/bin",
+      "redis:6379",
+      "docker:2375",
+      "(valkey:6379),",
     ];
     const file = await script(
       dir,
@@ -269,6 +272,7 @@ test("the screen shows a neutral OS line and role names for tools, and leaves UR
         'echo "OS=$(tp_os_line)"',
         'echo "S1=$(tp_ui_neutral "zstd is required to unpack it (apt install zstd); curl and openssl too, and Deno, Ansible.")"',
         `echo "Q1=$(tp_ui_neutral "docker, Deno and Ansible/Deno need a curl and 'tar' or \\"curl\\"")"`,
+        'echo "W1=$(tp_ui_neutral "dockerd and docker-compose are missing")"',
         ...same.map((v, i) =>
           `echo "U${i}=$(tp_ui_neutral "Failed to download ${v} now")"`
         ),
@@ -286,6 +290,11 @@ test("the screen shows a neutral OS line and role names for tools, and leaves UR
     assertEquals(
       quoted,
       "Q1=container engine, script runtime and installer/script runtime need a download tool and 'archive tool' or \"download tool\"",
+    );
+    const words = r.out.split("\n").find((l) => l.startsWith("W1=")) ?? "";
+    assertEquals(
+      words,
+      "W1=container service and container tooling are missing",
     );
     same.forEach((v, i) =>
       assertStringIncludes(r.out, `U${i}=Failed to download ${v} now`)
@@ -401,4 +410,33 @@ test("run.sh wires the screen into the install and keeps the kernel step after i
   const finish = run.lastIndexOf('tp_ui_finish "Enrolled in"');
   assert(finish > 0);
   assert(run.indexOf("tp_kernel_features_step", finish) > finish);
+});
+
+test("the screen helpers copy their positional parameters before use", async () => {
+  const text = await Deno.readTextFile(
+    new URL("../../scripts/run.sh", import.meta.url),
+  );
+  for (
+    const name of [
+      "tp_ui_area",
+      "tp_ui_done",
+      "tp_ui_sub",
+      "tp_ui_neutral",
+      "tp_ui_fail",
+    ]
+  ) {
+    const m = text.match(
+      new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`, "m"),
+    );
+    assertEquals(m !== null, true, name);
+    const lines = (m?.[1] ?? "").split("\n");
+    const first = lines.find((l) => /^\s+\w+=\$/.test(l)) ?? "";
+    assertEquals(/\$\{?1/.test(first), true, `${name} copies $1 first`);
+    const rest = lines.slice(lines.indexOf(first) + 1).join("\n");
+    assertEquals(
+      /\$\{?1/.test(rest.replace(/awk '[\s\S]*$/, "")),
+      false,
+      `${name} reuses $1`,
+    );
+  }
 });
