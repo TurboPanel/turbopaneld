@@ -6,6 +6,7 @@ import {
   parseVersion,
   RELEASE_API,
   renderReport,
+  tokenFromEnv,
 } from "./check-connector-release.ts";
 
 /**
@@ -116,4 +117,44 @@ test("latestRelease sends the token as a bearer header only when given one", asy
   await latestRelease(fake);
   await latestRelease(fake, "token-value");
   assertEquals(seen, [undefined, "Bearer token-value"]);
+});
+
+test("a failed lookup with a token never puts the token in the error", async () => {
+  const refused = (() => {
+    return Promise.resolve(new Response("denied", { status: 403 }));
+  }) as unknown as typeof fetch;
+  const secret = "secret-token-value";
+  let message = "";
+  try {
+    await latestRelease(refused, secret);
+  } catch (e) {
+    message = String(e);
+  }
+  assertStringIncludes(message, "HTTP 403");
+  assertEquals(message.includes(secret), false);
+});
+
+test("the token comes from GITHUB_TOKEN; unset, empty or a denied read is no token", () => {
+  assertEquals(tokenFromEnv(() => "abc"), "abc");
+  assertEquals(tokenFromEnv(() => undefined), undefined);
+  assertEquals(tokenFromEnv(() => ""), undefined);
+  assertEquals(
+    tokenFromEnv(() => {
+      throw new Deno.errors.PermissionDenied("env access denied");
+    }),
+    undefined,
+  );
+});
+
+test("the default reader uses the process environment", () => {
+  const before = Deno.env.get("GITHUB_TOKEN");
+  try {
+    Deno.env.set("GITHUB_TOKEN", "from-env");
+    assertEquals(tokenFromEnv(), "from-env");
+    Deno.env.delete("GITHUB_TOKEN");
+    assertEquals(tokenFromEnv(), undefined);
+  } finally {
+    if (before === undefined) Deno.env.delete("GITHUB_TOKEN");
+    else Deno.env.set("GITHUB_TOKEN", before);
+  }
 });

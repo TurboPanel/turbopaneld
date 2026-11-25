@@ -134,9 +134,11 @@ export function renderReport(
 }
 
 /** The token from the environment, or undefined when unset or not permitted. */
-function tokenFromEnv(): string | undefined {
+export function tokenFromEnv(
+  read: (name: string) => string | undefined = (name) => Deno.env.get(name),
+): string | undefined {
   try {
-    return Deno.env.get("GITHUB_TOKEN") || undefined;
+    return read("GITHUB_TOKEN") || undefined;
   } catch {
     return undefined;
   }
