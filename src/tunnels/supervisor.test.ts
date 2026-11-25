@@ -127,6 +127,57 @@ test("the update run moves an older tunnel to the pinned version", async () => {
   });
 });
 
+test("a daemon start with a changed pin runs the whole rolling update in order", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    const steps: string[] = [];
+    // The pinned program is downloaded and verified before any unit is made.
+    io.ensureBinary = () => {
+      steps.push("download-and-verify");
+      return Promise.resolve(
+        "/opt/turbopanel/vendor/cloudflared/2026.11.1/cloudflared",
+      );
+    };
+    io.probe = () => {
+      steps.push("ready");
+      return Promise.resolve({ kind: "ready", connections: 4 });
+    };
+    io.portFree = () => Promise.resolve(true);
+    io.unitExists = () => Promise.resolve(false);
+    io.sleep = () => Promise.resolve();
+    io.unitTexts = () => Promise.resolve([]);
+    let done!: () => void;
+    const pruned = new Promise<void>((resolve) => (done = resolve));
+    io.pruneVersions = (keep) => {
+      steps.push(`prune keep=${[...keep].join(",")}`);
+      done();
+      return Promise.resolve();
+    };
+    const run = io.run;
+    io.run = (command, args) => {
+      const text = [command, ...args].join(" ");
+      if (text.includes("start turbopanel-tunnel-")) steps.push("start-new");
+      if (text.includes("disable --now turbopanel-tunnel-")) {
+        steps.push("stop-old");
+      }
+      return args.includes("is-active")
+        ? Promise.resolve({ success: true, stdout: "active", stderr: "" })
+        : run(command, args);
+    };
+    await startTunnels(new AbortController().signal);
+    await pruned;
+    const order = ["download-and-verify", "start-new", "ready", "stop-old"];
+    const seen = steps.filter((s) => order.includes(s));
+    assertEquals([...new Set(seen)], order, steps.join("\n"));
+    assertEquals(steps.at(-1), "prune keep=2026.11.1");
+    assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
+    const record = JSON.parse(
+      await Deno.readTextFile(join(dir, `${UUID}.json`)),
+    );
+    assertEquals([record.slot, record.version], ["b", "2026.11.1"]);
+  });
+});
+
 test("a paused server keeps the connector versions it runs", async () => {
   await withTunnelsDir(async (dir, io, calls) => {
     await writeOldRecord(dir);

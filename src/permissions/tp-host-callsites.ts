@@ -29,6 +29,7 @@ import {
   backupTimerContent,
   backupTimerPath,
 } from "../backups/units.ts";
+import { CLOUDFLARED_VERSION } from "../orchestration/assets.ts";
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { postDeployUnitContent } from "../deploy/site/post-deploy.ts";
 import { workerUnitContent } from "../deploy/site/workers.ts";
@@ -178,7 +179,7 @@ const TUNNEL_UNIT_B = tunnelUnitName(TUNNEL_ID, "b");
 const TUNNEL_TOKEN = "dGVzdA".repeat(8);
 const TUNNEL_UNIT_TEXT = renderTunnelUnit({
   id: TUNNEL_ID,
-  binary: `${VENDOR}/cloudflared/2026.11.1/cloudflared`,
+  binary: `${VENDOR}/cloudflared/${CLOUDFLARED_VERSION}/cloudflared`,
   port: 20300,
   envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
 });

@@ -1,4 +1,4 @@
-import { join } from "@std/path";
+import { dirname, join } from "@std/path";
 import {
   CLOUDFLARED_CURRENT_DIR,
   CLOUDFLARED_SHA256,
@@ -150,4 +150,57 @@ export async function ensureCloudflared(
   await repointCurrent();
   logInfo("cloudflared", `${CLOUDFLARED_VERSION} installed at ${bin}`);
   return bin;
+}
+
+/** A version folder name: digits and dots only, never a path or a link name. */
+const VERSION_DIR_RE = /^\d+(?:\.\d+)*$/;
+
+/**
+ * Delete the connector version folders nothing needs any more: every folder
+ * under the `cloudflared` vendor folder except the ones named in `keep` and the
+ * `current` link. Returns the versions removed.
+ *
+ * Careful by construction. The vendor folder itself must be a real folder (a
+ * link there is left alone, so a swapped-in link cannot aim the delete
+ * elsewhere). An entry is removed only when it is a real folder (not a link,
+ * not a file) whose name is a plain version number; a recursive remove never
+ * follows a link inside it. One folder failing to go is logged and the rest are
+ * still tried. Nothing here throws for a missing folder.
+ */
+export async function pruneCloudflaredVersions(
+  keep: Iterable<string>,
+  root: string = dirname(cloudflaredDir()),
+): Promise<string[]> {
+  const keepSet = new Set(keep);
+  try {
+    if (!(await Deno.lstat(root)).isDirectory) return [];
+  } catch (err) {
+    if (err instanceof Deno.errors.NotFound) return [];
+    throw err;
+  }
+  const removed: string[] = [];
+  const names: Array<{ name: string; ok: boolean }> = [];
+  for await (const entry of Deno.readDir(root)) {
+    names.push({
+      name: entry.name,
+      ok: entry.isDirectory && !entry.isSymlink,
+    });
+  }
+  for (const { name, ok } of names) {
+    if (!ok || name === "current" || keepSet.has(name)) continue;
+    if (!VERSION_DIR_RE.test(name)) continue;
+    const path = join(root, name);
+    try {
+      // Checked again right before the delete: it may have been swapped for a
+      // link since the listing.
+      // NOSONAR typescript:S9382 — one folder at a time, on purpose
+      if (!(await Deno.lstat(path)).isDirectory) continue;
+      await Deno.remove(path, { recursive: true }); // NOSONAR typescript:S9382
+      removed.push(name);
+      logInfo("cloudflared", `removed the superseded version ${name}`);
+    } catch (err) {
+      logWarn("cloudflared", `could not remove version ${name}:`, err);
+    }
+  }
+  return removed;
 }

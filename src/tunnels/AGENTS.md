@@ -25,9 +25,24 @@ drop with every update. `<id>` is the provider's tunnel id (lower-case UUID) or
   exit, so the unit restarts every five seconds and no connector ever runs. A
   test pins the exact order, and one more runs the real program when
   `TP_CLOUDFLARED_BIN` names it (never in CI). A unit an older daemon wrote with
-  another command line is replaced and restarted by the next update round, even
-  at the same version (`refreshStaleUnit`); a unit that already matches is left
-  running.
+  another command line is replaced by the next update round, even at the same
+  version, through the same start-beside, wait, stop-the-old switch a version
+  change uses (`unitIsStale`, `switchSlot`), never a hard restart; a unit that
+  already matches is left running. A resend of the same token never rewrites
+  the unit or swaps the program.
+- The unit stops gracefully: `--grace-period 30s`, `KillSignal=SIGTERM`,
+  `KillMode=mixed`, `TimeoutStopSec=45` (`connector-unit.ts`, mirrored exactly
+  by `tp_tunnel_unit_text` in `orchestration/scripts/tp-host`; change both).
+- After a switch the old unit is stopped with one retry (`dropSlotUnit`). A stop
+  that still fails is logged as an error and kept in `lastUpdate` (outcome
+  `updated`, reason `did not stop`); the new unit is never touched and the old
+  unit file stays so the next round retries. Only then are superseded program
+  folders deleted (`pruneCloudflaredVersions`): never a symlink, `current`, the
+  pinned version, a version any record or installed connector unit names. A
+  cleanup failure is logged and never fails the update.
+- The connector path in the daemon's `--allow-run` grants (deno.json compile
+  tasks, `turbopaneld.service.j2`) comes from `CLOUDFLARED_VERSION` and is
+  pinned by `daemon-permissions.test.ts`.
 - The run token is never on a command line. The daemon stages
   `<state>/cloudflared/tunnels/<id>.env` (`0600`), `tp-host tunnel-env-install
   <id>` checks it (one line, `TUNNEL_TOKEN='<base64>'`) and copies it to
