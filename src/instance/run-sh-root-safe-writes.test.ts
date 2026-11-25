@@ -227,6 +227,7 @@ test("tp_mark_instance_swap does not follow a link planted at instance-swap.json
 
 const LABEL_SYNC = [
   "tp_print_error",
+  "tp_print_warn",
   "tp_instance_build_label_path",
   "tp_rewrite_instance_runtime_env",
   "tp_sync_instance_build_label",

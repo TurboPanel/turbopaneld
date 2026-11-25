@@ -19,7 +19,11 @@ const test = Deno.test.bind(Deno);
  * the setup wizard address.
  */
 
-const FILTER = ["tp_quiet_runtime_notes", "tp_quiet_runtime_notes_abort"];
+const FILTER = [
+  "tp_quiet_runtime_notes",
+  "tp_quiet_runtime_notes_abort",
+  "tp_rearm_signal_traps",
+];
 
 const NOTE_NVIDIA =
   "Info Failed to resolve 'nvidia-smi' for allow-run: cannot find binary path";

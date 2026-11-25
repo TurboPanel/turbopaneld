@@ -2585,7 +2585,22 @@ TP_UI_WANT=0
 TP_UI=0
 TP_UI_NOTES=""
 TP_UI_COLLECT=0
+TP_UI_LOG_READY=0
+TP_ENROLL_CONFIRMED=0
 TP_LOG="${TURBOPANEL_INSTALL_LOG:-/var/log/turbopanel/install.log}"
+
+# A short OS line for the screen: the id and major version, not the full
+# release name.
+tp_os_line() {
+  _os_id="${ID:-linux}"
+  _os_first="$(printf '%s' "$_os_id" | cut -c1 | tr '[:lower:]' '[:upper:]')"
+  _os_rest="$(printf '%s' "$_os_id" | cut -c2-)"
+  if [ -n "${VERSION_ID:-}" ]; then
+    printf '%s%s %s' "$_os_first" "$_os_rest" "$VERSION_ID"
+  else
+    printf '%s%s' "$_os_first" "$_os_rest"
+  fi
+}
 
 tp_ui_decide() {
   TP_UI_WANT=1
@@ -2629,7 +2644,12 @@ tp_ui_neutral() {
     -e 's/Deno/script runtime/g' -e 's/deno/script runtime/g' \
     -e 's/Docker/container engine/g' -e 's/Caddy/web server/g' \
     -e 's/PostgreSQL/database/g' -e 's/Postgres/database/g' \
-    -e 's/Redis/cache/g' -e 's/Valkey/cache/g' -e 's/RabbitMQ/message queue/g'
+    -e 's/Redis/cache/g' -e 's/Valkey/cache/g' -e 's/RabbitMQ/message queue/g' \
+    -e 's/ (apt install [a-z0-9]*)//' \
+    -e 's/\bzstd\b/archive tool/g' -e 's/\bpython3\b/scripting tool/g' \
+    -e 's/\bopenssl\b/certificate tool/g' -e 's/\bcurl\b/download tool/g' \
+    -e 's/\bsudo\b/privilege tool/g' -e 's/\btar\b/archive tool/g' \
+    -e 's/\bsystemd\b/service manager/g'
 }
 
 # An error while the screen is up: the open area turns red with the reason,
@@ -2659,6 +2679,18 @@ tp_rearm_traps() {
   fi
 }
 
+# Put the signal traps back after a function that set its own: the screen's
+# when it is up, none otherwise. EXIT is left alone.
+tp_rearm_signal_traps() {
+  if [ "${TP_UI:-0}" = 1 ]; then
+    trap '_ss_sig 130' INT
+    trap '_ss_sig 143' TERM
+    trap '_ss_sig 129' HUP
+  else
+    trap - INT TERM HUP
+  fi
+}
+
 # The main script's EXIT handler: the vars file goes, and the screen closes
 # the open area and restores the cursor.
 tp_exit_trap() {
@@ -2673,11 +2705,12 @@ tp_exit_trap() {
 # Draw the screen: tp_ui_begin <daemon|panel> <version>. Output of everything
 # else goes to the log from here on. Stays off (plain lines) when the log
 # cannot be created.
-tp_ui_begin() {
-  _ub_mode="$1"
-  _ub_ver="$2"
-  _ub_dir="$(dirname "$TP_LOG")"
-  mkdir -p "$_ub_dir" 2>/dev/null || return 0
+# Create the log (exclusive, 0600; the old one is kept as .prev). Fails, and
+# the caller keeps the plain lines, when it cannot be made.
+tp_ui_make_log() {
+  [ "${TP_UI_LOG_READY:-0}" = 1 ] && return 0
+  _ml_dir="$(dirname "$TP_LOG")"
+  mkdir -p "$_ml_dir" 2>/dev/null || return 1
   if [ -e "$TP_LOG" ] || [ -L "$TP_LOG" ]; then
     if [ -f "$TP_LOG" ] && [ ! -L "$TP_LOG" ]; then
       mv -f "$TP_LOG" "$TP_LOG.prev" 2>/dev/null || rm -f "$TP_LOG"
@@ -2686,7 +2719,15 @@ tp_ui_begin() {
     fi
   fi
   # Exclusive create: never write through a link someone left in the folder.
-  (umask 077; set -C; : >"$TP_LOG") 2>/dev/null || return 0
+  (umask 077; set -C; : >"$TP_LOG") 2>/dev/null || return 1
+  TP_UI_LOG_READY=1
+  return 0
+}
+
+tp_ui_begin() {
+  _ub_mode="$1"
+  _ub_ver="$2"
+  tp_ui_make_log || return 0
   if [ "$_ub_mode" = panel ]; then
     set -- "Checking this server" "Verifying the release" "Downloading TurboPanel" "Preparing the installer" "Installing the control plane"
   else
@@ -2758,6 +2799,19 @@ tp_print_error() {
   fi
 }
 
+# A problem that does not stop the install: the same red line as an error in
+# plain output; on the screen it is a warning in the summary, not a failure.
+tp_print_warn() {
+  _msg="$1"
+  if [ "${TP_UI:-0}" = 1 ]; then
+    TP_UI_NOTES="${TP_UI_NOTES}$(tp_ui_neutral "$_msg")
+"
+    printf '✗ %s\n' "$_msg" >&2
+    return 0
+  fi
+  tp_print_error "$_msg"
+}
+
 # An indented, dimmed follow-up line under the step above it.
 tp_print_detail() {
   _msg="$1"
@@ -2792,7 +2846,7 @@ tp_quiet_runtime_notes() {
     return $?
   fi
   grep --line-buffered -v -E "^Info Failed to resolve '[^']+' for allow-run: cannot find binary path\$" \
-    <"$_qrn_dir/stderr" >&2 &
+    <"$_qrn_dir/stderr" >&2 3>&- 4>&- &
   _qrn_pid=$!
   # An interrupt still has to stop the filter and remove the scratch folder.
   # EXIT is left alone: the main script keeps its own EXIT trap.
@@ -2801,7 +2855,7 @@ tp_quiet_runtime_notes() {
   trap 'tp_quiet_runtime_notes_abort 129' HUP
   _qrn_rc=0
   "$@" 2>"$_qrn_dir/stderr" 3>&- 4>&- || _qrn_rc=$?
-  trap - INT TERM HUP
+  tp_rearm_signal_traps
   # The filter ends once nothing holds the pipe open. Give it a moment to
   # drain. A process the command left running keeps the pipe open, so do not
   # wait for it and do not close the pipe under it (its next write would
@@ -3021,7 +3075,7 @@ tp_arm_update_guard() {
     tp_print_error "Failed to write update guard $_guard_path"
     return 1
   fi
-  if command -v systemctl >/dev/null 2>&1 && ! systemctl start "$UPDATE_GUARD_TIMER"; then
+  if command -v systemctl >/dev/null 2>&1 && ! systemctl start "$UPDATE_GUARD_TIMER" 3>&- 4>&-; then
     tp_print_error "Failed to start $UPDATE_GUARD_TIMER"
     return 1
   fi
@@ -3153,6 +3207,7 @@ tp_wait_for_enrollment() {
   while :; do
     case "$(tp_enroll_status_field "$_we_file" state)" in
       connected)
+        TP_ENROLL_CONFIRMED=1
         tp_print_ok "The control plane accepted this server"
         return 0
         ;;
@@ -3199,6 +3254,7 @@ tp_wait_for_enrollment() {
         if tp_enrol_files_fresh; then
           [ -n "$_we_enrolled_at" ] || _we_enrolled_at="$_we_waited"
           if [ $((_we_waited - _we_enrolled_at)) -ge 10 ]; then
+            TP_ENROLL_CONFIRMED=1
             tp_print_ok "The control plane accepted this server"
             return 0
           fi
@@ -3258,7 +3314,7 @@ tp_start_or_restart_daemon() {
     return 1
   fi
   tp_print_step "▸" "Starting $DAEMON_SERVICE_NAME…"
-  if ! systemctl enable --now "$DAEMON_SERVICE_NAME"; then
+  if ! systemctl enable --now "$DAEMON_SERVICE_NAME" 3>&- 4>&-; then
     tp_print_error "Failed to enable/start $DAEMON_SERVICE_NAME"
     exit 1
   fi
@@ -3781,7 +3837,7 @@ tp_sync_instance_build_label() {
     *) ;;
   esac
   if ! (tp_rewrite_instance_runtime_env "$_env_dir" "$_label"); then
-    tp_print_error "Skipped the build label in $_env_dir/runtime.env"
+    tp_print_warn "Skipped the build label in $_env_dir/runtime.env"
   fi
   return 0
 }
@@ -4688,6 +4744,10 @@ if ! tp_is_root; then
 fi
 
 tp_ui_decide
+# Without a log to write, the plain lines (and their header) stay.
+if [ "$TP_UI_WANT" = 1 ] && ! tp_ui_make_log; then
+  TP_UI_WANT=0
+fi
 tp_print_header
 if [ "$TP_UI_WANT" = 1 ]; then
   if [ "$INSTANCE_INSTALL" = true ]; then
@@ -4772,7 +4832,11 @@ else
   tp_print_error "Cannot read /etc/os-release to identify the operating system — TurboPanel supports Debian 13 (trixie) and later only."
   exit 1
 fi
-tp_print_ok "Operating system supported (${PRETTY_NAME:-$ID})"
+if [ "${TP_UI:-0}" = 1 ]; then
+  tp_print_ok "Operating system supported ($(tp_os_line))"
+else
+  tp_print_ok "Operating system supported (${PRETTY_NAME:-$ID})"
+fi
 
 tp_print_step "▸" "Checking host prerequisites…"
 # Host-base boundary (not TurboPanel-managed vendors): tools required to
@@ -4811,7 +4875,7 @@ if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
-tp_ui_done "${PRETTY_NAME:-${ID:-linux}}"
+tp_ui_done "$(tp_os_line)"
 tp_ui_area "Verifying the release"
 # A host that already carries an expected CA list keeps it when this run
 # brings none, so re-running an old command cannot downgrade it to trust on
@@ -5320,10 +5384,12 @@ if ! tp_wait_for_enrollment; then
   exit 1
 fi
 TP_UI_COLLECT=0
-if [ -n "${LICENSE_ID:-}" ]; then
-  tp_ui_finish "Enrolled in" "done"
+if [ "$TP_ENROLL_CONFIRMED" = 1 ]; then
+  tp_ui_finish "Enrolled in" "accepted"
 else
-  tp_ui_finish "Installed in" "done"
+  # Installed, but the control plane has not confirmed this server (waiting,
+  # no seat yet, an older daemon, no license): no success claim.
+  tp_ui_finish "Installed in" "installed"
 fi
 
 tp_kernel_features_step

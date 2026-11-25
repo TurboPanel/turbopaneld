@@ -40,6 +40,12 @@ const HELPERS = [
   "tp_ui_neutral",
   "tp_ui_fail",
   "tp_rearm_traps",
+  "tp_rearm_signal_traps",
+  "tp_quiet_runtime_notes",
+  "tp_quiet_runtime_notes_abort",
+  "tp_ui_make_log",
+  "tp_os_line",
+  "tp_print_warn",
   "tp_exit_trap",
   "tp_ui_begin",
   "tp_ui_finish",
@@ -58,6 +64,7 @@ async function script(dir: string, body: string): Promise<string> {
     "TP_UI=0",
     'TP_UI_NOTES=""',
     "TP_UI_COLLECT=0",
+    "TP_UI_LOG_READY=0",
     `TP_LOG="${join(dir, "logs", "install.log")}"`,
   ].join("\n");
   const file = join(dir, "t.sh");
@@ -165,6 +172,75 @@ test("an error turns the open area into a failure that names the log, with produ
   });
 });
 
+test("an interrupt after a quiet runtime step still stops the spinner and restores the cursor", async () => {
+  await withTemp(async (dir) => {
+    const tick = join(dir, "tick");
+    const file = await script(
+      dir,
+      [
+        "tp_ui_begin panel 1.2.3",
+        'tp_ui_area "Installing the control plane"',
+        "tp_quiet_runtime_notes true",
+        "screen_busy_start",
+        `echo "$_ss_tick" > '${tick}'`,
+        "kill -INT $$",
+        "sleep 1",
+        "exit 0",
+      ].join("\n"),
+    );
+    const r = await runScript(file, LIVE);
+    assertEquals(r.code, 130, r.out + r.err);
+    assertStringIncludes(r.out, "\x1b[?25h", "the cursor was not restored");
+    const pid = Number((await Deno.readTextFile(tick)).trim());
+    assert(pid > 0);
+    let alive = true;
+    try {
+      Deno.kill(pid, "SIGCONT");
+    } catch {
+      alive = false;
+    }
+    assert(!alive, "the spinner keeps running after the interrupt");
+  });
+});
+
+test("a problem that does not stop the install is a summary warning, not a failed area", async () => {
+  await withTemp(async (dir) => {
+    const file = await script(
+      dir,
+      [
+        "tp_ui_begin panel 1",
+        'tp_ui_area "Installing the control plane"',
+        'tp_print_warn "Skipped the build label in /srv/runtime.env"',
+        'tp_ui_finish "Ready in" "installed"',
+      ].join("\n"),
+    );
+    const r = await runScript(file, PLAIN);
+    assertEquals(r.code, 0, r.out + r.err);
+    assertStringIncludes(r.out, "Skipped the build label");
+    assert(!r.out.includes("failed"), r.out);
+  });
+});
+
+test("the screen shows a neutral OS line and role names for tools", async () => {
+  await withTemp(async (dir) => {
+    const file = await script(
+      dir,
+      [
+        "ID=debian; VERSION_ID=13",
+        'echo "OS=$(tp_os_line)"',
+        'echo "$(tp_ui_neutral "zstd is missing (apt install zstd); curl and openssl too")"',
+      ].join("\n"),
+    );
+    const r = await runScript(file, PLAIN);
+    assertEquals(r.code, 0, r.err);
+    assertStringIncludes(r.out, "OS=Debian 13");
+    for (const word of ["zstd", "curl", "openssl", "apt install"]) {
+      assert(!r.out.includes(word), r.out);
+    }
+    assertStringIncludes(r.out, "archive tool");
+  });
+});
+
 test("an error with no open area still reaches the real stderr", async () => {
   await withTemp(async (dir) => {
     const file = await script(
@@ -265,6 +341,11 @@ test("run.sh wires the screen into the install and keeps the kernel step after i
   ) {
     assertStringIncludes(run, `tp_ui_area "${area}"`);
   }
+  assertStringIncludes(run, 'if [ "$TP_ENROLL_CONFIRMED" = 1 ]; then');
+  assert(
+    run.indexOf("! tp_ui_make_log; then") < run.indexOf("\ntp_print_header\n"),
+    "the log is made before the header so the plain fallback keeps it",
+  );
   const finish = run.lastIndexOf('tp_ui_finish "Enrolled in"');
   assert(finish > 0);
   assert(run.indexOf("tp_kernel_features_step", finish) > finish);
