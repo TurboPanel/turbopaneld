@@ -384,3 +384,15 @@ CPU-burning throwaway image with the same `--cgroup-parent` the daemon passes,
 and proves the build step lands in `turbopanel-imagebuild.slice` and its CPU time
 stays within the quota. `purge.sh` stops that slice with the other TurboPanel
 slices; it is a runtime-only unit, so there is no file to remove.
+
+## Installer screen in run.sh
+
+A real install (no `--progress-markers`, `--no-start`, `--skip-daemon-package`
+or `--daemon-only`, and no `TURBOPANEL_INSTALL_VERBOSE`) draws the installer
+screen from `scripts/lib/installer-screen.sh`. run.sh is served alone through
+`curl | sh`, so it carries a copy between the `installer-screen.sh` markers;
+edit the library, then paste it over the copy (minus its first line).
+`src/instance/run-sh-installer-screen.test.ts` fails when they differ. In
+screen mode stdout and stderr go to `/var/log/turbopanel/install.log`
+(descriptor 3 is the real stdout); product names never appear on the screen
+(`tp_ui_neutral`). The kernel step runs after the screen has finished.

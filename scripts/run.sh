@@ -1614,7 +1614,7 @@ tp_install_verified_binary_and_orchestration() {
     mv "$_home/share/orchestration" "$_home/share/orchestration.prev"
   fi
   cp -a "$_orchestration_staging/$_home/share/orchestration" "$_home/share/"
-  trap - EXIT INT HUP TERM
+  tp_rearm_traps
   _cleanup
   return 0
 }
@@ -1653,7 +1653,7 @@ tp_install_verified_js_fallback() {
     mv "$_home/bin/$_js_name" "$_home/bin/$_js_name.prev"
   fi
   install -m 0644 "$_staging/$_home/bin/$_js_name" "$_home/bin/$_js_name"
-  trap - EXIT INT HUP TERM
+  tp_rearm_traps
   _cleanup
   return 0
 }
@@ -1697,6 +1697,1034 @@ tp_install_privilege_denied() {
   exit 1
 }
 
+# ---- installer-screen.sh (begin) ----
+# installer-screen.sh - one reusable screen layer for the installer.
+#
+# scripts/run.sh carries a copy of this file between the "installer-screen.sh"
+# markers (it is served on its own through curl | sh, so it cannot source a
+# lib); src/instance/run-sh-installer-screen.test.ts keeps the two identical.
+# scripts/installer-screen-demo.sh drives it with a simulated install.
+#
+# POSIX sh only (tested with dash and busybox ash). Raw ANSI, no tput.
+#
+# Source it the way the other libs are sourced:
+#   . "$SCRIPT_DIR/lib/installer-screen.sh"
+#
+# API
+#   screen_init <version> <channel> <mode> <log-file> <area-name>...
+#       mode is "daemon" or "panel". The area names (Title Case) are the whole
+#       plan: they give the step count and the name column width. Draws the
+#       one-line header, hides the cursor and installs the INT, TERM, HUP and
+#       EXIT handlers that restore it.
+#   screen_area_start <name>     make <name> the current area, with a spinner
+#   screen_sub <text> [<value>]  a detail line under the current area. Three
+#                                slots that fill top-down and scroll only when
+#                                a fourth arrives; with a value the lines align
+#                                as key and value, and a key that is already
+#                                shown is updated in place.
+#   screen_run <cmd> [args...]   run a real command: output goes to the log
+#                                file, the spinner keeps turning meanwhile
+#   screen_wait <seconds>        sleep while the spinner keeps turning
+#   screen_busy_start            keep the spinner turning while the caller runs
+#   screen_busy_stop             something in its own shell; any other screen_
+#                                call stops it first
+#   screen_area_done [fact]      collapse the area to one check row with a
+#                                short dim fact
+#   screen_area_fail <reason> [<next step>]
+#                                the current row turns red with a cross and
+#                                keeps its detail lines; then the reason, the
+#                                log path and one thing to try
+#   screen_summary <prefix>      the finish: the check rows collapse to one
+#                                row ("8 steps done"), then "<prefix> <total time>"
+#                                ("Ready in 1m 12s", "Enrolled in 1m 12s")
+#   screen_summary_item <value> <note>   URLs or names, aligned, note dim
+#   screen_summary_warn <text>   things to act on (after the items)
+#   screen_finish                log path, cursor restored
+#   screen_restore               restore the terminal only (for a caller's own
+#                                EXIT trap; screen_init already installs one)
+#
+# Layout while running (finished areas stay as one row each; pending areas
+# are not shown):
+#     TurboPanel  1.8.2 . control plane
+#     ████████░░░░░░░░  3/8  Installing TurboPanel database   (32 cells)
+#
+#     ok Checking this server   Debian 13, amd64, 4 CPU
+#     ok Verifying the release   signature verified
+#     spinner Installing TurboPanel database
+#         database      ready
+#         cache         pulling image
+#
+# The bar fills by finished areas, brand blue (green when done, red when an
+# area failed); SCREEN_UNICODE=0 gives # and - . Plain output has no bar.
+#
+# Environment
+#   NO_COLOR (non-empty), TERM=dumb or unset, stdout not a TTY
+#                          plain one-line-per-event output, no escape codes
+#   COLORTERM=truecolor|24bit   24-bit color, else the nearest 256-color index
+#   SCREEN_COLS            terminal width override (also truncates plain output)
+#   SCREEN_FORCE_TTY=1     draw as if stdout were a TTY (frame capture, tests)
+#   SCREEN_UNICODE=0|1     force ASCII or Unicode glyphs (default: from locale)
+#   SCREEN_FIXED_CLOCK=1   area times read 0s and the total reads 1m 12s
+#                          (reproducible captures, tests)
+#
+# Text passed in is shown on one line: control characters are dropped and long
+# text is cut to the terminal width with an ellipsis, never wrapped. Pass ASCII
+# text; cut counts bytes under dash.
+#
+# Brand colors (ui/design-system/turbopanel/MASTER.md, ui/global.css):
+#   blue #3366cc, green #3dd68c; link blue #86a8ff, warn #f2b84b, bad #ff7a7a.
+
+_ss_ESC=$(printf '\033')
+_ss_CR=$(printf '\r')
+_ss_NL=$(printf '\n_')
+_ss_NL=${_ss_NL%_}
+
+_ss_ready=0
+_ss_live=0
+_ss_cleaned=1
+_ss_child=
+_ss_tick=
+_ss_active=0
+_ss_drawn=0
+_ss_failed=0
+_ss_sum_open=0
+_ss_warns=0
+_ss_n=0
+_ss_total=0
+_ss_frame=0
+_ss_cols=0
+_ss_name=
+_ss_ns=0
+_ss_kw=0
+_ss_k1=
+_ss_v1=
+_ss_k2=
+_ss_v2=
+_ss_k3=
+_ss_v3=
+_ss_done_rows=0
+_ss_nw=12
+_ss_bar_state=run
+_ss_in=0
+_ss_items_out=0
+_ss_log=/dev/null
+_ss_t0=0
+
+_ss_now() {
+  if [ "${SCREEN_FIXED_CLOCK:-}" = 1 ]; then
+    printf '0'
+  else
+    date +%s
+  fi
+}
+
+# The total time shown at the finish (1m 12s with the fixed clock).
+_ss_total_dur() {
+  if [ "${SCREEN_FIXED_CLOCK:-}" = 1 ]; then
+    _ss_dur 72
+  else
+    _ss_dur $(($(_ss_now) - _ss_t0))
+  fi
+}
+
+# Strip control characters (including ESC) so text cannot move the cursor.
+# Always printed through "%s", so a leading dash or a % in the text is data;
+# a missing argument is empty text (the file runs under set -u in run.sh).
+_ss_clean() {
+  _c_t=${1-}
+  printf '%s' "$_c_t" | tr -d '\000-\037\177'
+}
+
+# _ss_fit <text> <width>: text cut to <width> columns, ellipsis when cut.
+_ss_fit() {
+  _f_t=$1
+  _f_w=$2
+  if [ "$_f_w" -le 0 ]; then
+    return 0
+  fi
+  if [ "${#_f_t}" -le "$_f_w" ]; then
+    printf '%s' "$_f_t"
+  elif [ "$_f_w" -le "$_ss_ellw" ]; then
+    printf '%s' "$_ss_ell" | cut -c1-"$_f_w"
+  else
+    printf '%s%s' "$(printf '%s' "$_f_t" | cut -c1-$((_f_w - _ss_ellw)))" "$_ss_ell"
+  fi
+}
+
+# _ss_pad <n>: n spaces (nothing when n <= 0).
+_ss_pad() {
+  _pd_n=$1
+  if [ "$_pd_n" -gt 0 ]; then
+    printf '%*s' "$_pd_n" ''
+  fi
+}
+
+# _ss_dur <seconds>: 12s, 1m 05s
+_ss_dur() {
+  _du_s=$1
+  if [ "$_du_s" -lt 60 ]; then
+    printf '%ss' "$_du_s"
+  else
+    printf '%sm %02ds' $((_du_s / 60)) $((_du_s % 60))
+  fi
+}
+
+# _ss_rgb <r> <g> <b> <fg|bg>: the color escape for the detected depth.
+_ss_rgb() {
+  _r_r=$1
+  _r_g=$2
+  _r_b=$3
+  _r_m=$4
+  if [ "$_r_m" = bg ]; then
+    _r_p=48
+  else
+    _r_p=38
+  fi
+  if [ "$_ss_truecolor" = 1 ]; then
+    printf '%s[%s;2;%s;%s;%sm' "$_ss_ESC" "$_r_p" "$_r_r" "$_r_g" "$_r_b"
+  else
+    printf '%s[%s;5;%sm' "$_ss_ESC" "$_r_p" \
+      $((16 + 36 * ((_r_r * 5 + 127) / 255) + 6 * ((_r_g * 5 + 127) / 255) + ((_r_b * 5 + 127) / 255)))
+  fi
+}
+
+_ss_width() {
+  _w_c=0
+  if [ -n "${SCREEN_COLS:-}" ]; then
+    _w_c=$SCREEN_COLS
+  elif [ "$_ss_live" = 1 ]; then
+    _w_s=$(stty size <&1 2>/dev/null) || _w_s=
+    _w_c=${_w_s#* }
+    [ -n "$_w_c" ] || _w_c=${COLUMNS:-80}
+  fi
+  case $_w_c in
+    '' | *[!0-9]*) _w_c=0 ;;
+    *) ;;
+  esac
+  if [ "$_ss_live" = 1 ]; then
+    [ "$_w_c" -ge 40 ] || _w_c=80
+  fi
+  _ss_cols=$_w_c
+}
+
+_ss_logf() {
+  printf '%s\n' "${1-}" >>"$_ss_log" 2>/dev/null || :
+}
+
+# Plain mode: one event per line, cut to SCREEN_COLS when that is set.
+_ss_say() {
+  _sy_t=$1
+  if [ "$_ss_cols" -gt 0 ]; then
+    printf '%s\n' "$(_ss_fit "$_sy_t" $((_ss_cols - 1)))"
+  else
+    printf '%s\n' "$_sy_t"
+  fi
+}
+
+_ss_setup_style() {
+  if [ "$_ss_live" = 1 ]; then
+    case ${COLORTERM:-} in
+      truecolor | 24bit) _ss_truecolor=1 ;;
+      *) _ss_truecolor=0 ;;
+    esac
+    _ss_RST="${_ss_ESC}[0m"
+    _ss_BOLD="${_ss_ESC}[1m"
+    _ss_DIM="${_ss_ESC}[2m"
+    _ss_BLUE=$(_ss_rgb 51 102 204 fg)
+    _ss_GREEN=$(_ss_rgb 61 214 140 fg)
+    _ss_LINK=$(_ss_rgb 134 168 255 fg)
+    _ss_WARN=$(_ss_rgb 242 184 75 fg)
+    _ss_BAD=$(_ss_rgb 255 122 122 fg)
+    _ss_utf=0
+    case ${SCREEN_UNICODE:-} in
+      1) _ss_utf=1 ;;
+      0) _ss_utf=0 ;;
+      *)
+        case ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} in
+          *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) _ss_utf=1 ;;
+          *) ;;
+        esac
+        ;;
+    esac
+  else
+    _ss_truecolor=0
+    _ss_RST=
+    _ss_BOLD=
+    _ss_DIM=
+    _ss_BLUE=
+    _ss_GREEN=
+    _ss_LINK=
+    _ss_WARN=
+    _ss_BAD=
+    _ss_utf=0
+  fi
+  if [ "$_ss_utf" = 1 ]; then
+    _ss_ell='…'
+    _ss_ellw=1
+    _ss_no='✗'
+    _ss_ok='✓'
+    _ss_bar_on='█'
+    _ss_bar_off='░'
+    _ss_arrow='→'
+    _ss_sep=' · '
+    _ss_spin_1='⠋'
+    _ss_spin_2='⠙'
+    _ss_spin_3='⠹'
+    _ss_spin_4='⠸'
+    _ss_spin_5='⠼'
+    _ss_spin_6='⠴'
+    _ss_spin_7='⠦'
+    _ss_spin_8='⠧'
+    _ss_spin_9='⠇'
+    _ss_spin_10='⠏'
+    _ss_spin_n=10
+  else
+    _ss_ell='...'
+    _ss_ellw=3
+    _ss_no='x'
+    _ss_ok='+'
+    _ss_bar_on='#'
+    _ss_bar_off='-'
+    _ss_arrow='>'
+    _ss_sep=' / '
+    _ss_spin_1='|'
+    _ss_spin_2='/'
+    _ss_spin_3='-'
+    _ss_spin_4='\'
+    _ss_spin_n=4
+  fi
+}
+
+_ss_mode_label() {
+  case $_ss_mode in
+    daemon) printf 'server' ;;
+    *) printf 'control plane' ;;
+  esac
+}
+
+# The header is one line: bold name, version, dim mode. The progress bar
+# (second line) and a blank line follow.
+_ss_header() {
+  _h_in=${1-}
+  _h_ch_in=${2-}
+  _h_ver=$(_ss_clean "$_h_in")
+  if [ "$_ss_live" != 1 ]; then
+    _h_ch=$(_ss_clean "$_h_ch_in")
+    _ss_say "TurboPanel installer $_h_ver (channel $_h_ch, mode $_ss_mode)"
+    _ss_say "log: $_ss_log"
+    return 0
+  fi
+  _h_lab=$(_ss_mode_label)
+  _h_ver=$(_ss_fit "$_h_ver" $((_ss_cols - 1 - 2 - 10 - 2 - 3 - ${#_h_lab})))
+  printf '%s  %sTurboPanel%s  %s%s%s%s%s%s' "$_ss_NL" \
+    "$_ss_BOLD" "$_ss_RST" "$_h_ver" "$_ss_DIM" "$_ss_sep" "$_h_lab" "$_ss_RST" "$_ss_NL"
+  _ss_bar_line
+  printf '%s%s' "$_ss_NL" "$_ss_NL"
+}
+
+# _ss_rep <char> <n>: the character n times.
+_ss_rep() {
+  _rp_c=$1
+  _rp_n=$2
+  _rp_i=0
+  while [ "$_rp_i" -lt "$_rp_n" ]; do
+    printf '%s' "$_rp_c"
+    _rp_i=$((_rp_i + 1))
+  done
+}
+
+# The progress bar line (no newline): filled part for the finished areas, dim
+# track, "n/total" and the current area name. A full green bar and no name once
+# finished; the filled part and the label turn red when an area failed.
+# _ss_bar_state is run, done or failed.
+_ss_bar_line() {
+  _b_cnt="$_ss_n/$_ss_total"
+  _b_nm=$_ss_name
+  _b_c=$_ss_BLUE
+  _b_fill=$_ss_done_rows
+  case $_ss_bar_state in
+    done)
+      _b_c=$_ss_GREEN
+      _b_fill=$_ss_total
+      _b_cnt="$_ss_total/$_ss_total"
+      _b_nm=
+      ;;
+    failed) _b_c=$_ss_BAD ;;
+    *) ;;
+  esac
+  [ "$_ss_n" -gt 0 ] || _b_nm=
+  _b_w=32
+  while [ "$_b_w" -gt 10 ] && [ $((2 + _b_w + 2 + ${#_b_cnt} + 2 + ${#_b_nm})) -gt $((_ss_cols - 1)) ]; do
+    _b_w=$((_b_w - 1))
+  done
+  if [ "$_ss_total" -gt 0 ]; then
+    _b_f=$((_b_fill * _b_w / _ss_total))
+  else
+    _b_f=0
+  fi
+  if [ "$_ss_bar_state" = failed ]; then
+    _b_cc=$_ss_BAD
+  else
+    _b_cc=$_ss_DIM
+  fi
+  printf '  %s%s%s%s%s%s  %s%s%s' "$_b_c" "$(_ss_rep "$_ss_bar_on" "$_b_f")" "$_ss_RST" \
+    "$_ss_DIM" "$(_ss_rep "$_ss_bar_off" $((_b_w - _b_f)))" "$_ss_RST" \
+    "$_b_cc" "$_b_cnt" "$_ss_RST"
+  _b_room=$((_ss_cols - 1 - 2 - _b_w - 2 - ${#_b_cnt} - 2))
+  if [ -n "$_b_nm" ] && [ "$_b_room" -ge 1 ]; then
+    if [ "$_ss_bar_state" = failed ]; then
+      _b_nc=$_ss_BAD
+    else
+      _b_nc=
+    fi
+    printf '  %s%s%s' "$_b_nc" "$(_ss_fit "$_b_nm" "$_b_room")" "$_ss_RST"
+  fi
+}
+
+# Redraw the bar line in place: up over the rows below it (blank line, check
+# rows, current area), rewrite it, and come back down.
+_ss_bar_update() {
+  [ "$_ss_live" = 1 ] || return 0
+  _bu_n=$((_ss_drawn + _ss_done_rows + 2))
+  printf '%s[%sA%s%s[2K%s%s[%sB%s' "$_ss_ESC" "$_bu_n" "$_ss_CR" "$_ss_ESC" \
+    "$(_ss_bar_line)" "$_ss_ESC" "$_bu_n" "$_ss_CR"
+}
+
+# One finished area: green check, name in a column, one short dim fact.
+_ss_row_done() {
+  _rd_n=$1
+  _rd_f=$2
+  _rd_nm=$(_ss_fit "$_rd_n" $((_ss_cols - 1 - 4)))
+  printf '  %s%s%s %s' "$_ss_GREEN" "$_ss_ok" "$_ss_RST" "$_rd_nm"
+  _rd_room=$((_ss_cols - 1 - 4 - _ss_nw))
+  if [ -n "$_rd_f" ] && [ "$_rd_room" -ge 4 ]; then
+    printf '%s%s%s%s' "$(_ss_pad $((_ss_nw - ${#_rd_nm})))" "$_ss_DIM" "$(_ss_fit "$_rd_f" "$_rd_room")" "$_ss_RST"
+  fi
+}
+
+# The current area: spinner (red cross when failed) and the bold name.
+_ss_row_now() {
+  if [ "$_ss_failed" = 1 ]; then
+    _rn_c=$_ss_BAD
+    _rn_m=$_ss_no
+  else
+    _rn_c=$_ss_BLUE
+    _rn_m=$(eval "printf '%s' \"\$_ss_spin_$((_ss_frame % _ss_spin_n + 1))\"")
+  fi
+  printf '  %s%s%s %s%s%s%s' "$_rn_c" "$_rn_m" "$_ss_RST" \
+    "$_ss_BOLD" "$_rn_c" "$(_ss_fit "$_ss_name" $((_ss_cols - 1 - 4)))" "$_ss_RST"
+}
+
+# _ss_row_slot <1-3>: one detail line, key and value aligned when it has both.
+_ss_row_slot() {
+  _sl_n=$1
+  [ "$_sl_n" -le "$_ss_ns" ] || return 0
+  eval "_sl_k=\$_ss_k$_sl_n _sl_v=\$_ss_v$_sl_n"
+  _sl_room=$((_ss_cols - 1 - 6))
+  if [ -z "$_sl_v" ]; then
+    printf '      %s' "$(_ss_fit "$_sl_k" "$_sl_room")"
+    return 0
+  fi
+  _sl_kf=$(_ss_fit "$_sl_k" "$_ss_kw")
+  printf '      %s%s   %s%s%s' "$_sl_kf" "$(_ss_pad $((_ss_kw - ${#_sl_kf})))" \
+    "$_ss_DIM" "$(_ss_fit "$_sl_v" $((_sl_room - _ss_kw - 3)))" "$_ss_RST"
+}
+
+# Repaint the current area in place: the name row and three detail rows. With
+# an argument the unused detail rows are left out (the failure screen).
+_ss_paint() {
+  [ "$_ss_live" = 1 ] || return 0
+  _p_o=
+  if [ "$_ss_drawn" -gt 0 ]; then
+    _p_o="${_ss_ESC}[${_ss_drawn}A"
+  fi
+  _ss_kw=0
+  _p_i=1
+  while [ "$_p_i" -le "$_ss_ns" ]; do
+    eval "_p_k=\$_ss_k$_p_i _p_v=\$_ss_v$_p_i"
+    if [ -n "$_p_v" ] && [ "${#_p_k}" -gt "$_ss_kw" ]; then
+      _ss_kw=${#_p_k}
+    fi
+    _p_i=$((_p_i + 1))
+  done
+  [ "$_ss_kw" -le 20 ] || _ss_kw=20
+  _p_c="${_ss_CR}${_ss_ESC}[2K"
+  _p_o="${_p_o}${_p_c}$(_ss_row_now)${_ss_NL}"
+  _ss_drawn=1
+  _p_i=1
+  while [ "$_p_i" -le 3 ]; do
+    if [ -z "${1:-}" ] || [ "$_p_i" -le "$_ss_ns" ]; then
+      _p_o="${_p_o}${_p_c}$(_ss_row_slot "$_p_i")${_ss_NL}"
+      _ss_drawn=$((_ss_drawn + 1))
+    fi
+    _p_i=$((_p_i + 1))
+  done
+  printf '%s%s[J' "$_p_o" "$_ss_ESC"
+  _ss_frame=$((_ss_frame + 1))
+}
+
+# The finished areas as one short check row: "8 steps done".
+_ss_collapsed() {
+  [ "$_ss_done_rows" -gt 0 ] || return 0
+  if [ "$_ss_done_rows" = 1 ]; then
+    _cc_s=step
+  else
+    _cc_s=steps
+  fi
+  printf '  %s%s%s %s %s done%s' "$_ss_GREEN" "$_ss_ok" "$_ss_RST" "$_ss_done_rows" "$_cc_s" "$_ss_NL"
+}
+
+# _ss_put_sub <key> <value>: a detail line goes in the first free slot and
+# fills downward; once all three are used the oldest scrolls off the top. A
+# key that is already shown keeps its slot and takes the new value.
+_ss_put_sub() {
+  _ps_key=$1
+  _ps_val=$2
+  if [ -n "$_ps_val" ]; then
+    _ps_i=1
+    while [ "$_ps_i" -le "$_ss_ns" ]; do
+      eval "_ps_k=\$_ss_k$_ps_i"
+      if [ "$_ps_k" = "$_ps_key" ]; then
+        eval "_ss_v$_ps_i=\$_ps_val"
+        return 0
+      fi
+      _ps_i=$((_ps_i + 1))
+    done
+  fi
+  if [ "$_ss_ns" -lt 3 ]; then
+    _ss_ns=$((_ss_ns + 1))
+  else
+    _ss_k1=$_ss_k2
+    _ss_v1=$_ss_v2
+    _ss_k2=$_ss_k3
+    _ss_v2=$_ss_v3
+  fi
+  eval "_ss_k$_ss_ns=\$_ps_key _ss_v$_ss_ns=\$_ps_val"
+}
+
+_ss_clear_subs() {
+  _ss_ns=0
+  _ss_k1=
+  _ss_v1=
+  _ss_k2=
+  _ss_v2=
+  _ss_k3=
+  _ss_v3=
+}
+
+# Stop the spinner process screen_busy_start began (nothing when none runs).
+_ss_busy_off() {
+  if [ -n "$_ss_tick" ]; then
+    kill "$_ss_tick" 2>/dev/null || :
+    wait "$_ss_tick" 2>/dev/null || :
+    _ss_tick=
+  fi
+}
+
+_ss_kill_child() {
+  _ss_busy_off
+  if [ -n "$_ss_child" ]; then
+    kill "$_ss_child" 2>/dev/null || :
+    wait "$_ss_child" 2>/dev/null || :
+    _ss_child=
+  fi
+}
+
+_ss_sig() {
+  _sg_c=$1
+  _ss_kill_child
+  exit "$_sg_c"
+}
+
+screen_restore() {
+  if [ "$_ss_live" = 1 ]; then
+    printf '%s[0m%s[?25h' "$_ss_ESC" "$_ss_ESC"
+  fi
+}
+
+# Runs once on exit, error, INT and TERM: close the active area, restore the
+# cursor. A caller's own EXIT trap passes the status it saw as $1.
+_ss_cleanup() {
+  _cl_rc=${1:-$?}
+  [ "$_ss_cleaned" = 0 ] || return 0
+  _ss_cleaned=1
+  trap - EXIT INT TERM HUP
+  _ss_kill_child
+  if [ "$_ss_active" = 1 ]; then
+    screen_area_fail "stopped unexpectedly (exit $_cl_rc)"
+  fi
+  if [ "$_ss_ready" = 1 ] && [ "$_ss_failed" = 1 ] && [ "$_ss_live" != 1 ]; then
+    _ss_say "stopped at step $_ss_n/$_ss_total after $(_ss_dur $(($(_ss_now) - _ss_t0)))"
+  fi
+  screen_restore
+  return "$_cl_rc"
+}
+
+# screen_init <version> <channel> <mode> <log-file> <area-name>...
+screen_init() {
+  _ss_version=${1-}
+  _ss_channel=${2-}
+  _ss_mode=${3-}
+  _ss_log=${4:-/dev/null}
+  if [ $# -ge 4 ]; then
+    shift 4
+  else
+    shift $#
+  fi
+  _ss_total=0
+  _ss_nw=0
+  for _in_a in "$@"; do
+    _in_a=$(printf '%s' "$_in_a" | tr -d '\000-\037\177|')
+    [ "${#_in_a}" -le "$_ss_nw" ] || _ss_nw=${#_in_a}
+    _ss_total=$((_ss_total + 1))
+  done
+  _ss_nw=$((_ss_nw + 4))
+  _ss_live=0
+  if [ "${SCREEN_FORCE_TTY:-}" = 1 ] || [ -t 1 ]; then
+    _ss_live=1
+  fi
+  if [ -n "${NO_COLOR:-}" ] || [ -z "${TERM:-}" ] || [ "${TERM:-}" = dumb ]; then
+    _ss_live=0
+  fi
+  _ss_width
+  _ss_setup_style
+  : >>"$_ss_log" 2>/dev/null || _ss_log=/dev/null
+  _ss_t0=$(_ss_now)
+  _ss_n=0
+  _ss_failed=0
+  _ss_sum_open=0
+  _ss_in=0
+  _ss_items_out=0
+  _ss_warns=0
+  _ss_active=0
+  _ss_drawn=0
+  _ss_done_rows=0
+  _ss_bar_state=run
+  _ss_name=
+  _ss_clear_subs
+  _ss_ready=1
+  _ss_cleaned=0
+  _ss_logf "== installer $_ss_version channel=$_ss_channel mode=$_ss_mode"
+  trap '_ss_cleanup' EXIT
+  trap '_ss_sig 130' INT
+  trap '_ss_sig 143' TERM
+  trap '_ss_sig 129' HUP
+  if [ "$_ss_live" = 1 ]; then
+    printf '%s[?25l' "$_ss_ESC"
+  fi
+  _ss_header "$_ss_version" "$_ss_channel"
+}
+
+screen_area_start() {
+  [ "$_ss_ready" = 1 ] || return 1
+  _ss_busy_off
+  if [ "$_ss_active" = 1 ]; then
+    screen_area_done
+  fi
+  _ss_width
+  _ss_n=$((_ss_n + 1))
+  _ss_name=$(_ss_clean "${1-}" | tr -d '|')
+  _ss_clear_subs
+  _ss_frame=0
+  _ss_active=1
+  _ss_logf "== [$_ss_n/$_ss_total] $_ss_name"
+  if [ "$_ss_live" = 1 ]; then
+    _ss_paint
+    _ss_bar_update
+  else
+    _ss_say "[$_ss_n/$_ss_total] $_ss_name ..."
+  fi
+}
+
+# screen_sub <text> [<value>]: what the active area is doing. With a value the
+# text is a key and the details line up in two columns.
+screen_sub() {
+  [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
+  _sb_k=$(_ss_clean "${1-}")
+  _sb_v=$(_ss_clean "${2:-}")
+  if [ -n "$_sb_v" ]; then
+    _ss_logf "   $_sb_k: $_sb_v"
+  else
+    _ss_logf "   $_sb_k"
+  fi
+  if [ "$_ss_live" = 1 ]; then
+    _ss_put_sub "$_sb_k" "$_sb_v"
+    _ss_paint
+  elif [ -n "$_sb_v" ]; then
+    _ss_say "      - $_sb_k: $_sb_v"
+  else
+    _ss_say "      - $_sb_k"
+  fi
+}
+
+screen_area_done() {
+  [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
+  _d_det=$(_ss_clean "${1:-}")
+  _d_el=$(_ss_dur $(($(_ss_now) - _ss_t0)))
+  _ss_logf "-- ok: $_ss_name: $_d_det ($_d_el)"
+  _ss_active=0
+  if [ "$_ss_live" = 1 ]; then
+    printf '%s[%sA%s%s[2K%s%s%s[J' "$_ss_ESC" "$_ss_drawn" "$_ss_CR" "$_ss_ESC" \
+      "$(_ss_row_done "$_ss_name" "$_d_det")" "$_ss_NL" "$_ss_ESC"
+    _ss_drawn=0
+    _ss_done_rows=$((_ss_done_rows + 1))
+    _ss_bar_update
+  else
+    _ss_say "[$_ss_n/$_ss_total] ok   $_ss_name: $_d_det ($_d_el)"
+  fi
+}
+
+# screen_area_fail <reason> [<next step>]: the current row turns red with a
+# cross and keeps its detail lines, the finished rows above stay. The reason,
+# the log path and one thing to try follow.
+screen_area_fail() {
+  [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
+  _fl_why=$(_ss_clean "${1:-failed}")
+  _fl_try=$(_ss_clean "${2:-fix the cause, then run the installer again}")
+  _fl_el=$(_ss_dur $(($(_ss_now) - _ss_t0)))
+  _ss_logf "-- FAILED: $_ss_name: $_fl_why ($_fl_el)"
+  _ss_active=0
+  _ss_failed=1
+  if [ "$_ss_live" = 1 ]; then
+    _ss_paint compact
+    _ss_bar_state=failed
+    _ss_bar_update
+    printf '%s' "$_ss_NL"
+    printf '  %s%s%s%s' "$_ss_BAD" "$(_ss_fit "$_fl_why" $((_ss_cols - 1 - 2)))" "$_ss_RST" "$_ss_NL"
+    printf '  %slog%s  %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 7)))" "$_ss_NL"
+    printf '  %stry%s  %s%s' "$_ss_DIM" "$_ss_RST" "$(_ss_fit "$_fl_try" $((_ss_cols - 1 - 7)))" "$_ss_NL"
+    _ss_drawn=0
+  else
+    _ss_say "[$_ss_n/$_ss_total] FAIL $_ss_name: $_fl_why ($_fl_el)"
+    _ss_say "      see $_ss_log"
+    _ss_say "      next: $_fl_try"
+  fi
+}
+
+# Run a real command with all of its output sent to the log file. The spinner
+# keeps turning while it runs. Returns the command's exit status.
+screen_run() {
+  _ss_logf "\$ $*"
+  if [ "$_ss_live" != 1 ] || [ "$_ss_active" != 1 ]; then
+    "$@" >>"$_ss_log" 2>&1
+    return $?
+  fi
+  "$@" >>"$_ss_log" 2>&1 &
+  _ss_child=$!
+  while kill -0 "$_ss_child" 2>/dev/null; do
+    _ss_paint
+    sleep 0.1 2>/dev/null || sleep 1
+  done
+  _ru_rc=0
+  wait "$_ss_child" || _ru_rc=$?
+  _ss_child=
+  return "$_ru_rc"
+}
+
+# screen_busy_start / screen_busy_stop: keep the spinner turning while the
+# caller runs something in its own shell (a function that sets variables, a
+# command whose exit status set -e must see). A background process repaints
+# the area every 0.1 s; every other screen_ call stops it first, and the
+# cleanup on exit kills it. Nothing happens when the screen is not live.
+screen_busy_start() {
+  [ "$_ss_live" = 1 ] && [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
+  (
+    while :; do
+      _ss_paint
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+  ) &
+  _ss_tick=$!
+}
+
+screen_busy_stop() {
+  _ss_busy_off
+}
+
+# screen_wait <seconds>: sleep while the spinner keeps turning (a plain sleep
+# when the screen is not live). For waits in the caller's own code.
+screen_wait() {
+  _wt_n=${1:-1}
+  if [ "$_ss_live" != 1 ] || [ "$_ss_active" != 1 ]; then
+    sleep "$_wt_n"
+    return 0
+  fi
+  _wt_i=$((_wt_n * 10))
+  while [ "$_wt_i" -gt 0 ]; do
+    _ss_paint
+    sleep 0.1 2>/dev/null || sleep 1
+    _wt_i=$((_wt_i - 1))
+  done
+}
+
+# screen_summary <prefix>: the finish. The header stays; the check rows
+# collapse to one wrapped row, then "<prefix> <total time>" in bold green.
+screen_summary() {
+  [ "$_ss_failed" = 0 ] || return 0
+  _ss_busy_off
+  if [ "$_ss_active" = 1 ]; then
+    screen_area_done
+  fi
+  _sm_title=$(_ss_clean "${1-}")
+  _sm_tot=$(_ss_total_dur)
+  _ss_sum_open=1
+  _ss_logf "== summary: $_sm_title $_sm_tot"
+  if [ "$_ss_live" = 1 ]; then
+    _ss_bar_state=done
+    _ss_bar_update
+    if [ "$_ss_done_rows" -gt 0 ]; then
+      printf '%s[%sA' "$_ss_ESC" "$_ss_done_rows"
+    fi
+    printf '%s%s[J' "$_ss_CR" "$_ss_ESC"
+    _ss_drawn=0
+    _ss_collapsed
+    printf '%s' "$_ss_NL"
+    printf '  %s%s%s %s%s%s%s' "$_ss_BOLD" "$_ss_GREEN" \
+      "$(_ss_fit "$_sm_title" $((_ss_cols - 1 - 3 - ${#_sm_tot})))" "$_sm_tot" "$_ss_RST" "$_ss_NL" "$_ss_NL"
+  else
+    _ss_say "== $_sm_title $_sm_tot"
+  fi
+}
+
+# screen_summary_item <value> <note>: a URL or name with a short dim note.
+screen_summary_item() {
+  _si_v=$(_ss_clean "${1-}")
+  _si_n=$(_ss_clean "${2:-}")
+  if [ -n "$_si_n" ]; then
+    _ss_logf "   $_si_v ($_si_n)"
+  else
+    _ss_logf "   $_si_v"
+  fi
+  if [ "$_ss_live" = 1 ]; then
+    _ss_in=$((_ss_in + 1))
+    eval "_ss_iv_$_ss_in=\$_si_v _ss_in_$_ss_in=\$_si_n"
+  elif [ -n "$_si_n" ]; then
+    _ss_say "   $_si_n: $_si_v"
+  else
+    _ss_say "   $_si_v"
+  fi
+}
+
+# Print the buffered items aligned in two columns, then a blank line.
+_ss_items_flush() {
+  [ "$_ss_items_out" = 0 ] || return 0
+  _ss_items_out=1
+  [ "$_ss_in" -gt 0 ] || return 0
+  _if_w=0
+  _if_i=1
+  while [ "$_if_i" -le "$_ss_in" ]; do
+    eval "_if_v=\$_ss_iv_$_if_i"
+    [ "${#_if_v}" -le "$_if_w" ] || _if_w=${#_if_v}
+    _if_i=$((_if_i + 1))
+  done
+  [ "$_if_w" -le $((_ss_cols - 1 - 4)) ] || _if_w=$((_ss_cols - 1 - 4))
+  _if_i=1
+  while [ "$_if_i" -le "$_ss_in" ]; do
+    eval "_if_v=\$_ss_iv_$_if_i _if_n=\$_ss_in_$_if_i"
+    _if_room=$((_ss_cols - 1 - 4))
+    _if_nr=$((_if_room - _if_w - 3))
+    if [ "$_if_nr" -lt 1 ]; then
+      _if_n=
+    else
+      _if_n=$(_ss_fit "$_if_n" "$_if_nr")
+    fi
+    _if_v=$(_ss_fit "$_if_v" "$_if_room")
+    case $_if_v in
+      http://* | https://*) _if_c=$_ss_LINK ;;
+      *) _if_c=$_ss_BOLD ;;
+    esac
+    printf '  %s%s%s %s%s%s' "$_ss_GREEN" "$_ss_arrow" "$_ss_RST" "$_if_c" "$_if_v" "$_ss_RST"
+    if [ -n "$_if_n" ]; then
+      printf '%s   %s%s%s' "$(_ss_pad $((_if_w - ${#_if_v})))" "$_ss_DIM" "$_if_n" "$_ss_RST"
+    fi
+    printf '%s' "$_ss_NL"
+    _if_i=$((_if_i + 1))
+  done
+  printf '%s' "$_ss_NL"
+}
+
+screen_summary_warn() {
+  _sw_t=$(_ss_clean "${1-}")
+  _ss_logf "   warning: $_sw_t"
+  if [ "$_ss_live" = 1 ]; then
+    _ss_items_flush
+    printf '  %s!%s %s%s' "$_ss_WARN" "$_ss_RST" "$(_ss_fit "$_sw_t" $((_ss_cols - 1 - 4)))" "$_ss_NL"
+  else
+    _ss_say "   warning: $_sw_t"
+  fi
+  _ss_warns=$((_ss_warns + 1))
+}
+
+screen_finish() {
+  _ss_logf "== finished in $(_ss_total_dur)"
+  if [ "$_ss_live" = 1 ]; then
+    if [ "$_ss_sum_open" = 1 ]; then
+      _ss_items_flush
+      printf '  %slog  %s%s%s' "$_ss_DIM" "$(_ss_fit "$_ss_log" $((_ss_cols - 1 - 7)))" "$_ss_RST" "$_ss_NL"
+    fi
+  else
+    _ss_say "log: $_ss_log"
+  fi
+  _ss_cleanup
+}
+# ---- installer-screen.sh (end) ----
+
+# The installer screen (see the library above). A real install shows it:
+# compact progress, one row per finished area, everything else in the log.
+# Updates, --progress-markers, --no-start and the daemon-only legs keep the
+# plain lines their callers read; so does TURBOPANEL_INSTALL_VERBOSE.
+#   TP_UI_WANT  decided from the flags, before the welcome text
+#   TP_UI       1 once the screen is drawn and stdout/stderr go to the log
+# Screen output goes through file descriptor 3 (the real stdout), descriptor 4
+# is the real stderr; the log file takes everything else.
+TP_UI_WANT=0
+TP_UI=0
+TP_UI_NOTES=""
+TP_UI_COLLECT=0
+TP_LOG="${TURBOPANEL_INSTALL_LOG:-/var/log/turbopanel/install.log}"
+
+tp_ui_decide() {
+  TP_UI_WANT=1
+  if [ "${PROGRESS_MARKERS:-false}" = true ] || [ "${NO_START:-false}" = true ] \
+    || [ "${SKIP_DAEMON_PACKAGE:-false}" = true ] || [ "${DAEMON_ONLY:-false}" = true ] \
+    || [ -n "${TURBOPANEL_INSTALL_VERBOSE:-}" ]; then
+    TP_UI_WANT=0
+  fi
+  return 0
+}
+
+# Runs a screen_* call on the real stdout. Nothing happens without the screen.
+tp_ui() {
+  [ "${TP_UI:-0}" = 1 ] || return 0
+  "$@" >&3
+}
+
+tp_ui_area() {
+  tp_ui screen_area_start "$1"
+  tp_ui screen_busy_start
+  return 0
+}
+
+tp_ui_done() {
+  tp_ui screen_area_done "${1:-}"
+  return 0
+}
+
+tp_ui_sub() {
+  tp_ui screen_sub "$1"
+  tp_ui screen_busy_start
+  return 0
+}
+
+# The screen names roles, not products: neutralise the product words in a
+# message before it is shown (the log keeps the original).
+tp_ui_neutral() {
+  printf '%s' "$1" | sed \
+    -e 's#orchestration/ansible\.cfg#installer files#g' \
+    -e 's/Ansible/installer/g' -e 's/ansible/installer/g' \
+    -e 's/Deno/script runtime/g' -e 's/deno/script runtime/g' \
+    -e 's/Docker/container engine/g' -e 's/Caddy/web server/g' \
+    -e 's/PostgreSQL/database/g' -e 's/Postgres/database/g' \
+    -e 's/Redis/cache/g' -e 's/Valkey/cache/g' -e 's/RabbitMQ/message queue/g'
+}
+
+# An error while the screen is up: the open area turns red with the reason,
+# the log path and a next step. Without an open area the line goes to the
+# real stderr.
+tp_ui_fail() {
+  _uf_msg="$(tp_ui_neutral "$1")"
+  if [ "${_ss_active:-0}" = 1 ]; then
+    tp_ui screen_area_fail "$_uf_msg"
+    tp_ui screen_restore
+  else
+    printf '  %s\n' "$_uf_msg" >&4
+  fi
+  return 0
+}
+
+# The same traps the screen installs, put back after a function that set its
+# own. Without the screen they are simply cleared.
+tp_rearm_traps() {
+  if [ "${TP_UI:-0}" = 1 ]; then
+    trap 'tp_exit_trap' EXIT
+    trap '_ss_sig 130' INT
+    trap '_ss_sig 143' TERM
+    trap '_ss_sig 129' HUP
+  else
+    trap - EXIT INT HUP TERM
+  fi
+}
+
+# The main script's EXIT handler: the vars file goes, and the screen closes
+# the open area and restores the cursor.
+tp_exit_trap() {
+  _tx_rc=$?
+  [ -z "${VARS_FILE:-}" ] || rm -f "$VARS_FILE"
+  if [ "${TP_UI:-0}" = 1 ]; then
+    _ss_cleanup "$_tx_rc" >&3 || :
+  fi
+  return 0
+}
+
+# Draw the screen: tp_ui_begin <daemon|panel> <version>. Output of everything
+# else goes to the log from here on. Stays off (plain lines) when the log
+# cannot be created.
+tp_ui_begin() {
+  _ub_mode="$1"
+  _ub_ver="$2"
+  _ub_dir="$(dirname "$TP_LOG")"
+  mkdir -p "$_ub_dir" 2>/dev/null || return 0
+  if [ -e "$TP_LOG" ] || [ -L "$TP_LOG" ]; then
+    if [ -f "$TP_LOG" ] && [ ! -L "$TP_LOG" ]; then
+      mv -f "$TP_LOG" "$TP_LOG.prev" 2>/dev/null || rm -f "$TP_LOG"
+    else
+      rm -f "$TP_LOG"
+    fi
+  fi
+  # Exclusive create: never write through a link someone left in the folder.
+  (umask 077; set -C; : >"$TP_LOG") 2>/dev/null || return 0
+  if [ "$_ub_mode" = panel ]; then
+    set -- "Checking this server" "Verifying the release" "Downloading TurboPanel" "Preparing the installer" "Installing the control plane"
+  else
+    set -- "Checking this server" "Verifying the release" "Downloading TurboPanel" "Preparing the installer" "Configuring this server" "Enrolling this server"
+  fi
+  TP_UI=1
+  exec 3>&1 4>&2
+  screen_init "$_ub_ver" "${TURBOPANEL_UPDATE_CHANNEL:-release}" "$_ub_mode" "$TP_LOG" "$@"
+  exec >>"$TP_LOG" 2>&1
+  trap 'tp_exit_trap' EXIT
+  return 0
+}
+
+# Every finished area collapses; the summary names what to open and what to
+# act on, then the real stdout and stderr come back.
+tp_ui_finish() {
+  [ "${TP_UI:-0}" = 1 ] || return 0
+  _uf_prefix="$1"
+  shift
+  tp_ui screen_area_done "${1:-}"
+  tp_ui screen_summary "$_uf_prefix"
+  if [ -n "${TP_UI_URL:-}" ]; then
+    tp_ui screen_summary_item "$TP_UI_URL" "${TP_UI_URL_NOTE:-}"
+  fi
+  _uf_old_ifs="$IFS"
+  IFS='
+'
+  for _uf_note in $TP_UI_NOTES; do
+    [ -z "$_uf_note" ] || tp_ui screen_summary_warn "$_uf_note"
+  done
+  IFS="$_uf_old_ifs"
+  tp_ui screen_finish || :
+  exec >&3 2>&4
+  TP_UI=0
+  trap 'tp_exit_trap' EXIT
+  return 0
+}
+
 tp_print_step() {
   _glyph="$1"; _msg="$2"
   if [ -t 1 ]; then
@@ -1708,6 +2736,9 @@ tp_print_step() {
 
 tp_print_ok() {
   _msg="$1"
+  if [ "${TP_UI:-0}" = 1 ]; then
+    tp_ui_sub "$(tp_ui_neutral "$_msg")"
+  fi
   if [ -t 1 ]; then
     printf '\033[32m✓\033[0m %s\n' "$_msg"
   else
@@ -1717,6 +2748,9 @@ tp_print_ok() {
 
 tp_print_error() {
   _msg="$1"
+  if [ "${TP_UI:-0}" = 1 ]; then
+    tp_ui_fail "$_msg"
+  fi
   if [ -t 2 ]; then
     printf '\033[31m✗\033[0m %s\n' "$_msg" >&2
   else
@@ -1727,6 +2761,15 @@ tp_print_error() {
 # An indented, dimmed follow-up line under the step above it.
 tp_print_detail() {
   _msg="$1"
+  if [ "${TP_UI:-0}" = 1 ]; then
+    if [ "${_ss_failed:-0}" = 1 ]; then
+      # Advice that follows an error stays visible.
+      printf '  %s\n' "$(tp_ui_neutral "$_msg")" >&4
+    elif [ "${TP_UI_COLLECT:-0}" = 1 ]; then
+      TP_UI_NOTES="${TP_UI_NOTES}$(tp_ui_neutral "$_msg")
+"
+    fi
+  fi
   if [ -t 1 ]; then
     printf '\033[90m   %s\033[0m\n' "$_msg"
   else
@@ -1757,7 +2800,7 @@ tp_quiet_runtime_notes() {
   trap 'tp_quiet_runtime_notes_abort 143' TERM
   trap 'tp_quiet_runtime_notes_abort 129' HUP
   _qrn_rc=0
-  "$@" 2>"$_qrn_dir/stderr" || _qrn_rc=$?
+  "$@" 2>"$_qrn_dir/stderr" 3>&- 4>&- || _qrn_rc=$?
   trap - INT TERM HUP
   # The filter ends once nothing holds the pipe open. Give it a moment to
   # drain. A process the command left running keeps the pipe open, so do not
@@ -3209,17 +4252,19 @@ tp_print_instance_welcome() {
   _channel="${TURBOPANEL_UPDATE_CHANNEL:-release}"
 
   printf '\n'
-  tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────────╮'
-  tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Control Plane Installer / Updater  │'
-  tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────────╯'
-  _version=""
-  _version="$(tp_peek_instance_version 2>/dev/null)" || _version=""
-  if [ -n "$_version" ]; then
-    tp_print_styled_line "1;36" "  v${_version}"
-  else
-    tp_print_styled_line "1;36" "  channel ${_channel}"
+  if [ "${TP_UI_WANT:-0}" != 1 ]; then
+    tp_print_styled_line "1" '  ╭──────────────────────────────────────────────────────────────────╮'
+    tp_print_styled_line "1" '  │  ⚡ TurboPanel  ·  Self-Hosted Control Plane Installer / Updater  │'
+    tp_print_styled_line "1" '  ╰──────────────────────────────────────────────────────────────────╯'
+    _version=""
+    _version="$(tp_peek_instance_version 2>/dev/null)" || _version=""
+    if [ -n "$_version" ]; then
+      tp_print_styled_line "1;36" "  v${_version}"
+    else
+      tp_print_styled_line "1;36" "  channel ${_channel}"
+    fi
+    printf '\n'
   fi
-  printf '\n'
   if [ "$_channel" != "release" ]; then
     tp_print_nonstable_channel_warning "$_channel"
     printf '\n'
@@ -3255,6 +4300,8 @@ tp_print_header() {
     tp_print_instance_welcome
     return 0
   fi
+  # The screen draws its own header.
+  [ "${TP_UI_WANT:-0}" != 1 ] || return 0
   if [ -t 1 ]; then
     printf '\n'
     printf '  ╭─────────────────────────────────────────╮\n'
@@ -3640,7 +4687,16 @@ if ! tp_is_root; then
   exit $?
 fi
 
+tp_ui_decide
 tp_print_header
+if [ "$TP_UI_WANT" = 1 ]; then
+  if [ "$INSTANCE_INSTALL" = true ]; then
+    _ui_version="$(tp_peek_instance_version 2>/dev/null)" || _ui_version=""
+    tp_ui_begin panel "${_ui_version:-${TURBOPANEL_UPDATE_CHANNEL:-release} channel}"
+  else
+    tp_ui_begin daemon "${TURBOPANEL_UPDATE_CHANNEL:-release} channel"
+  fi
+fi
 
 INSTALL_ROOT="/opt/turbopanel"
 BIN_DIR="$INSTALL_ROOT/bin"
@@ -3683,6 +4739,7 @@ if [ "$INSTANCE_INSTALL" != true ] && [ "$COLOCATED_DAEMON_ONLY" != true ]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+tp_ui_area "Checking this server"
 tp_print_step "▸" "Checking host operating system…"
 # TurboPanel's orchestration (the docker role's distro map,
 # turbopaneld/orchestration/roles/docker/vars/main.yml) supports Debian and
@@ -3754,6 +4811,8 @@ if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
+tp_ui_done "${PRETTY_NAME:-${ID:-linux}}"
+tp_ui_area "Verifying the release"
 # A host that already carries an expected CA list keeps it when this run
 # brings none, so re-running an old command cannot downgrade it to trust on
 # first use. A host with stored trust files but no list is held to the files
@@ -4063,6 +5122,8 @@ export TURBOPANEL_STATE_DIR="$STATE_DIR"
 export TURBOPANEL_DAEMON_STATE_DIR="$STATE_DIR"
 export TURBOPANEL_RUN_DIR="$RUN_DIR"
 
+tp_ui_done "manifest checked"
+tp_ui_area "Downloading TurboPanel"
 tp_print_step "▸" "Downloading daemon release…"
 tp_stop_running_daemon_for_release_swap
 
@@ -4085,6 +5146,8 @@ if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
   exit 1
 fi
 tp_print_ok "Release installed (SHA-256 ok)"
+tp_ui_done "checksum verified"
+tp_ui_area "Preparing the installer"
 
 tp_print_step "▸" "Probing native daemon binary…"
 if tp_probe_native_daemon; then
@@ -4131,6 +5194,7 @@ if [ ! -f "$ORCHESTRATION_DIR/ansible.cfg" ]; then
   exit 1
 fi
 
+tp_ui_done "ready"
 if [ "$_colocated_daemon_refresh" = true ]; then
   # Existing control plane: refresh the daemon in socket mode. Do not run
   # daemon-install.yml (remote URL plus a recursive chown of state/config).
@@ -4152,16 +5216,27 @@ if [ "$INSTANCE_INSTALL" = true ]; then
     tp_print_error "zstd is required to unpack the control plane package (apt install zstd)"
     exit 1
   fi
+  tp_ui_area "Installing the control plane"
   tp_run_instance_install
+  if [ "$TP_UI" = 1 ]; then
+    _wizard_host="$(tp_host_address)"
+    TP_UI_URL="https://${_wizard_host:-<this host>}:8443/install"
+    TP_UI_URL_NOTE="finish setup here"
+    TP_UI_NOTES="The browser warns about the certificate until setup has finished (it is self-signed)
+"
+    tp_ui_finish "Ready in" "installed"
+    exit 0
+  fi
   exit $?
 fi
+tp_ui_area "Configuring this server"
 
 # The daemon writes its first answer from the control plane here once it
 # starts (tp_wait_for_enrollment); an answer from before this run must not count.
 rm -f "$RUN_DIR/enroll-status" 2>/dev/null || true
 
 VARS_FILE="$(mktemp)"
-trap 'rm -f "$VARS_FILE"' EXIT
+trap 'tp_exit_trap' EXIT
 {
   printf 'turbopanel_instance_url: %s\n' "$HOST_URL"
   printf 'turbopanel_daemon_license_staging_dir: %s\n' "$LICENSE_STAGING_DIR"
@@ -4238,8 +5313,17 @@ if ! tp_arm_update_guard; then
   exit 1
 fi
 
+tp_ui_done "installed"
+tp_ui_area "Enrolling this server"
+TP_UI_COLLECT=1
 if ! tp_wait_for_enrollment; then
   exit 1
+fi
+TP_UI_COLLECT=0
+if [ -n "${LICENSE_ID:-}" ]; then
+  tp_ui_finish "Enrolled in" "done"
+else
+  tp_ui_finish "Installed in" "done"
 fi
 
 tp_kernel_features_step

@@ -1,8 +1,10 @@
 #!/bin/sh
 # installer-screen.sh - one reusable screen layer for the installer.
 #
-# MOCKUP: nothing in run.sh sources this file yet. scripts/installer-screen-demo.sh
-# drives it with a simulated install.
+# scripts/run.sh carries a copy of this file between the "installer-screen.sh"
+# markers (it is served on its own through curl | sh, so it cannot source a
+# lib); src/instance/run-sh-installer-screen.test.ts keeps the two identical.
+# scripts/installer-screen-demo.sh drives it with a simulated install.
 #
 # POSIX sh only (tested with dash and busybox ash). Raw ANSI, no tput.
 #
@@ -23,6 +25,10 @@
 #                                shown is updated in place.
 #   screen_run <cmd> [args...]   run a real command: output goes to the log
 #                                file, the spinner keeps turning meanwhile
+#   screen_wait <seconds>        sleep while the spinner keeps turning
+#   screen_busy_start            keep the spinner turning while the caller runs
+#   screen_busy_stop             something in its own shell; any other screen_
+#                                call stops it first
 #   screen_area_done [fact]      collapse the area to one check row with a
 #                                short dim fact
 #   screen_area_fail <reason> [<next step>]
@@ -78,6 +84,7 @@ _ss_ready=0
 _ss_live=0
 _ss_cleaned=1
 _ss_child=
+_ss_tick=
 _ss_active=0
 _ss_drawn=0
 _ss_failed=0
@@ -122,8 +129,10 @@ _ss_total_dur() {
 }
 
 # Strip control characters (including ESC) so text cannot move the cursor.
+# Always printed through "%s", so a leading dash or a % in the text is data;
+# a missing argument is empty text (the file runs under set -u in run.sh).
 _ss_clean() {
-  _c_t=$1
+  _c_t=${1-}
   printf '%s' "$_c_t" | tr -d '\000-\037\177'
 }
 
@@ -200,7 +209,7 @@ _ss_width() {
 }
 
 _ss_logf() {
-  printf '%s\n' "$1" >>"$_ss_log" 2>/dev/null || :
+  printf '%s\n' "${1-}" >>"$_ss_log" 2>/dev/null || :
 }
 
 # Plain mode: one event per line, cut to SCREEN_COLS when that is set.
@@ -297,8 +306,8 @@ _ss_mode_label() {
 # The header is one line: bold name, version, dim mode. The progress bar
 # (second line) and a blank line follow.
 _ss_header() {
-  _h_in=$1
-  _h_ch_in=$2
+  _h_in=${1-}
+  _h_ch_in=${2-}
   _h_ver=$(_ss_clean "$_h_in")
   if [ "$_ss_live" != 1 ]; then
     _h_ch=$(_ss_clean "$_h_ch_in")
@@ -364,7 +373,12 @@ _ss_bar_line() {
     "$_b_cc" "$_b_cnt" "$_ss_RST"
   _b_room=$((_ss_cols - 1 - 2 - _b_w - 2 - ${#_b_cnt} - 2))
   if [ -n "$_b_nm" ] && [ "$_b_room" -ge 1 ]; then
-    printf '  %s%s%s' "$([ "$_ss_bar_state" = failed ] && printf '%s' "$_ss_BAD")" "$(_ss_fit "$_b_nm" "$_b_room")" "$_ss_RST"
+    if [ "$_ss_bar_state" = failed ]; then
+      _b_nc=$_ss_BAD
+    else
+      _b_nc=
+    fi
+    printf '  %s%s%s' "$_b_nc" "$(_ss_fit "$_b_nm" "$_b_room")" "$_ss_RST"
   fi
 }
 
@@ -499,7 +513,17 @@ _ss_clear_subs() {
   _ss_v3=
 }
 
+# Stop the spinner process screen_busy_start began (nothing when none runs).
+_ss_busy_off() {
+  if [ -n "$_ss_tick" ]; then
+    kill "$_ss_tick" 2>/dev/null || :
+    wait "$_ss_tick" 2>/dev/null || :
+    _ss_tick=
+  fi
+}
+
 _ss_kill_child() {
+  _ss_busy_off
   if [ -n "$_ss_child" ]; then
     kill "$_ss_child" 2>/dev/null || :
     wait "$_ss_child" 2>/dev/null || :
@@ -519,9 +543,10 @@ screen_restore() {
   fi
 }
 
-# Runs once on exit, error, INT and TERM: close the active area, restore the cursor.
+# Runs once on exit, error, INT and TERM: close the active area, restore the
+# cursor. A caller's own EXIT trap passes the status it saw as $1.
 _ss_cleanup() {
-  _cl_rc=$?
+  _cl_rc=${1:-$?}
   [ "$_ss_cleaned" = 0 ] || return 0
   _ss_cleaned=1
   trap - EXIT INT TERM HUP
@@ -538,9 +563,9 @@ _ss_cleanup() {
 
 # screen_init <version> <channel> <mode> <log-file> <area-name>...
 screen_init() {
-  _ss_version=$1
-  _ss_channel=$2
-  _ss_mode=$3
+  _ss_version=${1-}
+  _ss_channel=${2-}
+  _ss_mode=${3-}
   _ss_log=${4:-/dev/null}
   if [ $# -ge 4 ]; then
     shift 4
@@ -593,12 +618,13 @@ screen_init() {
 
 screen_area_start() {
   [ "$_ss_ready" = 1 ] || return 1
+  _ss_busy_off
   if [ "$_ss_active" = 1 ]; then
     screen_area_done
   fi
   _ss_width
   _ss_n=$((_ss_n + 1))
-  _ss_name=$(_ss_clean "$1" | tr -d '|')
+  _ss_name=$(_ss_clean "${1-}" | tr -d '|')
   _ss_clear_subs
   _ss_frame=0
   _ss_active=1
@@ -615,7 +641,8 @@ screen_area_start() {
 # text is a key and the details line up in two columns.
 screen_sub() {
   [ "$_ss_active" = 1 ] || return 0
-  _sb_k=$(_ss_clean "$1")
+  _ss_busy_off
+  _sb_k=$(_ss_clean "${1-}")
   _sb_v=$(_ss_clean "${2:-}")
   if [ -n "$_sb_v" ]; then
     _ss_logf "   $_sb_k: $_sb_v"
@@ -634,6 +661,7 @@ screen_sub() {
 
 screen_area_done() {
   [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
   _d_det=$(_ss_clean "${1:-}")
   _d_el=$(_ss_dur $(($(_ss_now) - _ss_t0)))
   _ss_logf "-- ok: $_ss_name: $_d_det ($_d_el)"
@@ -654,6 +682,7 @@ screen_area_done() {
 # the log path and one thing to try follow.
 screen_area_fail() {
   [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
   _fl_why=$(_ss_clean "${1:-failed}")
   _fl_try=$(_ss_clean "${2:-fix the cause, then run the installer again}")
   _fl_el=$(_ss_dur $(($(_ss_now) - _ss_t0)))
@@ -696,14 +725,52 @@ screen_run() {
   return "$_ru_rc"
 }
 
+# screen_busy_start / screen_busy_stop: keep the spinner turning while the
+# caller runs something in its own shell (a function that sets variables, a
+# command whose exit status set -e must see). A background process repaints
+# the area every 0.1 s; every other screen_ call stops it first, and the
+# cleanup on exit kills it. Nothing happens when the screen is not live.
+screen_busy_start() {
+  [ "$_ss_live" = 1 ] && [ "$_ss_active" = 1 ] || return 0
+  _ss_busy_off
+  (
+    while :; do
+      _ss_paint
+      sleep 0.1 2>/dev/null || sleep 1
+    done
+  ) &
+  _ss_tick=$!
+}
+
+screen_busy_stop() {
+  _ss_busy_off
+}
+
+# screen_wait <seconds>: sleep while the spinner keeps turning (a plain sleep
+# when the screen is not live). For waits in the caller's own code.
+screen_wait() {
+  _wt_n=${1:-1}
+  if [ "$_ss_live" != 1 ] || [ "$_ss_active" != 1 ]; then
+    sleep "$_wt_n"
+    return 0
+  fi
+  _wt_i=$((_wt_n * 10))
+  while [ "$_wt_i" -gt 0 ]; do
+    _ss_paint
+    sleep 0.1 2>/dev/null || sleep 1
+    _wt_i=$((_wt_i - 1))
+  done
+}
+
 # screen_summary <prefix>: the finish. The header stays; the check rows
 # collapse to one wrapped row, then "<prefix> <total time>" in bold green.
 screen_summary() {
   [ "$_ss_failed" = 0 ] || return 0
+  _ss_busy_off
   if [ "$_ss_active" = 1 ]; then
     screen_area_done
   fi
-  _sm_title=$(_ss_clean "$1")
+  _sm_title=$(_ss_clean "${1-}")
   _sm_tot=$(_ss_total_dur)
   _ss_sum_open=1
   _ss_logf "== summary: $_sm_title $_sm_tot"
@@ -726,7 +793,7 @@ screen_summary() {
 
 # screen_summary_item <value> <note>: a URL or name with a short dim note.
 screen_summary_item() {
-  _si_v=$(_ss_clean "$1")
+  _si_v=$(_ss_clean "${1-}")
   _si_n=$(_ss_clean "${2:-}")
   if [ -n "$_si_n" ]; then
     _ss_logf "   $_si_v ($_si_n)"
@@ -782,7 +849,7 @@ _ss_items_flush() {
 }
 
 screen_summary_warn() {
-  _sw_t=$(_ss_clean "$1")
+  _sw_t=$(_ss_clean "${1-}")
   _ss_logf "   warning: $_sw_t"
   if [ "$_ss_live" = 1 ]; then
     _ss_items_flush
