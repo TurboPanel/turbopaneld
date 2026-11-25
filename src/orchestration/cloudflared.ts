@@ -10,6 +10,7 @@ import {
 } from "./assets.ts";
 import { assertBytesSha256 } from "./download-verify.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
+import { mapSequential } from "../util/sequential.ts";
 import {
   createSymlink,
   installVendorExecutable,
@@ -186,21 +187,22 @@ export async function pruneCloudflaredVersions(
       ok: entry.isDirectory && !entry.isSymlink,
     });
   }
-  for (const { name, ok } of names) {
-    if (!ok || name === "current" || keepSet.has(name)) continue;
-    if (!VERSION_DIR_RE.test(name)) continue;
+  const doomed = names.filter(({ name, ok }) =>
+    ok && name !== "current" && !keepSet.has(name) && VERSION_DIR_RE.test(name)
+  );
+  // One folder at a time; a failure on one never stops the rest.
+  await mapSequential(doomed, async ({ name }) => {
     const path = join(root, name);
     try {
       // Checked again right before the delete: it may have been swapped for a
       // link since the listing.
-      // NOSONAR typescript:S9382 — one folder at a time, on purpose
-      if (!(await Deno.lstat(path)).isDirectory) continue;
-      await Deno.remove(path, { recursive: true }); // NOSONAR typescript:S9382
+      if (!(await Deno.lstat(path)).isDirectory) return;
+      await Deno.remove(path, { recursive: true });
       removed.push(name);
       logInfo("cloudflared", `removed the superseded version ${name}`);
     } catch (err) {
       logWarn("cloudflared", `could not remove version ${name}:`, err);
     }
-  }
+  });
   return removed;
 }
