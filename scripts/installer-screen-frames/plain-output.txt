@@ -1,0 +1,75 @@
+TurboPanel installer 1.8.2 (channel release, mode panel)
+log: install.log
+[1/8] Checking this server ...
+      - host system: Debian 13
+      - prerequisites: checking
+      - ports 80, 443, 8443: checking
+      - prerequisites: ready
+[1/8] ok   Checking this server: Debian 13, 4 CPU, 8 GiB (0s)
+[2/8] Verifying the release ...
+      - manifest: fetching
+      - control plane: waiting
+      - web app: waiting
+      - manifest: ready
+[2/8] ok   Verifying the release: signature verified (0s)
+[3/8] Downloading TurboPanel ...
+      - control plane 1.8.2: downloading
+      - web app 1.8.2: waiting
+      - unpack: waiting
+      - control plane 1.8.2: ready
+      - web app 1.8.2: downloading
+      - web app 1.8.2: ready
+[3/8] ok   Downloading TurboPanel: control plane 1.8.2, web app 1.8.2 (0s)
+[4/8] Installing orchestration runtime ...
+      - runtime: installing
+      - task library: waiting
+      - plan: waiting
+      - runtime: ready
+      - task library: ready
+      - plan: ready
+[4/8] ok   Installing orchestration runtime: runtime and task library ready (0s)
+[5/8] Installing TurboPanel database ...
+      - database: installing
+      - roles: waiting
+      - migrations: waiting
+      - database: starting
+      - database: ready
+      - roles: creating
+      - roles: ready
+      - migrations: running
+      - migrations: ready
+      - schema: waiting
+      - schema: checking
+      - schema: ready
+[5/8] ok   Installing TurboPanel database: schema is up to date (0s)
+[6/8] Installing cache and message queue ...
+      - cache: installing
+      - message queue: waiting
+      - cache: pulling image
+      - cache: ready
+      - message queue: installing
+      - message queue: ready
+[6/8] ok   Installing cache and message queue: cache and message queue ready (0s)
+[7/8] Installing instance ...
+      - instance settings: applying
+      - control plane: waiting
+      - web gateway: waiting
+      - daemon: waiting
+      - control plane: starting
+      - control plane: ready
+      - web gateway: starting
+      - web gateway: ready
+      - daemon: starting
+      - daemon: ready
+[7/8] ok   Installing instance: control plane, web gateway and daemon active (0s)
+[8/8] Checking health ...
+      - /api/health: waiting
+      - web interface: waiting
+      - daemon: waiting
+      - /api/health: ready
+[8/8] ok   Checking health: healthy in 4 s (0s)
+== Ready in 1m 12s
+   public: https://192.0.2.10:8443
+   private: https://10.0.0.5:8443
+   warning: port 8443 is open to the internet
+log: install.log
