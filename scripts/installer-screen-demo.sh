@@ -71,21 +71,26 @@ while [ $# -gt 0 ]; do
 done
 
 case $MODE in daemon | panel) ;; *) usage 2 ;; esac
-case $FAIL_AT in '' | *[!0-9]*) usage 2 ;; esac
+case $FAIL_AT in
+  '' | *[!0-9]*) usage 2 ;;
+  *) ;;
+esac
 
 AREA=0
 
 # One simulated sub-step: show it, run a stand-in command whose output goes
 # to the log file. "key|value" shows as an aligned key and value.
 step() {
-  case $1 in
-    *'|'*) screen_sub "${1%%|*}" "${1#*|}" ;;
-    *) screen_sub "$1" ;;
+  _st_text=$1
+  _st_pause=${2:-0.7}
+  case $_st_text in
+    *'|'*) screen_sub "${_st_text%%|*}" "${_st_text#*|}" ;;
+    *) screen_sub "$_st_text" ;;
   esac
   if [ "$FAST" = 1 ]; then
-    screen_run sh -c 'printf "%s\n" "demo step: $0"' "$1"
+    screen_run sh -c 'printf "%s\n" "demo step: $0"' "$_st_text"
   else
-    screen_run sh -c 'printf "%s\n" "demo step: $0"; sleep "$1"' "$1" "${2:-0.7}"
+    screen_run sh -c 'printf "%s\n" "demo step: $0"; sleep "$1"' "$_st_text" "$_st_pause"
   fi
 }
 

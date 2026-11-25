@@ -123,7 +123,8 @@ _ss_total_dur() {
 
 # Strip control characters (including ESC) so text cannot move the cursor.
 _ss_clean() {
-  printf '%s' "$1" | tr -d '\000-\037\177'
+  _c_t=$1
+  printf '%s' "$_c_t" | tr -d '\000-\037\177'
 }
 
 # _ss_fit <text> <width>: text cut to <width> columns, ellipsis when cut.
@@ -144,32 +145,38 @@ _ss_fit() {
 
 # _ss_pad <n>: n spaces (nothing when n <= 0).
 _ss_pad() {
-  if [ "$1" -gt 0 ]; then
-    printf '%*s' "$1" ''
+  _pd_n=$1
+  if [ "$_pd_n" -gt 0 ]; then
+    printf '%*s' "$_pd_n" ''
   fi
 }
 
 # _ss_dur <seconds>: 12s, 1m 05s
 _ss_dur() {
-  if [ "$1" -lt 60 ]; then
-    printf '%ss' "$1"
+  _du_s=$1
+  if [ "$_du_s" -lt 60 ]; then
+    printf '%ss' "$_du_s"
   else
-    printf '%sm %02ds' $(($1 / 60)) $(($1 % 60))
+    printf '%sm %02ds' $((_du_s / 60)) $((_du_s % 60))
   fi
 }
 
 # _ss_rgb <r> <g> <b> <fg|bg>: the color escape for the detected depth.
 _ss_rgb() {
-  if [ "$4" = bg ]; then
+  _r_r=$1
+  _r_g=$2
+  _r_b=$3
+  _r_m=$4
+  if [ "$_r_m" = bg ]; then
     _r_p=48
   else
     _r_p=38
   fi
   if [ "$_ss_truecolor" = 1 ]; then
-    printf '%s[%s;2;%s;%s;%sm' "$_ss_ESC" "$_r_p" "$1" "$2" "$3"
+    printf '%s[%s;2;%s;%s;%sm' "$_ss_ESC" "$_r_p" "$_r_r" "$_r_g" "$_r_b"
   else
     printf '%s[%s;5;%sm' "$_ss_ESC" "$_r_p" \
-      $((16 + 36 * (($1 * 5 + 127) / 255) + 6 * (($2 * 5 + 127) / 255) + (($3 * 5 + 127) / 255)))
+      $((16 + 36 * ((_r_r * 5 + 127) / 255) + 6 * ((_r_g * 5 + 127) / 255) + ((_r_b * 5 + 127) / 255)))
   fi
 }
 
@@ -182,7 +189,10 @@ _ss_width() {
     _w_c=${_w_s#* }
     [ -n "$_w_c" ] || _w_c=${COLUMNS:-80}
   fi
-  case $_w_c in '' | *[!0-9]*) _w_c=0 ;; esac
+  case $_w_c in
+    '' | *[!0-9]*) _w_c=0 ;;
+    *) ;;
+  esac
   if [ "$_ss_live" = 1 ]; then
     [ "$_w_c" -ge 40 ] || _w_c=80
   fi
@@ -195,10 +205,11 @@ _ss_logf() {
 
 # Plain mode: one event per line, cut to SCREEN_COLS when that is set.
 _ss_say() {
+  _sy_t=$1
   if [ "$_ss_cols" -gt 0 ]; then
-    printf '%s\n' "$(_ss_fit "$1" $((_ss_cols - 1)))"
+    printf '%s\n' "$(_ss_fit "$_sy_t" $((_ss_cols - 1)))"
   else
-    printf '%s\n' "$1"
+    printf '%s\n' "$_sy_t"
   fi
 }
 
@@ -223,6 +234,7 @@ _ss_setup_style() {
       *)
         case ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} in
           *[Uu][Tt][Ff]-8* | *[Uu][Tt][Ff]8*) _ss_utf=1 ;;
+          *) ;;
         esac
         ;;
     esac
@@ -285,9 +297,11 @@ _ss_mode_label() {
 # The header is one line: bold name, version, dim mode. The progress bar
 # (second line) and a blank line follow.
 _ss_header() {
-  _h_ver=$(_ss_clean "$1")
+  _h_in=$1
+  _h_ch_in=$2
+  _h_ver=$(_ss_clean "$_h_in")
   if [ "$_ss_live" != 1 ]; then
-    _h_ch=$(_ss_clean "$2")
+    _h_ch=$(_ss_clean "$_h_ch_in")
     _ss_say "TurboPanel installer $_h_ver (channel $_h_ch, mode $_ss_mode)"
     _ss_say "log: $_ss_log"
     return 0
@@ -302,9 +316,11 @@ _ss_header() {
 
 # _ss_rep <char> <n>: the character n times.
 _ss_rep() {
+  _rp_c=$1
+  _rp_n=$2
   _rp_i=0
-  while [ "$_rp_i" -lt "$2" ]; do
-    printf '%s' "$1"
+  while [ "$_rp_i" -lt "$_rp_n" ]; do
+    printf '%s' "$_rp_c"
     _rp_i=$((_rp_i + 1))
   done
 }
@@ -326,6 +342,7 @@ _ss_bar_line() {
       _b_nm=
       ;;
     failed) _b_c=$_ss_BAD ;;
+    *) ;;
   esac
   [ "$_ss_n" -gt 0 ] || _b_nm=
   _b_w=32
@@ -362,11 +379,13 @@ _ss_bar_update() {
 
 # One finished area: green check, name in a column, one short dim fact.
 _ss_row_done() {
-  _rd_nm=$(_ss_fit "$1" $((_ss_cols - 1 - 4)))
+  _rd_n=$1
+  _rd_f=$2
+  _rd_nm=$(_ss_fit "$_rd_n" $((_ss_cols - 1 - 4)))
   printf '  %s%s%s %s' "$_ss_GREEN" "$_ss_ok" "$_ss_RST" "$_rd_nm"
   _rd_room=$((_ss_cols - 1 - 4 - _ss_nw))
-  if [ -n "$2" ] && [ "$_rd_room" -ge 4 ]; then
-    printf '%s%s%s%s' "$(_ss_pad $((_ss_nw - ${#_rd_nm})))" "$_ss_DIM" "$(_ss_fit "$2" "$_rd_room")" "$_ss_RST"
+  if [ -n "$_rd_f" ] && [ "$_rd_room" -ge 4 ]; then
+    printf '%s%s%s%s' "$(_ss_pad $((_ss_nw - ${#_rd_nm})))" "$_ss_DIM" "$(_ss_fit "$_rd_f" "$_rd_room")" "$_ss_RST"
   fi
 }
 
@@ -385,8 +404,9 @@ _ss_row_now() {
 
 # _ss_row_slot <1-3>: one detail line, key and value aligned when it has both.
 _ss_row_slot() {
-  [ "$1" -le "$_ss_ns" ] || return 0
-  eval "_sl_k=\$_ss_k$1 _sl_v=\$_ss_v$1"
+  _sl_n=$1
+  [ "$_sl_n" -le "$_ss_ns" ] || return 0
+  eval "_sl_k=\$_ss_k$_sl_n _sl_v=\$_ss_v$_sl_n"
   _sl_room=$((_ss_cols - 1 - 6))
   if [ -z "$_sl_v" ]; then
     printf '      %s' "$(_ss_fit "$_sl_k" "$_sl_room")"
@@ -445,12 +465,14 @@ _ss_collapsed() {
 # fills downward; once all three are used the oldest scrolls off the top. A
 # key that is already shown keeps its slot and takes the new value.
 _ss_put_sub() {
-  if [ -n "$2" ]; then
+  _ps_key=$1
+  _ps_val=$2
+  if [ -n "$_ps_val" ]; then
     _ps_i=1
     while [ "$_ps_i" -le "$_ss_ns" ]; do
       eval "_ps_k=\$_ss_k$_ps_i"
-      if [ "$_ps_k" = "$1" ]; then
-        eval "_ss_v$_ps_i=\$2"
+      if [ "$_ps_k" = "$_ps_key" ]; then
+        eval "_ss_v$_ps_i=\$_ps_val"
         return 0
       fi
       _ps_i=$((_ps_i + 1))
@@ -464,7 +486,7 @@ _ss_put_sub() {
     _ss_k2=$_ss_k3
     _ss_v2=$_ss_v3
   fi
-  eval "_ss_k$_ss_ns=\$1 _ss_v$_ss_ns=\$2"
+  eval "_ss_k$_ss_ns=\$_ps_key _ss_v$_ss_ns=\$_ps_val"
 }
 
 _ss_clear_subs() {
@@ -486,8 +508,9 @@ _ss_kill_child() {
 }
 
 _ss_sig() {
+  _sg_c=$1
   _ss_kill_child
-  exit "$1"
+  exit "$_sg_c"
 }
 
 screen_restore() {
