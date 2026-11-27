@@ -48,7 +48,10 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   (`tp_site_lifecycle_ok`, `tp_php_unit_ok`), from `HELPER_DIR`, which is
   always tp-host's own directory: `<install>/lib` on a managed host, the
   checkout's `orchestration/scripts` in development (where they are not copied
-  into `<install>/lib`). Nothing from the environment or the daemon chooses it,
+  into `<install>/lib`). The daemon names the same folder in those lines
+  (`hostHelperDir` in `src/permissions/host-sudo.ts`: `layout.libDir` on a
+  managed install, the checkout's `orchestration/scripts` in development).
+  Nothing from the environment or the daemon chooses it,
   and there is no fallback path. Other verbs that use `INSTALL_ROOT`
   (`$_self_dir/..`: `lib/tp-backup-run`, `lib/panel-identity`, `vendor/`,
   `share/`) still assume the installed layout.
@@ -116,7 +119,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `turbopanel-deploycmd-*.service` or `turbopanel-worker-*@.service` (a site's
     post-deploy commands and workers) may carry the same file and, beyond the
     account checks, must carry (`tp_site_lifecycle_ok`) exactly one
-    `ExecStartPre=+<lib>/tp-php-loopback sync` (the only `+` prefix any tenant
+    `ExecStartPre=+<helper dir>/tp-php-loopback sync` (the only `+` prefix any tenant
     unit may have), `IPAddressDeny=` and `IPAddressAllow=` equal to
     `SITE_IP_DENY` / `SITE_IP_ALLOW` (the same strings the per-site PHP unit is
     pinned to) and `PrivateDevices=yes`; no other unit may carry these keys.

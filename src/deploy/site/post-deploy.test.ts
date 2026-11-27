@@ -113,6 +113,20 @@ test("the command unit is a one-shot that begins with its marker and runs every 
   }
 });
 
+test("the guard names helperDir when given, else the layout's libDir", async () => {
+  const host = await makeSystemdHost();
+  try {
+    const dir = "/home/dev/turbopanel/turbopaneld/orchestration/scripts";
+    const text = postDeployUnitContent(opts(host, { helperDir: dir }));
+    assert(
+      text.split("\n").includes(`ExecStartPre=+${dir}/tp-php-loopback sync`),
+    );
+    assert(!text.includes(`${host.layout.libDir}/tp-php-loopback`));
+  } finally {
+    await host.cleanup();
+  }
+});
+
 test("a timeout replaces the default and a Laravel release adds its cache folder as optional", async () => {
   const host = await makeSystemdHost();
   try {

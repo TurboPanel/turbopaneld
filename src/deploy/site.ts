@@ -43,7 +43,7 @@
  */
 
 import { dirname, join } from "@std/path";
-import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { hostHelperDir, hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
@@ -3683,7 +3683,7 @@ function sitePhpRuntimeFiles(
     group: principalUnixGroupName(user),
     home,
     configDir: layout.configDir,
-    libDir: layout.libDir,
+    libDir: hostHelperDir(layout),
     runtimesDir: layout.runtimesDir,
     webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };
