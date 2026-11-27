@@ -1,8 +1,10 @@
 import { join } from "@std/path";
 import { assert, assertEquals } from "@std/assert";
 import {
+  buildBuildToggleExtraArgs,
   buildDockerSetupExtraArgs,
   buildTimeSyncApplyExtraArgs,
+  buildUiExportExtraArgs,
   devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
@@ -1350,6 +1352,49 @@ test(
     );
   },
 );
+
+test("build-toggle passes the optional-service converge options through", () => {
+  const args = buildBuildToggleExtraArgs(
+    { uiMode: "static", instanceRunMode: "source", forceBuild: true },
+    {
+      TURBOPANEL_DEV_CONVERGE_OPTIONS: JSON.stringify({
+        optionalServices: { redis_setup: true },
+      }),
+    },
+  );
+  assert(args.includes('{"turbopanel_optional_redis_setup":true}'));
+  assert(args.includes("force_build=true"));
+  const bare = buildBuildToggleExtraArgs(
+    { uiMode: "dev", instanceRunMode: "source" },
+    {},
+  );
+  assertEquals(bare.some((a) => a.startsWith("turbopanel_optional_")), false);
+});
+
+test("ui-export extra args carry the ui mode and the force flag", () => {
+  const forced = buildUiExportExtraArgs(
+    { forceBuild: true },
+    { TURBOPANEL_UI_MODE: "static" },
+  );
+  assert(forced.includes("turbopanel_ui_mode=static"));
+  assert(forced.includes("force_build=true"));
+  const plain = buildUiExportExtraArgs({}, {});
+  assert(plain.includes("turbopanel_ui_mode=dev"));
+  assert(plain.includes("force_build=false"));
+});
+
+test("ui-build exports in development mode only when a dev user is set", async () => {
+  const defaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/ui-build/defaults/main.yml"),
+  );
+  assert(/turbopanel_ui_export_dev:/.test(defaults), "dev export switch");
+  assert(/turbopanel_ui_export_max_workers:/.test(defaults), "bounded workers");
+  assert(/turbopanel_ui_export_node_heap_mb:/.test(defaults), "heap cap");
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/ui-build/tasks/main.yml"),
+  );
+  assert(/--dev/.test(tasks), "dev export passes --dev");
+});
 
 test("mergeTimeSyncApplyWithHostState preserves host NTP when command omits it", () => {
   const merged = mergeTimeSyncApplyWithHostState(

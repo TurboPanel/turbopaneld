@@ -44,4 +44,4 @@
     state: restarted
   when:
     - instance_start | bool
-    - turbopanel_ui_mode == 'dev'
+    - turbopanel_dbstudio_host | bool

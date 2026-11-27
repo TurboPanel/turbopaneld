@@ -108,6 +108,20 @@ expand-only twin: daemon first, then control plane).
   checkout, or the trunk copy CI places at `.ci-instance-caddy-pin`). A
   missing instance downloader fails those tests.
 
+## Static UI on a development host
+
+A development install (dev user set) can serve the static UI instead of the
+Expo dev server (which holds 2-4 GiB of RAM). The developer surface of the
+control plane (`TURBOPANEL_DEV_SURFACE`, `src/deno-dev.ts`, dev-migrate) and
+Drizzle Studio no longer depend on the UI mode. The `ui-build` role exports in
+development mode (`--dev`, bounded workers and Node heap as role defaults) when
+a dev user is set; production output is unchanged. Actions run by the dev
+console: `run-orchestration-action.ts ui-export [--force]` (export only, via
+`ui-export.yml`, run directly on dev hosts) or
+`build-toggle` with unchanged modes and `forceBuild` (also re-converges units;
+now keeps the optional-service options). Update and Restart refresh the export
+inside the existing `install` step (see `src/dev-host/AGENTS.md`).
+
 ## Scope Summary (Former Root Index Entry)
 
 | Subsystem | Read before editing | Covers |

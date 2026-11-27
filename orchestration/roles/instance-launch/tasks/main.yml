@@ -65,7 +65,7 @@
     - Reload systemd for instance units
 
 - name: Ensure Drizzle Studio serve script is executable
-  when: turbopanel_ui_mode == 'dev'
+  when: turbopanel_dbstudio_host | bool
   ansible.builtin.file:
     path: "{{ turbopanel_instance_dir }}/scripts/drizzle-studio-serve.sh"
     owner: "{{ instance_user }}"
@@ -74,7 +74,7 @@
   failed_when: false
 
 - name: Install Drizzle Studio systemd unit
-  when: turbopanel_ui_mode == 'dev'
+  when: turbopanel_dbstudio_host | bool
   ansible.builtin.template:
     src: turbopanel-dbstudio.service.j2
     dest: "/etc/systemd/system/{{ dbstudio_service_name }}.service"
@@ -715,7 +715,7 @@
 
 - name: Ensure Drizzle Studio service desired state
   when:
-    - turbopanel_ui_mode == 'dev'
+    - turbopanel_dbstudio_host | bool
     - turbopanel_optional_dbstudio | default(false) | bool
   ansible.builtin.systemd:
     name: "{{ dbstudio_service_name }}"
@@ -725,7 +725,7 @@
 
 - name: Stop and disable Drizzle Studio when optional off
   when:
-    - turbopanel_ui_mode == 'dev'
+    - turbopanel_dbstudio_host | bool
     - not (turbopanel_optional_dbstudio | default(false) | bool)
   ansible.builtin.systemd:
     name: "{{ dbstudio_service_name }}"
@@ -733,8 +733,8 @@
     enabled: false
   failed_when: false
 
-- name: Stop and disable Drizzle Studio when not in dev UI mode
-  when: turbopanel_ui_mode != 'dev'
+- name: Stop and disable Drizzle Studio when not a development host
+  when: not (turbopanel_dbstudio_host | bool)
   ansible.builtin.systemd:
     name: "{{ dbstudio_service_name }}"
     state: stopped

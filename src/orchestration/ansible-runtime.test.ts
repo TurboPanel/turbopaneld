@@ -58,6 +58,28 @@ describe("ansible runtime with stubbed binaries", () => {
     await ansible.runLocalPlaybook(LOCALHOST_PLAYBOOK);
   });
 
+  it("runUiExport invokes the stub playbook, forced or not", async () => {
+    await ansible.runUiExport();
+    await ansible.runUiExport({ forceBuild: true });
+  });
+
+  it("the job's default UI export reports ok, and the last output line on failure", async () => {
+    const { defaultUiExport } = await import("../dev-host/job.ts");
+    assertEquals(await defaultUiExport(), { ok: true });
+    const { ansibleBinDir } = runtimePaths(fixture.runtimesDir);
+    const playbookBin = join(ansibleBinDir, "ansible-playbook");
+    const backup = await Deno.readTextFile(playbookBin);
+    await Deno.writeTextFile(playbookBin, "#!/bin/sh\necho boom >&2\nexit 1\n");
+    await Deno.chmod(playbookBin, 0o755);
+    try {
+      const failed = await defaultUiExport();
+      assertEquals(failed.ok, false);
+    } finally {
+      await Deno.writeTextFile(playbookBin, backup);
+      await Deno.chmod(playbookBin, 0o755);
+    }
+  });
+
   it("runDaemonConverge and runRedisSetup invoke stub playbooks", async () => {
     await ansible.runDaemonConverge();
     await ansible.runRedisSetup();

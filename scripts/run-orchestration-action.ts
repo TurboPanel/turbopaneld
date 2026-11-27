@@ -143,7 +143,7 @@ export function emitEvent(event: unknown): void {
 
 function usage(): never {
   console.error(
-    "Usage: run-orchestration-action.ts <instance-dev-install|build-toggle|playbook> [args…]",
+    "Usage: run-orchestration-action.ts <instance-dev-install|build-toggle|ui-export|playbook> [args…]",
   );
   Deno.exit(2);
 }
@@ -358,6 +358,25 @@ export async function runPlaybook(
 }
 
 /**
+ * Export only: refresh the static UI export (the `ui-build` role through
+ * `ui-export.yml`) without touching units, Caddy or the instance. `force`
+ * rebuilds even when the export looks current. A no-op unless the UI mode in
+ * `daemon.env` is static. This is the action the dev console calls for
+ * "export only, forced"; `build-toggle` with unchanged modes does the same
+ * export but also re-converges the instance units.
+ */
+export async function runUiExport(
+  force: boolean,
+  deps: OrchestrationActionDeps = defaultDeps(),
+): Promise<void> {
+  await runPlaybook(
+    "ui-export.yml",
+    force ? ["-e", "force_build=true"] : [],
+    deps,
+  );
+}
+
+/**
  * Dispatch a CLI action without exiting the process. Unknown actions throw so
  * tests can assert; the CLI entry maps that to usage() / exit 2.
  */
@@ -371,6 +390,9 @@ export async function dispatchOrchestrationAction(
       return await runInstanceDevInstall(args.includes("--if-needed"), deps);
     case "build-toggle":
       await runBuildToggle(args[0], deps);
+      return;
+    case "ui-export":
+      await runUiExport(args.includes("--force"), deps);
       return;
     case "playbook":
       await runPlaybook(args[0], args.slice(1), deps);

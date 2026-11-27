@@ -416,7 +416,7 @@ test({
 
 test({
   name:
-    "production, compiled, static-UI and workers instance units never migrate on start",
+    "production, compiled and workers instance units never migrate on start",
   ignore: !JINJA_PYTHON,
   fn: async () => {
     const variants: Record<string, Record<string, unknown>> = {
@@ -425,7 +425,6 @@ test({
         ...DEV_SOURCE_VARS,
         turbopanel_instance_run_mode: "compiled",
       },
-      "dev, static UI": { ...DEV_SOURCE_VARS, turbopanel_ui_mode: "static" },
       "dev, workers": {
         ...DEV_SOURCE_VARS,
         turbopanel_instance_runtime: "workers",
@@ -451,6 +450,35 @@ test({
         `${label}: no dev backup folder`,
       );
     }
+  },
+});
+
+test({
+  name:
+    "a dev install keeps the developer surface, dev entry and pre-start migration whichever way the UI is served",
+  ignore: !JINJA_PYTHON,
+  fn: async () => {
+    const dev = await renderUnit(DEV_SOURCE_VARS);
+    const staticUi = await renderUnit({
+      ...DEV_SOURCE_VARS,
+      turbopanel_ui_mode: "static",
+    });
+    // The two units differ only in the UI mode the unit reports.
+    assertEquals(
+      staticUi,
+      dev.replace(
+        "Environment=TURBOPANEL_UI_MODE=dev",
+        "Environment=TURBOPANEL_UI_MODE=static",
+      ),
+    );
+    const unit = directives(staticUi);
+    const env = unit.get("Environment") ?? [];
+    assert(env.includes("TURBOPANEL_DEV_SURFACE=1"), "dev surface flag");
+    assert(env.includes("TURBOPANEL_UI_MODE=static"), "UI mode reported");
+    assert(one(unit, "ExecStart").endsWith(" src/deno-dev.ts"), "dev entry");
+    assert(unit.get("ExecStartPre")?.length === 1, "dev migrate before start");
+    assertEquals(one(unit, "StartLimitBurst"), "10");
+    assertEquals(one(unit, "StartLimitIntervalSec"), "120");
   },
 });
 

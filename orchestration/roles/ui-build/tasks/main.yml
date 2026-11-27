@@ -8,11 +8,25 @@
     group: "{{ turbopanel_group }}"
     mode: "2770"
 
+# A development export is built from source only: a downloaded export is always
+# a production build.
+- name: Decide the UI export mode
+  when: turbopanel_ui_mode == 'static'
+  ansible.builtin.set_fact:
+    _ui_export_dev: "{{ (turbopanel_ui_export_dev | bool) and turbopanel_ui_artifact_url | length == 0 }}"
+
 - name: Check UI static export
   when: turbopanel_ui_mode == 'static'
   ansible.builtin.stat:
     path: "{{ turbopanel_ui_dist_dir }}/index.html"
   register: _ui_dist_index
+
+- name: Check UI export mode marker
+  when: turbopanel_ui_mode == 'static'
+  ansible.builtin.slurp:
+    src: "{{ turbopanel_ui_export_marker }}"
+  register: _ui_export_marker_file
+  failed_when: false
 
 - name: Check if UI sources are newer than static export
   when:
@@ -22,22 +36,47 @@
   ansible.builtin.shell: |
     set -euo pipefail
     cd "{{ turbopanel_ui_dir }}"
-    find src app.json babel.config.cjs tsconfig.json -newer "{{ turbopanel_ui_dist_dir }}/index.html" -print -quit 2>/dev/null || true
+    find {{ turbopanel_ui_export_dev_sources if _ui_export_dev | bool else turbopanel_ui_export_sources }} -newer "{{ turbopanel_ui_dist_dir }}/index.html" -print -quit 2>/dev/null || true
   register: _ui_stale_check
   changed_when: false
+
+# No marker means a production export; only a development export writes one.
+- name: Decide whether the UI export must be redone
+  when: turbopanel_ui_mode == 'static'
+  ansible.builtin.set_fact:
+    _ui_export_rebuild: >-
+      {{
+        (force_build | bool)
+        or not _ui_dist_index.stat.exists
+        or (_ui_stale_check.stdout | default('') | trim | length > 0)
+        or ((_ui_export_marker_file.content | default('') | b64decode | trim
+             if _ui_export_marker_file.content is defined else 'production')
+            != ('development' if _ui_export_dev | bool else 'production'))
+      }}
 
 - name: Build UI static export locally
   when:
     - turbopanel_ui_mode == 'static'
     - turbopanel_ui_artifact_url | length == 0
-    - force_build | bool or not _ui_dist_index.stat.exists or (_ui_stale_check.stdout | default('') | trim | length > 0)
+    - _ui_export_rebuild | bool
   ansible.builtin.command:
-    cmd: pnpm export
+    argv: "{{ _ui_export_argv }}"
     chdir: "{{ turbopanel_ui_dir }}"
   become_user: "{{ turbopanel_user }}"
-  environment:
-    HOME: "{{ turbopanel_ui_runtime_dir }}"
-    PATH: "{{ turbopanel_runtime_path }}"
+  environment: "{{ _ui_export_environment }}"
+  vars:
+    _ui_export_argv: >-
+      {{
+        ['pnpm', 'exec', 'expo', 'export', '--platform', 'web', '--dev',
+         '--max-workers', turbopanel_ui_export_max_workers | string]
+        if _ui_export_dev | bool else ['pnpm', 'export']
+      }}
+    _ui_export_environment: >-
+      {{
+        {'HOME': turbopanel_ui_runtime_dir, 'PATH': turbopanel_runtime_path}
+        | combine({'NODE_OPTIONS': '--max-old-space-size=' ~ turbopanel_ui_export_node_heap_mb}
+                  if _ui_export_dev | bool else {})
+      }}
   register: _ui_local_build
 
 - name: Publish locally-built UI export to the FHS static dir
@@ -53,11 +92,24 @@
   register: _ui_local_publish
   changed_when: true
 
+- name: Mark the published UI export as a development export
+  when:
+    - turbopanel_ui_mode == 'static'
+    - _ui_local_publish is defined
+    - _ui_local_publish is changed
+    - _ui_export_dev | bool
+  ansible.builtin.copy:
+    content: "development\n"
+    dest: "{{ turbopanel_ui_export_marker }}"
+    owner: "{{ instance_user }}"
+    group: "{{ turbopanel_group }}"
+    mode: "0640"
+
 - name: Download UI static export from CDN
   when:
     - turbopanel_ui_mode == 'static'
     - turbopanel_ui_artifact_url | length > 0
-    - force_build | bool or not _ui_dist_index.stat.exists or (_ui_stale_check.stdout | default('') | trim | length > 0)
+    - _ui_export_rebuild | bool
   ansible.builtin.shell: |
     set -euo pipefail
     TMP="$(mktemp -d)"

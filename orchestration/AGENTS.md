@@ -1040,3 +1040,19 @@ compile toolchain).
 | Subsystem | Read before editing | Covers |
 |---|---|---|
 | **Time sync (Ansible)** | `orchestration/AGENTS.md` | `time-sync` role + `time-sync-apply.yml` (NTP / timezone) |
+
+## Static UI export on a development host (`ui-build`, `ui-export.yml`)
+
+With a dev user set and `turbopanel_ui_mode=static`, `ui-build` runs
+`pnpm exec expo export --platform web --dev` with `--max-workers`
+(`turbopanel_ui_export_max_workers`) and `NODE_OPTIONS=--max-old-space-size`
+(`turbopanel_ui_export_node_heap_mb`), both overridable role defaults sized for a
+4 GiB guest. A marker file in the output records production or development, so
+a switch re-exports; the stale check also watches the lockfile and config on a
+development export. Production keeps `pnpm export` and its stale check. In
+`instance-launch` the dev-surface settings follow only the dev user and source
+run mode, and the Drizzle Studio unit follows its optional switch; it always
+sets `TURBOPANEL_UI_MODE=dev` because the control plane's studio script exits
+under `static`. Static mode installs no Expo unit; the UI unit stays stopped and
+disabled. `playbooks/ui-export.yml` (on the `tp-orchestrate` allowlist, run directly on dev hosts) refreshes the export alone (`-e
+force_build=true` forces it).

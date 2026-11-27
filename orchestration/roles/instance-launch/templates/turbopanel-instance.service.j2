@@ -3,7 +3,7 @@ Description=TurboPanel instance
 After=network-online.target docker.service turbopanel-system-stack.service
 Wants=network-online.target turbopanel-system-stack.service
 Requires=docker.service
-{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
+{% if turbopanel_dev_user | length > 0 and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 # Co-located dev: a pre-start migration that is refused (see ExecStartPre)
 # fails in about a second, so it stops after ten tries instead of retrying
 # every RestartSec. A database that is still starting is waited for inside
@@ -37,13 +37,14 @@ Environment=TURBOPANEL_INSTANCE_SERVICE={{ instance_service_name }}
 # UI serving mode: "dev" proxies to Expo, "static" serves the exported build.
 # Caddy/Expo selection only — never an application dev-mode signal.
 Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
-{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
+{% if turbopanel_dev_user | length > 0 and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno' %}
 # Explicit opt-in for the dev-only developer surface (fleet/diagnostics/shell/
 # dev-sync/tunnel + /ws/developer) plus the dev-only auth relaxations
 # (ephemeral secrets, PAM bypass, verification logging). This template is the
 # sole managed writer of the flag, and only for co-located Deno source-mode dev
 # (the src/deno-dev.ts ExecStart below). Never emitted on managed/production
-# hosts, compiled binaries, Workers, or after switching to a static build. See
+# hosts, compiled binaries or Workers. The UI mode (Expo dev server or static
+# export) does not matter: a static development install keeps the surface. See
 # ../turbopanel src/dev-mode.ts (isExplicitDevelopmentMode) — it honors this
 # flag alone and fails closed without it.
 Environment=TURBOPANEL_DEV_SURFACE=1
@@ -151,7 +152,7 @@ ExecStart={{ turbopanel_instance_binary }}
    2.9+ also treats Unix-domain connect as --allow-net (not --allow-read), so
    the flag must stay even with no host list. The one carve-out is the cloud
    metadata endpoints (--deny-net), the same list the daemon denies. #}
-{% if turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' %}
+{% if turbopanel_dev_user | length > 0 %}
 ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi={{ turbopanel_instance_dir }}/node_modules --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-run=git,systemctl,tar,sudo,/usr/bin/sudo,/bin/sh,mkfifo,/usr/bin/mkfifo,pamtester,/usr/bin/pamtester,openssl,/usr/bin/openssl,{{ turbopanel_node }},{{ turbopanel_deno }} src/deno-dev.ts
 {% else %}
 ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,hostname --allow-ffi={{ turbopanel_instance_dir }}/node_modules --allow-read={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_daemon_dir }},{{ turbopanel_instance_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-write={{ turbopanel_run_dir }},{{ postgres_socket_dir }},{{ turbopanel_instance_runtime_dir }},{{ turbopanel_daemon_state_dir }},{{ turbopanel_metrics_dir }} --allow-net --deny-net=169.254.169.254,metadata.google.internal,[fd00:ec2::254] --allow-run=sudo,/usr/bin/sudo,/bin/sh,pamtester,/usr/bin/pamtester,openssl,/usr/bin/openssl src/deno.ts
@@ -159,7 +160,7 @@ ExecStart={{ turbopanel_deno }} run --allow-env --allow-sys=networkInterfaces,ho
 {% endif %}
 Restart=always
 RestartSec=2
-{% if not (turbopanel_dev_user | length > 0 and turbopanel_ui_mode == 'dev' and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno') %}
+{% if not (turbopanel_dev_user | length > 0 and (turbopanel_instance_run_mode | default('source')) == 'source' and (turbopanel_instance_runtime | default('deno')) == 'deno') %}
 # The delay grows from 2 s to 120 s (systemd 254 and newer; older systemd only
 # warns). The co-located dev unit above keeps its start limit, so it keeps a
 # fixed delay: a growing one would spread the ten tries out past the window.
