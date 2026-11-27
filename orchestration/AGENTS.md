@@ -1047,7 +1047,10 @@ With a dev user set and `turbopanel_ui_mode=static`, `ui-build` runs
 `pnpm exec expo export --platform web --dev` with `--max-workers`
 (`turbopanel_ui_export_max_workers`) and `NODE_OPTIONS=--max-old-space-size`
 (`turbopanel_ui_export_node_heap_mb`), both overridable role defaults sized for a
-4 GiB guest. A marker file in the output records production or development, so
+4 GiB guest, and `EXPO_NO_BUNDLE_SPLITTING=1`: a development export names every
+async chunk after the hash of empty content, so same-named route chunks
+overwrite each other (`Requiring unknown module`). The export is therefore one
+entry script, and a post-build check fails the run if any other script appears. A marker file in the output records production or development, so
 a switch re-exports; the stale check also watches the lockfile and config on a
 development export. Production keeps `pnpm export` and its stale check. In
 `instance-launch` the dev-surface settings follow only the dev user and source
