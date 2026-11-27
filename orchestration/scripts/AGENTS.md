@@ -41,9 +41,20 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   (`tp_config_root_self_sealed` / `tp_self_sealed_ok`; anything else fails
   closed). Unprivileged tests can only exercise that rule lifted from the
   script, since it needs a directory owned by a uid other than the stand-in
-  root. Verbs
-  that use `INSTALL_ROOT` (`$_self_dir/..`: `lib/`, `vendor/lsphp`) still
-  assume the installed layout.
+  root. The
+  root helpers that sit beside tp-host in `orchestration/scripts`
+  (`tp-php-loopback`, `tp-tunnel-loopback`, `tp-build-loopback`,
+  `tp-build-runner`) are run, and named in unit `ExecStartPre=+` lines
+  (`tp_site_lifecycle_ok`, `tp_php_unit_ok`), from `HELPER_DIR`, which is
+  always tp-host's own directory: `<install>/lib` on a managed host, the
+  checkout's `orchestration/scripts` in development (where they are not copied
+  into `<install>/lib`). The daemon names the same folder in those lines
+  (`hostHelperDir` in `src/permissions/host-sudo.ts`: `layout.libDir` on a
+  managed install, the checkout's `orchestration/scripts` in development).
+  Nothing from the environment or the daemon chooses it,
+  and there is no fallback path. Other verbs that use `INSTALL_ROOT`
+  (`$_self_dir/..`: `lib/tp-backup-run`, `lib/panel-identity`, `vendor/`,
+  `share/`) still assume the installed layout.
   `host-sudo.test.ts` fails on any unwrapped `sudo -n <verb>` literal in `src/`.
   tp-host accepts only the argument shapes the daemon produces and:
   - confines paths to the trees TurboPanel owns (`/etc/turbopanel`,
@@ -108,7 +119,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `turbopanel-deploycmd-*.service` or `turbopanel-worker-*@.service` (a site's
     post-deploy commands and workers) may carry the same file and, beyond the
     account checks, must carry (`tp_site_lifecycle_ok`) exactly one
-    `ExecStartPre=+<lib>/tp-php-loopback sync` (the only `+` prefix any tenant
+    `ExecStartPre=+<helper dir>/tp-php-loopback sync` (the only `+` prefix any tenant
     unit may have), `IPAddressDeny=` and `IPAddressAllow=` equal to
     `SITE_IP_DENY` / `SITE_IP_ALLOW` (the same strings the per-site PHP unit is
     pinned to) and `PrivateDevices=yes`; no other unit may carry these keys.

@@ -26,6 +26,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { serviceTree } from "../../paths/layout.ts";
+import { hostHelperDir } from "../../permissions/host-sudo.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { markPostDeployPassed } from "./post-deploy-marker.ts";
 import {
@@ -191,6 +192,7 @@ function postDeployJobs(
       binding,
       opts: {
         layout: deploy.layout,
+        helperDir: hostHelperDir(deploy.layout),
         username: context.username,
         workingDirectory: release.releaseDir,
         environmentFile: context.environmentFile,
@@ -330,6 +332,7 @@ export function workerSpecs(deploy: SiteLifecycleDeploy): WorkerApplySpec[] {
     ) continue;
     specs.push({
       layout: deploy.layout,
+      helperDir: hostHelperDir(deploy.layout),
       composeServiceName: site.composeServiceName,
       username: context.username,
       workingDirectory: context.workingDirectory,

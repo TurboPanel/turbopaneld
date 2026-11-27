@@ -319,7 +319,10 @@ export type SitePhpRuntimeSpec = Readonly<{
   home: string;
   /** The daemon's config root (`/etc/turbopanel`). */
   configDir: string;
-  /** The root-owned lib directory holding `tp-php-loopback` (`<install>/lib`). */
+  /**
+   * The folder holding `tp-php-loopback`: `<install>/lib`, or in development
+   * the checkout's `orchestration/scripts` (`hostHelperDir`).
+   */
   libDir: string;
   /** Vendored runtimes (`<install root>/vendor`): lsphp lives here. */
   runtimesDir: string;
@@ -437,8 +440,8 @@ export const SITE_PHP_IP_DENY =
 export const SITE_PHP_IP_ALLOW = "127.0.0.1 127.0.0.53";
 
 /** The root guard every PHP unit runs first; tp-host pins this exact line. */
-export function sitePhpLoopbackGuard(libDir: string): string {
-  return `+${libDir}/tp-php-loopback sync`;
+export function sitePhpLoopbackGuard(helperDir: string): string {
+  return `+${helperDir}/tp-php-loopback sync`;
 }
 
 /** The vendored lsphp of one series (roles/openlitespeed). */

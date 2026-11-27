@@ -2,6 +2,7 @@ import { assertEquals } from "@std/assert";
 import { dirname, fromFileUrl, join, relative } from "@std/path";
 import {
   HOST_PROGRAM_VERBS,
+  hostHelperDir,
   hostSudoArgs,
   TP_HOST_ONLY_VERBS,
   TP_HOST_VERBS,
@@ -96,6 +97,19 @@ const DEV = {
 };
 const DEV_TP_HOST =
   "/home/dev/turbopanel/turbopaneld/orchestration/scripts/tp-host";
+
+test("hostHelperDir names libDir when managed and the checkout's scripts folder in development", () => {
+  const layout = { libDir: "/opt/turbopanel/lib" };
+  assertEquals(hostHelperDir(layout, MANAGED), "/opt/turbopanel/lib");
+  assertEquals(
+    hostHelperDir(layout, { ...MANAGED, uid: 0 }),
+    "/opt/turbopanel/lib",
+  );
+  assertEquals(
+    hostHelperDir(layout, DEV),
+    "/home/dev/turbopanel/turbopaneld/orchestration/scripts",
+  );
+});
 
 test("development runs a tp-host-only verb through the checkout's tp-host", () => {
   assertEquals(hostSudoArgs(["-n", "tunnel-env-install", "instance"], DEV), [

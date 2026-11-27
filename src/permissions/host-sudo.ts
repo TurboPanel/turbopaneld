@@ -121,11 +121,32 @@ export function tpHostPath(
 export function devTpHostPath(
   env: Record<string, string | undefined> = Deno.env.toObject(),
 ): string {
+  return join(devHelperDir(env), "tp-host");
+}
+
+function devHelperDir(env: Record<string, string | undefined>): string {
   return join(
     resolveLayout(env, { forceMode: "development" }).orchestrationDir,
     "scripts",
-    "tp-host",
   );
+}
+
+/**
+ * The folder tp-host runs its sibling root helpers from (`tp-php-loopback`, …)
+ * and the one a unit's `ExecStartPre=+` line must name: the managed install's
+ * `libDir`, or in development the checkout's `orchestration/scripts` (the
+ * helpers are not installed to `libDir` there). Decided like
+ * {@link hostSudoArgs}.
+ */
+export function hostHelperDir(
+  layout: { libDir: string },
+  options: HostSudoOptions = {},
+): string {
+  const mode = options.installMode ?? ORCHESTRATION_LAYOUT.mode;
+  if (mode === "development") {
+    return devHelperDir(options.env ?? Deno.env.toObject());
+  }
+  return layout.libDir;
 }
 
 /**

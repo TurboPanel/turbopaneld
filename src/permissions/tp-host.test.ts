@@ -4624,6 +4624,34 @@ test("tunnel-loopback-sync runs the installed port lock with sync and nothing el
   });
 });
 
+test("run from a checkout, tp-host finds its loopback helpers beside it, not under <root>/lib", async () => {
+  await withHost(async (host) => {
+    // Development layout: the helpers sit next to tp-host in
+    // orchestration/scripts, and there is no lib/ beside that folder.
+    const dir = host.path("checkout/orchestration/scripts");
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.copyFile(SCRIPT, join(dir, "tp-host"));
+    const proc = async (verb: string) => {
+      const out = await new Deno.Command("sh", {
+        args: [join(dir, "tp-host"), verb],
+        clearEnv: true,
+        env: { PATH: "/usr/bin:/bin", TP_HOST_TEST_PREFIX: host.prefix },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return new TextDecoder().decode(out.stdout).trim();
+    };
+    assertEquals(
+      await proc("php-loopback-sync"),
+      `EXEC [${dir}/tp-php-loopback] [sync]`,
+    );
+    assertEquals(
+      await proc("tunnel-loopback-sync"),
+      `EXEC [${dir}/tp-tunnel-loopback] [sync]`,
+    );
+  });
+});
+
 test("the top of the config and state roots is root's: no verb removes, renames, re-owns or writes a root-owned entry there", async () => {
   await withHost(async (host) => {
     const staged = host.path("tmp/staged");
