@@ -2340,6 +2340,23 @@ test("docker-backed optional roles gate readiness and stop disabled containers",
   }
 });
 
+test("redis-insight keeps the dev-owned data volume owner with nocopy, production mount unchanged", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/redis-insight/tasks/main.yml"),
+  );
+  assert(
+    tasks.includes(
+      `"{{ redis_insight_volume_name }}:/data:rw{{ ',nocopy' if (turbopanel_dev_user | default('') | length > 0) else '' }}"`,
+    ),
+    "data mount gains nocopy only when a dev user is set",
+  );
+  const chown = tasks.indexOf(
+    "Give the redis-insight data volume to the container user",
+  );
+  const create = tasks.indexOf("Create and start redis-insight container");
+  assert(chown > 0 && chown < create, "volume chown runs before creation");
+});
+
 test("docker role merges daemon.json address pools and live-restore, skipping the restart on a co-located instance host", async () => {
   const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
   const main = await Deno.readTextFile(join(roleDir, "tasks/main.yml"));
