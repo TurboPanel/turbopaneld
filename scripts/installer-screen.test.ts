@@ -716,6 +716,92 @@ test("screen_run sends command output to the log and returns its status", async 
   });
 });
 
+test("calls with missing arguments, a leading dash or printf characters are safe under set -eu", async () => {
+  await withTemp(async (dir) => {
+    const file = join(dir, "args.sh");
+    await Deno.writeTextFile(
+      file,
+      `set -eu\n. "${LIB}"\nscreen_init\nscreen_init\n` +
+        `screen_init 1.0 release panel "${join(dir, "a.log")}" Aa Bb Cc\n` +
+        `screen_area_start\nscreen_sub\nscreen_sub -n\nscreen_sub -- '%s%d' '%x'\n` +
+        `screen_area_done\nscreen_area_start -e\nscreen_sub '%s%s%s' -n\n` +
+        `screen_area_done '%d'\nscreen_area_start '--'\nscreen_area_fail\n` +
+        `screen_summary\nscreen_summary_item\nscreen_summary_warn\nscreen_finish\n` +
+        `echo reached-end\n`,
+    );
+    for (const env of [LIVE_ENV, PLAIN_ENV]) {
+      const r = await run(["dash"], [file], env);
+      assertEquals(r.code, 0, r.out);
+      assertStringIncludes(r.out, "reached-end");
+      assert(!r.out.includes("bad substitution"));
+    }
+    const log = await Deno.readTextFile(join(dir, "a.log"));
+    assertStringIncludes(log, "%s%d");
+    assertStringIncludes(log, "-n");
+  });
+});
+
+test("a failed bar under set -e keeps the run going to the failure screen", async () => {
+  await withTemp(async (dir) => {
+    const file = await driver(
+      dir,
+      "set -e\nscreen_area_start Aa\nscreen_area_fail boom\necho after-fail",
+    );
+    const r = await run(["dash"], [file], LIVE_ENV);
+    assertEquals(r.code, 0, r.out);
+    assertStringIncludes(r.out, "after-fail");
+    assertStringIncludes(r.out, "boom");
+  });
+});
+
+test("screen_wait and the busy spinner return, keep the screen intact and leave no child behind", async () => {
+  await withTemp(async (dir) => {
+    const file = await driver(
+      dir,
+      "screen_area_start Aa\nscreen_wait 1\nscreen_busy_start\nsleep 1\n" +
+        "screen_busy_stop\nscreen_busy_start\nscreen_area_done ok\nscreen_finish\n" +
+        'if [ -n "$(jobs -p)" ]; then echo child-left; fi',
+    );
+    for (const env of [LIVE_ENV, PLAIN_ENV]) {
+      const r = await run(["dash"], [file], env);
+      assertEquals(r.code, 0, r.out);
+      assert(!r.out.includes("child-left"));
+    }
+  });
+});
+
+test("stopping the spinner right after starting it never hangs", async () => {
+  await withTemp(async (dir) => {
+    const file = await driver(
+      dir,
+      "screen_area_start Aa\ni=0\nwhile [ $i -lt 300 ]; do\n  screen_busy_start\n  screen_busy_stop\n  i=$((i + 1))\ndone\n" +
+        "screen_area_done ok\nscreen_finish\necho stress-done",
+    );
+    const outFile = join(dir, "stress.out");
+    // Output to a file and a hard deadline: a regression fails, not hangs.
+    const script = `dash '${file}' >'${outFile}' 2>&1 </dev/null`;
+    const child = new Deno.Command("sh", {
+      args: ["-c", script],
+      clearEnv: true,
+      env: { PATH: Deno.env.get("PATH") ?? "/usr/bin:/bin", ...LIVE_ENV },
+      stdout: "null",
+      stderr: "null",
+    }).spawn();
+    const timer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+    }, 60_000);
+    const status = await child.status;
+    clearTimeout(timer);
+    const shown = await Deno.readTextFile(outFile);
+    assertEquals(status.code, 0, "the spinner stop hung or failed");
+    assertStringIncludes(shown, "stress-done");
+  });
+});
+
 test("both files are valid POSIX sh and run under dash and busybox ash", async () => {
   const shells: string[][] = [];
   if (await haveShell("dash")) shells.push(["dash"]);

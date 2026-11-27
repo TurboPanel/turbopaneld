@@ -178,8 +178,10 @@ async function runWait(options: Options) {
       `TP_KF_ENROL_REF='${enrolRef}'`,
       `NO_START=${options.noStart ? "true" : "false"}`,
       `LICENSE_ID=${options.noLicense ? "" : "license-123"}`,
+      "TP_ENROLL_CONFIRMED=0",
       "rc=0; tp_wait_for_enrollment || rc=$?",
       'echo "rc=$rc"',
+      'echo "confirmed=$TP_ENROLL_CONFIRMED"',
     ].join("\n");
     const env: Record<string, string> = { PATH: bin };
     if (options.waitSeconds !== undefined) {
@@ -225,7 +227,35 @@ test("installer succeeds once the daemon reports a session", async () => {
   });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
   assertStringIncludes(res.stdout, "OK The control plane accepted this server");
+  assertStringIncludes(res.stdout, "confirmed=1");
   assertEquals(res.sleepCalls, []);
+});
+
+test("only an accepted enrolment counts as confirmed for the summary", async () => {
+  const unconfirmed: Options[] = [
+    {},
+    { noStart: true },
+    { noLicense: true },
+    { features: null },
+    {
+      status: formatEnrollStatus({
+        state: "parked",
+        kind: "awaiting-seat",
+        reason: "402 No free size",
+      }),
+    },
+  ];
+  for (const options of unconfirmed) {
+    const res = await runWait(options);
+    assertStringIncludes(res.stdout, "rc=0", res.stderr);
+    assertStringIncludes(
+      res.stdout,
+      "confirmed=0",
+      JSON.stringify(options) + res.stdout,
+    );
+  }
+  const accepted = await runWait({ enrol: "fresh" });
+  assertStringIncludes(accepted.stdout, "confirmed=1", accepted.stdout);
 });
 
 test("installer fails with the reason when the enrollment is refused", async () => {
