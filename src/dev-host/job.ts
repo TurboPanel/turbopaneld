@@ -682,7 +682,7 @@ export class DevHostJobRunner {
 }
 
 /** The ui-export playbook, with the last output line as the failure reason. */
-async function defaultUiExport(): Promise<
+export async function defaultUiExport(): Promise<
   { ok: true } | { ok: false; detail: string }
 > {
   const lines: string[] = [];

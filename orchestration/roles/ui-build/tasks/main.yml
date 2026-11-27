@@ -103,7 +103,7 @@
     dest: "{{ turbopanel_ui_export_marker }}"
     owner: "{{ instance_user }}"
     group: "{{ turbopanel_group }}"
-    mode: "0644"
+    mode: "0640"
 
 - name: Download UI static export from CDN
   when:
