@@ -63,6 +63,13 @@ fi
 
 _self_dir="$(CDPATH='' cd -P -- "$(dirname -- "$0")" && pwd -P)"
 INSTALL_ROOT="$(CDPATH='' cd -P -- "$_self_dir/.." && pwd -P)"
+# Where the root helpers that sit beside this script run from: tp-php-loopback,
+# tp-tunnel-loopback, tp-build-loopback and tp-build-runner. Always this
+# script's own directory: <install>/lib on a managed host (so the same path as
+# $INSTALL_ROOT/lib there) and <checkout>/orchestration/scripts in development,
+# where the helpers are not copied into <install>/lib. Never taken from the
+# environment or the daemon.
+HELPER_DIR="$_self_dir"
 # The account that owns this script and the script's mode, for one check only
 # (tp_config_root_self_sealed). Empty when unreadable, which fails that check.
 _self_meta="$(stat -L -c '%u %a' -- "$_self_dir/${0##*/}" 2>/dev/null)" || _self_meta=""
@@ -1393,7 +1400,7 @@ tp_unit_ok() {
       ;;
     *) ;;
   esac
-  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v site="${_uk_site:+1}" -v life="${_uk_life:+1}" -v guard="+$INSTALL_ROOT/lib/tp-php-loopback sync" -v hostcap="$HOSTING_CADDY_CAP" '
+  _uk_meta="$(awk -v name="$_uk_name" -v min="$PRINCIPAL_ID_MIN" -v backup="${_uk_backup:+1}" -v hosting="$_uk_hosting" -v app="${_uk_app:+1}" -v site="${_uk_site:+1}" -v life="${_uk_life:+1}" -v guard="+$HELPER_DIR/tp-php-loopback sync" -v hostcap="$HOSTING_CADDY_CAP" '
     function fail(msg) { print "tp-host: unit " name ": " msg > "/dev/stderr"; bad = 1; exit 1 }
     BEGIN {
       split("Description After Before Wants Requires PartOf StartLimitBurst StartLimitIntervalSec", a, " ");
@@ -1541,7 +1548,7 @@ tp_site_lifecycle_ok() {
   while IFS= read -r _sl_line || [ -n "$_sl_line" ]; do
     case "$_sl_line" in
       ExecStartPre=*)
-        [ "${_sl_line#*=}" = "+$INSTALL_ROOT/lib/tp-php-loopback sync" ] || return 1
+        [ "${_sl_line#*=}" = "+$HELPER_DIR/tp-php-loopback sync" ] || return 1
         _sl_pre=$((_sl_pre + 1))
         ;;
       IPAddressDeny=*)
@@ -2091,7 +2098,7 @@ tp_php_service_pinned_ok() {
     Service.IPAddressDeny=*) [ "${1#*=}" = "$SITE_IP_DENY" ] ;;
     Service.IPAddressAllow=*) [ "${1#*=}" = "$SITE_IP_ALLOW" ] ;;
     # The only root hook (`+`): the loopback guard, from this script's own lib/.
-    Service.ExecStartPre=*) [ "${1#*=}" = "+$INSTALL_ROOT/lib/tp-php-loopback sync" ] ;;
+    Service.ExecStartPre=*) [ "${1#*=}" = "+$HELPER_DIR/tp-php-loopback sync" ] ;;
     Service.BindPaths=*) [ "${1#*=}" = "$_pl_home/tmp:/tmp" ] ;;
     # The daemon's config tree is tp's alone (0750); inside the unit it is an
     # empty tmpfs holding only this site's config directory, read-only.
@@ -2545,7 +2552,7 @@ tp_php_install() {
 # units on disk. The daemon runs it after installing or removing a runtime.
 tp_verb_php_loopback_sync() {
   [ $# -eq 0 ] || tp_die "php-loopback-sync: takes no arguments"
-  tp_run "$INSTALL_ROOT/lib/tp-php-loopback" sync
+  tp_run "$HELPER_DIR/tp-php-loopback" sync
 }
 
 # tunnel-loopback-sync: reload the nftables table that lets only root and the
@@ -2553,7 +2560,7 @@ tp_verb_php_loopback_sync() {
 # (lib/tp-tunnel-loopback). The daemon runs it before it starts a connector.
 tp_verb_tunnel_loopback_sync() {
   [ $# -eq 0 ] || tp_die "tunnel-loopback-sync: takes no arguments"
-  tp_run "$INSTALL_ROOT/lib/tp-tunnel-loopback" sync
+  tp_run "$HELPER_DIR/tp-tunnel-loopback" sync
 }
 
 # php-test <siteId>: the site's PHP binary checks its own config, as the site's
@@ -4444,7 +4451,7 @@ BUILD_LOCK="$P/run/tpbuild.lock"
 # root:tp 0750 like this script. PID 1 reads it as root and hands it to the
 # unit as a credential (a private, read-only copy owned by the unit's user),
 # which /bin/sh then runs: the build's user never reaches /opt/turbopanel.
-BUILD_RUNNER="$INSTALL_ROOT/lib/tp-build-runner"
+BUILD_RUNNER="$HELPER_DIR/tp-build-runner"
 BUILD_LOCK_WAIT_SEC=2100
 # The CPU and memory limits are the smallest limits set for the build
 # (organization, server, service), which the daemon passes as build-run's
@@ -4504,7 +4511,7 @@ BUILD_SYSTEMD_MIN=247
 # public egress already reaches. Loopback (127.0.0.0/8, ::1) is NOT denied here:
 # Turbopack's helper processes talk to each other over it. lib/tp-build-loopback
 # (nftables, per build unit cgroup) refuses the platform's loopback ports instead.
-BUILD_LOOPBACK="$INSTALL_ROOT/lib/tp-build-loopback"
+BUILD_LOOPBACK="$HELPER_DIR/tp-build-loopback"
 BUILD_DENY_V4="0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 169.254.0.0/16 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3"
 # NAT64 (64:ff9b::/96) and 6to4 (2002::/16) embed IPv4 addresses, private
 # ones included, so both are denied whole.
