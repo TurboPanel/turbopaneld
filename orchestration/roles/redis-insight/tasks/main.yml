@@ -30,9 +30,15 @@
   changed_when: _redis_insight_volume_create.rc == 0
   failed_when: false
 
-# Dev runs the container as the dev uid:gid (see _redis_insight_docker_user),
-# but a new volume takes the image's owner (node, 1000:1000). On a host whose
-# dev user is not uid 1000 the app cannot write /data and restarts forever.
+# Dev runs the container as the dev uid:gid (see _redis_insight_docker_user).
+# On a host whose dev user is not uid 1000 the app cannot write /data unless
+# the volume belongs to that user. The chown below only survives container
+# creation because the data mount uses the nocopy option: without it, the
+# first start of a still-empty volume copies the image's /data into it and
+# resets the mountpoint owner to the image's owner (1000:1000), which undoes
+# the chown. An install broken that way heals on the next converge: the
+# restarting container is removed further down and recreated against the
+# volume this task has just fixed (it is no longer empty, so nothing is copied).
 - name: Inspect redis-insight data volume
   ansible.builtin.command:
     argv: [docker, volume, inspect, "{{ redis_insight_volume_name }}"]
@@ -190,7 +196,7 @@
       - "-p"
       - "127.0.0.1:{{ redis_insight_web_port }}:5540"
       - "-v"
-      - "{{ redis_insight_volume_name }}:/data:rw"
+      - "{{ redis_insight_volume_name }}:/data:rw{{ ',nocopy' if (turbopanel_dev_user | default('') | length > 0) else '' }}"
       - "-v"
       - "{{ redis_socket_mount_dir }}:{{ redis_socket_mount_dir }}:ro"
       - "-e"

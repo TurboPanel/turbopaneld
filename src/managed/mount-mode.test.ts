@@ -70,7 +70,9 @@ test("helper container mount arguments state a mode", () => {
   );
 });
 
-const MODE_END = /:(ro|rw)(`|"|'|\}\})?,?$/;
+// The mode may be followed by one Jinja expression that appends volume
+// options (for example `,nocopy`); the mode itself is still stated.
+const MODE_END = /:(ro|rw)(\{\{[^}]*\}\}"?|`|"|'|\}\})?,?$/;
 
 async function sourceFiles(
   dir: string,
