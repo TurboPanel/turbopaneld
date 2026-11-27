@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { waitFor } from "../testing/wait-for.ts";
 import type { RunResult } from "../deploy/ensure-principal.ts";
 import type { ConnectorIo } from "./connector-service.ts";
 import {
@@ -124,6 +125,58 @@ test("the update run moves an older tunnel to the pinned version", async () => {
       calls.filter((c) => c.endsWith(" tunnel-loopback-sync")).length,
       1,
     );
+  });
+});
+
+test("a daemon start with a changed pin runs the whole rolling update in order", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    const steps: string[] = [];
+    // The pinned program is downloaded and verified before any unit is made.
+    io.ensureBinary = () => {
+      steps.push("download-and-verify");
+      return Promise.resolve(
+        "/opt/turbopanel/vendor/cloudflared/2026.11.1/cloudflared",
+      );
+    };
+    io.probe = () => {
+      steps.push("ready");
+      return Promise.resolve({ kind: "ready", connections: 4 });
+    };
+    io.portFree = () => Promise.resolve(true);
+    io.unitExists = () => Promise.resolve(false);
+    io.sleep = () => Promise.resolve();
+    io.unitTexts = () => Promise.resolve([]);
+    let prunedDone = false;
+    io.pruneVersions = (keep) => {
+      steps.push(`prune keep=${[...keep].join(",")}`);
+      prunedDone = true;
+      return Promise.resolve();
+    };
+    const run = io.run;
+    io.run = (command, args) => {
+      const text = [command, ...args].join(" ");
+      if (text.includes("start turbopanel-tunnel-")) steps.push("start-new");
+      if (text.includes("disable --now turbopanel-tunnel-")) {
+        steps.push("stop-old");
+      }
+      return args.includes("is-active")
+        ? Promise.resolve({ success: true, stdout: "active", stderr: "" })
+        : run(command, args);
+    };
+    await startTunnels(new AbortController().signal);
+    await waitFor("the old versions to be pruned", () => prunedDone, {
+      timeoutMs: 60_000,
+    });
+    const order = ["download-and-verify", "start-new", "ready", "stop-old"];
+    const seen = steps.filter((s) => order.includes(s));
+    assertEquals([...new Set(seen)], order, steps.join("\n"));
+    assertEquals(steps.at(-1), "prune keep=2026.11.1");
+    assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
+    const record = JSON.parse(
+      await Deno.readTextFile(join(dir, `${UUID}.json`)),
+    );
+    assertEquals([record.slot, record.version], ["b", "2026.11.1"]);
   });
 });
 

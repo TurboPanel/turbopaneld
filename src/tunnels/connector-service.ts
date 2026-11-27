@@ -17,16 +17,20 @@ import {
   ORCHESTRATION_LAYOUT,
   TUNNELS_DIR,
 } from "../orchestration/assets.ts";
-import { ensureCloudflared } from "../orchestration/cloudflared.ts";
+import {
+  ensureCloudflared,
+  pruneCloudflaredVersions,
+} from "../orchestration/cloudflared.ts";
 import { sha256HexOfBytes } from "../orchestration/download-verify.ts";
 import type { RunFn, RunResult } from "../deploy/ensure-principal.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import {
+  installedFileMatches,
   installUnitFile,
   writePrivateFileAtomic,
 } from "../permissions/host-unit-files.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { logInfo, logWarn } from "../util/logger.ts";
+import { logError, logInfo, logWarn } from "../util/logger.ts";
 import { mapSequential, repeatSequential } from "../util/sequential.ts";
 import {
   allocateMetricsPort,
@@ -44,6 +48,8 @@ import {
   renderTunnelEnvFile,
   renderTunnelUnit,
   slotSuffix,
+  SYSTEMD_UNIT_DIR,
+  TUNNEL_UNIT_PREFIX,
   tunnelEnvPath,
   tunnelUnitName,
   tunnelUnitPath,
@@ -72,6 +78,13 @@ export type ConnectorIo = {
   readyPollMs?: number;
   /** Wait; tests replace it so no real time passes. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Delete connector program folders other than the given versions. Unset: no
+   * cleanup (only the real daemon wires it, see {@link defaultConnectorIo}).
+   */
+  pruneVersions?: (keep: Set<string>) => Promise<unknown>;
+  /** The text of every installed connector unit (default: the real unit folder). */
+  unitTexts?: () => Promise<string[]>;
 };
 
 const DEFAULT_READY_TIMEOUT_MS = 90_000;
@@ -187,6 +200,7 @@ export function defaultConnectorIo(): ConnectorIo {
     version: CLOUDFLARED_VERSION,
     probe: probeReadyDefault,
     readHostnames: readHostnamesDefault,
+    pruneVersions: (keep) => pruneCloudflaredVersions(keep),
   };
 }
 
@@ -434,6 +448,47 @@ export async function lockMetricsPorts(io: ConnectorIo): Promise<boolean> {
   return false;
 }
 
+/**
+ * Write the unit for one slot (and reload systemd when it changed). Returns
+ * whether the installed text changed.
+ */
+async function installSlotUnit(
+  io: ConnectorIo,
+  params: {
+    id: string;
+    binary: string;
+    port: number;
+    slot: ConnectorSlot;
+    firstInstall: boolean;
+  },
+): Promise<boolean> {
+  const { id, slot } = params;
+  const stagedUnit = join(io.workDir, `${id}${slotSuffix(slot)}.service`);
+  let unitChanged: boolean;
+  try {
+    unitChanged = await installUnitFile(io.run, {
+      stagedPath: stagedUnit,
+      installedPath: tunnelUnitPath(id, undefined, slot),
+      contents: renderTunnelUnit({
+        id,
+        binary: params.binary,
+        port: params.port,
+        envFile: tunnelEnvPath(io.layout, id),
+        slot,
+      }),
+    });
+  } catch (err) {
+    // A token copy no unit names is a secret left for nothing; a tunnel
+    // that already ran keeps the copy its unit still points at.
+    if (params.firstInstall) await removeEnvCopy(io, id).catch(() => undefined);
+    throw err;
+  } finally {
+    await Deno.remove(stagedUnit).catch(() => undefined);
+  }
+  if (unitChanged) await mustSystemctl(io, ["daemon-reload"]);
+  return unitChanged;
+}
+
 async function installConnectorNow(
   io: ConnectorIo,
   id: string,
@@ -449,38 +504,35 @@ async function installConnectorNow(
 
   await stageAndInstallEnv(io, id, token);
 
-  // A running tunnel keeps its slot: a changed token restarts that unit in
-  // place. Moving to a new version without a gap is `updateConnector`'s job.
+  // A running tunnel keeps its slot, and its unit file as it is: a resend
+  // never swaps the connector program. Moving to a new version without a gap
+  // is `updateConnector`'s job; a changed token starts a new unit beside the
+  // old one, like a version change, so no path restarts a working connector.
   const slot: ConnectorSlot = previous?.slot ?? "a";
-  const stagedUnit = join(io.workDir, `${id}${slotSuffix(slot)}.service`);
-  let unitChanged: boolean;
-  try {
-    unitChanged = await installUnitFile(io.run, {
-      stagedPath: stagedUnit,
-      installedPath: tunnelUnitPath(id, undefined, slot),
-      contents: renderTunnelUnit({
-        id,
-        binary,
-        port,
-        envFile: tunnelEnvPath(io.layout, id),
-        slot,
-      }),
-    });
-  } catch (err) {
-    // A token copy no unit names is a secret left for nothing; a tunnel that
-    // already ran keeps the copy its unit still points at.
-    if (!previous) await removeEnvCopy(io, id).catch(() => undefined);
-    throw err;
-  } finally {
-    await Deno.remove(stagedUnit).catch(() => undefined);
-  }
-  if (unitChanged) await mustSystemctl(io, ["daemon-reload"]);
+  const exists = io.unitExists ?? defaultUnitExists;
+  const keepUnit = previous != null &&
+    await exists(tunnelUnitPath(id, undefined, slot));
+  const unitChanged = keepUnit ? false : await installSlotUnit(io, {
+    id,
+    binary,
+    port,
+    slot,
+    firstInstall: !previous,
+  });
 
   // Before the connector listens, so its metrics port is never open to
   // local accounts (the boot unit loads the same table after a reboot).
   await lockMetricsPorts(io);
   const unit = tunnelUnitName(id, slot);
   await systemctl(io, ["reset-failed", unit]);
+  if (keepUnit && previous && previous.tokenDigest !== tokenDigest) {
+    // The token copy is already replaced; the running unit read the old one
+    // at start and keeps it. The record keeps the old digest until the new
+    // unit is committed, so a failed switch is retried by the next send.
+    const outcome = await switchSlot(io, previous, tokenDigest);
+    if (outcome.kind === "rolled-back") throw new Error(outcome.reason);
+    return;
+  }
   if (previous && !unitChanged && previous.tokenDigest === tokenDigest) {
     await mustSystemctl(io, ["enable", "--now", unit]);
   } else {
@@ -490,13 +542,9 @@ async function installConnectorNow(
 
   // Only after the service is enabled and (re)started: a failed attempt leaves
   // the old record, so a retry sees the old token digest and restarts again.
-  const record: ConnectorRecord = {
-    id,
-    port,
-    version: io.version,
-    tokenDigest,
-    slot,
-  };
+  const record: ConnectorRecord = keepUnit && previous
+    ? { ...previous, tokenDigest }
+    : { id, port, version: io.version, tokenDigest, slot };
   await writePrivateFileAtomic(
     io.workDir,
     `${id}.json`,
@@ -534,21 +582,51 @@ async function removeEnvCopy(io: ConnectorIo, id: string): Promise<void> {
   }
 }
 
-/** Stop and delete one slot's unit file. Missing units are not an error. */
+/** Whether systemd says the unit still has a process (running or winding down). */
+async function unitStillRuns(io: ConnectorIo, unit: string): Promise<boolean> {
+  const state = await systemctl(io, ["is-active", unit]);
+  const word = state.stdout.split("\n")[0]?.trim() ?? "";
+  return word === "active" || word === "activating" ||
+    word === "deactivating" || word === "reloading";
+}
+
+/** The unit stopped but its file could not be removed. */
+class UnitFileRemoveError extends Error {}
+
+/**
+ * Stop and delete one slot's unit file. Missing units are not an error.
+ *
+ * The stop is checked: a refused `disable --now` is tried once more, and when
+ * the unit still has a process after that this throws and leaves the unit file
+ * where it is, so the process stays under systemd's control and the next round
+ * finds the stray unit and tries again. Callers that drop the old connector
+ * after a switch report that loudly; this never touches any other unit.
+ */
 async function dropSlotUnit(
   io: ConnectorIo,
   id: string,
   slot: ConnectorSlot,
 ): Promise<void> {
   const unit = tunnelUnitName(id, slot);
-  // Not-installed units answer with an error; nothing to stop is fine.
-  await systemctl(io, ["disable", "--now", unit]);
+  let stop = await systemctl(io, ["disable", "--now", unit]);
+  if (!stop.success) {
+    // Not-installed units answer with an error too, so the answer alone does
+    // not say: one retry, then ask whether anything still runs.
+    stop = await systemctl(io, ["disable", "--now", unit]);
+  }
+  if (!stop.success && (await unitStillRuns(io, unit))) {
+    throw new Error(
+      `stopping ${unit} failed: ${stop.stderr || "no detail"}`,
+    );
+  }
   const rm = await io.run(
     "sudo",
     hostSudoArgs(["-n", "rm", "-f", "--", tunnelUnitPath(id, undefined, slot)]),
   );
   if (!rm.success) {
-    throw new Error(`removing ${unit} failed: ${rm.stderr || "no detail"}`);
+    throw new UnitFileRemoveError(
+      `removing ${unit} failed: ${rm.stderr || "no detail"}`,
+    );
   }
   await systemctl(io, ["reset-failed", unit]);
 }
@@ -832,41 +910,82 @@ async function waitUntilReady(io: ConnectorIo, port: number): Promise<boolean> {
 
 /**
  * A unit written by an older daemon can carry a command line the pinned
- * connector rejects, so it crash-loops and never connects. Render the unit as
- * this daemon would, and when the installed text differs, replace it and
- * restart that one unit. A unit that already matches is left running.
+ * connector rejects, or lack the stop settings. Render the unit as this daemon
+ * would and say whether the installed text differs. Nothing is installed or
+ * restarted here: a stale unit is replaced by the same start-beside, wait,
+ * stop-the-old switch a version change uses.
  */
-async function refreshStaleUnit(
+async function unitIsStale(
   io: ConnectorIo,
   record: ConnectorRecord,
-): Promise<void> {
+): Promise<boolean> {
   const binary = await io.ensureBinary();
   const staged = join(
     io.workDir,
     `${record.id}${slotSuffix(record.slot)}.service`,
   );
-  let changed: boolean;
   try {
-    changed = await installUnitFile(io.run, {
-      stagedPath: staged,
-      installedPath: tunnelUnitPath(record.id, undefined, record.slot),
-      contents: renderTunnelUnit({
+    await Deno.writeTextFile(
+      staged,
+      renderTunnelUnit({
         id: record.id,
         binary,
         port: record.port,
         envFile: tunnelEnvPath(io.layout, record.id),
         slot: record.slot,
       }),
-    });
+      { mode: 0o640 },
+    );
+    return !(await installedFileMatches(
+      io.run,
+      staged,
+      tunnelUnitPath(record.id, undefined, record.slot),
+    ));
   } finally {
     await Deno.remove(staged).catch(() => undefined);
   }
-  if (!changed) return;
-  await mustSystemctl(io, ["daemon-reload"]);
-  const unit = tunnelUnitName(record.id, record.slot);
-  await systemctl(io, ["reset-failed", unit]);
-  await mustSystemctl(io, ["restart", unit]);
-  logInfo("tunnels", `connector ${record.id}: replaced an out-of-date unit`);
+}
+
+async function defaultUnitTexts(): Promise<string[]> {
+  const texts: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(SYSTEMD_UNIT_DIR)) {
+      if (!entry.isFile || !entry.name.startsWith(TUNNEL_UNIT_PREFIX)) continue;
+      texts.push(await Deno.readTextFile(join(SYSTEMD_UNIT_DIR, entry.name)));
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return texts;
+}
+
+const UNIT_VERSION_RE = /\/vendor\/cloudflared\/([0-9.]+)\/cloudflared /g;
+
+/**
+ * Delete connector program folders that nothing uses. Kept: the pinned
+ * version, the version of every record, and every version any installed
+ * connector unit file names (so a running old unit, a tunnel not yet moved, or
+ * a damaged record never loses its program). If any of that cannot be read,
+ * nothing is deleted. Never throws: cleanup is not part of the update, and a
+ * failure only leaves old files for the next round.
+ */
+async function pruneSuperseded(io: ConnectorIo): Promise<void> {
+  if (!io.pruneVersions) return;
+  try {
+    const keep = new Set<string>([io.version]);
+    for (const record of await listRecords(io)) keep.add(record.version);
+    for (const text of await (io.unitTexts ?? defaultUnitTexts)()) {
+      for (const match of text.matchAll(UNIT_VERSION_RE)) keep.add(match[1]);
+    }
+    await io.pruneVersions(keep);
+  } catch (err) {
+    logWarn(
+      "tunnels",
+      `could not remove superseded connector versions: ${
+        err instanceof Error ? err.message : "failed"
+      }`,
+    );
+  }
 }
 
 /**
@@ -896,11 +1015,87 @@ async function updateConnectorNow(
     await dropSlotUnit(io, id, otherSlot(record.slot));
     await mustSystemctl(io, ["daemon-reload"]);
   }
-  if (record.version === io.version) {
-    await refreshStaleUnit(io, record);
+  const sameVersion = record.version === io.version;
+  if (sameVersion && !(await unitIsStale(io, record))) {
+    await pruneSuperseded(io);
     return { kind: "current", version: record.version };
   }
+  // A new version, or a unit written by an older daemon: either way the
+  // replacement starts beside the running one and the old one stops last.
+  const outcome = await switchSlot(io, record);
+  if (sameVersion && outcome.kind === "updated") {
+    return { kind: "current", version: record.version };
+  }
+  return outcome;
+}
 
+/**
+ * After the commit: stop the old unit, reload systemd, then either report that
+ * the old connector did not stop or delete the superseded program folders.
+ * A refused stop never touches the new unit: the record already names it. The
+ * old unit file stays so the next round finds it and tries again.
+ */
+async function retireOldConnector(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+  committed: ConnectorRecord,
+): Promise<void> {
+  const id = record.id;
+  let stopFailure: string | undefined;
+  let leftover: string | undefined;
+  try {
+    await dropSlotUnit(io, id, record.slot);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : "the stop failed";
+    if (err instanceof UnitFileRemoveError) {
+      // It stopped; only its file is left, which the next round removes.
+      leftover =
+        `the old connector (${record.version}) stopped but its unit file was not removed: ${detail}`;
+      logError("tunnels", `connector ${id}: ${leftover}`);
+    } else {
+      stopFailure = detail;
+      logError(
+        "tunnels",
+        `connector ${id}: the old connector (${record.version}) is still running: ${detail}`,
+      );
+    }
+  }
+  try {
+    await mustSystemctl(io, ["daemon-reload"]);
+  } catch (err) {
+    logWarn(
+      "tunnels",
+      `connector ${id}: daemon-reload after the switch failed: ${
+        err instanceof Error ? err.message : "failed"
+      }`,
+    );
+  }
+  if (!stopFailure && !leftover) {
+    await pruneSuperseded(io);
+    return;
+  }
+  const reason = leftover ??
+    `the old connector (${record.version}) did not stop: ${stopFailure}`;
+  await writeRecord(io, {
+    ...committed,
+    lastUpdate: {
+      outcome: "updated",
+      at: new Date().toISOString(),
+      reason: reason.slice(0, MAX_LAST_UPDATE_REASON),
+    },
+  }).catch(() => undefined);
+}
+
+/**
+ * Start the pinned version's unit in the other slot, and once it is connected
+ * make it the carrying unit and stop the old one (see above).
+ */
+async function switchSlot(
+  io: ConnectorIo,
+  record: ConnectorRecord,
+  tokenDigest?: string,
+): Promise<ConnectorUpdateOutcome> {
+  const id = record.id;
   const next = otherSlot(record.slot);
   const nextUnit = tunnelUnitName(id, next);
   const stagedUnit = join(io.workDir, `${id}${slotSuffix(next)}.service`);
@@ -970,18 +1165,25 @@ async function updateConnectorNow(
   }
 
   // Commit: the new unit carries the tunnel from here on.
-  await writeRecord(io, {
+  const committed: ConnectorRecord = {
     ...record,
     port,
     version: io.version,
     slot: next,
-    lastUpdate: { outcome: "updated", at: new Date().toISOString() },
-  });
-  await dropSlotUnit(io, id, record.slot);
-  await mustSystemctl(io, ["daemon-reload"]);
+    ...(tokenDigest ? { tokenDigest } : {}),
+    lastUpdate: {
+      outcome: "updated",
+      at: new Date().toISOString(),
+      ...(tokenDigest ? { reason: "the run token changed" } : {}),
+    },
+  };
+  await writeRecord(io, committed);
+  await retireOldConnector(io, record, committed);
   logInfo(
     "tunnels",
-    `connector ${id} moved from ${record.version} to ${io.version}`,
+    tokenDigest
+      ? `connector ${id} moved to a new unit for a changed run token`
+      : `connector ${id} moved from ${record.version} to ${io.version}`,
   );
   return { kind: "updated", from: record.version, to: io.version };
 }
