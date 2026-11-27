@@ -910,6 +910,18 @@ test("the boot unit loads the walls before the network, logins and cron, and not
   );
   assertStringIncludes(tasks, "name: turbopanel-loopback-php.service");
   assertStringIncludes(tasks, "      - iproute2\n");
+  // The packages and the nftables.service stop run in development too, before
+  // the daemon's first start; only the lib/ installs are gated.
+  for (
+    const name of [
+      "Install nft, flock and ip for tp-php-loopback",
+      "Keep nftables.service from flushing tp-php-loopback's rules",
+    ]
+  ) {
+    const task = tasks.split("\n- name: ").find((t) => t.startsWith(name));
+    assert(task !== undefined, name);
+    assert(!task.includes("turbopanel_dev_user"), name);
+  }
 });
 
 /** `nft -c -f -` on TEXT, in a private network namespace when one can be made. */

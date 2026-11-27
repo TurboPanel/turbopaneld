@@ -40,6 +40,11 @@
 # tp-php-loopback keeps site PHP off every loopback port but the database
 # proxy's. Every per-site PHP unit runs it as root (`ExecStartPre=+`) before
 # PHP starts, and `tp-host php-loopback-sync` runs it after units change.
+#
+# The packages and the nftables.service task below run in development too: the
+# co-located daemon runs the script from the checkout, and its first start
+# (installed by daemon-systemd-setup.yml after this role) runs the sync. Only the
+# tasks that install files under <install root>/lib are gated on a managed host.
 - name: Install nft, flock and ip for tp-php-loopback
   ansible.builtin.apt:
     lock_timeout: 300
@@ -50,17 +55,17 @@
     state: present
     update_cache: true
     cache_valid_time: 3600
-  when: turbopanel_dev_user | default('') | length == 0
 
 # The package's default /etc/nftables.conf starts with `flush ruleset`, which
-# would wipe tp-php-loopback's table; TurboPanel loads its own rules.
+# would wipe tp-php-loopback's table; TurboPanel loads its own rules. The
+# firewall takeover in daemon-prereqs runs before the package can arrive here, so
+# this is what disables the unit the install just enabled.
 - name: Keep nftables.service from flushing tp-php-loopback's rules
   ansible.builtin.systemd:
     name: nftables
     enabled: false
     state: stopped
   failed_when: false
-  when: turbopanel_dev_user | default('') | length == 0
 
 - name: Install tp-php-loopback
   ansible.builtin.copy:
