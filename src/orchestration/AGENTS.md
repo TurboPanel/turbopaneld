@@ -117,7 +117,7 @@ Drizzle Studio no longer depend on the UI mode. The `ui-build` role exports in
 development mode (`--dev`, bounded workers and Node heap as role defaults) when
 a dev user is set; production output is unchanged. Actions run by the dev
 console: `run-orchestration-action.ts ui-export [--force]` (export only, via
-`ui-export.yml`, dev hosts only, not on the `tp-orchestrate` allowlist) or
+`ui-export.yml`, run directly on dev hosts) or
 `build-toggle` with unchanged modes and `forceBuild` (also re-converges units;
 now keeps the optional-service options). Update and Restart refresh the export
 inside the existing `install` step (see `src/dev-host/AGENTS.md`).

@@ -1054,5 +1054,5 @@ development export. Production keeps `pnpm export` and its stale check. In
 run mode, and the Drizzle Studio unit follows its optional switch; it always
 sets `TURBOPANEL_UI_MODE=dev` because the control plane's studio script exits
 under `static`. Static mode installs no Expo unit; the UI unit stays stopped and
-disabled. `playbooks/ui-export.yml` refreshes the export alone (`-e
+disabled. `playbooks/ui-export.yml` (on the `tp-orchestrate` allowlist, run directly on dev hosts) refreshes the export alone (`-e
 force_build=true` forces it).

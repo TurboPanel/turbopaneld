@@ -3,8 +3,8 @@
 # and by the dev console's "export only, forced" action (-e force_build=true).
 # A no-op unless turbopanel_ui_mode is static. With a dev user set the export is
 # built in development mode (see the ui-build role defaults); without one it is
-# the production export. Development hosts only: the daemon runs it directly,
-# never through tp-orchestrate, so it is not on that helper's allowlist.
+# the production export. The development host runs it directly; it is on the
+# tp-orchestrate allowlist because the daemon's playbook constants must match.
 - name: TurboPanel UI static export refresh
   hosts: localhost
   connection: local
