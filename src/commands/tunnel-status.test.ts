@@ -36,7 +36,7 @@ test("the status answer lists each connector with its version and the pinned ver
     const io: ConnectorIo = {
       layout: { configDir: join(dir, "etc") },
       workDir: dir,
-      version: "2026.11.1",
+      version: "2026.11.2",
       ensureBinary: () => Promise.resolve("/unused"),
       probe: () => Promise.resolve({ kind: "ready", connections: 4 }),
       readHostnames: () => Promise.resolve(["panel.example.com"]),
@@ -45,7 +45,7 @@ test("the status answer lists each connector with its version and the pinned ver
     };
     const result = await handleTunnelStatus(new Date().toISOString(), { io });
     assertEquals(result, {
-      pinnedVersion: "2026.11.1",
+      pinnedVersion: "2026.11.2",
       connectors: [
         {
           tunnelId: ID,
@@ -70,7 +70,7 @@ test("the status answer reports what the hop does about client certificates, and
     const io: ConnectorIo = {
       layout: { configDir: join(dir, "etc") },
       workDir: dir,
-      version: "2026.11.1",
+      version: "2026.11.2",
       ensureBinary: () => Promise.resolve("/unused"),
       probe: () => Promise.resolve({ kind: "ready", connections: 1 }),
       readHostnames: () => Promise.resolve([]),
@@ -110,7 +110,7 @@ function lockIo(dir: string, run: ConnectorIo["run"]): ConnectorIo {
   return {
     layout: { configDir: join(dir, "etc") },
     workDir: dir,
-    version: "2026.11.1",
+    version: "2026.11.2",
     ensureBinary: () => Promise.resolve("/unused"),
     probe: () => Promise.resolve({ kind: "ready", connections: 1 }),
     readHostnames: () => Promise.resolve([]),

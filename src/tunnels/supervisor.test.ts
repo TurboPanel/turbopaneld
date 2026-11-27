@@ -32,7 +32,7 @@ async function withTunnelsDir(
   const io: ConnectorIo = {
     layout: { configDir: join(dir, "etc") },
     workDir: dir,
-    version: "2026.11.1",
+    version: "2026.11.2",
     ensureBinary: opts.ensureBinary ??
       (() =>
         Promise.resolve("/opt/turbopanel/vendor/cloudflared/x/cloudflared")),
@@ -136,7 +136,7 @@ test("a daemon start with a changed pin runs the whole rolling update in order",
     io.ensureBinary = () => {
       steps.push("download-and-verify");
       return Promise.resolve(
-        "/opt/turbopanel/vendor/cloudflared/2026.11.1/cloudflared",
+        "/opt/turbopanel/vendor/cloudflared/2026.11.2/cloudflared",
       );
     };
     io.probe = () => {
@@ -171,12 +171,12 @@ test("a daemon start with a changed pin runs the whole rolling update in order",
     const order = ["download-and-verify", "start-new", "ready", "stop-old"];
     const seen = steps.filter((s) => order.includes(s));
     assertEquals([...new Set(seen)], order, steps.join("\n"));
-    assertEquals(steps.at(-1), "prune keep=2026.11.1");
+    assertEquals(steps.at(-1), "prune keep=2026.11.2");
     assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
     const record = JSON.parse(
       await Deno.readTextFile(join(dir, `${UUID}.json`)),
     );
-    assertEquals([record.slot, record.version], ["b", "2026.11.1"]);
+    assertEquals([record.slot, record.version], ["b", "2026.11.2"]);
   });
 });
 
