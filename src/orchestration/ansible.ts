@@ -20,8 +20,10 @@ import {
   writeDevConvergeStamp,
 } from "./converge-stamp.ts";
 import {
+  DEV_CONVERGE_OPTIONS_ENV,
   type DevConvergeOptions,
   devConvergeOptionsExtraArgs,
+  parseDevConvergeOptions,
   resolveDevConvergeOptions,
 } from "./dev-converge-options.ts";
 import {
@@ -70,6 +72,7 @@ import {
   SMB_TOOLS_PLAYBOOK,
   SOCKET_DIRS_PLAYBOOK,
   TIME_SYNC_APPLY_PLAYBOOK,
+  UI_EXPORT_PLAYBOOK,
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
@@ -680,6 +683,9 @@ export function buildBuildToggleExtraArgs(
     forceBuild?: boolean;
   },
   env: Record<string, string | undefined> = Deno.env.toObject(),
+  options: DevConvergeOptions = parseDevConvergeOptions(
+    env[DEV_CONVERGE_OPTIONS_ENV],
+  ),
 ): string[] {
   const instanceRuntime = env.TURBOPANEL_INSTANCE_RUNTIME === "workers"
     ? "workers"
@@ -696,6 +702,11 @@ export function buildBuildToggleExtraArgs(
     `force_build=${opts.forceBuild ?? false}`,
     "-e",
     `force_compile=${opts.forceBuild ?? false}`,
+    // The toggle re-templates the instance units, so it needs the same
+    // optional-service switches the converge passes; without them each
+    // `turbopanel_optional_*` falls back to its role default and a toggle
+    // would stop services the developer switched on.
+    ...devConvergeOptionsExtraArgs(options),
   ];
 }
 
@@ -710,7 +721,7 @@ export async function runBuildToggle(
   },
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  const args = buildBuildToggleExtraArgs(opts);
+  const args = buildBuildToggleExtraArgs(opts, Deno.env.toObject());
 
   logInfo(
     "orchestration",
@@ -718,6 +729,48 @@ export async function runBuildToggle(
   );
   await runLocalPlaybook(BUILD_TOGGLE_PLAYBOOK, args, onEvent);
   logInfo("orchestration", "instance-build-toggle complete");
+}
+
+/** `-e` key=value extra-vars for ui-export. */
+export function buildUiExportExtraArgs(
+  opts: { forceBuild?: boolean } = {},
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string[] {
+  const uiMode = env.TURBOPANEL_UI_MODE === "static" ? "static" : "dev";
+  return [
+    ...devOwnershipPlaybookExtraArgs(env),
+    "-e",
+    `turbopanel_ui_mode=${uiMode}`,
+    "-e",
+    `force_build=${opts.forceBuild ?? false}`,
+  ];
+}
+
+/**
+ * Refresh the static UI export alone (the `ui-build` role: development mode on
+ * a development host). A no-op when the UI mode is not static. Run through
+ * Ansible so the build runs as the dev user and publishes under the install
+ * tree; nothing here runs pnpm itself.
+ */
+export async function runUiExport(
+  opts: { forceBuild?: boolean } = {},
+  onEvent?: AnsibleEventHandler,
+  onRawLine?: (stream: AnsibleRawLineStream, line: string) => void,
+): Promise<void> {
+  const args = buildUiExportExtraArgs(opts);
+  logInfo(
+    "orchestration",
+    `running ui-export playbook (force=${opts.forceBuild ?? false})`,
+  );
+  await runLocalPlaybook(
+    UI_EXPORT_PLAYBOOK,
+    args,
+    onEvent,
+    undefined,
+    onRawLine !== undefined,
+    onRawLine,
+  );
+  logInfo("orchestration", "ui-export complete");
 }
 
 /**

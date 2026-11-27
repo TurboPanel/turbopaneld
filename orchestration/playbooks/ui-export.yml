@@ -1,0 +1,27 @@
+# Refresh the static UI export alone (no instance, Caddy or unit changes).
+# Used by the development host's Update and Restart after the checkouts moved,
+# and by the dev console's "export only, forced" action (-e force_build=true).
+# A no-op unless turbopanel_ui_mode is static. With a dev user set the export is
+# built in development mode (see the ui-build role defaults); without one it is
+# the production export. Development hosts only: the daemon runs it directly,
+# never through tp-orchestrate, so it is not on that helper's allowlist.
+- name: TurboPanel UI static export refresh
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+
+  vars:
+    turbopanel_install_root: /opt/turbopanel
+    turbopanel_dev_user: ""
+    turbopanel_dev_uid: ""
+    turbopanel_dev_gid: ""
+    turbopanel_dev_root: "{{ ansible_env.HOME }}"
+    turbopanel_lib_dir: "{{ turbopanel_install_root }}/lib"
+    turbopanel_vendor_dir: "{{ turbopanel_install_root }}/vendor"
+    turbopanel_ui_dir: "{{ (turbopanel_dev_root ~ '/ui') if (turbopanel_dev_user | default('') | length > 0) else (turbopanel_lib_dir ~ '/ui') }}"
+    turbopanel_ui_mode: static
+    force_build: false
+
+  roles:
+    - role: ui-build

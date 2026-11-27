@@ -22,6 +22,7 @@ import {
   MAX_DEV_HOST_TEXT_CHARS,
 } from "../contracts/cell-messages.ts";
 import { resolveInstanceSocket } from "../instance/sockets.ts";
+import { runUiExport } from "../orchestration/ansible.ts";
 import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import { resolveRuntimesDir } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
@@ -92,6 +93,14 @@ export type JobDeps = {
   sudoArgs?: (args: string[]) => string[];
   /** The pnpm program and the whole environment it runs with. */
   pnpm?: { program: string; env: Record<string, string> };
+  /** The UI mode the host serves (default: `TURBOPANEL_UI_MODE` of the process). */
+  uiMode?: () => "dev" | "static";
+  /**
+   * Refresh the static UI export (default: the `ui-export` playbook, which
+   * builds as the dev user through Ansible). Resolves with the last output
+   * lines on failure.
+   */
+  uiExport?: () => Promise<{ ok: true } | { ok: false; detail: string }>;
   /** The control plane unit's `TURBOPANEL_DATABASE_URL`. */
   databaseUrl?: () => Promise<string | null>;
   /** Wait until the control plane restarted after `sinceMs` and answers. */
@@ -362,6 +371,13 @@ export class DevHostJobRunner {
     return "up to date";
   }
 
+  /**
+   * Install packages in the checkouts that need it, then (static UI mode only)
+   * refresh the published UI export. The export is part of this step, not a
+   * step of its own: the step names are a wire contract with the control plane,
+   * the developer console and the web interface (`dev-host-v1`), which label
+   * each one, so a new name would reach them unlabelled.
+   */
   async #stepInstall(job: DevHostJob): Promise<StepOutcome> {
     const pnpm = this.#pnpm();
     const done: string[] = [];
@@ -389,9 +405,40 @@ export class DevHostJobRunner {
       },
     );
     if (failure) return failure;
-    return done.length > 0
-      ? { state: "done", detail: `installed packages for ${done.join(", ")}` }
-      : { state: "skipped", detail: "packages are current" };
+    const exported = await this.#exportUi();
+    if (exported?.state === "failed") return exported;
+    const details = [
+      ...(done.length > 0 ? [`installed packages for ${done.join(", ")}`] : []),
+      ...(exported?.detail ? [exported.detail] : []),
+    ];
+    if (details.length === 0) {
+      return { state: "skipped", detail: "packages are current" };
+    }
+    return { state: "done", detail: details.join("; ") };
+  }
+
+  /**
+   * Refresh the published UI export when the host serves the static UI (the
+   * Expo dev server then is not running, so nothing else would pick up the new
+   * source). The role redoes the export only when the sources, the lockfile or
+   * the export mode changed, so an unchanged checkout costs one quick check.
+   * Undefined when there is nothing to do.
+   */
+  async #exportUi(): Promise<StepOutcome | undefined> {
+    const uiMode = this.#deps.uiMode ??
+      (() =>
+        Deno.env.get("TURBOPANEL_UI_MODE") === "static" ? "static" : "dev");
+    if (uiMode() !== "static") return undefined;
+    const spec = this.#deps.parts.find((p) => p.name === "web-interface");
+    if (!spec || !(await readHead(this.#repo(spec)))) return undefined;
+    const exportUi = this.#deps.uiExport ?? defaultUiExport;
+    const result = await exportUi();
+    return result.ok
+      ? { state: "done", detail: "refreshed the static UI export" }
+      : {
+        state: "failed",
+        detail: `static UI export failed: ${result.detail}`,
+      };
   }
 
   async #stepMigrate(job: DevHostJob, ctx: JobContext): Promise<StepOutcome> {
@@ -631,6 +678,23 @@ export class DevHostJobRunner {
 
   async #releaseLock(): Promise<void> {
     await Deno.remove(this.#deps.paths.lockFile).catch(() => undefined);
+  }
+}
+
+/** The ui-export playbook, with the last output line as the failure reason. */
+async function defaultUiExport(): Promise<
+  { ok: true } | { ok: false; detail: string }
+> {
+  const lines: string[] = [];
+  try {
+    await runUiExport({}, undefined, (_stream, line) => {
+      if (line.trim()) lines.push(line.trim());
+    });
+    return { ok: true };
+  } catch (err) {
+    const why = lines.at(-1) ??
+      (err instanceof Error ? err.message : String(err));
+    return { ok: false, detail: why };
   }
 }
 

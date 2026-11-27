@@ -293,6 +293,11 @@ export const BUILD_TOGGLE_PLAYBOOK = join(
   "playbooks",
   "instance-build-toggle.yml",
 );
+export const UI_EXPORT_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "ui-export.yml",
+);
 export const INSTANCE_CERTS_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",

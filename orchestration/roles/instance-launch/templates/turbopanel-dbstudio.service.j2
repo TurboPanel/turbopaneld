@@ -15,7 +15,11 @@ Environment=HOME={{ turbopanel_instance_runtime_dir }}
 Environment=XDG_CONFIG_HOME={{ turbopanel_instance_config_dir }}
 Environment=TURBOPANEL_NODE={{ turbopanel_node }}
 Environment=PATH={{ turbopanel_runtime_path }}
-Environment=TURBOPANEL_UI_MODE={{ turbopanel_ui_mode }}
+# The serve script exits quietly when this reads static. The unit is only
+# installed on a development host, where Drizzle Studio follows its own switch
+# and not the UI mode (a static-UI development install keeps it), so it always
+# reads dev here.
+Environment=TURBOPANEL_UI_MODE=dev
 Environment=TURBOPANEL_DRIZZLE_STUDIO_PORT={{ drizzle_studio_port | default(4983) }}
 Environment=TURBOPANEL_DRIZZLE_STUDIO_HOST=127.0.0.1
 {% if turbopanel_pg_password is defined %}

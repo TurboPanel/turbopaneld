@@ -111,6 +111,11 @@ drizzle_studio_port: 4983
 # "static" serves the exported web build from {{ turbopanel_ui_dist_dir }}.
 # Production default is static; co-located converge passes -e turbopanel_ui_mode=dev.
 turbopanel_ui_mode: static
+# Drizzle Studio is a development service: any development install (dev user
+# set) has it, whichever way the UI is served; its optional switch
+# (turbopanel_optional_dbstudio) then decides whether it runs. A dev UI mode
+# without a dev user keeps it too, as before.
+turbopanel_dbstudio_host: "{{ (turbopanel_dev_user | default('') | length > 0) or turbopanel_ui_mode == 'dev' }}"
 # Deprecated single-hostname alias. The listener set no longer follows this
 # switch: :8443 is the only TCP port, and turbopanel_hostnames decides
 # per-name tls. When hostnames is empty, resolve-hostnames.yml synthesizes

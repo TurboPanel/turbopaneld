@@ -101,6 +101,8 @@ async function withHarness(
       waitControlPlane: () => Promise.resolve({ ok: true }),
       waitUnit: () => Promise.resolve({ ok: true }),
       onChange: (job) => changes.push(job),
+      uiMode: () => "dev",
+      uiExport: () => Promise.reject(new Error("unexpected UI export")),
       ...options.deps,
     });
     await fn({ fx, calls, runner, collector, paths, changes });
@@ -338,6 +340,62 @@ test("install runs pnpm install --frozen-lockfile only where the lockfile moved"
     assertEquals(installs.map((c) => [c.cwd, ...c.args]), [
       [join(h.fx.root, "turbopanel"), "install", "--frozen-lockfile"],
     ]);
+  });
+});
+
+test("update refreshes the static UI export inside the install step and adds no step", async () => {
+  let exports = 0;
+  await withHarness(FOUR, async (h) => {
+    await h.runner.start("update");
+    await h.runner.settled();
+    const job = h.runner.current()!;
+    assertEquals(job.state, "done");
+    assertEquals(exports, 1);
+    assertEquals(job.steps.map((s) => s.name), [...UPDATE_STEPS]);
+    const install = job.steps.find((s) => s.name === "install")!;
+    assertEquals(install.state, "done");
+    assertEquals(install.detail, "refreshed the static UI export");
+  }, {
+    deps: {
+      uiMode: () => "static",
+      uiExport: () => {
+        exports++;
+        return Promise.resolve({ ok: true });
+      },
+    },
+  });
+});
+
+test("update leaves the UI export alone when the Expo dev server serves the UI", async () => {
+  await withHarness(FOUR, async (h) => {
+    await h.runner.start("update");
+    await h.runner.settled();
+    const install = h.runner.current()!.steps.find((s) => s.name === "install");
+    assertEquals(install?.state, "skipped");
+    assertEquals(install?.detail, "packages are current");
+  });
+});
+
+test("a failed static UI export fails the install step and stops before migrate and restarts", async () => {
+  await withHarness(FOUR, async (h) => {
+    await h.runner.start("update");
+    await h.runner.settled();
+    const job = h.runner.current()!;
+    assertEquals(job.state, "failed");
+    const states = Object.fromEntries(job.steps.map((s) => [s.name, s.state]));
+    assertEquals(states.install, "failed");
+    assertEquals(states.migrate, "skipped");
+    assertEquals(states["restart-control-plane"], "skipped");
+    assertStringIncludes(
+      job.steps.find((s) => s.name === "install")!.detail ?? "",
+      "static UI export failed: out of memory",
+    );
+    assertEquals(sudoUnits(h.calls), []);
+  }, {
+    deps: {
+      uiMode: () => "static",
+      uiExport: () => Promise.resolve({ ok: false, detail: "out of memory" }),
+    },
   });
 });
 
