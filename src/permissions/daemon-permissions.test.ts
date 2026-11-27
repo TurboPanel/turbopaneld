@@ -34,6 +34,7 @@ import {
   ANSIBLE_CURRENT_DIR,
   ANSIBLE_INSTALL_DIR,
   CACHE_DIR,
+  CLOUDFLARED_VERSION,
   cloudflaredDir,
   GALAXY_COLLECTIONS_DIR,
   PYTHON_CURRENT_DIR,
@@ -204,6 +205,53 @@ test("deno.json compile tasks and the JS ExecStart render the same daemon contra
     const granted = found.flags.filter((f) => isGrantFlag(f));
     assertEquals(granted, expected, name);
   }
+});
+
+test("every daemon path grants exactly the pinned cloudflared binary (deno.json, service template, constant)", async () => {
+  // A daemon update runs the NEW binary under the grants baked into it (native)
+  // or rendered into the unit (JS fallback). If the pinned connector path in
+  // any copy lags CLOUDFLARED_VERSION, the new daemon cannot start the very
+  // connector it just downloaded and the rolling update dies at the first spawn.
+  const pinned =
+    `${PROD_RUNTIME_DIR_DEFAULT}/cloudflared/${CLOUDFLARED_VERSION}/cloudflared`;
+  assertEquals(DAEMON_RUN_PROGRAMS.includes(pinned), true);
+  const invocations = await productionInvocations();
+  for (
+    const name of [
+      "deno.json compile",
+      "deno.json compile:linux-amd64",
+      "deno.json compile:linux-arm64",
+      "turbopaneld.service.j2 js",
+    ]
+  ) {
+    const found = invocations.find((entry) => entry.source === name);
+    if (!found) throw new TypeError(`missing invocation ${name}`);
+    const run = found.flags.find((f) => f.startsWith("--allow-run="));
+    const programs = (run ?? "").slice("--allow-run=".length).split(",");
+    const versioned = programs.filter((p) =>
+      p.startsWith(`${PROD_RUNTIME_DIR_DEFAULT}/cloudflared/`)
+    );
+    assertEquals(versioned, [pinned], name);
+  }
+});
+
+test("the daemon update re-renders the service unit and reloads it before the new daemon runs", async () => {
+  // Update path: run.sh runs daemon-install.yml from the new tree; the
+  // daemon-launch role renders the unit (carrying the grants above) and
+  // notifies the reload and restart handlers.
+  const roleDir = join(root, "orchestration/roles/daemon-launch");
+  const tasks = await Deno.readTextFile(join(roleDir, "tasks/main.yml"));
+  const block = tasks.split("src: turbopaneld.service.j2")[1]?.split(
+    "\n\n",
+  )[0];
+  if (!block) throw new TypeError("daemon-launch lost the unit task");
+  assertEquals(block.includes("- Reload systemd"), true);
+  assertEquals(block.includes("- Restart turbopanel daemon"), true);
+  const handlers = await Deno.readTextFile(
+    join(roleDir, "handlers/main.yml"),
+  );
+  assertEquals(/daemon_reload:\s*true/.test(handlers), true);
+  assertEquals(/state:\s*restarted/.test(handlers), true);
 });
 
 test("every compile task bakes --quiet so absent optional tools are not logged as Info lines", async () => {

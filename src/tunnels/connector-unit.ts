@@ -140,6 +140,20 @@ export function assertMetricsPort(port: number): void {
 }
 
 /**
+ * How long the connector keeps serving in-flight requests after SIGTERM
+ * (`--grace-period`; cloudflared's own default is the same 30 s, written out so
+ * the unit does not depend on a default that could change).
+ */
+export const CONNECTOR_GRACE_PERIOD_SECONDS = 30;
+
+/**
+ * systemd waits this long for the connector to exit before it sends SIGKILL:
+ * the grace period plus time to close its edge connections. Kept equal to
+ * `tp-host`.
+ */
+export const CONNECTOR_STOP_TIMEOUT_SECONDS = 45;
+
+/**
  * The unit text.
  *
  * - `DynamicUser=yes`: systemd makes a throwaway unprivileged account for the
@@ -175,9 +189,15 @@ export function renderTunnelUnit(params: {
     `EnvironmentFile=${params.envFile}`,
     `ExecStart=${params.binary} --no-autoupdate tunnel --metrics ${
       tunnelMetricsAddress(params.port)
-    } run`,
+    } --grace-period ${CONNECTOR_GRACE_PERIOD_SECONDS}s run`,
     "Restart=always",
     "RestartSec=5",
+    // SIGTERM to the connector alone starts its drain; the grace period is
+    // shorter than the stop timeout, so systemd never kills a connector that
+    // is still finishing requests it was allowed to finish.
+    "KillSignal=SIGTERM",
+    "KillMode=mixed",
+    `TimeoutStopSec=${CONNECTOR_STOP_TIMEOUT_SECONDS}`,
     "NoNewPrivileges=yes",
     "PrivateTmp=yes",
     "ProtectSystem=strict",

@@ -1597,9 +1597,12 @@ tp_tunnel_unit_text() {
     'Type=simple' \
     'DynamicUser=yes' \
     "EnvironmentFile=$R_TUNNELENV/$_tt_id.env" \
-    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:$_tt_port run" \
+    "ExecStart=$INSTALL_ROOT/vendor/cloudflared/$_tt_ver/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:$_tt_port --grace-period 30s run" \
     'Restart=always' \
     'RestartSec=5' \
+    'KillSignal=SIGTERM' \
+    'KillMode=mixed' \
+    'TimeoutStopSec=45' \
     'NoNewPrivileges=yes' \
     'PrivateTmp=yes' \
     'ProtectSystem=strict' \
@@ -1666,8 +1669,9 @@ tp_tunnel_unit_ok() {
   esac
   _tu_port="${_tu_rest#"$_tu_ver"/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:}"
   [ "$_tu_port" != "$_tu_rest" ] || return 1
-  # The command ends in " run": the port is what is left before it.
-  _tu_run="${_tu_port% run}"
+  # The command ends in " --grace-period 30s run": the port is what is left
+  # before it.
+  _tu_run="${_tu_port% --grace-period 30s run}"
   [ "$_tu_run" != "$_tu_port" ] || return 1
   _tu_port="$_tu_run"
   case "$_tu_port" in

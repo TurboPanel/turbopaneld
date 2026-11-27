@@ -1,4 +1,4 @@
-import { assertEquals, assertRejects } from "@std/assert";
+import { assert, assertEquals, assertRejects } from "@std/assert";
 import { join } from "@std/path";
 import { sha256HexOfBytes } from "./download-verify.ts";
 import { afterAll, beforeAll, describe, it } from "@std/testing/bdd";
@@ -410,5 +410,76 @@ exit 0
     } finally {
       await Deno.chmod(parent, previousMode);
     }
+  });
+});
+
+describe("pruneCloudflaredVersions", () => {
+  async function withRoot(
+    fn: (root: string) => Promise<void>,
+  ): Promise<void> {
+    const root = await Deno.makeTempDir({ prefix: "cloudflared-prune-" });
+    try {
+      await fn(root);
+    } finally {
+      await Deno.remove(root, { recursive: true });
+    }
+  }
+  async function version(root: string, name: string): Promise<void> {
+    await Deno.mkdir(join(root, name), { recursive: true });
+    await Deno.writeTextFile(join(root, name, "cloudflared"), "x");
+  }
+  const exists = (path: string) =>
+    Deno.lstat(path).then(() => true, () => false);
+
+  it("removes superseded version folders and keeps the kept ones and current", async () => {
+    const { pruneCloudflaredVersions } = await import("./cloudflared.ts");
+    await withRoot(async (root) => {
+      for (const v of ["2026.5.0", "2026.10.7", "2026.11.1"]) {
+        await version(root, v);
+      }
+      await Deno.symlink("2026.11.1", join(root, "current"));
+      const removed = await pruneCloudflaredVersions(
+        ["2026.11.1", "2026.10.7"],
+        root,
+      );
+      assertEquals(removed, ["2026.5.0"]);
+      assert(!(await exists(join(root, "2026.5.0"))));
+      assert(await exists(join(root, "2026.10.7")));
+      assert(await exists(join(root, "2026.11.1/cloudflared")));
+      assert((await Deno.lstat(join(root, "current"))).isSymlink);
+    });
+  });
+
+  it("never follows a link, and leaves names that are not versions alone", async () => {
+    const { pruneCloudflaredVersions } = await import("./cloudflared.ts");
+    await withRoot(async (root) => {
+      await version(root, "keepme-data");
+      await Deno.mkdir(join(root, "elsewhere"));
+      await Deno.writeTextFile(join(root, "elsewhere", "precious"), "x");
+      await Deno.symlink(join(root, "elsewhere"), join(root, "2026.1.0"));
+      await Deno.writeTextFile(join(root, "2026.2.0"), "a file");
+      await version(root, "2026.3.0-partial");
+      const removed = await pruneCloudflaredVersions(["2026.11.1"], root);
+      assertEquals(removed, []);
+      assert(await exists(join(root, "elsewhere/precious")));
+      assert((await Deno.lstat(join(root, "2026.1.0"))).isSymlink);
+      assert(await exists(join(root, "2026.2.0")));
+      assert(await exists(join(root, "keepme-data")));
+      assert(await exists(join(root, "2026.3.0-partial")));
+    });
+  });
+
+  it("is a no-op for a missing folder or a link in place of the folder", async () => {
+    const { pruneCloudflaredVersions } = await import("./cloudflared.ts");
+    await withRoot(async (root) => {
+      assertEquals(await pruneCloudflaredVersions([], join(root, "none")), []);
+      await version(root, "target/2026.1.0");
+      await Deno.symlink(join(root, "target"), join(root, "linked"));
+      assertEquals(
+        await pruneCloudflaredVersions([], join(root, "linked")),
+        [],
+      );
+      assert(await exists(join(root, "target/2026.1.0")));
+    });
   });
 });

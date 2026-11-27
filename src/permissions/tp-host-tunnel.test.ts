@@ -188,16 +188,29 @@ test("every one-line change to the unit is refused", async () => {
       [
         "the old argument order",
         good.replace(
-          "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20300 run",
+          "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20300 --grace-period 30s run",
           "cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:20300",
         ),
       ],
       [
         "the flags before the subcommand",
         good.replace(
-          "tunnel --metrics 127.0.0.1:20300 run",
+          "tunnel --metrics 127.0.0.1:20300 --grace-period 30s run",
           "--metrics 127.0.0.1:20300 tunnel run",
         ),
+      ],
+      [
+        "no grace period",
+        good.replace(" --grace-period 30s", ""),
+      ],
+      [
+        "another grace period",
+        good.replace("--grace-period 30s", "--grace-period 5m"),
+      ],
+      ["no kill mode", good.replace("KillMode=mixed\n", "")],
+      [
+        "a short stop timeout",
+        good.replace("TimeoutStopSec=45", "TimeoutStopSec=1"),
       ],
       ["no run word", good.replace(" run\n", "\n")],
       ["an argument after run", good.replace(" run\n", " run --token abc\n")],
