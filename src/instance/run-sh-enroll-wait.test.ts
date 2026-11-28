@@ -127,7 +127,9 @@ async function runWait(options: Options) {
     await Deno.mkdir(runDir);
     await Deno.mkdir(orchestrationDir);
     await Deno.mkdir(stateDir);
-    for (const name of ["cat", "head", "sed", "tr", "grep", "find", "rm"]) {
+    for (
+      const name of ["cat", "dd", "head", "sed", "tr", "grep", "find", "rm"]
+    ) {
       await Deno.symlink(await realTool(name), join(bin, name));
     }
     await Deno.writeTextFile(join(bin, "systemctl"), "#!/bin/sh\nexit 0\n", {
@@ -278,6 +280,21 @@ test("a wait for a purchased size is not a refusal", async () => {
   });
   assertStringIncludes(res.stdout, "rc=0", res.stderr);
   assertStringIncludes(res.stdout, "joins by itself");
+});
+
+test("a park for a missing license is waited out, then refused if it turns permanent", async () => {
+  const awaitingLicense = formatEnrollStatus({
+    state: "parked",
+    kind: "awaiting-license",
+    reason: "no license credentials yet",
+  });
+  const res = await runWait({ status: awaitingLicense, later: REFUSED });
+  assertStringIncludes(res.stdout, "rc=1", res.stderr);
+  assertEquals(res.sleepCalls, ["2"]);
+
+  const stuck = await runWait({ status: awaitingLicense, waitSeconds: "4" });
+  assertStringIncludes(stuck.stdout, "rc=0", stuck.stderr);
+  assertStringIncludes(stuck.stdout, NO_ANSWER);
 });
 
 test("other waits are not refusals either", async () => {

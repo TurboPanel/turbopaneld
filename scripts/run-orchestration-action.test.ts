@@ -16,6 +16,7 @@ import {
   runBuildToggle,
   runInstanceDevInstall,
   runPlaybook,
+  runUiExport,
   slimAnsibleEvent,
 } from "./run-orchestration-action.ts";
 import { parseDevConvergeOptions } from "../src/orchestration/dev-converge-options.ts";
@@ -210,11 +211,11 @@ test("devInstanceExtraArgs passes forwarded LAN hosts as certificate public URLs
       TURBOPANEL_TLS_EXTRA_SANS: "extra.lan",
     }),
     undefined,
-    () => "192.0.2.10\nlab.lan\n",
+    () => "192.0.2.10\nserver-d.example.lan\n",
   );
   assertEquals(
     args.includes(
-      "turbopanel_public_urls=https://panel.lan:8443,192.0.2.10,lab.lan",
+      "turbopanel_public_urls=https://panel.lan:8443,192.0.2.10,server-d.example.lan",
     ),
     true,
   );
@@ -444,6 +445,19 @@ test("playbook requires a path and passes the extra args through", async () => {
     true,
   );
   assertEquals(rec.playbookInvocations[0]?.args.includes("-e"), true);
+});
+
+test("ui-export runs the export playbook, forced only with --force", async () => {
+  const rec = recordingDeps();
+  await runUiExport(false, rec.deps);
+  const plain = rec.playbookInvocations[0]?.args ?? [];
+  assertEquals(plain.at(-1), "/tmp/orch/playbooks/ui-export.yml");
+  assertEquals(plain.includes("force_build=true"), false);
+
+  await dispatchOrchestrationAction("ui-export", ["--force"], rec.deps);
+  const forced = rec.playbookInvocations[1]?.args ?? [];
+  assertEquals(forced.at(-1), "/tmp/orch/playbooks/ui-export.yml");
+  assertEquals(forced.includes("force_build=true"), true);
 });
 
 test("dispatchOrchestrationAction routes known actions and rejects unknown", async () => {

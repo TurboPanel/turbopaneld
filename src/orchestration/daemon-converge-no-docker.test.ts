@@ -147,9 +147,13 @@ test("daemon-converge never runs the whole docker role", async () => {
     .map((c) => c.name);
   assertEquals(offenders, []);
 
-  // The docker role itself is only entered for the builder-deny re-apply.
+  // The docker role itself is only entered for the builder-deny re-apply and
+  // for taking the daemon out of the docker group.
   const docker = roles.filter((r) => r.name === "docker");
-  assertEquals(docker.map((r) => r.tasksFrom), ["converge-builder"]);
+  assertEquals(docker.map((r) => r.tasksFrom), [
+    "converge-builder",
+    "converge-group",
+  ]);
 });
 
 async function ansiblePlaybookAvailable(): Promise<boolean> {
@@ -199,16 +203,23 @@ async function listTasks(playbook: string): Promise<string[]> {
 
 test({
   name:
-    "daemon-converge's real task list skips the Docker install and the ungated hosting Caddy grants",
+    "daemon-converge's real task list skips the Docker install and the hosting Caddy and orchestrator roles",
   ignore: !(await ansiblePlaybookAvailable()),
   fn: async () => {
     const tasks = await listTasks("daemon-converge.yml");
 
-    // Only converge-builder's tasks run from the docker role; nothing from
-    // its main.yml (key fetch, docker-ce install, daemon.json pools).
-    const builder = new Set(await taskNames("docker", "converge-builder.yml"));
+    // Only converge-builder's and converge-group's tasks run from the docker
+    // role; nothing from its main.yml (key fetch, docker-ce install, pools).
+    const builder = new Set([
+      ...await taskNames("docker", "converge-builder.yml"),
+      ...await taskNames("docker", "converge-group.yml"),
+    ]);
     const dockerTasks = tasks.filter((t) => t.startsWith("docker : "));
     assert(dockerTasks.length > 0, "converge-builder tasks are missing");
+    assert(
+      dockerTasks.some((t) => t.includes("out of the docker group")),
+      "converge-group task is missing",
+    );
     assertEquals(
       dockerTasks.filter((t) => !builder.has(t.slice("docker : ".length))),
       [],
@@ -218,31 +229,18 @@ test({
       [],
     );
 
-    // hosting-caddy's main.yml runs only through the backfill, behind its
-    // incomplete-edge check (after the probes and the vendored Caddy), never
-    // ahead of it where the Caddy binary may not exist.
-    const grant =
-      "hosting-caddy : Grant the hosting Caddy execute on the vendored Caddy binary";
-    const grants = tasks.flatMap((t, i) => (t === grant ? [i] : []));
-    assertEquals(grants.length, 1, grant);
-    const [firstProbe] = await taskNames(
-      "hosting-caddy",
-      "backfill-edge-account.yml",
-    );
-    const probe = tasks.indexOf(`hosting-caddy : ${firstProbe}`);
-    assert(probe >= 0, "backfill-edge-account tasks are missing");
-    assert(grants[0]! > probe, "hosting-caddy main.yml runs before backfill");
+    // Neither the orchestrator nor hosting Caddy runs on a converge: both
+    // are set up lazily by the daemon.
+    assertEquals(tasks.filter((t) => t.startsWith("hosting-caddy : ")), []);
+    assertEquals(tasks.filter((t) => t.startsWith("orchestrator : ")), []);
 
-    // The play keeps its order: converge-builder, then the gate, then the
-    // orchestrator and hosting Caddy backfills.
+    // The play keeps its order: build-user, converge-builder, then the gate.
     const firstOf = (prefix: string) =>
       tasks.findIndex((t) => t.startsWith(prefix));
     const order = [
       firstOf("build-user : "),
       firstOf("docker : "),
       firstOf("docker-gate : "),
-      firstOf("orchestrator : "),
-      probe,
     ];
     assert(order.every((i) => i >= 0), String(order));
     assertEquals([...order].sort((a, b) => a - b), order);

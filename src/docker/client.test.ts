@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects, assertThrows } from "@std/assert";
 import {
+  DOCKER_GATE_SOCKET,
   DOCKER_HTTP_ORIGIN,
   DockerClient,
   type DockerEvent,
@@ -25,10 +26,30 @@ test("resolveDockerSocket uses TURBOPANEL_DOCKER_SOCKET when set", () => {
 
 test("resolveDockerSocket falls back when override is blank", () => {
   assertEquals(
-    resolveDockerSocket({ TURBOPANEL_DOCKER_SOCKET: "   " }),
+    resolveDockerSocket({ TURBOPANEL_DOCKER_SOCKET: "   " }, () => false),
     "/var/run/docker.sock",
   );
-  assertEquals(resolveDockerSocket({}), "/var/run/docker.sock");
+  assertEquals(resolveDockerSocket({}, () => false), "/var/run/docker.sock");
+});
+
+test("resolveDockerSocket prefers the gate's socket over the engine's when it exists", () => {
+  const asked: string[] = [];
+  assertEquals(
+    resolveDockerSocket({}, (path) => {
+      asked.push(path);
+      return true;
+    }),
+    DOCKER_GATE_SOCKET,
+  );
+  assertEquals(asked, ["/run/turbopanel-gate/docker.sock"]);
+  // An explicit override still wins, and is not second-guessed.
+  assertEquals(
+    resolveDockerSocket(
+      { TURBOPANEL_DOCKER_SOCKET: "/run/custom.sock" },
+      () => true,
+    ),
+    "/run/custom.sock",
+  );
 });
 
 test("parseEventLines skips blanks and invalid JSON", () => {
@@ -112,6 +133,25 @@ test("DockerClient info reads /info and throws on HTTP error", async () => {
     fetchImpl: () => Promise.resolve(new Response("no", { status: 500 })),
   });
   await assertRejects(() => failing.info(), Error, "docker info failed");
+  failing.close();
+});
+
+test("DockerClient listNetworks reads /networks and throws on HTTP error", async () => {
+  const seen: string[] = [];
+  const client = new DockerClient(undefined, {
+    fetchImpl: (url) => {
+      seen.push(url);
+      return Promise.resolve(jsonResponse([{ Id: "a", Name: "bridge" }]));
+    },
+  });
+  assertEquals((await client.listNetworks())[0].Name, "bridge");
+  assertEquals(seen[0], `${DOCKER_HTTP_ORIGIN}/networks`);
+  client.close();
+
+  const failing = new DockerClient(undefined, {
+    fetchImpl: () => Promise.resolve(new Response("no", { status: 500 })),
+  });
+  await assertRejects(() => failing.listNetworks(), Error, "list networks");
   failing.close();
 });
 

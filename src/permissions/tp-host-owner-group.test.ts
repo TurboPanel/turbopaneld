@@ -142,52 +142,6 @@ test("an engine joins only a site owner's own group", async () => {
   });
 });
 
-test("groupmod renames an old <name>-grp to <name> in its one exact shape", async () => {
-  await withHost(async (host) => {
-    await append(host, "etc/passwd", [
-      `dave:x:15004:15004::${host.path("srv/users/dave/home")}:/bin/bash`,
-      `gina:x:15005:15006::${host.path("srv/users/gina/home")}:/bin/bash`,
-      `hal:x:15007:1007::${host.path("srv/users/hal/home")}:/bin/bash`,
-      `admin:x:15008:15008::${host.path("srv/users/admin/home")}:/bin/bash`,
-      `ivy:x:15009:15009::${host.path("srv/users/ivy/home")}:/bin/bash`,
-    ]);
-    await append(host, "etc/group", [
-      "dave-grp:x:15004:tpnginx",
-      // gina's primary group is not gina-grp.
-      "gina-grp:x:15005:",
-      "gina:x:15006:",
-      // hal's old group sits outside the band.
-      "hal-grp:x:1007:",
-      "admin-grp:x:15008:",
-      // ivy already has both names.
-      "ivy-grp:x:15009:",
-      "ivy:x:15010:",
-      // No account kim.
-      "kim-grp:x:15011:",
-    ]);
-    const ok = await host.run(["groupmod", "-n", "dave", "dave-grp"]);
-    assertEquals(ok.code, 0, ok.stderr);
-    assertStringIncludes(ok.stdout, "EXEC [groupmod] [-n] [dave] [dave-grp]");
-    for (
-      const args of [
-        ["groupmod", "-n", "gina", "gina-grp"],
-        ["groupmod", "-n", "hal", "hal-grp"],
-        ["groupmod", "-n", "admin", "admin-grp"],
-        ["groupmod", "-n", "ivy", "ivy-grp"],
-        ["groupmod", "-n", "kim", "kim-grp"],
-        // Only <name>-grp to <name>, nothing else.
-        ["groupmod", "-n", "dave", "alice"],
-        ["groupmod", "-n", "sudo", "dave-grp"],
-        ["groupmod", "-g", "15004", "dave-grp"],
-        ["groupmod", "-n", "dave", "dave-grp", "extra"],
-        ["groupmod", "-n", "root", "root-grp"],
-      ]
-    ) {
-      await refused(host, args);
-    }
-  });
-});
-
 test("principal-remove retires an owner whose group still has the old name", async () => {
   await withHost(async (host) => {
     await append(host, "etc/passwd", [

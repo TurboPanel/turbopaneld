@@ -4,17 +4,28 @@ Root context: `../../../src/permissions/AGENTS.md` → **Managed-host privilege 
 ("Docker" is the first of the three root-equivalent routes of the daemon
 account `tp`). This role is **stage 3 of 5** of closing it.
 
-## What exists today (stages 1-3: observe mode, plus Traefik's read-only socket)
+## Label prefix (`io.turbopanel.`)
+
+The gate reads labels under `io.turbopanel.` only. `platform.ts` `componentOf` reads the component label; for the signed approval, `approvalTokenOf` reads `io.turbopanel.approval`, and the body digest removes that label. A container that carries only labels of another prefix has no TurboPanel identity.
+
+## What exists today (stages 1-4: enforcing, daemon routed, Traefik on a read-only socket)
 
 A root-owned systemd service, `turbopanel-docker-gate.service`, runs the
 vendored Deno (`<install>/vendor/deno/current/deno`) over the TypeScript in
 `files/` (copied root-owned to `<install>/lib/docker-gate/`). It listens on
 `/run/turbopanel-gate/docker.sock` (`root:tp 0660`, directory `root:tp 0750`),
-forwards every request byte for byte to the real `/var/run/docker.sock`, and
-**logs what the strict profile would refuse**. It never refuses a policy
-violation. **Nothing routes through it**: the daemon still uses the real
-socket (no `DOCKER_HOST`, no `TURBOPANEL_DOCKER_SOCKET`), and `tp` is still in
-the `docker` group. The only wire-visible refusals are framing ones (below).
+forwards requests to the real `/var/run/docker.sock` and, in the default
+`enforce` mode, answers 403 to what the strict profile refuses
+(`docker-gate.denied`). **The daemon routes through it** (stage 4): the
+`turbopaneld` unit sets `DOCKER_HOST` and `TURBOPANEL_DOCKER_SOCKET` (and
+`TURBOPANEL_DOCKER_BUILD_SOCKET`) on managed hosts, orders itself after the
+gate service, and waits for the socket (`scripts/wait-docker-gate.sh`) before
+any Docker work; with no direct fallback a missing gate fails closed. `tp` is
+not in the `docker` group (stage 5): the `docker` role skips it on managed hosts and
+`daemon-converge` removes it from hosts provisioned earlier (`gpasswd -d`; the
+running daemon loses the group at its next restart). Co-located dev hosts have no gate
+and are exempt. Root-run Ansible roles and `postgres-backup.sh` keep the real
+socket by design (they are root already).
 
 Installed on managed hosts only (`turbopanel_dev_user` empty), wherever Docker
 is: the `docker` role includes it at the end, and `daemon-converge.yml` runs it
@@ -78,6 +89,11 @@ engine would clean (`..`, `//`); an API version prefix other than one
 refuses (`body-unparseable` with `empty`, `invalid-utf8`, `invalid-json`,
 `too-deep`, `duplicate-key` or `non-ascii-key`).
 
+The legacy `/build` refuses a cgroup parent (rule `build-cgroup-parent`), but
+`docker buildx build` sends `cgroupparent` over `/grpc`, which the gate cannot
+see. The daemon passes each image build's slice that way, so the gate does not
+check it.
+
 ## Bind sources: allowed places, and the start-time re-check
 
 **Allowed places under the site owners' homes.** A bind source that resolves
@@ -95,6 +111,40 @@ container is not caught here. An operator-chosen storage path under a home
 (`sourcePath`, "explicit operator paths still win") outside those places is
 refused too, backup and restore helpers included. `principalRoots` is the
 built-in `/srv/users` (it does not follow `TP_DOCKER_GATE_BIND_ROOTS`).
+
+**Allowed places under the storage root.** Below `/var/lib/turbopanel/storage`
+(`storageRoots`, built in like `principalRoots`) only
+`<org>/<storage>/<location>/data` and what is under it may be bound
+(`policy.ts` `storageViolation`, rule `bind-storage-path`): the root, an
+organization's folder, a storage's folder and a location's folder are refused.
+The gate does not know a container's organization, so another organization's
+well-formed location still passes here; the daemon confines a deploy to its own
+locations (`stateTree` in `compose-host-paths.ts`).
+
+**State directory rule no approval waives.** A source at `/var/lib/turbopanel`
+(`stateDirs`), below it outside the storage root (`deployments/`, secret
+records, the spool), or above it (`/var/lib`, `/var`) is `bind-state-dir`
+(`policy.ts` `stateDirViolation`, `volume-bind-state-dir` for a volume device).
+It is not in `APPROVABLE_RULES`, unlike `bind-outside-roots`, so a signed
+`host-paths` approval does not relax it. A source the gate cannot resolve (a
+link loop, an untraversable directory) is `bind-unresolvable`, also never
+approvable, instead of being judged on its spelling. It replaces a lexical
+finding an approval could clear (`bind-outside-roots`, `bind-docker-socket`),
+so a `host-paths` approval cannot carry an unresolvable bind through; a finding
+that is itself never approvable (`bind-forbidden-path`, `bind-state-dir`, ...)
+keeps its own name. The daemon refuses the same bind
+(`compose-host-paths.ts`).
+
+**Generated secret and config files.** A tenant container (`ownerOf` is
+`tenant`) may bind, read-only, exactly the files the daemon writes for Compose
+`secrets:` and `configs:`: `<runDir>/deployments/<projectId>/<environmentId>/(secrets|configs)/<name>`
+(`policy.ts` `isGeneratedFileBind`, allowance `generated-file-bind`). Both ids
+are UUIDs, `<name>` is one segment of the deploy's plan-name rule
+(`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`, not `.tmp`), and the authored source
+must already be the resolved one, so a symlink never qualifies. The two ids must also equal the container's own `io.turbopanel.project` and `io.turbopanel.environment` labels exactly; a container missing either label is refused. The daemon stamps both on every service of a deploy (`buildHostingLabelsFragment`), overriding tenant-written values. Anything else
+under `/run` stays `bind-forbidden-path`. `runDir` is the policy config's
+`/run/turbopanel` (the layout's `PROD_RUN_DIR_DEFAULT`, repeated because the
+gate imports nothing).
 
 **Start / restart re-check.** The engine resolves a bind source again at
 `start`, so a clean create can be stale (source swapped for a symlink, a
@@ -115,7 +165,12 @@ tenant-writable allowed source (`data/`, `tmp/`, `shared/`) can still be
 swapped for a symlink in the window between the gate's inspect and the engine's
 own resolution at start; the check narrows that window, it does not close it.
 Closing it fully needs the engine to mount by file descriptor or the sources to
-be root-owned.
+be root-owned. The generated-file allowance has the same race:
+`/run/turbopanel/deployments` is tp-writable, so before enforcement the
+generated files must become root-owned (written through tp-host) or be mounted
+by file descriptor. Until then the gate only checks, at inspect time, that the
+source is a regular file (lstat) and not a symlink, and it fails closed when
+symlink resolution errors.
 
 ## Paths and bodies as the engine reads them
 
@@ -151,7 +206,7 @@ containers are labelled, see below).
 
 **Platform allowance** (`platform.ts`). A create is `platform` when it carries
 `turbopanel.role` in {`turbopanel`, `ingress`} plus a known
-`com.turbopanel.system.component` (`hosting-ingress`, `managed-ingress`,
+`io.turbopanel.system.component` (`hosting-ingress`, `managed-ingress`,
 `managed-ha`), or `tp.managed.engine`. Such a container may bind, after symlink
 resolution: config trees read-only (`<config>/proxysql`, `<config>/orchestrator`,
 `TP_DOCKER_GATE_PLATFORM_RO_ROOTS`) and state trees in any mode
@@ -171,7 +226,7 @@ until the stage-3 switch is on.
 
 **Helper containers.** Every daemon-started throwaway `docker run` (backup tar,
 restore swap, managed-file ownership, engine volume bootstrap) stamps
-`turbopanel.role=turbopanel` + `com.turbopanel.system.component=<backup-copy |
+`turbopanel.role=turbopanel` + `io.turbopanel.system.component=<backup-copy |
 backup-restore | managed-files | volume-copy>` through `helperLabelArgs` in
 `src/deploy/labels.ts`; `platform.ts` lists those components, and `/backup`
 (the restore archive, read-only only) is a platform read-only root. A test in
@@ -190,13 +245,13 @@ an `owner-unknown` finding.
 **Signed approvals** (`approval.ts`). Host-level Compose features cannot rest on
 the daemon's own `hostLevelApproved` flag (the daemon account sets it). The
 control plane signs, the gate verifies with a public key. Token = container
-label `com.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
+label `io.turbopanel.approval` = `v2.<b64url payload>.<b64url sig>`; the
 signature covers `turbopanel-docker-gate-approval-v2\n` + the payload text.
 Payload: `deployId`, `project`, `composeDigest` (audit only: the gate never sees
 the compose file), `bodyDigest`, `containerName` (the create's `?name=` query, which the body does not hold: another name is `rejected: wrong-name`), `features[]`, `iat`, `exp` (seconds). `bodyDigest`
 binds the token to ONE create body: base64url SHA-256 of the RFC 8785 canonical JSON of the body AS THE CLIENT SENT IT
 (a plain `JSON.parse` of the payload: field names as written, never the strict parser's canonical spelling, so no gate
-version shifts it), with the `com.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1
+version shifts it), with the `io.turbopanel.approval` label removed. A different body is `rejected: wrong-body`; a v1
 token (no binding) is `unsupported-version`. `jti` makes a token single-use: an accepted id is remembered until its
 `exp` and a second use is `rejected: replayed` (memory is per gate process; at most 10 000 ids, beyond which new tokens
 are refused). The signer therefore has to sign the final create body Compose sends; the signer is not built, so that is
@@ -318,9 +373,10 @@ registry auth, query strings, request bodies, the approval token itself. An
   `tp` could swap a directory there). It is `root:tp 0750`, created by
   tmpfiles.d and `ExecStartPre=+`.
 - `TP_DOCKER_GATE_MODE` accepts `observe` and `enforce` (anything else fails
-  the start); the unit sets it from `docker_gate_mode` (default `observe`; in
-  `enforce` a failed install or swap fails the converge). No host runs `enforce` until the
-  lockouts below are closed and the daemon builds through the build socket.
+  the start); the unit sets it from `docker_gate_mode` (default `enforce`; a
+  failed install or swap fails the converge, and `enforce` with Traefik's gate
+  socket switched off is refused, because that combination would mount the
+  raw socket proxy).
 - The read-only listener's directory holds nothing but its socket, and never
   becomes a parent of (or the same as) the main socket's directory: a Traefik
   mounts it.
@@ -339,11 +395,22 @@ registry auth, query strings, request bodies, the approval token itself. An
 3. **This role (added)**: Traefik on a read-only filtered socket behind a
    per-host switch (on by default); with it on, the tp-created Tecnativa
    container is removed.
-4. `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`), drops
-   the `sudo -u self docker` fallback, **enforce mode**; `tp` still in `docker`.
-5. `tp` leaves the `docker` group; the real socket is root-only.
+4. **Done.** `tp` switches to the gate (`DOCKER_HOST`, `TURBOPANEL_DOCKER_SOCKET`),
+   **enforce mode**; compose and buildx use a `turbopanel-build` context on the
+   build socket (`--context`, buildx `--builder turbopanel-build`); the sudo rungs
+   carry `env DOCKER_HOST=...`; `tp` was still in `docker` until stage 5.
+5. **Done.** `tp` leaves the `docker` group (role and converge, managed hosts only); the
+   real socket is root-only for it, and the daemon's Deno grants no longer name it.
 
-Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
+Break-glass: never stop the gate. Since stage 4 the daemon reaches Docker only
+through the gate socket, so stopping the gate cuts it off from Docker entirely.
+The rollback is `docker_gate_mode: observe` plus a converge: the gate then
+relays everything and refuses nothing. `usermod -aG docker tp` does not work as
+a rollback: the unit's `ExecStartPre` `gpasswd -d` removes the group again on
+every start, the converge removes it too, and the daemon's Deno grants no longer
+include `/run/docker.sock`. Only a downgrade to a package from before stage 4
+needs the group (`usermod -aG docker tp` and a restart); that package's unit has
+no `gpasswd` line.
 
 ## What stage 4 needs from stage 3
 
@@ -376,9 +443,9 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
   as Tecnativa did: redacting it needs response rewriting (a separate change).
 - The `ingress-socket` allowance trusts `turbopanel.role=ingress`, a label the
   daemon (and possibly tenant Compose) can set; enforcement needs tenant
-  Compose to be refused `turbopanel.*` / `com.turbopanel.*` labels.
+  Compose to be refused `turbopanel.*` / `io.turbopanel.*` labels.
 
-## Lockouts to expect when enforcement arrives (stage 4; none bite in stage 2)
+## Lockouts to watch now that enforcement is on (stage 4)
 
 - Approval key missing or rotated without overlap: every host-level deploy is
   denied. Ship the new key alongside the old one, then retire the old one.
@@ -390,16 +457,21 @@ Break-glass at every stage: `systemctl stop turbopanel-docker-gate` as root.
 - Renaming a system component label (or an emitter changing a bind path)
   makes platform containers lose the allowance; the emitter test guards the
   paths, the label constants are pinned to `src/deploy/labels.ts`.
-- The label-less helpers (managed-file normalisation, **backup and restore**)
-  would be denied until the daemon stamps a platform label on them: backups and
-  restores stop working. This is the most critical gap to close before stage 4.
+- The helper containers (managed-file normalisation, backup copy and restore)
+  carry a platform label (`helperLabelArgs` in `src/deploy/labels.ts`); one
+  that loses it is denied, and its backup or restore fails. The scheduled
+  backup wrapper (`tp-backup-run`) is re-rendered by `daemon-converge`, so
+  existing hosts route it through the gate too.
+- Environments deployed before the project labels existed (pre-#825 compose
+  files, or containers carrying tenant-written labels) must be redeployed once;
+  until then a stop or remove of such a container can read as unowned.
 
 ## Ownership scope
 
 `unowned-container` / `unowned-volume` / `unowned-network` only say that a target carries none of a Compose project,
 a TurboPanel label or `tp.managed.engine`; a target whose labels cannot be read (gone, engine error, odd name) is
 `owner-unknown` (fail closed). A tenant deploy may not set the platform's owner labels at all (`turbopanel.role`,
-`com.turbopanel.system.*`, `tp.*`, the approval label): `src/deploy/compose-reserved-labels.ts` refuses the deploy
+`io.turbopanel.system.*`, `tp.*`, the approval label): `src/deploy/compose-reserved-labels.ts` refuses the deploy
 before `compose up`. They are observations, not a boundary: any caller can add a compose-project
 label, and the gate cannot tell which tenant or project the daemon is acting for (the daemon account is the only client).
 Checked routes: container start/stop/restart/kill/pause/unpause/rename/update/exec/attach/archive/wait/resize/export and
@@ -460,7 +532,7 @@ mounts) rides inside them. They open only on the **build listener** (`build.ts`)
   builds too). The sandboxed build runner (`tp-host build-run`'s per-build throwaway users) never speaks Docker: its unit makes
   `/run/turbopanel-gate` and both Docker sockets inaccessible. Deno cannot read a Unix peer's credentials (no
   SO_PEERCRED), and a header token does not work either: the Docker CLI's `HttpHeaders` are not sent on the hijacked
-  `/grpc` request buildx opens (seen on adrastea, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
+  `/grpc` request buildx opens (seen on host-a, Engine 29.8 / buildx 0.37: the header was missing on every `/grpc`).
   So the kernel checks the caller at `connect()`: `TP_DOCKER_GATE_BUILD_SOCKET` (`/run/turbopanel-gate/build/docker.sock`)
   is `root:tpgatebuild 0660` in a `root:tpgatebuild 0750` directory of its own. `tpgatebuild`
   (`docker_gate_build_group`, its gid in `TP_DOCKER_GATE_BUILD_GID`) holds only `docker_gate_build_user` (`tp`): the
@@ -475,11 +547,11 @@ mounts) rides inside them. They open only on the **build listener** (`build.ts`)
 - **Modes.** Observe logs the finding as `would-deny` and relays. Enforce answers 403 with a `docker-gate.denied`
   line (method, route, rules) **before the engine is reached**, for this finding and every other one left after
   allowances and approvals. The read-only listener refuses both routes as before.
-- **Daemon side (not wired yet, needed before enforce):** every buildx / Compose build call must use a Docker context
-  whose host is the build socket (`docker context create ... --docker host=unix://<build socket>`, then
-  `--context`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
+- **Daemon side (wired, stage 4):** every buildx / Compose build call uses a Docker context (`turbopanel-build`)
+  whose host is the build socket, written by `src/deploy/docker-cli.ts` and passed as `--context` (and buildx
+  `--builder turbopanel-build`). `DOCKER_HOST` alone is not enough: with it set, buildx's `default` builder becomes a
   `docker-container` builder that creates a privileged BuildKit container (refused).
-- **Proof (adrastea, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
+- **Proof (host-a, a separate enforce-mode gate on its own sockets):** buildx as tp through the build socket built
   and loaded an image; through the main socket `/grpc` was refused and the fallback BuildKit container's create too;
   tpbuild and uid 65534 with gid tp could not connect to the build socket; spoofed headers, and a container handed
   the main socket, got 403 on `/session` and `/grpc`; a create binding the build directory was refused

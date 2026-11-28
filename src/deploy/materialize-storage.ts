@@ -16,6 +16,7 @@ import {
   type RunFn,
 } from "./ensure-principal.ts";
 import { runDocker } from "./docker-cli.ts";
+import { LABEL_STORAGE } from "./labels.ts";
 import { directoryExists } from "../permissions/privileged-read.ts";
 
 const STORAGE_ROOT = "storage";
@@ -166,7 +167,18 @@ async function materializeDockerVolume(
     );
   }
   const volumeName = entry.volumeName;
-  const create = await runDocker(["volume", "create", volumeName]);
+  // A volume the control plane manages carries the owner label so the Docker
+  // gate lets a later Destroy remove it. A volume the compose file names as
+  // external is not ours and stays unlabeled.
+  const labelArgs = entry.managed === false
+    ? []
+    : ["--label", `${LABEL_STORAGE}=${entry.storageId}`];
+  const create = await runDocker([
+    "volume",
+    "create",
+    ...labelArgs,
+    volumeName,
+  ]);
   if (!create.success) {
     throw new Error(
       create.stderr || `Failed to create docker volume ${volumeName}`,
@@ -342,15 +354,19 @@ export async function materializeStorageEntries(
   return mountPaths;
 }
 
+/** `<state>/storage`: every organization's storage locations live below it. */
+export function storageRootPath(layout: Pick<LayoutPaths, "stateDir">): string {
+  return join(layout.stateDir, STORAGE_ROOT);
+}
+
 export function storageHostPath(
-  layout: LayoutPaths,
+  layout: Pick<LayoutPaths, "stateDir">,
   organizationId: string,
   storageId: string,
   locationId: string,
 ): string {
   return join(
-    layout.stateDir,
-    STORAGE_ROOT,
+    storageRootPath(layout),
     organizationId,
     storageId,
     locationId,

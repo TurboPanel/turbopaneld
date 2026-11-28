@@ -5,20 +5,19 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 ## Managed-host privilege boundary (2026-09-19 hardening, sudo 2026-09-25)
 
 **What this boundary does not contain yet — read first.** The daemon account
-`tp` is still root-equivalent on a managed host, through three paths the
-controls below do not close:
+`tp` was root-equivalent on a managed host through three paths; the list
+below says which are closed:
 
-1. **Docker.** The `docker` role adds `tp` to the `docker` group, and Docker
-   socket access is root (`docker run -v /:/h`). There is no sudo grant for
-   Docker any more; the group is the residual. Closing it is under way with an
-   authorizing proxy in front of the socket: **stages 1-3 are installed** (the
-   root-owned `turbopanel-docker-gate` service, observe mode: it forwards
-   everything and logs what the strict profile would refuse, with a platform
-   allowance, ownership observation and a signed-approval verifier; plus a
-   read-only listener Traefik can use instead of the Tecnativa socket proxy
-   behind a per-host switch, off by default; nothing of the daemon's own is
-   routed through it yet and `tp` is still in the group) — see
-   `orchestration/roles/docker-gate/AGENTS.md` for the stages.
+1. **Closed: Docker, behind an enforcing gate.** Docker socket access is root
+   (`docker run -v /:/h`), so the root-owned `turbopanel-docker-gate` service
+   sits in front of the engine and refuses what the strict profile forbids
+   (platform allowance, ownership checks, signed-approval verifier). The
+   daemon's own Docker traffic is routed through it, `tp` is not in the
+   `docker` group on a managed host (the role skips it and `daemon-converge`
+   removes it; a co-located dev host keeps it), there is no sudo grant for
+   Docker, and the daemon's Deno grants name only the gate's socket folder.
+   Traefik uses a read-only gate listener, not the Tecnativa proxy. Stages:
+   `orchestration/roles/docker-gate/AGENTS.md`.
 2. **Closed: the hosting Caddy no longer runs as root.**
    `turbopanel-hosting-caddy.service` runs as `tpedge` (not in group `tp`)
    with `AmbientCapabilities=`/`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`
@@ -170,3 +169,13 @@ non-link binary of that release, an installed config whose port equals the
 unit's `PORT=`, and an id that stays with the first account that used it.
 `journalctl` may read `turbopanel-cache-*`. The daemon side is
 `src/deploy/cache/`.
+
+## Update repairs read per-site PHP files through `tp-host cat`
+
+`tp-host cat -- PATH` accepts the `phpconf` class as well as `tree`, so the
+daemon can read a runtime's `php.ini`, `php-fpm.conf` and guard file when the
+one-time Apache walls repair (`src/deploy/site/apache-walls-repair.ts`) brings
+an older runtime up to date. Nothing else under `php/sites` reaches `cat`
+(`tp-host.test.ts` covers it), and it stays read-only. The same update also
+repairs the vendored Caddy folder modes and the lock-file modes through the
+`caddy` and `turbopanel-user` roles (`repair-modes.yml`, `vendor-locks.yml`).

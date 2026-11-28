@@ -156,6 +156,7 @@ function baseSource(
   return {
     sourceId: "src-1",
     composeServiceName: "web",
+    releaseServiceId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c0000ff",
     provider: "github",
     cloneUrl: "https://github.com/example/repo.git",
     ref: "main",
@@ -282,7 +283,7 @@ test("applySourceReleases fails a image-build rollback with no release record", 
               sourceMaterial: [
                 baseSource({
                   rollbackToReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000004",
-                  build: { kind: "railpack" },
+                  build: { kind: "image" },
                 }),
               ],
             }),
@@ -312,7 +313,7 @@ test("applySourceReleases skips a rollback to a native release once no principal
           sourceMaterial: [
             baseSource({
               rollbackToReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000005",
-              build: { kind: "railpack" },
+              build: { kind: "image" },
             }),
           ],
         }),
@@ -543,7 +544,7 @@ test("applySourceReleases image-build rollback omits optional image fields when 
           sourceMaterial: [
             baseSource({
               rollbackToReleaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000a",
-              build: { kind: "railpack" },
+              build: { kind: "image" },
             }),
           ],
         }),
@@ -579,7 +580,7 @@ test("applySourceReleases image-build prune logs superseded releases and optiona
               releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c00000b",
               commitMessage: "image ship",
               commitAuthor: "bot@example.com",
-              build: { kind: "railpack" },
+              build: { kind: "image" },
             }),
           ],
         }),
@@ -681,6 +682,7 @@ test("applySourceReleases native builds honor subdirectory, credentials, and cur
           sourceMaterial: [
             baseSource({
               composeServiceName: "web",
+              releaseServiceId: serviceId,
               releaseId: "019e0a1b-7c3d-7a52-9b4e-3f1a2c000009",
               subdirectory: "apps/web",
               credential: "tpdaemon.sealed",

@@ -36,6 +36,34 @@ Docker Compose. The daemon:
    A refused `.htaccess` line makes Apache answer 500 for that folder and its
    reason lands in that file.
 
+   **Walls on hosts an update reaches.** Hosts deployed before the walls have
+   vhosts, `php.ini` and `php-fpm.conf` without them. After a daemon update,
+   `site/apache-walls-repair.ts` (started from `entry/run.ts` once the daemon is
+   ready) patches each existing Apache PHP site in place: the vhost gets the
+   wall lines and its key, the runtime gets the key, `site-guard.php` and the
+   guard lines, through the same stage, probe, commit and rollback a deploy
+   uses. The patched text must equal what the renderers write (the tests pin
+   that). It is idempotent and recorded once per daemon version in
+   `<stateDir>/sites/.apache-walls-repair.json`, and only when no site failed.
+   The vhost is read again under the environment lock before it is patched (a
+   deploy may have rewritten it since the listing); without a runtime record
+   the lock is taken on every environment id the file name could hold. A static
+   or shared-pool vhost gets the unset lines only; a shared-pool one has no
+   single runtime to key and is also logged as needing a redeploy.
+
+   **Socket paths on hosts an update reaches.** The shared php-fpm masters keep
+   their pidfile and sockets under `PHP_FPM_RUN_DIR`, a root-owned folder, and
+   nothing creates the old `<runDir>/php/<series>/` any more, so a pool or vhost
+   still naming it would fail to bind after a reboot. The move is done as root by
+   the php-fpm role (`tasks/converge-run-tree.yml`, entered from
+   `daemon-converge.yml`), not by the daemon: it re-renders the unit and swaps the old prefix for the new
+   one in each series' `php-fpm.conf`, the pools (the bootstrap pool too) and the Caddy, nginx and Apache vhosts, tests every engine
+   before restarting any master, and restores its backups on any failure. Deploys
+   cannot overlap it (`bootConvergeSettled`; a converge retry also waits for
+   running commands, `commandsDrained`). `site/php-run-tree-check.ts`
+   (started from `entry/run.ts`) is read-only: it warns when the unit or a pool
+   or vhost still names the old folder, and writes nothing.
+
    **Shared Apache walls.** Apache reaches every per-site PHP socket, so a
    socket path is no boundary. Every Apache PHP runtime therefore has a site
    key (`site/php-site-key.ts`): the hex HMAC of the runtime id under a
@@ -72,14 +100,26 @@ Docker Compose. The daemon:
    answers 403 (fail closed). The first deploy of an existing site changes the
    runtime and the vhost together, so its PHP pages can answer 403 for the few
    seconds between the PHP restart and the Apache reload. A runtime has its guard
-   only after its own site is deployed; until then another site can still proxy
-   to it and run its existing scripts. The Apache role does tighten every vhost
+   only after its own site is deployed or the update repair above has run; until
+   then another site can still proxy to it and run its existing scripts. The Apache role does tighten every vhost
    already on disk at the host's first Apache deploy (`orchestration/AGENTS.md`):
-   no `FileInfo`, the closed list, the strip lines. Known limit: a `[P]` to a
-   FastCGI listener on loopback that is not a site runtime is not covered by the
-   key (none exists today). `AuthUserFile` may name any file `tpapache` can read;
-   Apache only checks passwords against it, so the worst case is a guessing
-   oracle against another site's password file.
+   no `FileInfo`, the closed list, the strip lines. Known limit: `RewriteRule [P]`
+   and `SetHandler proxy:` are allowed overrides and nothing in the server
+   config restricts their target. `<Proxy>`/`<ProxyMatch>` runs only in the
+   `map_to_storage` hook (`proxy_walk`, `mod_proxy.c`), before the per-directory
+   rewrite or `SetHandler` has named a proxy target, and a request with no
+   configured worker falls back to the always-created default reverse worker
+   (`ap_proxy_pre_request`, `proxy_util.c`), so no config turns it off. Only
+   `mod_proxy_fcgi` is loaded, so the reachable targets are FastCGI: a unix
+   socket (other sites' runtimes are behind the per-site key) or a FastCGI
+   listener on loopback or the LAN that is not a site runtime (none exists today
+   and the key does not cover it). The deploy check names a `RewriteRule` with
+   `[P]` (or a `proxy:` substitution) and a `SetHandler proxy:...` line as a
+   warning; it does not block. Closing it means dropping `SetHandler` (or the
+   proxy forms) from the closed list or confining the Apache unit at the OS
+   level; both change what tenants may do, so they are the owner's call.
+   `AuthUserFile` may name any file `tpapache` can read; Apache
+   only checks passwords against it, so the worst case is a guessing oracle against another site's password file.
 
    **Refused `.htaccess` lines are named at deploy.** For a release-backed
    Apache or nginx+Apache site, `htaccessWarningsForSite`
@@ -153,7 +193,7 @@ Docker Compose. The daemon:
    ```
    /etc/turbopanel/php/<series>/{php-fpm.conf,pools/,conf.d/}
    /var/log/turbopanel/php/<series>/
-   /run/turbopanel/php/<series>/{php-fpm.pid,<poolId>.sock}
+   /run/turbopanel-phpfpm/<series>/{php-fpm.pid,<poolId>.sock}
    ```
 
    A site on 8.3 therefore never touches the 8.4 master serving everything
@@ -525,7 +565,7 @@ root-owned `0550` by design:
   nginx (alone, or in front of Apache) a `location ^~` with its own `alias`
   for `/storage/` (`shared/storage/app/public`) or `/wp-content/uploads/`
   (`shared/uploads`), links followed only when link and target share an owner,
-  and `.php`, `.phtml` and `.phar` refused there. The folders are served
+  and `.php`, `.phtml` and `.phar` refused there. Laravel's `public/storage` is also a recipe link into the same folder, but only so the app can write through its usual path; it is never the serving path (the document root follows no link on nginx, and the alias takes `/storage/` first), so the alias stays. The folders are served
   folders, like the document root: whatever lets an engine read a document root
   must cover them. OpenLiteSpeed and the site Caddy get no alias yet and a
   deploy warning says so (`planSiteFrameworkAliases`). The alias paths go
@@ -580,15 +620,26 @@ root-owned `0550` by design:
   its commands still run before any vhost serves it. `after-switch` publishes
   normally, runs right after the site apply and before the workers restart; a
   failure throws at that point (`PostDeployFailedAfterSwitchError`, code
-  `post_deploy_failed_after_switch`, both release ids in `details`), so no worker
-  restarts onto the failed release. Neither timing runs for a rollback
+  `post_deploy_failed_after_switch`, both release ids and the failure in
+  `details`), so no worker restarts onto the failed release. The error text
+  starts with the code and a colon, the one place a failed command outcome can
+  carry it (like `rolled_back: `), then names the site, the new release, the
+  failed program (path only, never an argument or a variable) and its exit
+  status; the unit prints `turbopanel-post-deploy-step <n>` before each command
+  (the line carries the unit's own journal identifier) so the failing one is
+  known; only the next number counts, and such lines are left out of the
+  transcript (a command could still print one, which only misnames the failing
+  step). The status is read from systemd's own journal
+  lines. The failing run's output goes to the transcript as its last 60 lines
+  (500 characters each), then a line naming the failure, or a line saying no
+  output was captured. Neither timing runs for a rollback
   (`AppliedRelease.built` is set for a release built now and for a re-sent one,
   which is held and switched like a new one; a re-sent release already
   `current` is skipped only when the `post-deploy-passed` marker in its daemon
   record folder says its commands passed). A failed read of `current` holds the
-  site, and a site with no owner or no PHP is never held. **The command
-  outcome carries only the sentence today** (a failed outcome sends no
-  `result`), so the control plane cannot yet read the code and ids. Commands
+  site, and a site with no owner or no PHP is never held. A failed outcome sends no `result`, so the code travels as the text prefix above (an older control plane
+  shows it as plain text; mapping it to its own code is the control plane's
+  change). Commands
   need a principal and a release-backed site; a site with no PHP is refused
   before the build (`assertSiteLifecyclePhp`, which also refuses two workers that would share a unit name, such as `web` with `a-b` and `web-a` with `b`). Worker output on the patch-update path carries no journal text: that log is not redacted.
 - **Background workers** (`sites[].workers`, `workers.ts`). One template
@@ -610,7 +661,11 @@ root-owned `0550` by design:
   deploy). A worker the payload no longer names is disabled, stopped and
   removed; `environment.stop` removes every worker and command unit before the
   sites (and so before the variables copy); `environment.lifecycle` starts,
-  stops or restarts the instances. After installing or removing either unit
+  stops or restarts the instances, and likewise the environment's per-site PHP
+  runtimes (`php-lifecycle.ts`: a restart also reloads the shared php-fpm
+  master of each shared-pool series; a stop never touches the shared master).
+  On a host without Docker the compose and ingress steps are skipped, so a
+  native-only environment needs no Docker to start, stop or restart. After installing or removing either unit
   family the daemon runs `tp-host php-loopback-sync`; the loopback rules cover
   the whole principal uid band, so no unit file is needed for a user to be
   walled. tp-host pins the unit lines (`tp_site_lifecycle_ok`): exactly one
@@ -637,7 +692,17 @@ root-owned `0550` by design:
   service, probe URL, patch version) are written when a runtime is committed and
   removed with it; the patch versions and the sites' versions go out in the
   presence snapshot's `runtimes.php` (`versions`, `sites`, `restartError`) from
-  a cache the pass fills (`host/php-patch-cache.ts`). `systemctl show` is run
+  a cache the pass fills (`host/php-patch-cache.ts`). A site that keeps the
+  shared php-fpm master has no runtime record; the deploy writes it a
+  shared-pool record (`<state>/sites/.php-shared-sites/<env>.<service>.json`:
+  environment, service, series, patch version; removed when the site leaves the
+  pool or its environment stops). After the shared master restart the pass
+  restarts those sites' stale workers, one site at a time under the
+  environment's lock, with the same is-active check; a worker that does not stay
+  running only warns and leaves its site pending, as for a per-site runtime.
+  Those sites are listed in `runtimes.php.sites` beside the per-site ones with
+  `shared: true`, `version` (what the pool runs) and `outdated: true` (master or
+  a worker still on the old build). `systemctl show` is run
   without sudo; that is unproven on a managed host (tp-host has no `show` verb).
 - **nginx follows no link below a release-backed document root.** It serves
   one with `disable_symlinks on from=$document_root`, so **every** symlink under

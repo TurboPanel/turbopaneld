@@ -2,16 +2,11 @@ import { assert, assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import type { AcmeIssueRequestMessage } from "../contracts/cell-messages.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { writeFixtureLeafPair } from "../testing/openssl-fixture-leaf.ts";
 import { createFakeCa, FAKE_CA_DIRECTORY } from "../testing/fake-acme-ca.ts";
 import type {
   CommandResult,
   InstanceAcmeCommand,
 } from "./instance-acme-http01.ts";
-import {
-  instanceAcmeIssuerKey,
-  LETS_ENCRYPT_STAGING_DIRECTORY_URL,
-} from "./instance-acme-issuer.ts";
 import type { DaemonIssueOutcome } from "./acme/issue.ts";
 import { Http01Answers } from "./acme/http01.ts";
 import type { ChallengeSolver } from "./acme/order.ts";
@@ -21,10 +16,7 @@ import {
   localProofAddresses,
   parseProofResponse,
   rawProofGet,
-  sweepTenantAcme,
-  tenantAcmeCertificateRoot,
   tenantAcmeSocketPath,
-  tenantAcmeUnit,
   type TenantIssueDeps,
 } from "./tenant-acme-issue.ts";
 
@@ -39,13 +31,6 @@ const test = Deno.test.bind(Deno);
 const NOW = Date.parse("2026-10-01T00:00:00.000Z");
 const HOST = "panel.example.com";
 const OTHER = "other.example.com";
-const ISSUER_KEY = instanceAcmeIssuerKey({
-  contactEmail: "",
-  tosAccepted: true,
-  directoryUrl: LETS_ENCRYPT_STAGING_DIRECTORY_URL,
-  useStaging: true,
-});
-
 function layoutUnder(root: string): LayoutPaths {
   return {
     configDir: join(root, "config"),
@@ -152,17 +137,6 @@ async function withHarness(
     await Deno.remove(root, { recursive: true });
   }
 }
-
-async function exists(path: string): Promise<boolean> {
-  return await Deno.stat(path).then(() => true, () => false);
-}
-
-test("the unit name an older release used is still known to the sweep", () => {
-  assertEquals(
-    tenantAcmeUnit("req_1"),
-    "turbopanel-tenant-acme@req_1.service",
-  );
-});
 
 test("an HTTP response is read with a length or in chunks", () => {
   assertEquals(
@@ -336,66 +310,6 @@ test("the whole path against an in-process authority: one certificate names both
     assertEquals(outcome.ok, true);
     assertEquals(ca.issued, [[HOST, OTHER]]);
     assertEquals(h.reports.length, 2);
-  });
-});
-
-test("the start-up sweep stops issuers and clears requests, stored pairs and sockets but keeps the account", async () => {
-  await withHarness(async (h) => {
-    const { layout } = h;
-    const pair = join(tenantAcmeCertificateRoot(layout), ISSUER_KEY, HOST);
-    await writeFixtureLeafPair(
-      pair,
-      HOST,
-      "20260923000000Z",
-      "20270923000000Z",
-    );
-    const account = join(
-      layout.stateDir,
-      "tenant-acme",
-      "caddy",
-      "acme",
-      "directory",
-      "users",
-      "account.json",
-    );
-    await Deno.mkdir(join(account, ".."), { recursive: true });
-    await Deno.writeTextFile(account, "{}");
-    await Deno.mkdir(join(layout.stateDir, "tenant-acme", "requests"), {
-      recursive: true,
-    });
-    const oldConfig = join(
-      layout.stateDir,
-      "tenant-acme",
-      "requests",
-      "old.json",
-    );
-    await Deno.writeTextFile(oldConfig, "{}");
-    await Deno.mkdir(layout.runDir, { recursive: true });
-    await Deno.writeTextFile(tenantAcmeSocketPath(layout, "old"), "");
-    await Deno.writeTextFile(join(layout.runDir, "instance.sock"), "");
-    const stopped: string[] = [];
-    await sweepTenantAcme(layout, {
-      run: () =>
-        Promise.resolve({
-          ok: true,
-          stdout:
-            "turbopanel-tenant-acme@old.service loaded active running x\nturbopanel-tenant-acme@old2.service loaded failed failed x\n",
-          stderr: "",
-        }),
-      stopUnit: (unit) => {
-        stopped.push(unit);
-        return Promise.resolve(null);
-      },
-    });
-    assertEquals(stopped, [
-      "turbopanel-tenant-acme@old.service",
-      "turbopanel-tenant-acme@old2.service",
-    ]);
-    assertEquals(await exists(pair), false);
-    assertEquals(await exists(oldConfig), false);
-    assertEquals(await exists(tenantAcmeSocketPath(layout, "old")), false);
-    assertEquals(await exists(join(layout.runDir, "instance.sock")), true);
-    assertEquals(await exists(account), true);
   });
 });
 

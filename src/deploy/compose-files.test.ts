@@ -216,6 +216,41 @@ describe("compose-files", () => {
     }
   });
 
+  it("manifest releases[] drops a commitSha that is not a commit id and reads a row that has none", async () => {
+    const tmp = await Deno.makeTempDir({ prefix: "tp-" });
+    try {
+      const layout = resolveLayout({ TURBOPANEL_STATE_DIR: tmp });
+      const deploymentDir = environmentDeploymentDir(layout, "proj-1", "env-1");
+      await Deno.mkdir(deploymentDir, { recursive: true, mode: 0o750 });
+      const row = {
+        composeServiceName: "web",
+        serviceId: "svc-1",
+        releaseId: "rel-1",
+        sourceId: "src-1",
+      };
+      await writeDeploymentManifest(deploymentDir, {
+        version: 2 as const,
+        projectId: "proj-1",
+        environmentId: "env-1",
+        serverId: "srv-1",
+        generation: 4,
+        projectName: "demo",
+        composeSha256: "e".repeat(64),
+        services: {},
+        releases: [
+          { ...row, commitSha: "main" },
+          { ...row, composeServiceName: "api", serviceId: "svc-2" },
+        ],
+      });
+      assertEquals((await readDeploymentManifest(deploymentDir))?.releases, [
+        row,
+        { ...row, composeServiceName: "api", serviceId: "svc-2" },
+      ]);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  });
+
   it("manifest releases[] round-trip carries the owning principal", async () => {
     const tmp = await Deno.makeTempDir({ prefix: "tp-" });
     try {
@@ -961,6 +996,66 @@ describe("compose-files", () => {
         await assertRejects(() => Deno.stat(join(dir, "previous")));
         // The v2 .env (A=2) must not survive; v1's is back.
         assertEquals(await Deno.readTextFile(join(dir, ".env")), "A=1\n");
+      });
+    });
+
+    it("the checkout marker follows the compose file through a publish and a restore", async () => {
+      await withDir(async (dir, stage) => {
+        const marker = (sha: string) =>
+          `${
+            JSON.stringify({
+              version: 1,
+              cloneUrl: "https://git.example.net/acme/stack.git",
+              commitSha: sha.repeat(40),
+              composePath: "compose.yaml",
+            })
+          }\n`;
+        const publish = async (n: number, sha: string | null) => {
+          // A deploy moves repo.json to its commit before it publishes.
+          if (sha === null) {
+            await Deno.remove(join(dir, "repo.json")).catch(() => undefined);
+          } else {
+            await Deno.writeTextFile(join(dir, "repo.json"), marker(sha));
+          }
+          await writeComposeFileSecure(
+            join(stage, RUNTIME_COMPOSE_FILENAME),
+            `v${n}\n`,
+          );
+          await publishStagedRuntimeCompose(dir, stage, {
+            ...base,
+            version: 3,
+            generation: n,
+            composeSha256: String(n).repeat(64),
+          });
+        };
+        await publish(1, "a");
+        await publish(2, "b");
+        assertEquals(
+          await Deno.readTextFile(join(dir, "previous", "repo.json")),
+          marker("a"),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(dir, "repo.live.json")),
+          marker("b"),
+        );
+        // A deploy that fetched "c" and then failed before publishing leaves
+        // repo.json at "c"; the restore puts the kept marker back.
+        await Deno.writeTextFile(join(dir, "repo.json"), marker("c"));
+        await restorePreviousDeployment(dir);
+        assertEquals(
+          await Deno.readTextFile(join(dir, "repo.json")),
+          marker("a"),
+        );
+        assertEquals(
+          await Deno.readTextFile(join(dir, "repo.live.json")),
+          marker("a"),
+        );
+        // An earlier version without a checkout leaves no marker behind.
+        await publish(3, null);
+        await publish(4, "d");
+        await restorePreviousDeployment(dir);
+        await assertRejects(() => Deno.stat(join(dir, "repo.json")));
+        await assertRejects(() => Deno.stat(join(dir, "repo.live.json")));
       });
     });
 

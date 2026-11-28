@@ -612,7 +612,11 @@ function rollbackWith(
   });
 }
 
+const PUBLIC_DISK_LINK = {
+  "public/storage": "../shared/storage/app/public",
+};
 const LARAVEL_RECIPE = { "storage": "shared/storage" };
+const LARAVEL_FULL_RECIPE = { ...LARAVEL_RECIPE, ...PUBLIC_DISK_LINK };
 
 test("a release whose record names Laravel rolls back with its storage link, and its folders are made again first", async () => {
   await withSealedRelease(LARAVEL_RECIPE, async (paths) => {
@@ -628,6 +632,17 @@ test("a release whose record names Laravel rolls back with its storage link, and
       RELEASE_ID,
       "layout=laravel",
     ]);
+  });
+});
+
+test("a Laravel release with both recipe links rolls back; each is refused without the layout", async () => {
+  await withSealedRelease(LARAVEL_FULL_RECIPE, async (paths) => {
+    await rollbackWith(paths, "laravel");
+    assert((await Deno.lstat(paths.currentLink)).isSymlink);
+  });
+  await withSealedRelease(PUBLIC_DISK_LINK, async (paths) => {
+    await assertRejects(() => rollbackWith(paths, undefined));
+    await assertRejects(() => rollbackWith(paths, "wordpress"));
   });
 });
 
@@ -658,6 +673,18 @@ for (
       ...LARAVEL_RECIPE,
       "public/s": "../shared/storage",
     },
+    "a link through the public disk link": {
+      ...LARAVEL_FULL_RECIPE,
+      "public/x": "storage/logs",
+    },
+    "the public disk link with other text": {
+      ...LARAVEL_RECIPE,
+      "public/storage": "../shared/storage",
+    },
+    "the public disk link to the public disk from elsewhere": {
+      ...LARAVEL_FULL_RECIPE,
+      "public/second": "../shared/storage/app/public",
+    },
     "a chain through the storage link": {
       ...LARAVEL_RECIPE,
       "here": ".",
@@ -672,6 +699,17 @@ for (
     });
   });
 }
+
+test("the public disk folder the owner repointed outside shared/ is refused on rollback", async () => {
+  await withSealedRelease(LARAVEL_FULL_RECIPE, async (paths) => {
+    await Deno.mkdir(join(paths.sharedDir, "storage/app"), { recursive: true });
+    await Deno.symlink(
+      "../../../elsewhere",
+      join(paths.sharedDir, "storage/app/public"),
+    );
+    await assertRejects(() => rollbackWith(paths, "laravel"));
+  });
+});
 
 test("a recipe folder the owner repointed outside shared/ is refused on rollback", async () => {
   await withSealedRelease(LARAVEL_RECIPE, async (paths) => {
@@ -692,6 +730,15 @@ test("linksLeavingReleaseLexically excuses a recipe link only for its layout", (
     linksLeavingReleaseLexically(links, undefined, "wordpress").length,
     1,
   );
+  const both = [
+    ...links,
+    { path: "public/storage", text: "../shared/storage/app/public" },
+  ];
+  assertEquals(linksLeavingReleaseLexically(both, undefined, "laravel"), []);
+  assertEquals(
+    linksLeavingReleaseLexically(both, undefined, "wordpress").length,
+    2,
+  );
   assertEquals(
     linksLeavingReleaseLexically(
       [...links, { path: "public/x", text: "../storage/app" }],
@@ -706,6 +753,8 @@ test("linksLeavingReleaseLexically excuses a recipe link only for its layout", (
 async function promoteLaravel(
   root: string,
   links: Readonly<Record<string, string>>,
+  /** Files the build ships, by path (their folders are made). */
+  files: Readonly<Record<string, string>> = {},
 ) {
   const paths = resolveReleasePaths(
     { principalHomeRoot: root, daemonStateDir: join(root, "state") },
@@ -722,6 +771,10 @@ async function promoteLaravel(
   await Deno.mkdir(join(workingDir, "public"), { recursive: true });
   await Deno.writeTextFile(join(workingDir, "artisan"), "<?php\n");
   await Deno.mkdir(join(workingDir, "storage", "app"), { recursive: true });
+  for (const [path, text] of Object.entries(files)) {
+    await Deno.mkdir(join(workingDir, path, ".."), { recursive: true });
+    await Deno.writeTextFile(join(workingDir, path), text);
+  }
   await Promise.all(
     Object.entries(links).map(([path, text]) =>
       Deno.symlink(text, join(workingDir, path))
@@ -758,6 +811,24 @@ test("a daemon-owned Laravel promote refuses a link that goes through the storag
     // Never published: no `current`, no half-staged release left behind.
     await assertRejects(() => Deno.lstat(paths.currentLink));
     await assertRejects(() => Deno.lstat(paths.releaseDir));
+  });
+});
+
+test("a daemon-owned Laravel promote replaces a shipped public/storage folder with the public disk link", async () => {
+  await withHomes(async (root) => {
+    const { paths, promoted } = await promoteLaravel(root, {}, {
+      "public/storage/.gitignore": "*\n",
+    });
+    await promoted;
+    assertEquals(
+      (await Deno.lstat(join(paths.releaseDir, "public/storage"))).isSymlink,
+      true,
+    );
+    assertEquals(
+      await Deno.readLink(join(paths.releaseDir, "public/storage")),
+      "../shared/storage/app/public",
+    );
+    assert((await Deno.lstat(paths.currentLink)).isSymlink);
   });
 });
 

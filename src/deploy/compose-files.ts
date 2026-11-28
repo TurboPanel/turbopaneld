@@ -5,6 +5,11 @@
  * `<stateDir>/deployments/<projectId>/<environmentId>/`.
  */
 
+import {
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
+  COMPOSE_CHECKOUT_MARKER_FILENAME,
+} from "./compose-checkout-marker.ts";
+import { isResolvedCommitSha } from "./commit-sha.ts";
 import { basename, join } from "@std/path";
 import {
   type FolderRefParts,
@@ -168,8 +173,10 @@ export type DeploymentManifestRelease = {
    * is the commit read back out of the promoted release's own manifest, not the
    * placeholder the payload carried. The host's durable record therefore names
    * the code that is running, which is the whole point of keeping it here.
+   * Only ever a resolved commit id (40 or 64 hex characters), and absent when
+   * none is known: a branch name or a placeholder is never recorded here.
    */
-  commitSha: string;
+  commitSha?: string;
   /** Commit subject / author, when the source provider resolved them. */
   commitMessage?: string;
   commitAuthor?: string;
@@ -223,7 +230,7 @@ export type DeploymentManifest = {
    * This is the daemon's authoritative copy of container identity. The
    * on-demand log tail (`src/logs/container-tail.ts`) validates that a
    * requested container belongs to the caller's service against this map
-   * rather than a live `com.turbopanel.service` label, which can drift, be
+   * rather than a live `io.turbopanel.service` label, which can drift, be
    * stripped, or be re-stamped by anything that touches the container outside
    * the deployment pipeline. Absent on pre-`serviceIds` manifests.
    */
@@ -383,6 +390,14 @@ function parseManifestServiceIds(value: unknown): Record<string, string> {
   return out;
 }
 
+/** Optional text fields of a release row, kept only when non-empty. */
+const OPTIONAL_RELEASE_TEXT_FIELDS = [
+  "ref",
+  "commitMessage",
+  "commitAuthor",
+  "username",
+] as const;
+
 /**
  * Accept only fully-identified release rows.
  *
@@ -403,36 +418,29 @@ function parseManifestRelease(
       "serviceId",
       "releaseId",
       "sourceId",
-      "commitSha",
     ]
   ) {
     const field = record[key];
     if (typeof field !== "string" || field.length === 0) return null;
   }
+  // Absent when no commit was resolved; a value that is not a commit id (a
+  // branch name an older daemon recorded) is dropped, not kept.
+  const commitSha = isResolvedCommitSha(record.commitSha)
+    ? record.commitSha
+    : undefined;
   const entry: DeploymentManifestRelease = {
     composeServiceName: record.composeServiceName as string,
     serviceId: record.serviceId as string,
     releaseId: record.releaseId as string,
     sourceId: record.sourceId as string,
-    commitSha: record.commitSha as string,
+    ...(commitSha === undefined ? {} : { commitSha }),
   };
-  if (typeof record.ref === "string" && record.ref.length > 0) {
-    entry.ref = record.ref;
-  }
-  // Display-only, and absent on every manifest written before it was recorded —
-  // a missing one is not a reason to drop an otherwise-valid release row.
-  if (
-    typeof record.commitMessage === "string" && record.commitMessage.length > 0
-  ) {
-    entry.commitMessage = record.commitMessage;
-  }
-  if (
-    typeof record.commitAuthor === "string" && record.commitAuthor.length > 0
-  ) {
-    entry.commitAuthor = record.commitAuthor;
-  }
-  if (typeof record.username === "string" && record.username.length > 0) {
-    entry.username = record.username;
+  // `commitMessage` and `commitAuthor` are display-only, and absent on every
+  // manifest written before they were recorded — a missing one is not a reason
+  // to drop an otherwise-valid release row.
+  for (const key of OPTIONAL_RELEASE_TEXT_FIELDS) {
+    const text = record[key];
+    if (typeof text === "string" && text.length > 0) entry[key] = text;
   }
   if (record.folder !== undefined) {
     try {
@@ -600,6 +608,10 @@ export async function removeComposeEnvFile(dir: string): Promise<void> {
   }
 }
 
+function ignoreNotFound(err: unknown): void {
+  if (!(err instanceof Deno.errors.NotFound)) throw err;
+}
+
 async function fileExists(path: string): Promise<boolean> {
   try {
     const stat = await Deno.stat(path);
@@ -685,11 +697,31 @@ export async function retainPreviousDeployment(
     join(deploymentDir, DEPLOYMENT_MANIFEST_FILENAME),
     join(previousDir, DEPLOYMENT_MANIFEST_FILENAME),
   );
+  // The commit the kept compose file was published with, so it runs against
+  // its own repository tree (`composeCheckoutDirsForFile`).
+  await copyIfPresent(
+    join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME),
+    join(previousDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
+  );
   return {
     generation: live.generation,
     projectName: live.projectName,
     composeSha256: live.composeSha256,
   };
+}
+
+/**
+ * Make the live checkout marker (`repo.live.json`) the copy of `from`, or
+ * remove it when `from` is absent: it records which commit the live compose
+ * file was published with.
+ */
+export async function setLiveCheckoutMarker(
+  deploymentDir: string,
+  from: string,
+): Promise<void> {
+  const live = join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME);
+  if (await copyIfPresent(from, live)) return;
+  await Deno.remove(live).catch(ignoreNotFound);
 }
 
 /**
@@ -711,6 +743,10 @@ export async function publishStagedRuntimeCompose(
   await writeDeploymentManifest(
     deploymentDir,
     previous ? { ...rest, previous } : rest,
+  );
+  await setLiveCheckoutMarker(
+    deploymentDir,
+    join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
   );
   await pruneStaleComposeLayerFiles(
     deploymentDir,
@@ -757,6 +793,19 @@ export async function restorePreviousDeployment(
   if (!hadEnv) await removeComposeEnvFile(deploymentDir);
   const { previous: _index, ...restored } = manifest;
   await writeDeploymentManifest(deploymentDir, restored);
+  // The commit the restored compose file was published with becomes current
+  // again; a deploy that had no checkout leaves no marker behind.
+  const kept = join(previousDir, COMPOSE_CHECKOUT_MARKER_FILENAME);
+  if (
+    !(await copyIfPresent(
+      kept,
+      join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME),
+    ))
+  ) {
+    await Deno.remove(join(deploymentDir, COMPOSE_CHECKOUT_MARKER_FILENAME))
+      .catch(ignoreNotFound);
+  }
+  await setLiveCheckoutMarker(deploymentDir, kept);
   await removePreviousDir(deploymentDir);
   return [live];
 }

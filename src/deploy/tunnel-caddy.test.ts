@@ -8,10 +8,13 @@ import type {
   EnvironmentDeployHosting,
   TunnelRoute,
 } from "../contracts/commands-contracts.ts";
+import { ConfigValueError } from "../contracts/config-values.ts";
 import { buildCaddyHostnameRoutes, caddyfile, siteSnippet } from "./ingress.ts";
 import {
+  canonicalAddress,
   peerUpstreamText,
   renderTunnelFile,
+  TUNNEL_PEER_PORT,
   tunnelLockLines,
   tunnelPeerPaths,
   withTrustedProxies,
@@ -64,6 +67,9 @@ const PROXY_TAIL = `      lb_policy round_robin
         tls_trust_pool file /etc/turbopanel/hosting/peer/abc123/ca.pem
         tls_server_name tp-peer.internal
         versions 2
+        dial_timeout 2s
+        response_header_timeout 60s
+        keepalive 15s
       }
     }`;
 
@@ -84,7 +90,7 @@ ${PROXY_TAIL}
     abort
   }
   handle_errors {
-    respond "This site is not running right now." {err.status_code}
+    respond "This site is not running right now." 503
   }
 }
 
@@ -99,7 +105,7 @@ open.example.com {
 ${PROXY_TAIL}
   }
   handle_errors {
-    respond "This site is not running right now." {err.status_code}
+    respond "This site is not running right now." 503
   }
 }
 
@@ -354,6 +360,7 @@ test("only the names a hosting lists as tunnel names are locked, and open ones a
         hostnames: ["app.example.com", "pub.example.com"],
         openHostnames: ["pub.example.com"],
         peers: ["10.0.0.5"],
+        generation: 1,
         extraBind: ["10.0.0.7"],
       },
     })],
@@ -450,4 +457,299 @@ test({
     assertEquals(serverOf("plain.example.com"), serverOf("tp-peer.internal"));
     assertEquals(serverOf("app.example.com"), serverOf("tp-peer.internal"));
   },
+});
+
+test("a sender with a fit certificate shows it in the peer transport", () => {
+  const text = peerUpstreamText({
+    kind: "peer",
+    targets: ["10.0.0.5:443"],
+    trustFile: PEER_DIR.trust,
+    trustedProxies: ["127.0.0.0/8"],
+    clientCertificate: { certificate: PEER_DIR.certificate, key: PEER_DIR.key },
+  });
+  assertStringIncludes(
+    text,
+    `    tls_trust_pool file ${PEER_DIR.trust}
+    tls_server_name tp-peer.internal
+    tls_client_auth ${PEER_DIR.certificate} ${PEER_DIR.key}
+    versions 2`,
+  );
+  assertThrows(
+    () =>
+      peerUpstreamText({
+        kind: "peer",
+        targets: ["10.0.0.5:443"],
+        trustFile: PEER_DIR.trust,
+        trustedProxies: [],
+        clientCertificate: { certificate: "leaf pem", key: PEER_DIR.key },
+      }),
+    ConfigValueError,
+  );
+});
+
+test("forward blocks show the certificate only when the inputs say it is fit", () => {
+  const withCert = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, presentCertificate: true },
+    new Set(),
+  ).contents;
+  assertEquals(withCert.split("tls_client_auth ").length - 1, 2);
+  assertStringIncludes(
+    withCert,
+    `tls_client_auth ${PEER_DIR.certificate} ${PEER_DIR.key}`,
+  );
+  const without = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, presentCertificate: false },
+    new Set(),
+  ).contents;
+  assertEquals(without, GOLDEN_TUNNEL_FILE);
+});
+
+const DEDICATED_SITE = `https://:9443 {
+  tls ${PEER_DIR.certificate} ${PEER_DIR.key} {
+    client_auth {
+      mode require_and_verify
+      trust_pool file ${PEER_DIR.trust}
+    }
+  }
+  @tp_outside not remote_ip 10.0.0.5 10.0.0.6 fd00::5
+  handle @tp_outside {
+    abort
+  }
+  @tp_repeated_host {
+    vars_regexp {http.request.header.X-Tp-Peer-Host} ,
+  }
+  handle @tp_repeated_host {
+    abort
+  }
+  @tp_door_0 {
+    header X-Tp-Peer-Host app.example.com
+    remote_ip 10.0.0.5
+  }
+  handle @tp_door_0 {
+    reverse_proxy https://127.0.0.1:443 {
+      header_up Host {header.X-Tp-Peer-Host}
+      header_up -X-Tp-Peer-Host
+      header_up X-Tp-Peer-Hop 1
+      trusted_proxies 127.0.0.0/8 ::1 10.0.0.5 10.0.0.6 fd00::5
+      transport http {
+        tls_server_name {http.request.header.X-Tp-Peer-Host}
+        tls_insecure_skip_verify
+        dial_timeout 2s
+        response_header_timeout 60s
+      }
+    }
+  }
+  handle {
+    abort
+  }
+}
+`;
+
+/** One name with a peer, one local-only name (no peers): only the first gets a door. */
+const DEDICATED_INBOUND = [
+  { hostname: "App.Example.com", peers: ["10.0.0.5"] },
+  { hostname: "mine.example.com", peers: [], lock: true },
+];
+
+test("with client auth the peer hop is its own server on its own port, requiring a certificate", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require", inbound: DEDICATED_INBOUND },
+    new Set(),
+  ).contents;
+  assert(text.endsWith(DEDICATED_SITE));
+  // A local-only name gets no door, so a peer cannot ask for it.
+  assertEquals(text.includes("mine.example.com"), false);
+  // The shared-port peer site is gone, and so is its name on 443.
+  assertEquals(text.includes("tp-peer.internal {"), false);
+  assertEquals(TUNNEL_PEER_PORT, 9443);
+});
+
+test("in verify mode the peer server only checks a certificate that is shown", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "verify", inbound: DEDICATED_INBOUND },
+    new Set(),
+  ).contents;
+  assert(
+    text.endsWith(
+      DEDICATED_SITE.replace("require_and_verify", "verify_if_given"),
+    ),
+  );
+});
+
+test("senders dial the peer port unless an upstream names its own, and mark nothing else", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assertStringIncludes(
+    text,
+    "reverse_proxy 10.0.0.5:9443 [fd00::5]:9443 10.0.0.6:8443 {",
+  );
+  assertEquals(text.includes("10.0.0.5:443"), false);
+  // The receiver matches Host to the connecting name, so the real one rides in a header.
+  assertStringIncludes(text, "header_up Host tp-peer.internal");
+  assertStringIncludes(text, "header_up X-Tp-Peer-Host {host}");
+  // A forwarded request is told by the header the peer server sets, not by its address.
+  assertStringIncludes(text, "@tp_peer header X-Tp-Peer-Hop 1");
+  assertEquals(text.includes("@tp_peer remote_ip"), false);
+});
+
+test("without client auth nothing moves: port 443, the address rule and the shared peer site", () => {
+  const text = renderTunnelFile(ROUTES, INPUTS, new Set()).contents;
+  assertStringIncludes(text, "10.0.0.5:443");
+  assertStringIncludes(text, "@tp_peer remote_ip 10.0.0.5 10.0.0.6 fd00::5");
+  assertStringIncludes(text, "tp-peer.internal {");
+  assertEquals(text.includes("client_auth"), false);
+  assertEquals(text.includes("9443"), false);
+});
+
+// Real Caddy (TP_TEST_CADDY): the new directives must adapt to what is meant,
+// a verifying peer site and a sender that shows its certificate.
+test({
+  name: "a real Caddy adapts the client certificate directives",
+  ignore: !Deno.env.get("TP_TEST_CADDY"),
+  fn: async () => {
+    const rendered = renderTunnelFile(
+      ROUTES,
+      { ...INPUTS, clientAuth: "require", presentCertificate: true },
+      new Set(),
+    ).contents;
+    const child = new Deno.Command(Deno.env.get("TP_TEST_CADDY")!, {
+      args: ["adapt", "--adapter", "caddyfile", "--config", "/dev/stdin"],
+      stdin: "piped",
+      stdout: "piped",
+      stderr: "piped",
+    }).spawn();
+    const writer = child.stdin.getWriter();
+    await writer.write(new TextEncoder().encode(rendered));
+    await writer.close();
+    const out = await child.output();
+    assertEquals(out.success, true, new TextDecoder().decode(out.stderr));
+    const json = new TextDecoder().decode(out.stdout);
+    assertStringIncludes(json, '"mode":"require_and_verify"');
+    assertStringIncludes(json, PEER_DIR.trust);
+    assertStringIncludes(json, '"client_certificate_file"');
+    assertStringIncludes(json, PEER_DIR.certificate);
+  },
+});
+
+test("a peer server with no inbound names hands nothing on", () => {
+  const text = renderTunnelFile(
+    ROUTES,
+    { ...INPUTS, clientAuth: "require" },
+    new Set(),
+  ).contents;
+  assertEquals(text.includes("@tp_door_"), false);
+  assertEquals(text.includes("reverse_proxy https://127.0.0.1:443"), false);
+});
+
+test("a source address is rendered as local_address when it is on this host", () => {
+  const routes: TunnelRoute[] = [{
+    hostname: "app.example.com",
+    local: false,
+    lock: false,
+    upstreams: [
+      {
+        serverId: SERVER_A,
+        addresses: ["10.0.0.5", "fd00::5"],
+        localAddress: "10.0.0.7",
+      },
+      { serverId: SERVER_B, addresses: ["10.0.0.6"], localAddress: "10.0.0.7" },
+    ],
+  }];
+  const owned = new Set(["10.0.0.7"]);
+  const out = renderTunnelFile(
+    routes,
+    { ...INPUTS, localAddresses: owned },
+    new Set(),
+  );
+  assertStringIncludes(out.contents, "    local_address 10.0.0.7\n");
+  // The IPv6 target cannot be dialed from an IPv4 source.
+  assertStringIncludes(
+    out.contents,
+    "reverse_proxy 10.0.0.5:443 10.0.0.6:443 {",
+  );
+  assertEquals(out.contents.includes("[fd00::5]:"), false);
+  // Leaving a target out is said, not silent.
+  assertEquals(out.warnings.length, 1);
+  assertStringIncludes(out.warnings[0], "other address family");
+
+  // Not checked when the host's addresses are not given.
+  assertStringIncludes(
+    renderTunnelFile(routes, INPUTS, new Set()).contents,
+    "local_address 10.0.0.7",
+  );
+});
+
+test("a source address that is not on this host, or that the carriers disagree on, is left out with a warning", () => {
+  const route = (first?: string, second?: string): TunnelRoute[] => [{
+    hostname: "app.example.com",
+    local: false,
+    lock: false,
+    upstreams: [
+      { serverId: SERVER_A, addresses: ["10.0.0.5"], localAddress: first },
+      { serverId: SERVER_B, addresses: ["10.0.0.6"], localAddress: second },
+    ],
+  }];
+  const inputs = { ...INPUTS, localAddresses: new Set(["10.0.0.7"]) };
+  for (
+    const routes of [
+      route("10.0.0.99", "10.0.0.99"),
+      route("10.0.0.7", "10.0.0.8"),
+      route("10.0.0.7", undefined),
+    ]
+  ) {
+    const out = renderTunnelFile(routes, inputs, new Set());
+    assertEquals(out.contents.includes("local_address"), false);
+    assertEquals(out.warnings.length, 1);
+    assertStringIncludes(out.contents, "10.0.0.5:443 10.0.0.6:443");
+  }
+  // No pin on any upstream: nothing to say.
+  const none = renderTunnelFile(route(), inputs, new Set());
+  assertEquals(none.warnings, []);
+  assertEquals(none.contents.includes("local_address"), false);
+  // A pin with no target of its family is dropped, not the route.
+  const v6only = renderTunnelFile(
+    [{
+      hostname: "app.example.com",
+      local: false,
+      lock: false,
+      upstreams: [{
+        serverId: SERVER_A,
+        addresses: ["10.0.0.5"],
+        localAddress: "fd00::7",
+      }],
+    }],
+    { ...INPUTS, localAddresses: new Set(["fd00::7"]) },
+    new Set(),
+  );
+  assertEquals(v6only.contents.includes("local_address"), false);
+  assertEquals(v6only.warnings.length, 1);
+});
+
+test("addresses compare by their canonical form", () => {
+  assertEquals(canonicalAddress("FD00:0:0:0:0:0:0:7"), "fd00::7");
+  assertEquals(canonicalAddress("fe80::1%eth0"), "fe80::1");
+  assertEquals(canonicalAddress("10.0.0.7"), "10.0.0.7");
+  const out = renderTunnelFile(
+    [{
+      hostname: "app.example.com",
+      local: false,
+      lock: false,
+      upstreams: [{
+        serverId: SERVER_A,
+        addresses: ["fd00::5"],
+        localAddress: "FD00::7",
+      }],
+    }],
+    { ...INPUTS, localAddresses: new Set(["fd00:0:0:0:0:0:0:7"]) },
+    new Set(),
+  );
+  assertStringIncludes(out.contents, "local_address fd00::7");
+  assertEquals(out.warnings, []);
 });

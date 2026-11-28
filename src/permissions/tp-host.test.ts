@@ -1491,6 +1491,18 @@ test("root reads go through a verified descriptor, not a planted symlink", async
   });
 });
 
+test("cat reads a site's PHP config file and nothing else under php/sites", async () => {
+  await withHost(async (host) => {
+    const dir = host.path("etc/turbopanel/php/sites/shop-0a1b2c3d4e5f-fcgi84");
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(join(dir, "php.ini"), "memory_limit=64M\n");
+    await Deno.writeTextFile(join(dir, "notes.txt"), "x\n");
+    const ok = await host.run(["cat", "--", join(dir, "php.ini")]);
+    assertEquals(ok.stdout, "memory_limit=64M\n");
+    await refused(host, ["cat", "--", join(dir, "notes.txt")]);
+  });
+});
+
 test("test -d answers for a real directory, never a symlink to one", async () => {
   await withHost(async (host) => {
     const release = host.path("srv/users/alice/sites/web/releases/r1");
@@ -1840,9 +1852,9 @@ test("ip route accepts a connected network whoever made it, and nothing that is 
     await Deno.writeTextFile(
       host.path("tp-test/ip-route-link-eth0"),
       [
-        "10.10.0.0/22 proto dhcp scope link src 10.10.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+        "10.50.0.0/22 proto dhcp scope link src 10.50.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
         "10.20.0.0/24 proto static scope link", // NOSONAR typescript:S1313 — sample static LAN for this test fixture, not a reachable host
-        "10.30.0.0/24 via 10.10.0.1 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
+        "10.30.0.0/24 via 10.50.0.1 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
         "default proto dhcp scope link",
         "blackhole 10.40.0.0/24 proto static",
         "",
@@ -1851,8 +1863,8 @@ test("ip route accepts a connected network whoever made it, and nothing that is 
     await Deno.writeTextFile(
       host.path("tp-test/ip-route-kernel"),
       [
-        "10.10.0.0/22 dev eth0 proto dhcp scope link src 10.10.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
-        "10.30.0.0/24 via 10.10.0.1 dev eth0 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
+        "10.50.0.0/22 dev eth0 proto dhcp scope link src 10.50.3.85", // NOSONAR typescript:S1313 — sample DHCP LAN for this test fixture, not a reachable host
+        "10.30.0.0/24 via 10.50.0.1 dev eth0 proto static scope link", // NOSONAR typescript:S1313 — a routed network is not connected, test fixture only
         "10.250.5.0/24 dev tp0 proto boot scope link",
         "",
       ].join("\n"),
@@ -1869,7 +1881,7 @@ test("ip route accepts a connected network whoever made it, and nothing that is 
     ];
     for (
       const args of [
-        lan("10.194.0.0/16", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.194.0.0/16", "10.50.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
         lan("10.195.0.0/16", "10.20.0.7"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
         [
           "ip",
@@ -1877,7 +1889,7 @@ test("ip route accepts a connected network whoever made it, and nothing that is 
           "del",
           "10.194.0.0/16",
           "via",
-          "10.10.3.86",
+          "10.50.3.86",
           "dev",
           "eth0",
         ], // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
@@ -1891,12 +1903,12 @@ test("ip route accepts a connected network whoever made it, and nothing that is 
       const args of [
         lan("10.194.0.0/16", "10.30.0.9"), // NOSONAR typescript:S1313 — behind a gateway, not on a connected network
         lan("10.194.0.0/16", "10.40.0.9"), // NOSONAR typescript:S1313 — blackhole, not a connected network
-        lan("10.194.0.0/16", "10.10.0.0"), // NOSONAR typescript:S1313 — the network address
-        lan("10.194.0.0/16", "10.10.3.86", "eth1"), // NOSONAR typescript:S1313 — no connected network on eth1
-        lan("10.194.0.0/16", "10.10.3.86", "tp0"), // NOSONAR typescript:S1313 — never tp0
-        lan("0.0.0.0/0", "10.10.3.86"), // NOSONAR typescript:S1313 — never the default route
-        lan("10.10.0.0/22", "10.10.3.86"), // NOSONAR typescript:S1313 — the connected network itself
-        lan("10.10.1.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — inside the connected network
+        lan("10.194.0.0/16", "10.50.0.0"), // NOSONAR typescript:S1313 — the network address
+        lan("10.194.0.0/16", "10.50.3.86", "eth1"), // NOSONAR typescript:S1313 — no connected network on eth1
+        lan("10.194.0.0/16", "10.50.3.86", "tp0"), // NOSONAR typescript:S1313 — never tp0
+        lan("0.0.0.0/0", "10.50.3.86"), // NOSONAR typescript:S1313 — never the default route
+        lan("10.50.0.0/22", "10.50.3.86"), // NOSONAR typescript:S1313 — the connected network itself
+        lan("10.50.1.0/24", "10.50.3.86"), // NOSONAR typescript:S1313 — inside the connected network
       ]
     ) {
       await refused(host, args);
@@ -1904,8 +1916,8 @@ test("ip route accepts a connected network whoever made it, and nothing that is 
     // A routed network and `tp0`'s own routes do not count as connected.
     for (
       const args of [
-        lan("10.30.0.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
-        lan("10.250.5.0/24", "10.10.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.30.0.0/24", "10.50.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
+        lan("10.250.5.0/24", "10.50.3.86"), // NOSONAR typescript:S1313 — sample LAN neighbour for this test fixture, not a reachable host
       ]
     ) {
       const answer = await host.run(args);
@@ -3474,8 +3486,11 @@ test("per-site PHP config: root:<owner>, 0750/0640, directives on an allowlist",
       ["listen.owner", add(PHP_SITE, "listen.owner = tpnginx")],
       ["listen.group", add(PHP_SITE, "listen.group = tpnginx")],
       [
-        "a socket in /run/turbopanel",
-        line("listen = ", `listen = /run/turbopanel/php/8.4/${PHP_SITE}.sock`),
+        "a socket in the shared php-fpm run tree",
+        line(
+          "listen = ",
+          `listen = /run/turbopanel-phpfpm/8.4/${PHP_SITE}.sock`,
+        ),
       ],
       ["a TCP listener", line("listen = ", "listen = 127.0.0.1:9000")],
       [
@@ -4609,6 +4624,34 @@ test("tunnel-loopback-sync runs the installed port lock with sync and nothing el
   });
 });
 
+test("run from a checkout, tp-host finds its loopback helpers beside it, not under <root>/lib", async () => {
+  await withHost(async (host) => {
+    // Development layout: the helpers sit next to tp-host in
+    // orchestration/scripts, and there is no lib/ beside that folder.
+    const dir = host.path("checkout/orchestration/scripts");
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.copyFile(SCRIPT, join(dir, "tp-host"));
+    const proc = async (verb: string) => {
+      const out = await new Deno.Command("sh", {
+        args: [join(dir, "tp-host"), verb],
+        clearEnv: true,
+        env: { PATH: "/usr/bin:/bin", TP_HOST_TEST_PREFIX: host.prefix },
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      return new TextDecoder().decode(out.stdout).trim();
+    };
+    assertEquals(
+      await proc("php-loopback-sync"),
+      `EXEC [${dir}/tp-php-loopback] [sync]`,
+    );
+    assertEquals(
+      await proc("tunnel-loopback-sync"),
+      `EXEC [${dir}/tp-tunnel-loopback] [sync]`,
+    );
+  });
+});
+
 test("the top of the config and state roots is root's: no verb removes, renames, re-owns or writes a root-owned entry there", async () => {
   await withHost(async (host) => {
     const staged = host.path("tmp/staged");
@@ -5309,7 +5352,7 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
         "env1",
         { ...base, php: { version: "8.4" } },
         "/srv/root",
-        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
       ),
       phpFpmPoolConfig(
         "env1",
@@ -5326,7 +5369,7 @@ test("shared php-fpm master pools: only what the daemon renders, never a root wo
           },
         },
         "/var/lib/turbopanel/sites/env1/phpapp/public",
-        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
         {
           openBasedir: ["/var/lib/turbopanel/sites/env1/phpapp/public", "/tmp"],
           releaseSymlinkSwap: true,
@@ -5609,7 +5652,7 @@ test("a php-fpm series folder and its pools folder stay root's: no verb re-owns,
         php: { version: "8.4" },
       },
       "/srv/root",
-      "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
+      "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock",
     );
     await refused(host, [
       "install",
@@ -5653,7 +5696,7 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
       listenPort: 18081,
       php: { version: "8.4" },
     };
-    const socket = "/run/turbopanel/php/8.4/tp-env1-phpapp.sock";
+    const socket = "/run/turbopanel-phpfpm/8.4/tp-env1-phpapp.sock";
     const engine = phpFpmPoolConfig("env1", site, "/srv/root", socket);
     const owned = phpFpmPoolConfig(
       "env1",
@@ -5710,10 +5753,12 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
       // The socket is the pool's own, in its series folder, mode 0660.
       ...[
         "/etc/turbopanel/system/postgres-backup.sh",
-        "/run/turbopanel/php/8.3/tp-env1-phpapp.sock",
-        "/run/turbopanel/php/8.4/tp-env1-other.sock",
-        "/run/turbopanel/php/8.4/../tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.3/tp-env1-phpapp.sock",
+        "/run/turbopanel-phpfpm/8.4/tp-env1-other.sock",
+        "/run/turbopanel-phpfpm/8.4/../tp-env1-phpapp.sock",
         "/run/turbopanel/tp-env1-phpapp.sock",
+        // The daemon-owned run folder is no place for a root-bound socket.
+        "/run/turbopanel/php/8.4/tp-env1-phpapp.sock",
         "127.0.0.1:9000",
       ].map((path) => owned.replace(`listen = ${socket}`, `listen = ${path}`)),
       owned.replace(`listen = ${socket}\n`, ""),
@@ -5729,7 +5774,7 @@ test("a shared php-fpm pool runs only as a site owner with its own group or as o
         owned.replace("listen.owner = tpnginx", `listen.owner = ${word}`),
       ]),
       // A good pool followed by a bad one.
-      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel/php/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
+      `${owned}[second]\nuser = alice\ngroup = disk\nlisten = /run/turbopanel-phpfpm/8.4/second.sock\nlisten.owner = tpnginx\nlisten.group = tpnginx\n`,
       engine.replace("listen.group = tpnginx\n", ""),
     ];
     for (const content of hostile) {

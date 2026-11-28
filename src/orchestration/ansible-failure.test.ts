@@ -4,6 +4,7 @@ import {
   AnsibleFailureTracker,
   playbookFailureMessage,
 } from "./ansible-failure.ts";
+import { AnsibleRunSummaryCollector } from "./ansible-events.ts";
 import type {
   AnsibleHostResult,
   AnsibleTaskResultEvent,
@@ -113,6 +114,28 @@ test("a task that ignores its errors is not the cause", () => {
   tracker.handleEvent(failed("Real", { msg: "disk full" }));
   tracker.handleEvent(failed("Optional", { msg: "x", ignore_errors: true }));
   assertEquals(tracker.describe(), "Real: disk full");
+});
+
+test("a failed event the callback marked as ignored is not the cause, wherever the flag sits", () => {
+  const onEvent = {
+    ...failed("Lock", { msg: "refused" }),
+    ignore_errors: true,
+  } as AnsibleTaskResultEvent;
+  assertEquals(ansibleFailureLine(onEvent), null);
+  assertEquals(
+    ansibleFailureLine(
+      failed("Lock", { msg: "x", _ansible_ignore_errors: true }),
+    ),
+    null,
+  );
+  const collector = new AnsibleRunSummaryCollector();
+  collector.handleEvent(onEvent);
+  collector.handleEvent(failed("Real", { msg: "disk full" }));
+  assertEquals(
+    collector.build({ runFailed: true }).includes("Real: disk full"),
+    true,
+  );
+  assertEquals(collector.build({ runFailed: true }).includes("Lock"), false);
 });
 
 test("a failure with no detail still names the task", () => {

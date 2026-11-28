@@ -109,7 +109,6 @@ exit 0
         instanceUrl: "https://203.0.113.10",
         start: true,
         instanceCa: caPath,
-        tunnelToken: " tunnel-token ",
       });
     } finally {
       await Deno.remove(caPath).catch(() => {});

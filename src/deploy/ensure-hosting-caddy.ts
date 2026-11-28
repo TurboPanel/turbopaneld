@@ -2,21 +2,16 @@
  * Ensure the hosting Caddy binary and its account exist.
  *
  * Called from `environment.deploy` and from the pre-validate hook in
- * `ingress.ts` (deploy paths and boot guard). `daemon-converge` backfills
- * {@link HOSTING_CADDY_USER}, the vendored binary, and the ingress guard on
- * enrolled hosts via `hosting-caddy/tasks/backfill-edge-account.yml`. Managed
- * hosts often have no Caddy until the first deploy that needs hostname ingress.
+ * `ingress.ts` (deploy paths and boot guard). Managed hosts often have no
+ * Caddy until the first deploy that needs hostname ingress.
  * The `caddy-setup` playbook (root) vendors the binary and provisions
  * {@link HOSTING_CADDY_USER} with read access to what Caddy loads; it runs
  * whenever any of those pieces is missing, so a host that already has the
- * binary from an older release still gets the account.
+ * binary from an earlier run still gets the account.
  */
 
-import { encodeHex } from "@std/encoding/hex";
-import { hostSudoArgs } from "../permissions/host-sudo.ts";
-import { dirname, join } from "@std/path";
-import { logInfo, logWarn } from "../util/logger.ts";
-import { createSymlink } from "../permissions/scoped-writes.ts";
+import { join } from "@std/path";
+import { logWarn } from "../util/logger.ts";
 import { runCaddySetup as defaultRunCaddySetup } from "../orchestration/ansible.ts";
 import type { AnsibleEventHandler } from "../orchestration/ansible-events.ts";
 import { type LayoutPaths, PROD_LIB_DIR_DEFAULT } from "../paths/layout.ts";
@@ -56,31 +51,6 @@ export const INGRESS_GUARD_RULES_PATH = join(
 /** The systemd unit that loads {@link INGRESS_GUARD_RULES_PATH}. */
 export const INGRESS_GUARD_UNIT = "turbopanel-ingress-guard.service";
 
-/** Keep in step with orchestration/roles/caddy/defaults/main.yml */
-export const HOSTING_CADDY_VERSION = "2.11.4";
-const HOSTING_CADDY_TAG = `v${HOSTING_CADDY_VERSION}`;
-
-/** Upstream SHA-256 of linux release tarballs (ansible_architecture → digest). */
-export const HOSTING_CADDY_SHA256: Record<"amd64" | "arm64", string> = {
-  amd64: "527fbf917c39189a1e3b31d34fa955601680b2d5c8055d2a87b8b9588dec7bb9",
-  arm64: "52d42ae12b3462097e9868da6dfed3c9648ae12edd3b3638102312af84cb6904",
-};
-
-export async function verifyHostingCaddyTarballSha256(
-  arch: "arm64" | "amd64",
-  tarballPath: string,
-): Promise<void> {
-  const expected = HOSTING_CADDY_SHA256[arch];
-  const data = await Deno.readFile(tarballPath);
-  const digest = await crypto.subtle.digest("SHA-256", data);
-  const hex = encodeHex(new Uint8Array(digest));
-  if (hex !== expected) {
-    throw new Error(
-      `Caddy tarball SHA-256 mismatch for ${arch} (expected ${expected}, got ${hex})`,
-    );
-  }
-}
-
 const decoder = new TextDecoder();
 
 function caddyBinaryPath(runtimesDir: string): string {
@@ -116,13 +86,6 @@ async function caddyBinaryPresent(path: string): Promise<boolean> {
   }
 }
 
-function resolveCaddyArchDefault(): "arm64" | "amd64" {
-  const arch = Deno.build.arch;
-  if (arch === "aarch64") return "arm64";
-  if (arch === "x86_64") return "amd64";
-  throw new Error(`Unsupported CPU architecture for hosting Caddy: ${arch}`);
-}
-
 async function runDefault(
   command: string,
   args: string[],
@@ -152,20 +115,18 @@ export type EnsureHostingCaddyDeps = {
     args: string[],
     opts?: { cwd?: string },
   ) => Promise<{ success: boolean; stderr: string; stdout?: string }>;
-  resolveArch?: () => "arm64" | "amd64";
   /** Whether the hosting Caddy account exists (`getent passwd`). */
   accountExists?: () => Promise<boolean>;
   /** Whether the current ingress guard ruleset is installed. */
   ingressGuardCurrent?: () => Promise<boolean>;
   /** Whether {@link INGRESS_GUARD_UNIT} is active (`systemctl is-active`). */
   ingressGuardActive?: () => Promise<boolean>;
-  verifyTarballSha256?: (
-    arch: "arm64" | "amd64",
-    tarballPath: string,
-  ) => Promise<void>;
   /** Replaces {@link grantHostingCaddyRead} in {@link ensureHostingCaddyRuntime}. */
   grantHostingRead?: (hostingDir: string) => Promise<void>;
 };
+
+/** The peer certificate key: `<hosting>/peer/<id>/leaf.key` (`TUNNEL_PEER_FILES.key`). */
+const PEER_KEY_PATH = /\/peer\/[^/]+\/leaf\.key$/;
 
 /** A path under the hosting config directory and whether it is a folder. */
 type HostingEntry = { path: string; dir: boolean };
@@ -182,6 +143,16 @@ async function listHostingEntries(root: string): Promise<HostingEntry[]> {
     return child.isFile ? [{ path, dir: false }] : [];
   }));
   return out.concat(...nested);
+}
+
+/** The paths whose `getfacl` block shows an empty group entry (`group::---`). */
+function closedGroupPaths(text: string): Set<string> {
+  const closed = new Set<string>();
+  for (const block of text.split(/\n\s*\n/)) {
+    const file = /^# file: (.+)$/m.exec(block)?.[1];
+    if (file && /^group::---$/m.test(block)) closed.add(file);
+  }
+  return closed;
 }
 
 /** `getfacl` blocks as `path -> [permissions, effective]` for `user`. */
@@ -219,7 +190,8 @@ function parseUserEntries(
  * if it already carries the entry. A host without the account (dev, tests) is
  * left alone. The files the daemon writes must keep a group-or-mask read bit
  * (0640): a later chmod 0600 would mask the entry away, which the check
- * reports.
+ * reports. The one exception is the peer certificate key, whose group entry is
+ * emptied after the grant (the mask keeps the web server's read).
  */
 export async function grantHostingCaddyRead(
   hostingDir: string,
@@ -249,6 +221,13 @@ export async function grantHostingCaddyRead(
     access,
     `d:${access}`,
   ]);
+  // A peer certificate key is for the daemon and the web server only. The
+  // folder's default entries give a new file `group::r-x`, which the entry
+  // above would turn into a group read; empty the group entry again (the mask
+  // stays at what the web server needs).
+  const keyPaths = entries.filter((e) => !e.dir && PEER_KEY_PATH.test(e.path))
+    .map((e) => e.path);
+  await apply(keyPaths, ["g::---"]);
 
   // The read-back decides, not setfacl's exit code.
   const shown = await runCommand("getfacl", [
@@ -257,12 +236,23 @@ export async function grantHostingCaddyRead(
     ...entries.map((e) => e.path),
   ]).catch(() => ({ success: false, stderr: "", stdout: "" }));
   const have = parseUserEntries(shown.stdout ?? "", user);
+  const closed = closedGroupPaths(shown.stdout ?? "");
   const unreadable = entries.filter((entry) => {
     const got = have.get(entry.path);
     const needs = entry.dir ? "r-x" : "r--";
     return got === undefined ||
       ![...needs].every((c, k) => c === "-" || got[1][k] === c);
   }).map((e) => e.path);
+  // The read-back decides here too: a key whose group entry stayed open is
+  // readable by the whole group.
+  const openKeys = keyPaths.filter((path) => !closed.has(path));
+  if (openKeys.length > 0) {
+    throw new Error(
+      `the peer certificate key is still readable by its group: ${
+        openKeys.join(", ")
+      }; the next apply retries it`,
+    );
+  }
   if (unreadable.length > 0) {
     logWarn(
       "deploy",
@@ -278,93 +268,6 @@ export async function grantHostingCaddyRead(
         `\`setfacl -m u:${user}:r\` run as root; the rest is retried by the next apply.`,
     );
   }
-}
-
-/**
- * Direct download into the vendor tree (no Ansible). Used when the caddy-setup
- * playbook is missing on older managed orchestration trees, or Ansible fails.
- */
-async function downloadHostingCaddy(
-  runtimesDir: string,
-  deps: Required<
-    Pick<
-      EnsureHostingCaddyDeps,
-      "runCommand" | "resolveArch" | "verifyTarballSha256"
-    >
-  >,
-): Promise<void> {
-  const arch = deps.resolveArch();
-  const versionDir = join(runtimesDir, "caddy", HOSTING_CADDY_VERSION);
-  const binPath = join(versionDir, "caddy");
-  const currentLink = join(runtimesDir, "caddy", "current");
-  const asset = `caddy_${HOSTING_CADDY_VERSION}_linux_${arch}.tar.gz`;
-  const url =
-    `https://github.com/caddyserver/caddy/releases/download/${HOSTING_CADDY_TAG}/${asset}`;
-
-  const tmp = await Deno.makeTempDir({ prefix: "tp-caddy-" });
-  try {
-    const tarball = join(tmp, asset);
-    logInfo("deploy", `downloading hosting Caddy ${HOSTING_CADDY_VERSION}`);
-    const curl = await deps.runCommand("/usr/bin/curl", [
-      "-fsSL",
-      "-o",
-      tarball,
-      url,
-    ]);
-    if (!curl.success) {
-      throw new Error(`curl failed: ${curl.stderr || "download error"}`);
-    }
-    await deps.verifyTarballSha256(arch, tarball);
-    const tar = await deps.runCommand("/usr/bin/tar", [
-      "-xzf",
-      tarball,
-      "-C",
-      tmp,
-      "caddy",
-    ]);
-    if (!tar.success) {
-      throw new Error(`tar failed: ${tar.stderr || "extract error"}`);
-    }
-
-    await Deno.mkdir(versionDir, { recursive: true, mode: 0o750 });
-    await Deno.copyFile(join(tmp, "caddy"), binPath);
-    await Deno.chmod(binPath, 0o750);
-
-    // Refresh current symlink (force).
-    try {
-      await Deno.remove(currentLink);
-    } catch (err) {
-      if (!(err instanceof Deno.errors.NotFound)) throw err;
-    }
-    await createSymlink(versionDir, currentLink);
-
-    // Best-effort root ownership on managed hosts; the group stays the daemon
-    // account's (it downloaded the file), so the 0750 binary still runs. May
-    // fail without sudo — then the daemon user keeps owning it, which also
-    // runs.
-    const chown = await deps.runCommand(
-      "sudo",
-      hostSudoArgs([
-        "-n",
-        "chown",
-        "root",
-        binPath,
-      ]),
-    );
-    if (!chown.success) {
-      logWarn(
-        "deploy",
-        `hosting Caddy chown skipped: ${
-          chown.stderr || "no passwordless sudo"
-        }`,
-      );
-    }
-  } finally {
-    await Deno.remove(tmp, { recursive: true }).catch(() => {});
-  }
-
-  // Ensure parent vendor/caddy exists with sane mode after symlink dance.
-  await Deno.mkdir(dirname(currentLink), { recursive: true }).catch(() => {});
 }
 
 let accountCheckOverride: (() => Promise<boolean>) | undefined;
@@ -478,39 +381,17 @@ export async function ensureHostingCaddy(
 ): Promise<string> {
   const runSetup = deps?.runCaddySetup ??
     (() => defaultRunCaddySetup(deps?.onEvent));
-  const runCommand = deps?.runCommand ?? runDefault;
-  const resolveArch = deps?.resolveArch ?? resolveCaddyArchDefault;
-  const verifyTarballSha256 = deps?.verifyTarballSha256 ??
-    verifyHostingCaddyTarballSha256;
   const { accountExists, guardCurrent, guardActive } =
     resolveHostingCaddyChecks(deps);
 
   const caddy = caddyBinaryPath(layout.runtimesDir);
   if (await hostingCaddyReady(layout, deps)) return caddy;
 
-  try {
-    await runSetup();
-  } catch (err) {
-    logWarn(
-      "deploy",
-      `caddy-setup playbook failed, trying direct download: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-  }
-
-  if (!(await caddyBinaryPresent(caddy))) {
-    await downloadHostingCaddy(layout.runtimesDir, {
-      runCommand,
-      resolveArch,
-      verifyTarballSha256,
-    });
-  }
+  await runSetup();
 
   if (!(await caddyBinaryPresent(caddy))) {
     throw new Error(`Hosting Caddy runtime is missing: ${caddy}`);
   }
-  // Only the playbook can create the account; a direct download cannot.
   if (!(await accountExists())) {
     throw new Error(
       `Hosting Caddy account ${HOSTING_CADDY_USER} is missing: the caddy-setup playbook did not complete`,

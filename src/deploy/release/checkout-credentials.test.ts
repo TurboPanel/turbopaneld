@@ -3,9 +3,7 @@ import {
   askpassHostForCloneUrl,
   DEFAULT_HTTPS_CREDENTIAL_USERNAME,
   gitEnvironment,
-  isSshCloneUrl,
   removeCheckoutCredentialFiles,
-  resolveCredentialKind,
   resolveCredentialUsername,
   writeCheckoutCredentialFiles,
 } from "./checkout.ts";
@@ -20,30 +18,6 @@ const test = Deno.test.bind(Deno);
 
 const SSH_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nbody\n-----END-----";
 
-test("isSshCloneUrl recognizes both SSH clone forms", () => {
-  assertEquals(isSshCloneUrl("ssh://git@example.com/owner/repo.git"), true);
-  assertEquals(isSshCloneUrl("git@example.com:owner/repo.git"), true);
-  assertEquals(isSshCloneUrl("https://example.com/owner/repo.git"), false);
-});
-
-test("resolveCredentialKind honors the wire field, else the transport", () => {
-  assertEquals(
-    resolveCredentialKind({ cloneUrl: "git@example.com:o/r.git" }),
-    "ssh_key",
-  );
-  assertEquals(
-    resolveCredentialKind({ cloneUrl: "https://example.com/o/r.git" }),
-    "token",
-  );
-  assertEquals(
-    resolveCredentialKind({
-      cloneUrl: "https://example.com/o/r.git",
-      credentialKind: "ssh_key",
-    }),
-    "ssh_key",
-  );
-});
-
 test("an ssh_key credential becomes a 0600 identity file, never an askpass helper", async () => {
   const scratchDir = await Deno.makeTempDir({ prefix: "tp-checkout-ssh-" });
   try {
@@ -53,6 +27,7 @@ test("an ssh_key credential becomes a 0600 identity file, never an askpass helpe
       commitSha: "0".repeat(40),
       scratchDir,
       credential: SSH_KEY,
+      credentialKind: "ssh_key",
     });
     assertEquals(files.askpassPath, null);
     assertEquals(files.sshKeyPath !== null, true);

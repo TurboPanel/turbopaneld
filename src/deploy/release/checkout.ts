@@ -31,6 +31,7 @@
  * with `GIT_ALLOW_PROTOCOL`.
  */
 
+import { isResolvedCommitSha } from "../commit-sha.ts";
 import { join } from "@std/path";
 import { pumpLines } from "../../logs/line-stream.ts";
 import { throwIfAborted, withCancelSignal } from "../deploy-cancel.ts";
@@ -89,11 +90,7 @@ export type CheckoutParams = {
   checkoutDir?: string;
   /** Decrypted clone credential (PAT / installation token / deploy key). */
   credential?: string;
-  /**
-   * Auth shape of `credential`. Absent falls back to the clone URL's transport
-   * ({@link isSshCloneUrl}), so a payload minted before the control plane
-   * started tagging the kind still clones correctly.
-   */
+  /** Auth shape of `credential`; always set when `credential` is. */
   credentialKind?: CheckoutCredentialKind;
   /**
    * HTTPS basic-auth user to answer git's `Username` prompt with. Opaque —
@@ -210,29 +207,6 @@ export function resolveCredentialUsername(
     : DEFAULT_HTTPS_CREDENTIAL_USERNAME;
 }
 
-/** `git@host:owner/repo.git` — the scp-like form git accepts. */
-const SCP_LIKE_SSH_RE = /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$/;
-
-/**
- * Does this clone URL use the SSH transport?
- *
- * Mirrors the instance-side rule (`validateRepositoryUrl` /
- * `isSshCloneUrl` in `client/environments/deploy-sources.ts`) so a payload that
- * predates `credentialKind` is still handled by transport rather than by
- * assuming HTTPS and failing publickey auth.
- */
-export function isSshCloneUrl(cloneUrl: string): boolean {
-  return cloneUrl.startsWith("ssh://") || SCP_LIKE_SSH_RE.test(cloneUrl);
-}
-
-/** Explicit kind wins; otherwise the transport decides. */
-export function resolveCredentialKind(
-  params: Pick<CheckoutParams, "cloneUrl" | "credentialKind">,
-): CheckoutCredentialKind {
-  if (params.credentialKind) return params.credentialKind;
-  return isSshCloneUrl(params.cloneUrl) ? "ssh_key" : "token";
-}
-
 /** Single-quote a path for the `GIT_SSH_COMMAND` shell string. */
 function shellQuote(value: string): string {
   const escaped = value.replaceAll("'", `'"'"'`);
@@ -281,7 +255,7 @@ export async function writeCheckoutCredentialFiles(
   params: CheckoutParams,
 ): Promise<CheckoutCredentialFiles> {
   if (!params.credential) return NO_CREDENTIAL_FILES;
-  if (resolveCredentialKind(params) === "ssh_key") {
+  if (params.credentialKind === "ssh_key") {
     const sshKeyPath = join(params.scratchDir, ".git-ssh-key");
     await Deno.writeTextFile(sshKeyPath, sshKeyMaterial(params.credential), {
       mode: 0o600,
@@ -523,7 +497,7 @@ export async function checkoutRelease(
     // The pinned commit is not what `--branch <ref>` produced — fetch it
     // explicitly rather than silently building a different commit.
     const fetch = await git(
-      ["fetch", "--depth", "1", "origin", params.commitSha],
+      ["fetch", "--depth", "1", "--", "origin", params.commitSha],
       workingDir,
       env,
       params.onOutput,
@@ -547,10 +521,13 @@ export async function checkoutRelease(
       );
     }
     const pinned = await git(["rev-parse", "HEAD"], workingDir, env);
-    return {
-      workingDir,
-      commitSha: pinned.success ? pinned.stdout : params.commitSha,
-    };
+    const resolved = pinned.success ? pinned.stdout.trim() : params.commitSha;
+    // The commit is only ever a resolved id; a placeholder (a branch name)
+    // would end up in the release record and the deploy result.
+    if (!isResolvedCommitSha(resolved)) {
+      throw new Error("git could not resolve the checked-out commit");
+    }
+    return { workingDir, commitSha: resolved };
   } finally {
     await removeCheckoutCredentialFiles(credentialFiles);
   }

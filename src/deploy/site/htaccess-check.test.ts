@@ -181,3 +181,84 @@ test("IfDefine, IfFile, IfDirective and IfSection are looked into, not reported"
     );
   }
 });
+
+test("proxying lines get their own finding", () => {
+  const text = [
+    "RewriteEngine On",
+    'RewriteRule ^api/(.*)$ "fcgi://server-a.example.lan:9000/$1" [P,L]',
+    "RewriteRule ^a$ http://192.0.2.10/ [proxy]",
+    "RewriteRule ^b$ http://192.0.2.10/ [L, P]",
+    "RewriteRule ^c$ proxy:http://192.0.2.10/",
+    'SetHandler "proxy:fcgi://192.0.2.10:9000"',
+    "<FilesMatch \\.php$>",
+    "  SetHandler proxy:unix:/run/other.sock|fcgi://localhost/",
+    "</FilesMatch>",
+  ].join("\n");
+  assertEquals(
+    checkHtaccess(text).map((f) => [f.line, f.directive, f.reason]),
+    [
+      [2, "RewriteRule", "proxy"],
+      [3, "RewriteRule", "proxy"],
+      [4, "RewriteRule", "proxy"],
+      [5, "RewriteRule", "proxy"],
+      [6, "SetHandler", "proxy"],
+      [8, "SetHandler", "proxy"],
+    ],
+  );
+  assertStringIncludes(
+    htaccessWarnings("web", checkHtaccess(text))[0],
+    "Site web: .htaccess line 2: RewriteRule proxies to another target",
+  );
+});
+
+test("rules that only look like proxying, and ordinary handlers, are accepted", () => {
+  assertEquals(
+    checkHtaccess(
+      [
+        "RewriteRule ^go$ https://example.net/ [R=302,L]",
+        "RewriteRule ^p$ /page.php [L,QSA]",
+        "RewriteRule ^proxy/(.*)$ /index.php?p=$1 [L]",
+        "RewriteRule ^x$ /y [NC,PT]",
+        "SetHandler application/x-httpd-php",
+        "SetHandler none",
+        "RemoveHandler .php",
+        "",
+      ].join("\n"),
+    ),
+    [],
+  );
+});
+
+test("trailing flag groups: matched and unmatched forms", () => {
+  const cases: Array<[string, boolean]> = [
+    ["^a$ /b [P]", true],
+    ["^a$ /b [L,P]", true],
+    ["^a$ /b [L, proxy ]  ", true],
+    ["^a$ /b [x[P]", false],
+    ["^a$ /b [x] [P]", true],
+    ["^a$ /b [P]]", false],
+    ["^a$ /b [P] x", false],
+    ["^a$ /b P]", false],
+    ["^a$ /b [P", false],
+    ["^a$ /b []", false],
+    ["^a$ /b [L]", false],
+    ["^a$ /b [P][L]", false],
+    ["^a$ /b []P]", false],
+  ];
+  for (const [args, proxies] of cases) {
+    assertEquals(
+      checkHtaccess(`RewriteRule ${args}`).length,
+      proxies ? 1 : 0,
+      args,
+    );
+  }
+});
+
+test("a long line of open brackets does not backtrack", () => {
+  const started = performance.now();
+  for (const tail of ["", " [", "]", "x]"]) {
+    checkHtaccess(`RewriteRule ^a$ /b ${"[".repeat(200_000)}${tail}`);
+    checkHtaccess(`RewriteRule ^a$ /b ${"[] ".repeat(70_000)}${tail}`);
+  }
+  assertEquals(performance.now() - started < 2000, true);
+});

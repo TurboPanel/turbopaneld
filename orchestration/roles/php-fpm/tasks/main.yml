@@ -58,11 +58,6 @@
     repo_key_fingerprints: "{{ php_fpm_sury_key_fingerprints }}"
     repo_key_policy: "{{ php_fpm_key_policy }}"
 
-- name: Remove any legacy sury sources.list entry
-  ansible.builtin.file:
-    path: /etc/apt/sources.list.d/sury-php.list
-    state: absent
-
 # deb822 format with an explicit Signed-By — apt-key and `[signed-by=]` one-liners
 # are both deprecated.
 - name: Configure sury PHP apt repository
@@ -89,6 +84,18 @@
     _sury_repo.changed
     or (repo_key_changed | default(false)) | bool
 
+# Laravel loads database/schema/mysql-schema.sql by running the `mysql` binary,
+# so a PHP host needs the client. Debian's mariadb-client provides `mysql` and
+# does not depend on the server, so it is safe next to a managed MariaDB, which
+# runs in a container and never installs the server package on the host.
+- name: Install the database command-line client for PHP hosts
+  ansible.builtin.apt:
+    lock_timeout: 300
+    name: mariadb-client
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
 # One template for every series: `%i` is the series. Installed once, before the
 # loop, because `systemctl enable turbopanel-php-fpm@8.4` needs the template to
 # already exist.
@@ -106,13 +113,15 @@
     daemon_reload: true
   when: _php_fpm_unit.changed # noqa: no-handler
 
-# Parent of the per-series socket directories. Grouped to `tp` so every engine
-# account can traverse to its own series' sockets.
+# Parent of the per-series socket directories, at the top of /run so only root
+# can rename or replace it. Root-owned and grouped to `tp` so every engine
+# account (all members of `tp`) can traverse to its own series' sockets while
+# the daemon account cannot write here.
 - name: Ensure the PHP runtime directory root
   ansible.builtin.file:
-    path: "{{ turbopanel_run_dir }}/php"
+    path: "{{ php_fpm_run_dir }}"
     state: directory
-    owner: "{{ php_fpm_service_user }}"
+    owner: root
     group: "{{ turbopanel_group }}"
     mode: "0750"
 
@@ -138,20 +147,6 @@
 # The PHP package manager site builds use, vendored and digest-checked.
 - name: Vendor the PHP package manager
   ansible.builtin.include_tasks: composer.yml
-
-# Left over from the single-series layout, where config lived directly under
-# `php/` and the unit was not templated. Removed so a host converged before
-# multi-version does not keep a second, unmanaged master around.
-- name: Remove obsolete single-series php-fpm layout
-  ansible.builtin.file:
-    path: "{{ item }}"
-    state: absent
-  loop:
-    - /etc/systemd/system/turbopanel-php-fpm.service
-    - "{{ turbopanel_config_dir }}/php/php-fpm.conf"
-    - "{{ turbopanel_config_dir }}/php/php.ini"
-    - "{{ turbopanel_config_dir }}/php/pools"
-    - "{{ turbopanel_config_dir }}/php/conf.d"
 
 # /usr/local/bin precedes /usr/bin in Debian's default PATH, so this shadows
 # sury's `update-alternatives` link for `php` without removing it. Removing the

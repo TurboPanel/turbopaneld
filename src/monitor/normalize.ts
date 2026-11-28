@@ -1,3 +1,4 @@
+import { LABEL_PROJECT, LABEL_SERVICE_ID } from "../deploy/labels.ts";
 import type {
   ContainerInspect,
   ContainerSummary,
@@ -8,10 +9,12 @@ import type {
   MonitorResourceStatus,
 } from "./protocol.ts";
 
-/** optional turbopanel docker label keys for project/service mapping. */
+/**
+ * Optional docker label keys for project/service mapping.
+ */
 export const TURBOPANEL_LABEL_KEYS = {
-  project: "com.turbopanel.project",
-  service: "com.turbopanel.service",
+  project: LABEL_PROJECT,
+  service: LABEL_SERVICE_ID,
 } as const;
 
 export type NormalizeContainerInput = {

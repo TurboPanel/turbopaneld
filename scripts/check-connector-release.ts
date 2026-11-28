@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net=api.github.com --allow-read --allow-write
+#!/usr/bin/env -S deno run --allow-net=api.github.com --allow-env=GITHUB_TOKEN --allow-read --allow-write
 /**
  * Look for a newer tunnel connector release than the version this daemon pins
  * (`CLOUDFLARED_VERSION` in `src/orchestration/assets.ts`) and write a short
@@ -43,13 +43,20 @@ export function isNewer(candidate: string, current: string): boolean {
   return false;
 }
 
-/** The newest published release, reduced to what the report needs. */
+/**
+ * The newest published release, reduced to what the report needs. With a
+ * token the lookup is authenticated, which lifts the unauthenticated rate
+ * limit that shared CI runners hit.
+ */
 export async function latestRelease(
   fetchFn: typeof fetch = fetch,
+  token?: string,
 ): Promise<Release> {
-  const res = await fetchFn(RELEASE_API, {
-    headers: { Accept: "application/vnd.github+json" },
-  });
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.github+json",
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetchFn(RELEASE_API, { headers });
   if (!res.ok) throw new Error(`release lookup failed: HTTP ${res.status}`);
   const body = await res.json() as {
     tag_name?: unknown;
@@ -116,9 +123,9 @@ export function renderReport(
     "Nothing has changed on any server and no pin was edited. A new connector reaches servers only with a daemon release. To move to it, a pull request changes these together:",
     "",
     "- `CLOUDFLARED_VERSION` and `CLOUDFLARED_SHA256` in `src/orchestration/assets.ts`",
-    "- the exact connector path in the daemon's permission list (`orchestration/roles/daemon-launch/templates/turbopaneld.service.j2`)",
-    "- the version in `src/orchestration/cloudflared.ts` and `deno.json` where they name it",
     "- the test samples that name the version",
+    "",
+    "The connector path in the daemon's permission list (the `deno.json` compile tasks and `turbopaneld.service.j2`) is pinned to `CLOUDFLARED_VERSION` by a test, which fails if any copy disagrees, so those files change in the same pull request.",
     "",
     "After the daemon update each server starts the new version beside the old one and stops the old one once the new one is connected.",
     "",
@@ -126,10 +133,21 @@ export function renderReport(
   return lines.filter((l, i) => !(l === "" && lines[i - 1] === "")).join("\n");
 }
 
+/** The token from the environment, or undefined when unset or not permitted. */
+export function tokenFromEnv(
+  read: (name: string) => string | undefined = (name) => Deno.env.get(name),
+): string | undefined {
+  try {
+    return read("GITHUB_TOKEN") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
   const reportFile = Deno.args[0];
   if (!reportFile) throw new Error("usage: check-connector-release <file>");
-  const release = await latestRelease();
+  const release = await latestRelease(fetch, tokenFromEnv());
   if (!isNewer(release.tag, CLOUDFLARED_VERSION)) {
     console.log("current");
     return;

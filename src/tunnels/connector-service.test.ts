@@ -48,6 +48,10 @@ type Harness = {
   onDisk: Set<string>;
   /** Loopback ports something else already listens on. */
   busyPorts: Set<number>;
+  /** Each keep set `io.pruneVersions` was asked to keep, and the calls seen so far when it ran. */
+  pruned: { keep: string[]; callsSoFar: string[] }[];
+  /** Set to make `io.pruneVersions` fail. */
+  pruneFails: { value: boolean };
 };
 
 /** Command text without the sudo / tp-host wrapping. */
@@ -73,7 +77,16 @@ async function withHarness(
   const binaryCalls = { count: 0 };
   const onDisk = new Set<string>();
   const busyPorts = new Set<number>();
+  const pruned: { keep: string[]; callsSoFar: string[] }[] = [];
+  const pruneFails = { value: false };
   const io: ConnectorIo = {
+    pruneVersions: (keep) => {
+      pruned.push({ keep: [...keep].sort(), callsSoFar: [...calls] });
+      return pruneFails.value
+        ? Promise.reject(new Error("disk is read-only"))
+        : Promise.resolve();
+    },
+    unitTexts: () => Promise.resolve([]),
     layout: { configDir: join(root, "etc") },
     workDir,
     version: "2026.10.7",
@@ -106,6 +119,8 @@ async function withHarness(
           text: await Deno.readTextFile(path),
         });
       }
+      if (text.startsWith("install ")) onDisk.add(text.split(" ").at(-1)!);
+      if (text.startsWith("rm -f ")) onDisk.delete(text.split(" ").at(-1)!);
       if (text.startsWith("install ")) {
         installedUnits.push(await Deno.readTextFile(text.split(" ").at(-2)!));
       }
@@ -127,6 +142,8 @@ async function withHarness(
       binaryCalls,
       onDisk,
       busyPorts,
+      pruned,
+      pruneFails,
     });
   } finally {
     await Deno.remove(root, { recursive: true });
@@ -176,17 +193,22 @@ test("installing again with the same token and unit does not restart the service
   });
 });
 
-test("a new token restarts the service on the same port", async () => {
+test("a new token starts a new unit beside the running one and never restarts it", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.calls.length = 0;
     h.state.unchanged = true;
     await installConnector(h.io, ID_A, `${TOKEN}AA`);
-    assert(h.calls.some((c) => c.startsWith("systemctl restart")));
-    const record = JSON.parse(
-      await Deno.readTextFile(join(h.io.workDir, `${ID_A}.json`)),
+    assert(!h.calls.some((c) => c.startsWith("systemctl restart")));
+    const start = h.calls.indexOf(`systemctl start ${unitOf(ID_A, "b")}`);
+    const stop = h.calls.findIndex((c) =>
+      c.startsWith(`systemctl disable --now ${unitOf(ID_A, "a")}`)
     );
-    assertEquals(record.port, 20300);
+    assert(start >= 0 && stop > start, h.calls.join("\n"));
+    const record = await readRecordFile(h, ID_A);
+    assertEquals(record.slot, "b");
+    assert(record.tokenDigest !== undefined);
+    assertEquals(record.lastUpdate.reason, "the run token changed");
   });
 });
 
@@ -350,16 +372,22 @@ test("the record is written only after the service starts, and a retry restarts 
   });
 });
 
-test("a retry after a failed token change restarts even though the unit is unchanged", async () => {
+test("a retry after a failed token change switches again and the old unit keeps running meanwhile", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.state.unchanged = true;
-    h.state.fail.add("systemctl restart");
+    h.state.fail.add(`systemctl start ${unitOf(ID_A, "b")}`);
+    h.calls.length = 0;
     await assertRejects(() => installConnector(h.io, ID_A, `${TOKEN}AA`));
+    assert(
+      !h.calls.some((c) => c.includes(`disable --now ${unitOf(ID_A, "a")}`)),
+    );
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
     h.state.fail.clear();
     h.calls.length = 0;
     await installConnector(h.io, ID_A, `${TOKEN}AA`);
-    assert(h.calls.some((c) => c.startsWith("systemctl restart")));
+    assert(h.calls.includes(`systemctl start ${unitOf(ID_A, "b")}`));
+    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
   });
 });
 
@@ -384,7 +412,7 @@ test("a failed unit install keeps the token copy of a tunnel that already runs",
 
 const unitOf = (id: string, slot: "a" | "b" = "a") =>
   `turbopanel-tunnel-${id}${slot === "b" ? "-b" : ""}.service`;
-const NEW = "2026.11.0";
+const NEW = "2026.11.2";
 
 async function readRecordFile(h: Harness, id: string) {
   return JSON.parse(await Deno.readTextFile(join(h.io.workDir, `${id}.json`)));
@@ -403,7 +431,7 @@ test("an update starts the new version in the other slot and moves only after it
     assertEquals(h.installedUnits.length, 1);
     assertStringIncludes(
       h.installedUnits[0],
-      `ExecStart=/opt/turbopanel/vendor/cloudflared/${NEW}/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20301 run`,
+      `ExecStart=/opt/turbopanel/vendor/cloudflared/${NEW}/cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20301 --grace-period 30s run`,
     );
     assertStringIncludes(
       h.installedUnits[0],
@@ -533,16 +561,17 @@ test("the verbs follow the recorded slot, and the next update goes back to slot 
   });
 });
 
-test("a token change on an updated tunnel restarts the unit in the slot that carries it", async () => {
+test("a token change on an updated tunnel moves back to the other slot without a restart", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.io.version = NEW;
     await updateConnector(h.io, ID_A);
     h.calls.length = 0;
     await installConnector(h.io, ID_A, "b3RoZXI".repeat(6));
-    const second = unitOf(ID_A, "b");
-    assert(h.calls.includes(`systemctl restart ${second}`), h.calls.join("\n"));
-    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
+    const other = unitOf(ID_A, "a");
+    assert(h.calls.includes(`systemctl start ${other}`), h.calls.join("\n"));
+    assert(!h.calls.some((c) => c.startsWith("systemctl restart")));
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
   });
 });
 
@@ -657,7 +686,7 @@ test("the report is answered while an update is still waiting for a connector", 
   });
 });
 
-test("a unit installed with the old command line is replaced and restarted at the same version", async () => {
+test("a unit installed with the old command line is replaced by a rolling switch, not a restart", async () => {
   await withHarness(async (h) => {
     await installConnector(h.io, ID_A, TOKEN);
     h.calls.length = 0;
@@ -668,19 +697,56 @@ test("a unit installed with the old command line is replaced and restarted at th
     const outcome = await updateConnector(h.io, ID_A);
     assertEquals(outcome, { kind: "current", version: "2026.10.7" });
 
+    // The new text starts in the other slot beside the running unit.
     assertEquals(h.installedUnits.length, 1);
     assertStringIncludes(
-      h.installedUnits[0],
-      "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20300 run\n",
+      h.installedUnits.at(-1)!,
+      "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20301 --grace-period 30s run\n",
     );
-    const unit = unitOf(ID_A);
+    const first = unitOf(ID_A);
+    const second = unitOf(ID_A, "b");
     const order = h.calls.filter((c) => c.startsWith("systemctl"));
-    const reload = order.indexOf("systemctl daemon-reload");
-    const restart = order.indexOf(`systemctl restart ${unit}`);
-    assert(reload >= 0 && restart > reload, order.join("\n"));
+    const startNew = order.indexOf(`systemctl start ${second}`);
+    const stopOld = order.indexOf(`systemctl disable --now ${first}`);
+    assert(startNew >= 0 && stopOld > startNew, order.join("\n"));
+    assert(
+      order.every((c) => !c.startsWith("systemctl restart")),
+      order.join("\n"),
+    );
+    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
     // The token is not handled: both versions read the same root-only copy.
     assert(h.calls.every((c) => !c.startsWith("tunnel-env-install")));
     assert(h.calls.every((c) => !c.includes(TOKEN)));
+  });
+});
+
+test("a stale unit whose replacement never connects leaves the running one alone", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.calls.length = 0;
+    h.state.unchanged = false;
+    h.probe.byPort.set(20301, { kind: "not-ready", connections: 0 });
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome.kind, "rolled-back");
+    assert(!h.calls.includes(`systemctl disable --now ${unitOf(ID_A)}`));
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
+  });
+});
+
+test("resending the same token never swaps the unit or restarts it, even after a version bump", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.onDisk.add(`/etc/systemd/system/${unitOf(ID_A)}`);
+    h.calls.length = 0;
+    h.installedUnits.length = 0;
+    await installConnector(h.io, ID_A, TOKEN);
+    assertEquals(h.installedUnits.length, 0);
+    assert(h.calls.every((c) => !c.startsWith("systemctl restart")));
+    assert(h.calls.includes(`systemctl enable --now ${unitOf(ID_A)}`));
+    const record = await readRecordFile(h, ID_A);
+    assertEquals(record.version, "2026.10.7");
+    assertEquals(record.port, 20300);
   });
 });
 
@@ -702,6 +768,137 @@ test("a unit that already matches is left running at the same version", async ()
       ),
       h.calls.join("\n"),
     );
+  });
+});
+
+test("the old connector is stopped once more when the first stop fails", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.calls.length = 0;
+    let stops = 0;
+    const run = h.io.run;
+    h.io.run = (command, args) => {
+      if (args.join(" ").includes(`disable --now ${unitOf(ID_A)}`)) {
+        stops++;
+        if (stops === 1) {
+          return Promise.resolve({
+            success: false,
+            stdout: "",
+            stderr: "busy",
+          });
+        }
+      }
+      return run(command, args);
+    };
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "updated", from: "2026.10.7", to: NEW });
+    assertEquals(stops, 2);
+    assertEquals(
+      (await readRecordFile(h, ID_A)).lastUpdate.reason,
+      undefined,
+    );
+  });
+});
+
+test("an old connector that will not stop is reported loudly and the new one is never touched", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.calls.length = 0;
+    const run = h.io.run;
+    h.io.run = (command, args) => {
+      const text = args.join(" ");
+      if (text.includes(`disable --now ${unitOf(ID_A)}`)) {
+        return Promise.resolve({ success: false, stdout: "", stderr: "busy" });
+      }
+      if (text.includes(`is-active ${unitOf(ID_A)}`)) {
+        return Promise.resolve({ success: true, stdout: "active", stderr: "" });
+      }
+      return run(command, args);
+    };
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "updated", from: "2026.10.7", to: NEW });
+    const record = await readRecordFile(h, ID_A);
+    assertEquals(record.slot, "b");
+    assertEquals(record.version, NEW);
+    assertEquals(record.lastUpdate.outcome, "updated");
+    assertStringIncludes(record.lastUpdate.reason, "did not stop");
+    const second = unitOf(ID_A, "b");
+    assert(h.calls.every((c) => !c.includes(`disable --now ${second}`)));
+    assert(
+      h.calls.every((c) => !c.includes(`rm -f /etc/systemd/system/${second}`)),
+    );
+    // The old unit file stays so the next round retries, and nothing is pruned.
+    assert(!h.calls.includes(`rm -f /etc/systemd/system/${unitOf(ID_A)}`));
+    assertEquals(h.pruned.length, 0);
+  });
+});
+
+test("an old connector that stopped but whose unit file stays is reported as exactly that", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.state.fail.add(`rm -f /etc/systemd/system/${unitOf(ID_A)}`);
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "updated", from: "2026.10.7", to: NEW });
+    const record = await readRecordFile(h, ID_A);
+    assertStringIncludes(record.lastUpdate.reason, "stopped but its unit file");
+    assert(!record.lastUpdate.reason.includes("still running"));
+  });
+});
+
+test("a first install with a leftover unit file at the slot path writes the unit", async () => {
+  await withHarness(async (h) => {
+    h.onDisk.add(`/etc/systemd/system/${unitOf(ID_A)}`);
+    await installConnector(h.io, ID_A, TOKEN);
+    assertEquals(h.installedUnits.length, 1);
+    assertEquals((await readRecordFile(h, ID_A)).slot, "a");
+  });
+});
+
+test("superseded program folders are pruned only after the old connector stopped, keeping every version in use", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    await installConnector(h.io, ID_B, TOKEN);
+    h.pruned.length = 0;
+    h.io.version = NEW;
+    // B has not moved yet: its program must survive A's cleanup.
+    h.io.unitTexts = () =>
+      Promise.resolve([
+        `ExecStart=/opt/turbopanel/vendor/cloudflared/2026.5.0/cloudflared --x run\n`,
+      ]);
+    await updateConnector(h.io, ID_A);
+    assertEquals(h.pruned.length, 1);
+    assertEquals(h.pruned[0].keep, ["2026.10.7", NEW, "2026.5.0"]);
+    assert(
+      h.pruned[0].callsSoFar.includes(
+        `systemctl disable --now ${unitOf(ID_A)}`,
+      ),
+    );
+  });
+});
+
+test("a failed cleanup never fails the update", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.io.version = NEW;
+    h.pruneFails.value = true;
+    const outcome = await updateConnector(h.io, ID_A);
+    assertEquals(outcome, { kind: "updated", from: "2026.10.7", to: NEW });
+    assertEquals((await readRecordFile(h, ID_A)).slot, "b");
+    assertEquals(h.pruned.length, 1);
+  });
+});
+
+test("a tunnel already on the pinned version still has its old program folders pruned", async () => {
+  await withHarness(async (h) => {
+    await installConnector(h.io, ID_A, TOKEN);
+    h.state.unchanged = true;
+    h.pruned.length = 0;
+    assertEquals((await updateConnector(h.io, ID_A)).kind, "current");
+    assertEquals(h.pruned.length, 1);
+    assertEquals(h.pruned[0].keep, ["2026.10.7"]);
   });
 });
 

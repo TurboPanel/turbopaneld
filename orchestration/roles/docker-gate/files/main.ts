@@ -3,9 +3,10 @@
  *
  * Listens on a socket only the daemon group can open, forwards every request
  * to the real engine socket and logs what the strict profile would refuse.
- * `TP_DOCKER_GATE_MODE` is `observe` (the default, and what the unit pins:
- * nothing is refused) or `enforce` (stage 4: a request with findings is
- * refused with a 403). A third listener, the build socket (build.ts), is the
+ * `TP_DOCKER_GATE_MODE` is `observe` (nothing is refused; what the code assumes
+ * when the variable is unset) or `enforce` (a request with findings is refused
+ * with a 403). The unit always sets it from `docker_gate_mode`, whose role
+ * default is `enforce`; `observe` is the operator's rollback. A third listener, the build socket (build.ts), is the
  * only place BuildKit's `/session` and `/grpc` may open.
  *
  * Run by the vendored Deno with scoped permissions (see the unit template):
@@ -149,9 +150,12 @@ export function loadConfig(env: Env): GateConfig {
     policy: {
       bindRoots: roots.length > 0 ? roots : DEFAULT_POLICY_CONFIG.bindRoots,
       principalRoots: DEFAULT_POLICY_CONFIG.principalRoots,
+      storageRoots: DEFAULT_POLICY_CONFIG.storageRoots,
+      stateDirs: DEFAULT_POLICY_CONFIG.stateDirs,
       denyPrefixes: [...DEFAULT_POLICY_CONFIG.denyPrefixes, ...denyExtra],
       dockerSockets: DEFAULT_POLICY_CONFIG.dockerSockets,
       capAllowlist: caps,
+      runDir: DEFAULT_POLICY_CONFIG.runDir,
       ingressSocketDir: ingressSocketDirOf(env.TP_DOCKER_GATE_RO_SOCKET),
       platform: {
         readOnly: platformRo.length > 0

@@ -35,6 +35,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   phpReconciles: number;
   wallSyncs: number;
   phpPatchArms: number;
+  wallsRepairs: number;
+  runTreeChecks: number;
   stackHeals: number;
   instanceStops: number;
   sentinelStops: number;
@@ -50,6 +52,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
   let phpReconciles = 0;
   let wallSyncs = 0;
   let phpPatchArms = 0;
+  let wallsRepairs = 0;
+  let runTreeChecks = 0;
   let stackHeals = 0;
   let instanceStops = 0;
   let sentinelStops = 0;
@@ -93,6 +97,8 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     // No test waits on a real retry timer; the retry tests turn this off.
     shouldSkipOrchestration: () => true,
     applyManagedBootHold: () => Promise.resolve(),
+    scopeManagedPublicListeners: () => Promise.resolve(),
+    sweepImageBuildSlices: () => Promise.resolve(),
     markCleanShutdown: () => Promise.resolve(),
     scanLiveReleases: () => Promise.resolve(),
     restoreFabricFromPersistedState: () => {
@@ -121,6 +127,14 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     },
     armPhpPatchRestarts: () => {
       phpPatchArms += 1;
+    },
+    checkPhpRunTree: () => {
+      runTreeChecks += 1;
+      return Promise.resolve();
+    },
+    repairApacheWalls: () => {
+      wallsRepairs += 1;
+      return Promise.resolve();
     },
     shouldEnableDockerIntegration: () => false,
     shouldConnectToInstance: () => false,
@@ -164,6 +178,12 @@ function stubIo(overrides: Partial<DaemonRunIo> = {}): {
     get phpPatchArms() {
       return phpPatchArms;
     },
+    get runTreeChecks() {
+      return runTreeChecks;
+    },
+    get wallsRepairs() {
+      return wallsRepairs;
+    },
     get phpReconciles() {
       return phpReconciles;
     },
@@ -191,6 +211,8 @@ test("runDaemon skips fabric, docker, and instance when orchestration is not rea
   // The wall is reloaded at start even when orchestration never becomes ready.
   assertEquals(stub.wallSyncs, 1);
   assertEquals(stub.phpPatchArms, 0);
+  assertEquals(stub.runTreeChecks, 0);
+  assertEquals(stub.wallsRepairs, 0);
   assertEquals(stub.fabricReinstalls, 0);
   assertEquals(stub.dockerCloses, 0);
   assertEquals(stub.instanceStops, 0);
@@ -220,6 +242,10 @@ test("runDaemon restores fabric and attaches Docker when the socket is up", asyn
   assertEquals(stub.wallSyncs >= 1, true);
   // The patch restarts are armed once the runtimes are back.
   assertEquals(stub.phpPatchArms, 1);
+  // The PHP run tree check and then the Apache walls repair start with them,
+  // in the background.
+  assertEquals(stub.runTreeChecks, 1);
+  assertEquals(stub.wallsRepairs, 1);
   assertEquals(stub.fabricReinstalls >= 1, true);
   assertEquals(stub.dockerCloses, 1);
   assertEquals(stub.instanceStops, 1);
@@ -268,6 +294,27 @@ test("runDaemon holds primaries first and stamps a clean shutdown last", async (
   });
   await runDaemon(stub.io);
   assertEquals(order, ["hold", "orchestration", "clean", "exit"]);
+});
+
+test("runDaemon scopes public managed ports before anything else and survives a failure", async () => {
+  const order: string[] = [];
+  const stub = stubIo({
+    scopeManagedPublicListeners: () => {
+      order.push("scope");
+      return Promise.reject(new Error("iptables missing"));
+    },
+    applyManagedBootHold: () => {
+      order.push("hold");
+      return Promise.resolve();
+    },
+  });
+  await runDaemon(stub.io);
+  assertEquals(order, ["scope", "hold"]);
+  assertEquals(stub.exits, [0]);
+  assertEquals(
+    stub.warns.some((line) => line.includes("boot firewall scoping failed")),
+    true,
+  );
 });
 
 test("runDaemon still starts when the boot hold check or the shutdown stamp fails", async () => {

@@ -105,9 +105,12 @@ test("writeDaemonFile and removeDaemonFile refuse a real-looking dir before any 
 
 const REPO = join(dirname(fromFileUrl(import.meta.url)), "..", "..");
 
-/** A quoted daemon identity or trust file name. */
+/**
+ * A quoted daemon identity file name: the license files, the server id and
+ * key files, the sealing key or the instance CA pin.
+ */
 const NAMES_IDENTITY =
-  /["'`/](?:license\.id|license\.token|server\.id|server-key\.json|server-key-id|sealing-key\.json|instance-ca\.pem|trust-level)["'`]/;
+  /["'`/](?:license\.id|license\.token|server\.id|server-key\.json|server-key-id|sealing-key\.json|instance-ca\.pem)["'`]/;
 
 /** Deno calls that change the filesystem. */
 const WRITES =

@@ -50,6 +50,8 @@ import {
   releaseRoleObjectsSql,
   reloadVerifySql,
   resetFencedReadOnlyDefaultSql,
+  restoreLoginFinishSql,
+  restoreLoginPrepareSql,
   restoreReadWriteLoginSchemasSql,
   restoreResetSql,
   revokePublicDatabaseAccessSql,
@@ -61,13 +63,11 @@ import {
 } from "./postgres-sql.ts";
 import {
   countObjectsToReassignSql,
-  DATABASE_OWNER_SQL,
   databaseAdminAttributesSql,
   databaseIsEmptySql,
   databaseOwnerSql,
   dropOwnerRolesSql,
   ensureOwnerRolesSql,
-  handOverPlatformObjectsSql,
   moveDatabaseOwnerSql,
   OWNER_ROLE_MAX_DATABASE_NAME,
   ownerLoginReturnSql,
@@ -120,33 +120,149 @@ function assertSafeDatabaseIdentifier(database: string): string {
 }
 
 /**
- * `$1` root user, `$2` database, `$3` reset SQL, `$4` per-login schema SQL.
+ * Filter between `pg_restore -f -` and the owner's session (awk; lines inside
+ * `COPY ... FROM stdin` data pass through untouched):
+ *
+ * - A `COPY` block starts only after the `-- Data for Name:` comment block
+ *   (`--`, blank line, then the statement), so a function body that merely
+ *   contains such a line does not switch the filter into data mode.
+ * - The large-object section (`-- Data for Name: <range>; Type: BLOBS;`, the
+ *   range part differs between pg_restore versions) is wrapped in its own
+ *   `BEGIN;` / `COMMIT;`. That
+ *   `COMMIT;` would end the restore transaction early, so the rest of the
+ *   replay would run outside it, without the owner role and without rollback.
+ *   Both lines are dropped (only in that section; a `COMMIT;` in a function
+ *   body stays).
+ * - `ALTER DEFAULT PRIVILEGES FOR ROLE <role>` of a role other than the
+ *   database owner cannot be replayed by the owner's session. Those belong to
+ *   the platform's logins, which survive a restore and get theirs back from
+ *   every apply; they are skipped and counted on stderr.
+ */
+const PG_RESTORE_FILTER_AWK = String.raw`
+function other_role_default_acl(line,   r) {
+  r = line
+  sub(/^ALTER DEFAULT PRIVILEGES FOR ROLE /, "", r)
+  sub(/ .*/, "", r)
+  gsub(/"/, "", r)
+  return r != owner
+}
+{
+  line = $0
+  if (copy) {
+    if (line == "\\.") copy = 0
+    print line
+  } else if (p1 == "" && p2 == "--" && line ~ /^COPY .* FROM stdin;$/) {
+    copy = 1
+    print line
+  } else if (line ~ /^-- Data for Name: .*; Type: BLOBS;/) {
+    blobs = 1
+    print line
+  } else if (blobs && line == "BEGIN;") {
+  } else if (blobs && line == "COMMIT;") {
+    blobs = 0
+  } else if (line ~ /^ALTER DEFAULT PRIVILEGES FOR ROLE / && other_role_default_acl(line)) {
+    skipped++
+  } else {
+    print line
+  }
+  p2 = p1
+  p1 = line
+}
+END {
+  if (skipped) {
+    printf "restore skipped %d default-privilege entries of other roles; the next apply sets them\n", skipped | "cat >&2"
+  }
+}
+`;
+
+/**
+ * `$1` root user, `$2` database, `$3` login prepare SQL, `$4` reset SQL,
+ * `$5` finish SQL, `$6` per-login schema SQL (run as the superuser after the
+ * commit).
+ *
+ * The dump holds whatever the tenant created (functions, CHECK constraints,
+ * index expressions, materialized views), and replaying it runs that code. So
+ * the replay never runs as the engine superuser: the script makes a throwaway
+ * `NOSUPERUSER` login that is a member of the database owner role (as the
+ * superuser, running no tenant code), connects as it over TLS to the
+ * container's own address (the platform `pg_hba.conf` only lets a non-admin
+ * in over `hostssl` on the managed network, not over the socket), runs the
+ * schema reset and the replay in ONE transaction as that login (the replay
+ * as the owner role), and drops the login afterwards. A tenant that resets
+ * its role mid-replay only gets back to that login, which can assume the
+ * owner role and no other role.
+ *
+ * The password is made here from `/dev/urandom` and lives only in this
+ * script's variables, psql's stdin (with statement logging switched off for
+ * that session) and the `PGPASSWORD` environment of the one replay client:
+ * never in argv or in the daemon.
+ *
  * The sentinel line is printed by the server only after `COMMIT` succeeded;
  * success needs psql's exit status 0 and that line as the last line of stdout
  * (dump replay prints other rows, such as `setval` results, before it).
  * `client_min_messages = warning` keeps the reset's "drop cascades to ..."
  * notices out of stderr, so a failure reports the real error line.
  */
-const POSTGRES_RESTORE_SCRIPT = [
-  "set -eu",
-  "set -o pipefail",
-  "set +e",
-  "out=$({",
-  String
-    .raw`  printf 'BEGIN;\nSET LOCAL client_min_messages = warning;\n%s\n' "$3"`,
-  `  if pg_restore --no-owner --clean --if-exists -f - | sed -E '${PG_RESTORE_TIMEOUT_SET_LINE_SED}d'; then`,
-  String
-    .raw`    printf '%s\nCOMMIT;\nSELECT %s;\n' "$4" "'tp_restore_committed'"`,
-  "  fi",
-  '} | psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$1" -d "$2")',
-  "rc=$?",
-  "set -e",
-  String.raw`last=$(printf '%s\n' "$out" | tail -n 1)`,
-  'if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then',
-  "  echo 'restore was not committed; the database is unchanged' >&2",
-  "  exit 1",
-  "fi",
-].join("\n");
+const POSTGRES_RESTORE_SCRIPT = String.raw`
+set -eu
+set -o pipefail
+root=$1
+db=$2
+admin() { psql -X -q -A -t -v ON_ERROR_STOP=1 -U "$root" -d "$db"; }
+hex() { od -An -N"$1" -tx1 /dev/urandom | tr -d ' \n'; }
+login=tp_restore_$(hex 6)
+pw=$(hex 24)
+drop_login() {
+  printf 'SET search_path = pg_catalog, pg_temp;\nDROP ROLE IF EXISTS "%s";\n' "$login" | admin >/dev/null ||
+    echo "the temporary restore login $login could not be dropped" >&2
+}
+trap drop_login EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+set +e
+owner=$(printf '%s\n' "SELECT r.rolname FROM pg_catalog.pg_database d JOIN pg_catalog.pg_roles r ON r.oid = d.datdba WHERE d.datname = pg_catalog.current_database();" | admin)
+prep=$(printf '\\set tp_login %s\n\\set tp_pw %s\n%s\n' "$login" "$pw" "$3" | admin 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "$prep" | PW="$pw" awk 'index($0, ENVIRON["PW"]) == 0' >&2
+  echo 'restore was not started; the database is unchanged' >&2
+  exit 1
+fi
+host=
+for addr in $(hostname -i 2>/dev/null); do
+  if PGPASSWORD="$pw" PGCONNECT_TIMEOUT=5 psql -X -q -t -A -c 'SELECT 1' \
+    "host=$addr user=$login dbname=$db sslmode=require" </dev/null >/dev/null 2>&1; then
+    host=$addr
+    break
+  fi
+done
+if [ -z "$host" ]; then
+  echo 'restore was not started: the temporary login could not connect over TLS to the engine address' >&2
+  exit 1
+fi
+out=$({
+  printf '\\set tp_login %s\nBEGIN;\nSET LOCAL client_min_messages = warning;\n' "$login"
+  printf '%s\n%s\n' "SELECT r.rolname AS tp_owner FROM pg_catalog.pg_database d JOIN pg_catalog.pg_roles r ON r.oid = d.datdba WHERE d.datname = pg_catalog.current_database() \\gset" "$4"
+  printf 'SET LOCAL ROLE :"tp_owner";\n'
+  if pg_restore --no-owner --clean --if-exists -f - | sed -E '` +
+  PG_RESTORE_TIMEOUT_SET_LINE_SED + `d' | awk -v owner="$owner" '` +
+  PG_RESTORE_FILTER_AWK + String.raw`'; then
+    printf '%s\nCOMMIT;\nSELECT %s;\n' "$5" "'tp_restore_committed'"
+  fi
+} | PGPASSWORD="$pw" psql -X -q -A -t -v ON_ERROR_STOP=1 "host=$host user=$login dbname=$db sslmode=require")
+rc=$?
+set -e
+last=$(printf '%s\n' "$out" | tail -n 1)
+if [ "$rc" -ne 0 ] || [ "$last" != tp_restore_committed ]; then
+  echo 'restore was not committed; the database is unchanged apart from schema owners, which may now be the database owner role' >&2
+  exit 1
+fi
+if ! printf 'SET search_path = pg_catalog, pg_temp;\n%s\n' "$6" | admin >/dev/null; then
+  echo 'restore was committed, but the per-login schemas could not be recreated; apply the database again' >&2
+  exit 1
+fi
+`;
 
 const postgresBackupRuntime: ManagedEngineBackupRuntime = {
   artifactExtension: "dump",
@@ -157,17 +273,20 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
   },
 
   /**
-   * Returns the database to exactly the backup's state, all or nothing.
+   * Returns the database to exactly the backup's state, all or nothing, and
+   * never runs the dump's code as the engine superuser.
    *
-   * One transaction: empty every user schema (`restoreResetSql`), replay the
-   * dump as plain SQL (`pg_restore --clean --if-exists` drops database-global
-   * objects the dump recreates), then recreate per-login read-write schemas
-   * (`restoreReadWriteLoginSchemasSql`). `COMMIT` is only sent when
-   * `pg_restore` succeeded,
-   * so a bad or truncated dump, or a failing statement, rolls back and the
+   * One transaction, on a throwaway `NOSUPERUSER` login that is a member of
+   * the database owner role: empty every user schema (`restoreResetSql`),
+   * replay the dump as plain SQL as the owner role (`pg_restore --clean
+   * --if-exists` drops database-global objects the dump recreates), hand
+   * anything the login itself owns to the owner role. `COMMIT` is only sent
+   * when `pg_restore` succeeded, so a bad or truncated dump, or a failing
+   * statement (including one that needs a superuser), rolls back and the
    * customer keeps their data. The final line proves the commit happened;
-   * without it the command fails. `pg_restore` reads the dump from stdin.
-   * Positional args keep every value out of the script text.
+   * without it the command fails. A database owned by a superuser is refused.
+   * `pg_restore` reads the dump from stdin. Positional args keep every value
+   * out of the script text.
    */
   restoreArgv(ctx: ManagedEngineContext, { database }): string[] {
     const db = assertSafeDatabaseIdentifier(database);
@@ -178,14 +297,10 @@ const postgresBackupRuntime: ManagedEngineBackupRuntime = {
       "tp-restore",
       ctx.rootUsername,
       db,
+      restoreLoginPrepareSql(),
       restoreResetSql(),
-      [
-        restoreReadWriteLoginSchemasSql(),
-        handOverPlatformObjectsSql(
-          DATABASE_OWNER_SQL,
-          "ARRAY[current_user::text]",
-        ),
-      ].join("\n"),
+      restoreLoginFinishSql(),
+      restoreReadWriteLoginSchemasSql(),
     ];
   },
 };

@@ -92,6 +92,9 @@ const BUILD_PATH_NOTE =
 const OWNER_TREE_NOTE =
   "mount a volume of this environment instead; service folders and other owners' folders are never bind sources";
 
+const STATE_TREE_NOTE =
+  "other organizations' storage and the daemon's records are never bind sources, whatever the organization allows; only this deploy's own storage locations are";
+
 const HOST_LEVEL_NOTE =
   "host-level Compose features need an organization owner's opt-in and a manager's deploy";
 
@@ -502,6 +505,22 @@ export async function resolveExistingPrefix(
   }
 }
 
+/**
+ * The daemon's own state trees. Whatever host-level approval says, a bind
+ * source at or under one of them, or an ancestor of one (`/var/lib/turbopanel`,
+ * `/var/lib`, `/`), is refused, with one exception: a storage location this
+ * deploy itself was sent, which is bound only while it really resolves inside
+ * that location.
+ */
+export type StateTreeOptions = {
+  /** `<state>/storage`, the parent of every organization's locations. */
+  storageRoot: string;
+  /** The state directories (deployments, secrets records, storage, spool). */
+  stateDirs: readonly string[];
+  /** `<state>/storage/<org>/<storage>/<location>/data` of this deploy's own storage. */
+  locations: readonly string[];
+};
+
 export type ConfinementOptions = {
   /** Live `<stateDir>/deployments/<projectId>/<environmentId>`. */
   deploymentDir: string;
@@ -509,6 +528,14 @@ export type ConfinementOptions = {
   stageDir: string;
   /** `environment.deploy` `hostLevelApproved`; absent on the wire is false. */
   hostLevelApproved: boolean;
+  /**
+   * The repository checkout of a Git Compose project (`compose-checkout.ts`).
+   * Relative paths resolve against its project directory, and everything under
+   * its root counts as inside the deployment directory at its own place (it is
+   * not staged). A writable bind into it is refused: its folder goes away with
+   * the next commit, so anything a container wrote there would be lost.
+   */
+  checkout?: { root: string; projectDir: string };
   /**
    * Writable bind sources (live paths) of the generation still running. Its
    * containers keep running until `compose up` replaces them, so a new source
@@ -527,6 +554,7 @@ export type ConfinementOptions = {
     homeRoot: string;
     volumes: readonly string[];
   };
+  stateTree?: StateTreeOptions;
   realPath?: RealPathFn;
 };
 
@@ -595,6 +623,94 @@ async function ownerTreeOutcome(
     );
 }
 
+/** At, under or above one of the daemon's state trees. */
+function touchesStateTree(path: string, tree: StateTreeOptions): boolean {
+  return [tree.storageRoot, ...tree.stateDirs].some((root) => {
+    const dir = normalize(root);
+    return isWithin(path, dir) || isWithin(dir, path);
+  });
+}
+
+/**
+ * This deploy's own storage location, bound only with host-level approval and
+ * only while it really resolves inside that location. The caller has already
+ * resolved `real` (`undefined` when that failed): a path that cannot be
+ * resolved is refused, because the lexical check alone cannot see a link.
+ * `undefined` when no host-level approval was given (the host-level rule then
+ * refuses it like any other absolute source).
+ */
+async function ownLocationOutcome(
+  entry: HostPathEntry,
+  label: string,
+  location: string,
+  real: string | undefined,
+  ctx: ConfinementContext,
+): Promise<EntryOutcome | undefined> {
+  if (!ctx.opts.hostLevelApproved) return undefined;
+  let realLocation: string;
+  try {
+    realLocation = await resolveExistingPrefix(location, ctx.realPath);
+  } catch (err) {
+    return finding(
+      `${label} cannot be resolved on this host (${(err as Error).message})`,
+    );
+  }
+  return real !== undefined && isWithin(real, realLocation)
+    ? { kind: "checked", checked: { entry, real } }
+    : finding(
+      `${label} resolves through a symlink to ${
+        real ?? "an unreadable path"
+      }, outside its storage location`,
+    );
+}
+
+/**
+ * Rule for the daemon's state trees (see {@link StateTreeOptions}): checked on
+ * the lexical path and on where it really resolves, so a link from somewhere
+ * else cannot reach in. A path that cannot be resolved is refused when
+ * host-level approval was given, since the approval would otherwise rest on the
+ * lexical path alone. `undefined` for a path that stays clear of them, and for
+ * this deploy's own location when no host-level approval was given.
+ */
+async function stateTreeOutcome(
+  entry: HostPathEntry,
+  label: string,
+  staged: string,
+  ctx: ConfinementContext,
+): Promise<EntryOutcome | undefined> {
+  const tree = ctx.opts.stateTree;
+  if (!tree) return undefined;
+  let real: string | undefined;
+  let unresolved: string | undefined;
+  try {
+    real = await resolveExistingPrefix(staged, ctx.realPath);
+  } catch (err) {
+    // Not a path Docker has yet to create (that resolves through its
+    // ancestor): the account cannot read it, so where it leads is unknown.
+    unresolved = (err as Error).message;
+  }
+  const location = tree.locations.map((root) => normalize(root)).find((root) =>
+    isWithin(staged, root)
+  );
+  if (location !== undefined && !entry.build) {
+    return ownLocationOutcome(entry, label, location, real, ctx);
+  }
+  if (
+    touchesStateTree(staged, tree) ||
+    (real !== undefined && touchesStateTree(real, tree))
+  ) {
+    return finding(
+      `${label} is, holds or sits inside the daemon's state directory — ${STATE_TREE_NOTE}`,
+    );
+  }
+  if (unresolved !== undefined && ctx.opts.hostLevelApproved) {
+    return finding(
+      `${label} cannot be resolved on this host (${unresolved}), so it cannot be checked against the daemon's state directory`,
+    );
+  }
+  return undefined;
+}
+
 /**
  * Rule: paths that are lexically outside the deployment directory, and the
  * engine socket, are host-level Compose features. `undefined` when the path is
@@ -638,6 +754,17 @@ function resolvedPathRefusal(
     return `${label} resolves through a symlink to ${real}, outside the deployment directory`;
   }
   if (entry.kind !== "mount") return null;
+  // A symlink in the repository may point at `..`: the checkout is the
+  // author's, and the deployment directory around it holds the compiled
+  // compose file, the env file and the daemon's records.
+  if (
+    ctx.opts.checkout !== undefined &&
+    (real === ctx.realDir || dirname(real) === ctx.realDir)
+  ) {
+    return `${label} resolves to ${
+      real === ctx.realDir ? "the deployment directory itself" : "a file in it"
+    }, which holds the daemon's records, not the repository`;
+  }
   if (isWithin(real, ctx.realStage)) {
     return `${label} is the daemon's staging directory`;
   }
@@ -660,14 +787,34 @@ async function confineEntry(
       `${label} is interpolated, so where it points cannot be checked`,
     );
   }
+  const checkout = ctx.opts.checkout;
   const staged = normalize(
-    isAbsolute(entry.path) ? entry.path : resolve(ctx.stageDir, entry.path),
+    isAbsolute(entry.path)
+      ? entry.path
+      : resolve(checkout?.projectDir ?? ctx.stageDir, entry.path),
   );
+  const inCheckout = checkout !== undefined &&
+    isWithin(staged, normalize(checkout.root));
   const inOwnerTree = await ownerTreeOutcome(entry, label, staged, ctx);
   if (inOwnerTree) return inOwnerTree;
-  const hostLevel = hostLevelOutcome(entry, label, staged, ctx);
+  // A path inside the staging directory or the checkout is judged by the
+  // symlink rules below; everything else may not touch the state trees.
+  const inState = inCheckout || isWithin(staged, ctx.stageDir)
+    ? undefined
+    : await stateTreeOutcome(entry, label, staged, ctx);
+  if (inState) return inState;
+  const hostLevel = inCheckout
+    ? undefined
+    : hostLevelOutcome(entry, label, staged, ctx);
   if (hostLevel) return hostLevel;
-  const live = join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
+  if (inCheckout && entry.kind === "mount" && !entry.readOnly) {
+    return finding(
+      `${label} is a writable bind inside the repository checkout, which is replaced by a new folder on every new commit and would lose what the container writes — use a named volume`,
+    );
+  }
+  const live = inCheckout
+    ? staged
+    : join(ctx.opts.deploymentDir, relative(ctx.stageDir, staged));
   let real: string;
   try {
     real = await resolveExistingPrefix(live, ctx.realPath);

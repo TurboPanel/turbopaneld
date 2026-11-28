@@ -343,7 +343,7 @@ function ensureServiceVolumeMounts(
     }
   }
   for (const volume of volumes) {
-    const mount = `${volume.name}:${volume.target}`;
+    const mount = `${volume.name}:${volume.target}:rw`;
     const already = mounts.some((entry) =>
       entry === mount || entry.startsWith(`${volume.name}:`)
     );
@@ -519,12 +519,6 @@ export function composeUsesRootPasswordInterpolation(
 }
 
 export type NormalizeManagedComposeOptions = {
-  /**
-   * Keep the root password as a plain env var (legacy form, visible to
-   * `docker inspect`). Only for an engine whose compose is unchanged, so the
-   * apply does not recreate (restart) it. Default: file form.
-   */
-  legacyRootPasswordEnv?: boolean;
   /** Image string in the compose file already on disk (see resolveManagedEngineImage). */
   storedImage?: string;
 };
@@ -557,7 +551,7 @@ export function normalizeManagedCompose(
     applyDockerOptions(service, payload.dockerOptions, payload.engine);
   }
 
-  if (options.legacyRootPasswordEnv !== true) moveRootPasswordToFile(service);
+  moveRootPasswordToFile(service);
 
   stampManagedEngineLabels(service, payload);
   attachManagedIngressNetwork(service, payload.managedNetwork);

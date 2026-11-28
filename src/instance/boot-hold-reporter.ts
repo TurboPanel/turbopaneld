@@ -7,10 +7,6 @@
  * use, with `detector: 'boot-hold'`. The control plane never starts a failover
  * from it: it answers a still-current primary with `managed.lifecycle start`
  * and leaves a replaced one stopped (`needs_resync`).
- *
- * A control plane that does not advertise `managed-ha-boot-hold-v1` cannot
- * answer, so the hold is released locally (engine started) instead of leaving
- * the primary down for ever.
  */
 
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
@@ -23,14 +19,9 @@ import {
   type DockerRunFn,
   ensureHoldStopped,
   listActiveBootHolds,
-  releaseBootHoldLocally,
 } from "../managed/boot-hold.ts";
 
 export const BOOT_HOLD_REPORT_MS = 60_000;
-/** Look again this soon while the control plane's feature list has not arrived. */
-export const BOOT_HOLD_RECHECK_MS = 2_000;
-/** Give up the quick looks after this many (the minute timer carries on). */
-const MAX_RECHECKS = 150;
 
 export type BootHoldEventMessage = {
   type: "managed-ha-event";
@@ -44,18 +35,7 @@ export type BootHoldEventMessage = {
 export type BootHoldReporterOptions = {
   /** True only when the frame reached an open socket. */
   send: (message: BootHoldEventMessage) => boolean;
-  /**
-   * Whether the attached control plane advertised `managed-ha-boot-hold-v1`:
-   * `undefined` until its attach frame has arrived (the observers attach right
-   * after the socket opens, a moment before that frame). Never act on
-   * `undefined`: an empty list that simply has not arrived yet must not read as
-   * "cannot answer", or every held primary would be started seconds after a
-   * reconnect.
-   */
-  peerBootHoldSupport: () => boolean | undefined;
   intervalMs?: number;
-  /** How soon to look again while the feature list is not known yet. */
-  recheckMs?: number;
   now?: () => string;
   layout?: LayoutPaths;
   run?: DockerRunFn;
@@ -65,23 +45,17 @@ export type BootHoldReporterOptions = {
 
 export class BootHoldReporter {
   readonly #send: BootHoldReporterOptions["send"];
-  readonly #support: () => boolean | undefined;
   readonly #intervalMs: number;
-  readonly #recheckMs: number;
   readonly #now: () => string;
   readonly #layout: LayoutPaths | undefined;
   readonly #run: DockerRunFn;
   readonly #listHolds: (() => Promise<BootHoldRecord[]>) | undefined;
   #timer: ReturnType<typeof setInterval> | undefined;
-  #recheck: ReturnType<typeof setTimeout> | undefined;
-  #rechecks = 0;
   #ticking = false;
 
   constructor(options: BootHoldReporterOptions) {
     this.#send = options.send;
-    this.#support = options.peerBootHoldSupport;
     this.#intervalMs = options.intervalMs ?? BOOT_HOLD_REPORT_MS;
-    this.#recheckMs = options.recheckMs ?? BOOT_HOLD_RECHECK_MS;
     this.#now = options.now ?? (() => new Date().toISOString());
     this.#layout = options.layout;
     this.#run = options.run ?? defaultRunDocker;
@@ -94,7 +68,6 @@ export class BootHoldReporter {
 
   attach(): void {
     this.detach();
-    this.#rechecks = 0;
     this.#timer = setInterval(() => {
       void this.tick();
     }, this.#intervalMs);
@@ -106,20 +79,6 @@ export class BootHoldReporter {
       clearInterval(this.#timer);
       this.#timer = undefined;
     }
-    if (this.#recheck !== undefined) {
-      clearTimeout(this.#recheck);
-      this.#recheck = undefined;
-    }
-  }
-
-  #scheduleRecheck(): void {
-    if (this.#timer === undefined || this.#recheck !== undefined) return;
-    if (this.#rechecks >= MAX_RECHECKS) return;
-    this.#rechecks += 1;
-    this.#recheck = setTimeout(() => {
-      this.#recheck = undefined;
-      void this.tick();
-    }, this.#recheckMs);
   }
 
   async tick(): Promise<void> {
@@ -130,25 +89,6 @@ export class BootHoldReporter {
       const holds = await (this.#listHolds ?? (() =>
         listActiveBootHolds(layout)))();
       if (holds.length === 0) return;
-      const support = this.#support();
-      if (support === undefined) {
-        this.#scheduleRecheck();
-        return;
-      }
-      if (!support) {
-        await forEachSequential(holds, async (hold) => {
-          logWarn(
-            "managed",
-            `control plane cannot confirm held primary managedId=${hold.managedId}; releasing the hold and starting it`,
-          );
-          await releaseBootHoldLocally(
-            hold,
-            { layout, run: this.#run },
-            "control plane lacks managed-ha-boot-hold-v1",
-          );
-        });
-        return;
-      }
       await forEachSequential(holds, (hold) => this.#report(hold, layout));
     } catch (err) {
       logWarn("managed", "boot hold report failed:", sanitizeForLog(err));

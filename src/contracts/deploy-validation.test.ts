@@ -404,4 +404,72 @@ describe("www mode validation", () => {
       null,
     );
   });
+
+  it("applies the ACME and forceHttps rule per name when a row has nameTls", () => {
+    const row = {
+      hostnames: ["a.example.test", "b.example.test"],
+      proxy: { forceHttps: false },
+    };
+    // Only the name that picks Let's Encrypt conflicts with forceHttps:false.
+    assertEquals(
+      validateDeployHostnameRouting([
+        hosting({
+          ...row,
+          nameTls: [{ hostname: "b.example.test", tlsMode: "acme" }],
+        }),
+      ]),
+      "forceHttps:false is incompatible with ACME TLS on hostname b.example.test",
+    );
+    // A row-level acme choice that every name overrides no longer conflicts.
+    assertEquals(
+      validateDeployHostnameRouting([
+        hosting({
+          ...row,
+          tlsMode: "acme",
+          nameTls: [
+            { hostname: "a.example.test", tlsMode: "internal" },
+            { hostname: "b.example.test", tlsMode: "internal" },
+          ],
+        }),
+      ]),
+      null,
+    );
+    // Without nameTls the row level decides, as before.
+    assertEquals(
+      validateDeployHostnameRouting([hosting({ ...row, tlsMode: "acme" })]),
+      "forceHttps:false is incompatible with ACME TLS on hostname a.example.test",
+    );
+  });
+
+  it("sees an acme name a www mode serves, whichever spelling the row typed", () => {
+    // root-to-www serves www; the bare name has its own non-acme entry.
+    assertEquals(
+      validateDeployHostnameRouting([
+        hosting({
+          hostnames: ["a.example.test"],
+          www: "root-to-www",
+          proxy: { forceHttps: false },
+          nameTls: [
+            { hostname: "a.example.test", tlsMode: "internal" },
+            { hostname: "www.a.example.test", tlsMode: "acme" },
+          ],
+        }),
+      ]),
+      "forceHttps:false is incompatible with ACME TLS on hostname a.example.test",
+    );
+  });
+
+  it("refuses an acme redirect name when forceHttps is off", () => {
+    assertEquals(
+      validateDeployHostnameRouting([
+        hosting({
+          hostnames: ["x.example.test"],
+          www: "www-to-root",
+          proxy: { forceHttps: false },
+          nameTls: [{ hostname: "www.x.example.test", tlsMode: "acme" }],
+        }),
+      ]),
+      "forceHttps:false is incompatible with ACME TLS on hostname x.example.test",
+    );
+  });
 });

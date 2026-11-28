@@ -1,3 +1,4 @@
+import { useTempCommandJournal } from "../testing/command-journal.ts";
 import { assertEquals, assertMatch } from "@std/assert";
 import { join } from "@std/path";
 import {
@@ -13,6 +14,7 @@ import type { CommandDispatchMessage } from "../contracts/commands-contracts.ts"
  * reports Deno suites as empty; keep this alias so analysis sees real tests.
  */
 const test = Deno.test.bind(Deno);
+useTempCommandJournal();
 
 class MockWebSocket extends EventTarget {
   static readonly OPEN = 1;
@@ -120,7 +122,7 @@ test({
 test({
   name:
     "handleCommandDispatch rejects malformed server.principals.reconcile payloads",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const ws = new MockWebSocket() as unknown as WebSocket;
@@ -181,7 +183,7 @@ test({
 test({
   name:
     "handleCommandDispatch rejects invalid server.tls.trust.reconcile payloads",
-  permissions: { env: true, sys: ["hostname"], read: true },
+  permissions: { env: true, sys: ["hostname"], read: true, write: true },
   fn: async () => {
     const { handleCommandDispatch } = await import("./command-router.ts");
     const ws = new MockWebSocket() as unknown as WebSocket;

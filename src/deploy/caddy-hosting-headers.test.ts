@@ -1,4 +1,4 @@
-import { assertEquals } from "@std/assert";
+import { assertEquals, assertStringIncludes } from "@std/assert";
 import { join } from "@std/path";
 import {
   freePort,
@@ -150,7 +150,7 @@ async function probe(choices: Choices, upPort: number): Promise<void> {
       const [host, status] of [
         ["secure.test", 301],
         ["www.app.test", 301],
-        ["nobody.test", 200],
+        ["nobody.test", 404],
         ["down.test", 502],
       ] as const
     ) {
@@ -159,7 +159,24 @@ async function probe(choices: Choices, upPort: number): Promise<void> {
       assertEquals(res.status, status, where);
       assertEquals(res.headers.get("server"), hidden ? null : "Caddy", where);
       assertEquals(res.headers.get("via"), null, where);
-      if (status === 502 || status === 200) assertEquals(body, "", where);
+      if (status === 502) assertEquals(body, "", where);
+      if (host === "nobody.test") {
+        assertEquals(
+          res.headers.get("content-type"),
+          "text/html; charset=utf-8",
+          where,
+        );
+        assertEquals(res.headers.get("cache-control"), "no-store", where);
+        assertStringIncludes(body, "This site isn't live yet.");
+        // The CSS braces survive Caddy's placeholder expansion.
+        assertStringIncludes(body, "body{margin:0;");
+        assertEquals(body.includes("\\{"), false, where);
+        assertEquals(
+          body.includes("Hosted with"),
+          !choices.hideWebServerNames,
+          where,
+        );
+      }
     }
     assertEquals(
       (await get("www.app.test", "/x?y=1")).res.headers.get("location"),
@@ -207,7 +224,7 @@ test({
       assertEquals(down.res.status, 502);
       assertEquals(down.res.headers.get("server"), "Caddy");
       const nobody = await rawGet(ports.http, "nobody.test", "/");
-      assertEquals(nobody.res.status, 200);
+      assertEquals(nobody.res.status, 404);
       assertEquals(nobody.res.headers.get("server"), null);
     } finally {
       await stop();
@@ -243,3 +260,55 @@ async function rawGet(
     body: raw.slice(split + 4),
   };
 }
+
+/** Runs the pinned Caddy with the catch-all on a loopback port, then stops it. */
+async function withCatchAll(
+  choices: Choices,
+  run: (httpPort: number) => Promise<void>,
+): Promise<void> {
+  const root = await Deno.makeTempDir({ prefix: "tp-hosting-page-" });
+  const ports = {
+    http: freePort(),
+    https: freePort(),
+    up: freePort(),
+    down: freePort(),
+  };
+  const config = join(root, "Caddyfile");
+  await Deno.writeTextFile(config, hostingConfig(choices, ports));
+  const { stop } = await startPanelCaddy(
+    required(caddy, "caddy"),
+    config,
+    root,
+    ports.http,
+  );
+  try {
+    await run(ports.http);
+  } finally {
+    await stop();
+    await Deno.remove(root, { recursive: true });
+  }
+}
+
+test({
+  name: "the default page never reflects the requested host name",
+  ignore: caddy === undefined,
+  permissions: { read: true, write: true, run: true, env: true, net: true },
+  fn: () =>
+    // Caddy puts {http.request.host} into a respond body unescaped (`&` and
+    // `'` come back as sent), which is why the page shows no name at all.
+    // Go refuses a Host with `<` outright, so markup is tried with the
+    // characters it does accept.
+    withCatchAll(
+      { hideWebServerNames: false, sendViaHeader: false },
+      async (port) => {
+        const host = "a&b'(x)=1.test";
+        const { res, body } = await rawGet(port, host, "/");
+        assertEquals(res.status, 404);
+        assertStringIncludes(body, "This site isn't live yet.");
+        assertEquals(body.includes("a&b"), false);
+        const markup = await rawGet(port, "<script>alert(1)</script>", "/");
+        assertEquals(markup.res.status, 400);
+        assertEquals(markup.body.includes("<script>"), false);
+      },
+    ),
+});

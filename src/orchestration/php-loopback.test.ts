@@ -54,7 +54,7 @@ const UNITS: Record<string, string> = {
 /** `ip -o addr show`: eth0 is the host's scope address; vmbr0 and br-lan are not Docker's. */
 const IP_ADDR = [
   "1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever",
-  "2: eth0    inet 10.10.0.169/24 brd 10.10.0.255 scope global eth0\\       valid_lft forever preferred_lft forever",
+  "2: eth0    inet 10.50.0.169/24 brd 10.50.0.255 scope global eth0\\       valid_lft forever preferred_lft forever",
   "3: docker0    inet 172.17.0.1/16 brd 172.17.255.255 scope global docker0\\       valid_lft forever preferred_lft forever",
   "7: br-0123456789ab    inet 172.20.0.1/16 brd 172.20.255.255 scope global br-0123456789ab\\       valid_lft forever preferred_lft forever",
   "7: br-0123456789ab    inet6 fd00:dead:0:1::1/64 scope global \\       valid_lft forever preferred_lft forever",
@@ -78,8 +78,8 @@ const IP_LINK = [
  * are not destinations.
  */
 const IP_ROUTE = [
-  "default via 10.10.0.1 dev eth0 proto dhcp src 10.10.0.169 metric 100",
-  "10.10.0.0/24 dev eth0 proto kernel scope link src 10.10.0.169",
+  "default via 10.50.0.1 dev eth0 proto dhcp src 10.50.0.169 metric 100",
+  "10.50.0.0/24 dev eth0 proto kernel scope link src 10.50.0.169",
   "10.88.0.0/16 dev tp0 scope link",
   "10.90.0.5 dev tp0 scope link",
   "172.17.0.0/16 dev docker0 proto kernel scope link src 172.17.0.1 linkdown",
@@ -303,14 +303,19 @@ const GUARDED_UNITS: Record<string, string> = {
 };
 
 test("with no cache and no helper list there is no guarded set and no guard rule", async () => {
-  const out = (await render()).stdout;
+  const rendered = (await render()).stdout;
+  // The account table only: the app port table has its own `ct state new` rule.
+  const out = rendered.slice(
+    0,
+    rendered.indexOf("add table inet turbopanel_apps"),
+  );
   assert(!out.includes("guarded"), out);
   assert(!out.includes("ct state new"), out);
   // A socket-only cache has no port: nothing is added either.
   await withTree(HOST_FILES, async (run) => {
     const only = await run();
     assertEquals(only.code, 0, only.stderr);
-    assertEquals(only.stdout, out);
+    assertEquals(only.stdout, rendered);
   }, { ...UNITS, "turbopanel-cache-c2.service": cacheUnit("bob") });
 });
 
@@ -544,7 +549,7 @@ test("a configured /8 pool that holds the host's own network is not refused; the
   ]);
   assertStringIncludes(
     out.stderr,
-    "not refusing pool 10.0.0.0/8: this host routes 10.10.0.0/24 outside Docker",
+    "not refusing pool 10.0.0.0/8: this host routes 10.50.0.0/24 outside Docker",
   );
   // Docker's own bridge routes never drop a pool (bip is docker0's route).
   assert(!out.stderr.includes("172.17.0.1/16"));
@@ -696,6 +701,137 @@ test("the table is rebuilt whole in one transaction", async () => {
   );
 });
 
+/** The inbound table for native app ports, from `table inet turbopanel_apps {` on. */
+const appsTable = (stdout: string) =>
+  stdout.slice(stdout.indexOf("table inet turbopanel_apps {"));
+
+test("native app ports: one input drop for every non-loopback new connection, IPv4 and IPv6", async () => {
+  const out = (await render()).stdout;
+  const table = appsTable(out);
+  assertStringIncludes(table, "type filter hook input priority -150");
+  assertEquals(
+    table.split("\n").map((l) => l.trim()).filter((l) =>
+      l.startsWith("iifname")
+    ),
+    ['iifname != "lo" ct state new tcp dport @app_ports drop'],
+  );
+  // The inet family covers both address families with the one rule.
+  assertStringIncludes(out, "table inet turbopanel_apps {");
+  // Inbound only: the output hook of the account table is not touched.
+  assert(!table.includes("hook output"));
+});
+
+test("native app ports: the set holds every app unit's port, check copies and any account included", async () => {
+  const out = (await render()).stdout;
+  // 3000 and 3001 are outside the app ports root accepts, so they are left out.
+  assertEquals(setElements(appsTable(out), "app_ports"), ["41234"]);
+  // A unit whose account is not a Hosting Account is still an app port.
+  await withTree(HOST_FILES, async (run) => {
+    const rendered = await run();
+    assertEquals(rendered.code, 0, rendered.stderr);
+    assertEquals(setElements(appsTable(rendered.stdout), "app_ports"), [
+      "18500",
+      "18600",
+    ]);
+  }, {
+    "turbopanel-app-x1.service": appUnit("nobody", "18500"),
+    "turbopanel-app-x2.service": appUnit("alice", "18600"),
+    "turbopanel-app-x3.service": appUnit("alice", "18600"),
+    "turbopanel-app-bad1.service": appUnit("alice", "0"),
+    "turbopanel-app-bad2.service": appUnit("alice", "70000"),
+    "turbopanel-app-bad3.service": appUnit("alice", "12a"),
+    "turbopanel-app-bad4.service": appUnit("alice", ""),
+    "turbopanel-php-a-fcgi84.service": appUnit("alice", "9999"),
+    "turbopanel-cache-c1.service": appUnit("alice", "18100"),
+  });
+});
+
+test("native app ports: no app means an empty set and the same rule, so removing the last app closes nothing wrongly", async () => {
+  await withTree(HOST_FILES, async (run) => {
+    const rendered = await run();
+    assertEquals(rendered.code, 0, rendered.stderr);
+    const table = appsTable(rendered.stdout);
+    assertEquals(setElements(table, "app_ports"), []);
+    assertStringIncludes(table, "tcp dport @app_ports drop");
+  });
+});
+
+test("native app ports: the table is replaced whole in the same transaction, after the account table", async () => {
+  const out = (await render()).stdout;
+  const del = out.indexOf("delete table inet turbopanel_apps");
+  assert(out.indexOf("add table inet turbopanel_apps") < del);
+  assert(del < out.indexOf("table inet turbopanel_apps {"));
+  assert(out.indexOf("table inet turbopanel_php {") < del);
+  // A symlinked unit is not read.
+  await withTree(HOST_FILES, async (run, dir) => {
+    await Deno.symlink(
+      join(dir, "etc/systemd/system/turbopanel-app-real.service"),
+      join(dir, "etc/systemd/system/turbopanel-app-link.service"),
+    );
+    const rendered = await run();
+    assertEquals(setElements(appsTable(rendered.stdout), "app_ports"), [
+      "18700",
+    ]);
+  }, { "turbopanel-app-real.service": appUnit("bob", "18700") });
+});
+
+test("native app ports: only the app bands and the check copy range are dropped; platform ports are skipped", async () => {
+  await withTree(HOST_FILES, async (run) => {
+    const rendered = await run();
+    assertEquals(rendered.code, 0, rendered.stderr);
+    assertEquals(setElements(appsTable(rendered.stdout), "app_ports"), [
+      "18080",
+      "18999",
+      "19100",
+      "19799",
+      "32768",
+      "41234",
+      "44999",
+      "46000",
+      "60999",
+    ]);
+    for (
+      const port of [
+        "22",
+        "443",
+        "8443",
+        "19080",
+        "33001",
+        "33002",
+        "45000",
+        "45999",
+      ]
+    ) {
+      assertStringIncludes(
+        rendered.stderr,
+        `not dropping inbound port ${port} of`,
+      );
+    }
+  }, {
+    "turbopanel-app-ok1.service": appUnit("bob", "18080"),
+    "turbopanel-app-ok2.service": appUnit("bob", "18999"),
+    "turbopanel-app-ok3.service": appUnit("bob", "19100"),
+    "turbopanel-app-ok4.service": appUnit("bob", "19799"),
+    "turbopanel-app-ok5.service": appUnit("bob", "32768"),
+    "turbopanel-app-ok6.service": appUnit("bob", "41234"),
+    "turbopanel-app-ok7.service": appUnit("bob", "60999"),
+    "turbopanel-app-p22.service": appUnit("bob", "22"),
+    "turbopanel-app-p443.service": appUnit("bob", "443"),
+    "turbopanel-app-p8443.service": appUnit("bob", "8443"),
+    "turbopanel-app-p19080.service": appUnit("bob", "19080"),
+    "turbopanel-app-p33001.service": appUnit("bob", "33001"),
+    "turbopanel-app-p33002.service": appUnit("bob", "33002"),
+    "turbopanel-app-p45000.service": appUnit("bob", "45000"),
+    "turbopanel-app-p45999.service": appUnit("bob", "45999"),
+    "turbopanel-app-ok8.service": appUnit("bob", "44999"),
+    "turbopanel-app-ok9.service": appUnit("bob", "46000"),
+    "turbopanel-app-low.service": appUnit("bob", "18079"),
+    "turbopanel-app-mid.service": appUnit("bob", "19000"),
+    "turbopanel-app-high.service": appUnit("bob", "61000"),
+    "turbopanel-app-managed.service": appUnit("bob", "45500"),
+  });
+});
+
 test("the database ports and the band are the code's and tp-host's", async () => {
   const script = await Deno.readTextFile(SCRIPT);
   assertStringIncludes(script, `DB_PORT=${MYSQL_PORT}\n`);
@@ -774,6 +910,18 @@ test("the boot unit loads the walls before the network, logins and cron, and not
   );
   assertStringIncludes(tasks, "name: turbopanel-loopback-php.service");
   assertStringIncludes(tasks, "      - iproute2\n");
+  // The packages and the nftables.service stop run in development too, before
+  // the daemon's first start; only the lib/ installs are gated.
+  for (
+    const name of [
+      "Install nft, flock and ip for tp-php-loopback",
+      "Keep nftables.service from flushing tp-php-loopback's rules",
+    ]
+  ) {
+    const task = tasks.split("\n- name: ").find((t) => t.startsWith(name));
+    assert(task !== undefined, name);
+    assert(!task.includes("turbopanel_dev_user"), name);
+  }
 });
 
 /** `nft -c -f -` on TEXT, in a private network namespace when one can be made. */

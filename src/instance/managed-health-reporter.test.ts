@@ -26,6 +26,7 @@ function member(
     role,
     containerName: `c-${memberId}`,
     replicaPeerCount: 1,
+    peerCount: 1,
     updatedAt: AT,
   };
 }
@@ -45,7 +46,6 @@ function streaming(memberId: string): ManagedHealthProbeResult {
 function setup(options: {
   members: ManagedHaMemberRecord[];
   probe: (record: ManagedHaMemberRecord) => Promise<ManagedHealthProbeResult>;
-  supported?: boolean;
 }) {
   const sent: DaemonMessage[] = [];
   const reporter = new ManagedHealthReporter({
@@ -53,7 +53,6 @@ function setup(options: {
       sent.push(message);
       return true;
     },
-    peerSupportsReport: () => options.supported ?? true,
     now: () => AT,
     listMembers: () => Promise.resolve(options.members),
     probe: options.probe,
@@ -113,21 +112,6 @@ test("an unrelated probe error says nothing about the replica, so nothing is sen
   const frame = sent[0];
   if (frame?.type !== "managed-health-report") throw new Error("no frame");
   assertEquals(frame.members.map((entry) => entry.memberId), ["r2"]);
-});
-
-test("sends nothing to a control plane that does not advertise the feature", async () => {
-  let probes = 0;
-  const { reporter, sent } = setup({
-    members: [member("r1")],
-    supported: false,
-    probe: () => {
-      probes += 1;
-      return Promise.resolve(streaming("r1"));
-    },
-  });
-  await reporter.poll();
-  assertEquals(sent.length, 0);
-  assertEquals(probes, 0);
 });
 
 test("sends nothing when this host runs no replica", async () => {

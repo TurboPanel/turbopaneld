@@ -35,6 +35,7 @@ import {
 } from "../deploy/compose-ps.ts";
 import {
   createStreamedRunner,
+  dockerBinaryInstalled,
   type DockerCliResult,
   runDocker as defaultRunDocker,
   type RunDockerOptions,
@@ -53,6 +54,7 @@ import {
 import { applyNativeAppLifecycle } from "../deploy/native/apply-native-apps.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { workerLifecycle } from "../deploy/site/workers.ts";
+import { phpLifecycle } from "../deploy/site/php-lifecycle.ts";
 import { runHostCommand } from "../deploy/systemd-unit-set.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -79,9 +81,23 @@ export type EnvironmentLifecycleHandlerDeps = {
   logSink?: CommandOutputSink;
   decryptSecrets?: DecryptSecretsFn;
   rehydrateDeploymentSecrets?: RehydrateDeploymentSecretsFn;
-  /** Test seam: the host runner for worker units. */
+  /** Test seam: the host runner for worker and PHP units. */
   runHost?: RunFn;
+  /** Test seam: defaults to a `/usr/bin/docker` probe when `runDocker` is not injected. */
+  dockerInstalled?: () => Promise<boolean>;
 };
+
+/**
+ * A host without Docker (site-only: native PHP and native apps) has no
+ * containers to act on, so Docker steps are skipped. An injected `runDocker`
+ * means "Docker is there".
+ */
+async function dockerAvailableForLifecycle(
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<boolean> {
+  if (deps?.dockerInstalled) return await deps.dockerInstalled();
+  return deps?.runDocker !== undefined || await dockerBinaryInstalled();
+}
 
 function assertSafeLifecycleIdentifiers(
   payload: EnvironmentLifecyclePayload,
@@ -246,44 +262,23 @@ async function ensureLifecycleSecrets(
   });
 }
 
-async function lifecycleLocked(
+type DockerLifecycleContext = {
+  layout: ReturnType<typeof resolveLayout>;
+  deploymentDir: string;
+  composePaths: string[];
+  manifest: Awaited<ReturnType<typeof readDeploymentManifest>>;
+  run: RunDockerFn;
+  runStreamed: ReturnType<typeof createStreamedRunner>;
+  logSink: CommandOutputSink;
+};
+
+/** Compose and ingress for the action. Returns the earlier-named projects found. */
+async function applyDockerLifecycle(
   parsedPayload: EnvironmentLifecyclePayload,
-  daemonReceivedAt: string,
-  deps?: EnvironmentLifecycleHandlerDeps,
-): Promise<EnvironmentLifecycleResult> {
-  const run = deps?.runDocker ?? defaultRunDocker;
-  const runStreamed = createStreamedRunner(deps?.runDocker);
-  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
-  logSink.setPhase(lifecyclePhase(parsedPayload.action));
-  const decryptSecrets = captureDecryptedSecrets(deps?.decryptSecrets, logSink);
-  const layout = resolveLayout(Deno.env.toObject());
-
-  const deploymentDir = resolveEnvironmentDeploymentDir(
-    layout,
-    parsedPayload.projectId,
-    parsedPayload.environmentId,
-  );
-  const composePaths = await resolveDeployedComposePaths(deploymentDir);
-
-  if (composePaths === null) {
-    throw new Error(
-      `environment ${parsedPayload.environmentId} is not deployed on this server yet — deploy it first`,
-    );
-  }
-
-  // Stop, start and restart change what is running, so the last deploy no
-  // longer describes the host: the next deploy runs in full instead of being
-  // skipped as unchanged.
-  await clearAppliedDeployHash(deploymentDir);
-  const manifest = await readDeploymentManifest(deploymentDir);
-  await ensureLifecycleSecrets(
-    parsedPayload,
-    layout,
-    manifest,
-    decryptSecrets,
-    deps,
-  );
-
+  ctx: DockerLifecycleContext,
+): Promise<string[]> {
+  const { layout, deploymentDir, composePaths, manifest, run } = ctx;
+  const { runStreamed, logSink } = ctx;
   // A stack still running under an earlier, project-wide name (the recorded
   // names do not include this command's). Compose acts on a whole project and
   // sibling environments shared that name, so only this environment's own
@@ -334,7 +329,27 @@ async function lifecycleLocked(
     parsedPayload.action,
     run,
   );
+  return earlier;
+}
 
+/** A host without Docker has no containers: the Docker steps are skipped. */
+function skipDockerLifecycle(
+  parsedPayload: EnvironmentLifecyclePayload,
+): string[] {
+  logInfo(
+    "commands",
+    `environment.lifecycle Docker not installed; skipping compose ${parsedPayload.action} project=${parsedPayload.projectName} env=${parsedPayload.environmentId}`,
+  );
+  return [];
+}
+
+/** Native app units, workers and PHP follow the action. */
+async function applyHostUnitLifecycle(
+  parsedPayload: EnvironmentLifecyclePayload,
+  layout: ReturnType<typeof resolveLayout>,
+  logSink: CommandOutputSink,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<void> {
   // Native app units follow the same action. Best-effort per unit for the same
   // reason ingress is: one wedged unit must not fail the whole lifecycle
   // command and leave the compose half in an inconsistent state.
@@ -379,9 +394,79 @@ async function lifecycleLocked(
     );
   }
 
+  // A site's native PHP (per-site runtimes, the shared pool) follows the
+  // action as well. Last of the host steps, and it fails the command: a
+  // restart that left PHP on its old build must not report success.
+  const phpUnits = await phpLifecycle(
+    { run: deps?.runHost ?? runHostCommand, layout },
+    parsedPayload.environmentId,
+    parsedPayload.action,
+  );
+  if (phpUnits.length > 0) {
+    logInfo(
+      "commands",
+      `environment.lifecycle ${parsedPayload.action} php units=${
+        phpUnits.join(",")
+      }`,
+    );
+  }
+}
+
+async function lifecycleLocked(
+  parsedPayload: EnvironmentLifecyclePayload,
+  daemonReceivedAt: string,
+  deps?: EnvironmentLifecycleHandlerDeps,
+): Promise<EnvironmentLifecycleResult> {
+  const run = deps?.runDocker ?? defaultRunDocker;
+  const runStreamed = createStreamedRunner(deps?.runDocker);
+  const logSink = deps?.logSink ?? createNoopCommandOutputSink();
+  logSink.setPhase(lifecyclePhase(parsedPayload.action));
+  const decryptSecrets = captureDecryptedSecrets(deps?.decryptSecrets, logSink);
+  const layout = resolveLayout(Deno.env.toObject());
+
+  const deploymentDir = resolveEnvironmentDeploymentDir(
+    layout,
+    parsedPayload.projectId,
+    parsedPayload.environmentId,
+  );
+  const composePaths = await resolveDeployedComposePaths(deploymentDir);
+
+  if (composePaths === null) {
+    throw new Error(
+      `environment ${parsedPayload.environmentId} is not deployed on this server yet — deploy it first`,
+    );
+  }
+
+  // Stop, start and restart change what is running, so the last deploy no
+  // longer describes the host: the next deploy runs in full instead of being
+  // skipped as unchanged.
+  await clearAppliedDeployHash(deploymentDir);
+  const manifest = await readDeploymentManifest(deploymentDir);
+  await ensureLifecycleSecrets(
+    parsedPayload,
+    layout,
+    manifest,
+    decryptSecrets,
+    deps,
+  );
+
+  const dockerPresent = await dockerAvailableForLifecycle(deps);
+  const earlier = dockerPresent
+    ? await applyDockerLifecycle(parsedPayload, {
+      layout,
+      deploymentDir,
+      composePaths,
+      manifest,
+      run,
+      runStreamed,
+      logSink,
+    })
+    : skipDockerLifecycle(parsedPayload);
+  await applyHostUnitLifecycle(parsedPayload, layout, logSink, deps);
+
   // No container listing for an earlier-named stack: Compose would list the
   // whole shared project, siblings included.
-  const containers = earlier.length > 0
+  const containers = earlier.length > 0 || !dockerPresent
     ? undefined
     : await collectAllLifecycleContainers(
       projectsForCommand(manifest, parsedPayload.projectName, "live"),

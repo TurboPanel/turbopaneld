@@ -1,14 +1,18 @@
 import { assertEquals, assertExists, assertStringIncludes } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
+import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/index.ts";
 import {
+  clearUpdateSkip,
   handleSelfUpdateAttachOutcome,
   readUpdateGuardArmed,
   readUpdateRollback,
+  readUpdateSkip,
   updateGuardDisarmPath,
   updateGuardPath,
   updateRollbackPath,
   writeUpdateGuardDisarm,
+  writeUpdateSkip,
 } from "./update-guard.ts";
 
 /**
@@ -586,7 +590,11 @@ test("run.sh and tp-update-guard share the documented version parser", async () 
 async function runGuardOnFailedDaemon(options: {
   record?: Parameters<typeof writeRootRecord>[1];
   prevCommit?: string;
-}): Promise<{ code: number; stderr: string; rolledBack: boolean }> {
+}): Promise<{
+  code: number;
+  stderr: string;
+  rolledBack: boolean;
+}> {
   const root = await Deno.makeTempDir({ prefix: "tp-guard-root-record-" });
   try {
     const bin = join(root, "bin");
@@ -898,4 +906,118 @@ test("early rollback: the deadline still rolls back a healthy-looking unit", asy
     }),
     true,
   );
+});
+
+test("the guard rolls back a failed build every time it is armed for it", async () => {
+  const bootId = await currentBootId();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const run = await runGuardOnFailedDaemon({
+      record: { target: "newsha", previous: "oldsha", bootId },
+    });
+    assertEquals(run.code, 0, run.stderr);
+    assertEquals(run.rolledBack, true);
+  }
+});
+
+test("a previous build that ignores SIGTERM cannot hold the guard or run.sh", async () => {
+  const guardSh = await Deno.readTextFile(updateGuardSh);
+  const runSh = await Deno.readTextFile(runShPath);
+  const dir = await Deno.makeTempDir({ prefix: "tp-hang-" });
+  try {
+    // Ignores SIGTERM (the ignore survives the exec) and sleeps for a minute.
+    const hang = join(dir, "turbopaneld.prev");
+    await Deno.writeTextFile(hang, "#!/bin/sh\ntrap '' TERM\nexec sleep 60\n");
+    await Deno.chmod(hang, 0o755);
+    const cases: Array<[string, string]> = [
+      [
+        "guard",
+        `VERSION_READ_TIMEOUT_SEC=1\n${
+          extractShellFunction(guardSh, "tp_binary_version_line")
+        }`,
+      ],
+      [
+        "run.sh",
+        extractShellFunction(runSh, "tp_binary_version_line").replace(
+          "-k 2 10",
+          "-k 1 1",
+        ),
+      ],
+    ];
+    for (const [name, fn] of cases) {
+      assertEquals(
+        fn.includes("-k "),
+        true,
+        `${name} must send SIGKILL after the timeout`,
+      );
+      const started = performance.now();
+      const out = await new Deno.Command("sh", {
+        args: [
+          "-c",
+          `${fn}\ntp_binary_version_line "$1"\necho done`,
+          "sh",
+          hang,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      }).output();
+      const seconds = (performance.now() - started) / 1000;
+      assertEquals(new TextDecoder().decode(out.stdout), "done\n", name);
+      assertEquals(seconds < 10, true, `${name} took ${seconds}s`);
+    }
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+  // Every other --version read in both scripts goes through that helper or
+  // carries the same kill.
+  assertEquals(
+    /(?<!-k 2 10 )"\$\{?_(native|js)_prev\}?" --version/.test(guardSh),
+    false,
+  );
+  assertEquals(/\btimeout 10 /.test(runSh), false);
+});
+
+test("a rolled-back build is skipped by the daemon until another is asked for", async () => {
+  await withTempLayout(async (fixture) => {
+    const prior: Record<string, string | undefined> = {};
+    for (const key of Object.keys(fixture.env)) {
+      prior[key] = Deno.env.get(key);
+      Deno.env.set(key, fixture.env[key]);
+    }
+    try {
+      await Deno.writeTextFile(
+        updateRollbackPath(),
+        '{"fromCommit":"badnew","toCommit":"restored","reason":"deadline","at":"2026-09-24T12:00:00Z"}\n',
+      );
+      await handleSelfUpdateAttachOutcome({
+        currentCommit: "restored",
+        reportStage: () => {},
+      });
+      const skip = await readUpdateSkip();
+      assertEquals(skip?.commit, "badnew");
+      assertEquals(skip?.reason, "deadline");
+    } finally {
+      for (const key of Object.keys(fixture.env)) {
+        const value = prior[key];
+        if (value === undefined) Deno.env.delete(key);
+        else Deno.env.set(key, value);
+      }
+    }
+  });
+});
+
+test("the skip record round-trips, ignores blanks and clears", async () => {
+  await withTempLayout(async (fixture) => {
+    const layout = resolveLayout(fixture.env);
+    assertEquals(await readUpdateSkip(layout), null);
+    await clearUpdateSkip(layout);
+    await writeUpdateSkip({ commit: " ", reason: "x", at: "t" }, layout);
+    assertEquals(await readUpdateSkip(layout), null);
+    await writeUpdateSkip(
+      { commit: "abc", reason: "deadline", at: "t" },
+      layout,
+    );
+    assertEquals((await readUpdateSkip(layout))?.commit, "abc");
+    await clearUpdateSkip(layout);
+    assertEquals(await readUpdateSkip(layout), null);
+  });
 });

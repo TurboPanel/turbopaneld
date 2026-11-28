@@ -12,11 +12,14 @@
  * hosting records, never read from the compose file.
  *
  * The control plane's identity labels on tenant services
- * (`com.turbopanel.service`, `com.turbopanel.environment`) are not owner
- * labels and stay allowed.
+ * (`io.turbopanel.service`, `io.turbopanel.environment`) are not owner labels
+ * and stay allowed. The
+ * project and environment identity labels are not refused either: the daemon
+ * overrides whatever the tenant wrote.
  */
 
 import {
+  LABEL_PREFIX,
   LABEL_RAW_PORT,
   LABEL_ROLE,
   LABEL_SYSTEM_COMPONENT,
@@ -27,13 +30,13 @@ const RESERVED_KEYS = new Set([
   LABEL_ROLE,
   LABEL_SYSTEM_COMPONENT,
   "tp.managed.engine",
-  "com.turbopanel.approval",
+  `${LABEL_PREFIX}approval`,
   LABEL_RAW_PORT,
 ]);
 /** Whole namespaces no tenant writes into. */
 const RESERVED_PREFIXES = [
   "turbopanel.",
-  "com.turbopanel.system.",
+  `${LABEL_PREFIX}system.`,
   "tp.",
   // The platform generates every routing rule itself; a site owner's own
   // router, service or middleware label could otherwise claim another site's

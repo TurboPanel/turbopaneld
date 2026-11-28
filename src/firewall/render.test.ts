@@ -359,3 +359,76 @@ test("the digest is a function of the rendered bytes only", () => {
   assert(a.digest !== c.digest);
   assertEquals(a.digest.length, 64);
 });
+
+test("default drop: TP-FWD ends in a DNAT-only DROP and an accept-from-any published rule renders an explicit RETURN before it", () => {
+  const out = renderFirewall({
+    payload: payload({
+      policy: { inputDefault: "drop", ipv6: "mirror" },
+      rules: [
+        rule({
+          id: "d:compose:tcp:8081:public",
+          scope: "published",
+          ports: "8081",
+          sources: ["any"],
+          destinations: ["192.0.2.54/32"],
+          origin: "derived",
+        }),
+        rule({
+          id: "lan-445",
+          scope: "published",
+          ports: "445",
+          sources: ["192.0.2.0/24"],
+          origin: "user",
+        }),
+      ],
+    }),
+    sshPorts: [22],
+    includeForward: BOTH,
+  });
+  for (const doc of [out.v4, out.v6!]) {
+    const fwd = lines(doc).filter((l) =>
+      l.startsWith(`-A ${FIREWALL_FORWARD_CHAIN}`)
+    );
+    // prefix: established + container-side ingress still RETURN first
+    assertStringIncludes(fwd[0]!, "--ctstate ESTABLISHED,RELATED");
+    assertStringIncludes(fwd[0]!, "-j RETURN");
+    assertStringIncludes(fwd[1]!, "-i docker0");
+    assertEquals(
+      fwd.at(-1),
+      `-A TP-FWD -m conntrack --ctstate DNAT -m comment --comment "tp:system:default" -j DROP`,
+    );
+    assert(
+      fwd.filter((l) => l.endsWith("-j DROP")).length === 2,
+      "the 445 narrowing DROP and the default DROP",
+    );
+  }
+  const anyRule = lines(out.v4).filter((l) => l.includes("d:compose"));
+  assertEquals(anyRule, [
+    `-A TP-FWD -p tcp -m conntrack --ctorigdstport 8081 --ctorigdst 192.0.2.54/32 -m comment --comment "tp:derived:d:compose:tcp:8081:public" -j RETURN`,
+  ]);
+  // v4 destination renders nothing in v6, so only the v4 any-rule counts there
+  assert(!out.v6!.includes("d:compose"));
+  assertEquals(out.warnings, []);
+});
+
+test("accept default: TP-FWD keeps no default DROP and an accept-from-any published rule still renders nothing", () => {
+  const out = renderFirewall({
+    payload: payload({
+      rules: [
+        rule({
+          id: "any-80",
+          scope: "published",
+          ports: "80",
+          sources: ["any"],
+        }),
+      ],
+    }),
+    sshPorts: [22],
+    includeForward: BOTH,
+  });
+  const fwd = lines(out.v4).filter((l) =>
+    l.startsWith(`-A ${FIREWALL_FORWARD_CHAIN}`)
+  );
+  assertEquals(fwd.length, 1 + CONTAINER_INGRESS_INTERFACES.length);
+  assert(!fwd.some((l) => l.includes("ctstate DNAT")));
+});

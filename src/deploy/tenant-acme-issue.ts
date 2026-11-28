@@ -6,9 +6,7 @@
  * by the daemon's own ACME client (`acme/issue.ts`): one certificate covers
  * every name of the request. It is not the hosting web server's built-in
  * client, which retries and renews on its own schedule; the control plane owns
- * the schedule. Earlier releases started a one-shot web server unit per order
- * (`turbopanel-tenant-acme@<request>.service`); nothing starts it any more, and
- * the start-up sweep still stops one an older release left running.
+ * the schedule.
  *
  * Order of events: take the window lock, route the proof path for these names
  * to the request's socket inside each site's own port-80 block, answer a random
@@ -24,7 +22,6 @@
 
 import { join } from "@std/path";
 import type { AcmeIssueRequestMessage } from "../contracts/cell-messages.ts";
-import { hostSudoArgs } from "../permissions/host-sudo.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
 import { logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
@@ -43,12 +40,12 @@ import {
   withInstanceAcmeWindowLock,
   withPreflightServer,
 } from "./instance-acme-http01.ts";
+import type { DnsRelay } from "./acme/dns01.ts";
 import {
   type DaemonIssueDeps,
+  issueCertificateOverDns01,
   issueCertificateOverHttp01,
 } from "./acme/issue.ts";
-
-export const TENANT_ACME_SERVICE_PREFIX = "turbopanel-tenant-acme@";
 
 /** How long the local proof routes of one request may stay (the order takes minutes). */
 const LOCAL_ROUTE_TTL_MS = 15 * 60 * 1000;
@@ -57,18 +54,18 @@ const CONNECT_TIMEOUT_MS = 10_000;
 const CHALLENGE_PATH = "/.well-known/acme-challenge/";
 const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-export function tenantAcmeUnit(requestId: string): string {
-  return `${TENANT_ACME_SERVICE_PREFIX}${requestId}.service`;
+/** Server-placed order state: `account/` holds this server's ACME accounts (one per contact address). */
+export function tenantAcmeDataDir(layout: LayoutPaths): string {
+  return join(layout.stateDir, "tenant-acme");
 }
 
 /**
- * Server-placed order state: `account/` holds this server's ACME accounts (one
- * per contact address); `requests/` and `caddy/` are what an older release's
- * one-shot issuer left, cleared by the start-up sweep (its `caddy/acme`
- * account folder is kept and no longer used).
+ * One empty file per DNS order in flight (`<name>` is the request id). The
+ * control plane keeps such a request open until it hears, so a restart that
+ * loses the order must be able to say so afterwards (`sweepDnsOrders`).
  */
-export function tenantAcmeDataDir(layout: LayoutPaths): string {
-  return join(layout.stateDir, "tenant-acme");
+export function tenantAcmeDnsOpenDir(layout: LayoutPaths): string {
+  return join(tenantAcmeDataDir(layout), "dns-open");
 }
 
 export function tenantAcmeCertificateRoot(layout: LayoutPaths): string {
@@ -368,6 +365,84 @@ async function reportPair(
   });
 }
 
+export type TenantDnsIssueDeps =
+  & Pick<
+    TenantIssueDeps,
+    "now" | "report" | "acme"
+  >
+  & {
+    /** Carries the records to the control plane and waits for its answer. */
+    relay: DnsRelay;
+    /** Places the order over DNS with this daemon's own client (test seam). */
+    issueDns?: typeof issueCertificateOverDns01;
+  };
+
+/** Request ids of DNS orders a restart cut short (their marker file is left). */
+export async function listOpenDnsOrders(
+  layout: LayoutPaths,
+): Promise<string[]> {
+  const ids: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(tenantAcmeDnsOpenDir(layout))) {
+      if (entry.isFile && SAFE_REQUEST_ID_RE.test(entry.name)) {
+        ids.push(entry.name);
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof Deno.errors.NotFound)) throw err;
+  }
+  return ids;
+}
+
+export function forgetOpenDnsOrder(
+  layout: LayoutPaths,
+  requestId: string,
+): Promise<void> {
+  if (!SAFE_REQUEST_ID_RE.test(requestId)) return Promise.resolve();
+  return removeIfPresent(join(tenantAcmeDnsOpenDir(layout), requestId));
+}
+
+/**
+ * Run one DNS-01 order from start to cleanup. No proof routes, no port 80 and
+ * no window lock (nothing here shares a window); the control plane publishes
+ * the TXT records and the pair goes out through the same report as an HTTP
+ * order. Never throws; returns the outcome.
+ */
+export async function issueTenantCertificatesOverDns(
+  layout: LayoutPaths,
+  request: AcmeIssueRequestMessage,
+  deps: TenantDnsIssueDeps,
+): Promise<TenantIssueOutcome> {
+  const now = deps.now ?? Date.now;
+  if (!SAFE_REQUEST_ID_RE.test(request.requestId)) {
+    return { ok: false, reason: "the request id is not usable" };
+  }
+  if (Date.parse(request.startByIso) <= now()) {
+    return { ok: false, reason: "the request was not started in time" };
+  }
+  const marker = join(tenantAcmeDnsOpenDir(layout), request.requestId);
+  try {
+    await Deno.mkdir(tenantAcmeDnsOpenDir(layout), {
+      recursive: true,
+      mode: 0o700,
+    });
+    await Deno.writeTextFile(marker, "", { mode: 0o600 });
+    const issue = deps.issueDns ?? issueCertificateOverDns01;
+    const outcome = await issue(layout, request, deps.relay, deps.acme);
+    if (!outcome.ok) throw new IssueStop(outcome.reason);
+    await reportPair(outcome, request, deps);
+    return { ok: true, notAfterIso: outcome.notAfterIso, skippedHelpers: [] };
+  } catch (err) {
+    return { ok: false, reason: plainReason(err) };
+  } finally {
+    try {
+      await removeIfPresent(marker);
+    } catch (err) {
+      logWarn("deploy", "tenant ACME DNS marker cleanup failed:", err);
+    }
+  }
+}
+
 /** Run one order from start to cleanup. Never throws; returns the outcome. */
 export function issueTenantCertificates(
   layout: LayoutPaths,
@@ -453,76 +528,4 @@ async function cleanUp(
     "delete request socket",
     () => removeIfPresent(tenantAcmeSocketPath(layout, request.requestId)),
   );
-}
-
-/**
- * At start-up, before any request is taken: clear what an older release's
- * one-shot issuer may have left. A daemon updated from such a release can find
- * an issuer unit still running with nobody to stop it, which would keep
- * retrying after its proof routes expire and leave a private key on disk. Stop
- * every `turbopanel-tenant-acme@*` unit and delete the per-request config and
- * logs, the certificates and keys it stored and the leftover request sockets.
- * The accounts stay: `account/` (this daemon's own client, one per contact
- * address) and the old issuer's `caddy/acme`.
- */
-export async function sweepTenantAcme(
-  layout: LayoutPaths,
-  deps: {
-    run?: InstanceAcmeCommand;
-    stopUnit?: (
-      unit: string,
-      run: InstanceAcmeCommand,
-    ) => Promise<Error | null>;
-  } = {},
-): Promise<void> {
-  const run = deps.run ?? defaultCommand;
-  const stop = deps.stopUnit ?? stopUnit;
-  await withInstanceAcmeWindowLock(async () => {
-    const listed = await run("systemctl", [
-      "list-units",
-      "--all",
-      "--plain",
-      "--no-legend",
-      `${TENANT_ACME_SERVICE_PREFIX}*`,
-    ]);
-    const units = listed.stdout.split("\n")
-      .map((line) => line.trim().split(/\s+/)[0] ?? "")
-      .filter((name) =>
-        name.startsWith(TENANT_ACME_SERVICE_PREFIX) &&
-        /^[A-Za-z0-9_@.-]+$/.test(name)
-      );
-    await forEachSequential(units, async (unit) => {
-      const problem = await stop(unit, run);
-      if (problem) logWarn("deploy", `stopping ${unit} failed:`, problem);
-    });
-    await removeIfPresent(join(tenantAcmeDataDir(layout), "requests"), true);
-    await removeIfPresent(tenantAcmeCertificateRoot(layout), true);
-    await removeSockets(layout.runDir);
-  });
-}
-
-/** `systemctl stop` through tp-host; the problem, or null when it stopped. */
-async function stopUnit(
-  unit: string,
-  run: InstanceAcmeCommand,
-): Promise<Error | null> {
-  const result = await run(
-    "sudo",
-    hostSudoArgs(["-n", "systemctl", "stop", unit]),
-  );
-  return result.ok
-    ? null
-    : new Error(result.stderr.trim() || `could not stop ${unit}`);
-}
-
-async function removeSockets(runDir: string): Promise<void> {
-  try {
-    for await (const entry of Deno.readDir(runDir)) {
-      if (/^tenant-acme-[A-Za-z0-9_-]+\.sock$/.test(entry.name)) {
-        await removeIfPresent(join(runDir, entry.name));
-      }
-    }
-  } catch (err) {
-    if (!(err instanceof Deno.errors.NotFound)) throw err;
-  }
 }

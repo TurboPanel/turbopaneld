@@ -1,10 +1,10 @@
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
+import { waitFor } from "../testing/wait-for.ts";
 import type { RunResult } from "../deploy/ensure-principal.ts";
 import type { ConnectorIo } from "./connector-service.ts";
 import {
   CONNECTOR_UPDATES_PAUSED_FILE,
-  migrateLegacyTokenFiles,
   runConnectorUpdates,
   setTunnelsTestHooks,
   startTunnels,
@@ -32,7 +32,7 @@ async function withTunnelsDir(
   const io: ConnectorIo = {
     layout: { configDir: join(dir, "etc") },
     workDir: dir,
-    version: "2026.10.7",
+    version: "2026.11.2",
     ensureBinary: opts.ensureBinary ??
       (() =>
         Promise.resolve("/opt/turbopanel/vendor/cloudflared/x/cloudflared")),
@@ -42,7 +42,7 @@ async function withTunnelsDir(
       return Promise.resolve({ success: true, stdout: "", stderr: "" });
     },
   };
-  setTunnelsTestHooks({ io, tunnelsDir: dir });
+  setTunnelsTestHooks({ io });
   try {
     await fn(dir, io, calls);
   } finally {
@@ -50,76 +50,6 @@ async function withTunnelsDir(
     await Deno.remove(dir, { recursive: true });
   }
 }
-
-test("a host that never had a token file does nothing, not even a download", async () => {
-  await withTunnelsDir(async (_dir, io, calls) => {
-    assertEquals(await migrateLegacyTokenFiles(io), []);
-    assertEquals(calls, []);
-  }, {
-    ensureBinary: () => {
-      throw new TypeError("the connector program must not be fetched");
-    },
-  });
-});
-
-test("a missing tunnels folder is not an error", async () => {
-  await withTunnelsDir(async (dir, io) => {
-    assertEquals(await migrateLegacyTokenFiles(io, join(dir, "missing")), []);
-  });
-});
-
-test("legacy token files for the instance, the installer and a tunnel id become services", async () => {
-  await withTunnelsDir(async (dir, io, calls) => {
-    for (const name of ["instance", "default", UUID]) {
-      await Deno.writeTextFile(join(dir, `${name}.token`), `${TOKEN}\n`);
-    }
-    const migrated = await migrateLegacyTokenFiles(io);
-    assertEquals(migrated, ["default", "instance", UUID].sort());
-    assert(
-      calls.some((c) => c.includes(`enable turbopanel-tunnel-${UUID}.service`)),
-    );
-    const left = [...Deno.readDirSync(dir)].map((e) => e.name).filter((n) =>
-      n.endsWith(".token")
-    );
-    assertEquals(left, []);
-    assert(calls.every((c) => !c.includes(TOKEN)));
-  });
-});
-
-test("a file not named for a tunnel id, an empty one and a bad one stay where they are", async () => {
-  await withTunnelsDir(async (dir, io, calls) => {
-    await Deno.writeTextFile(join(dir, "my tunnel.token"), TOKEN);
-    await Deno.writeTextFile(join(dir, "..token"), TOKEN);
-    await Deno.writeTextFile(join(dir, "instance.token"), "  \n");
-    await Deno.writeTextFile(
-      join(dir, `${UUID}.token`),
-      "has space and 'quote",
-    );
-    await Deno.writeTextFile(join(dir, "notes.txt"), "x");
-    assertEquals(await migrateLegacyTokenFiles(io), []);
-    assertEquals(calls, []);
-    assertEquals([...Deno.readDirSync(dir)].length, 5);
-  });
-});
-
-test("a file whose service cannot be installed stays for the next start, the others migrate", async () => {
-  await withTunnelsDir(async (dir, io) => {
-    await Deno.writeTextFile(join(dir, "default.token"), TOKEN);
-    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
-    const run = io.run;
-    io.run = (command, args) =>
-      args.includes("default")
-        ? Promise.resolve({ success: false, stdout: "", stderr: "no" })
-        : run(command, args);
-    // `tunnel-env-install default` is refused; instance is fine.
-    const migrated = await migrateLegacyTokenFiles(io);
-    assertEquals(migrated, ["instance"]);
-    assertEquals(
-      (await Deno.stat(join(dir, "default.token"))).isFile,
-      true,
-    );
-  });
-});
 
 test("startTunnels returns at once and never throws", async () => {
   await withTunnelsDir(async () => {
@@ -130,18 +60,12 @@ test("startTunnels returns at once and never throws", async () => {
 });
 
 test("the instance token becomes the instance service and an empty one removes it", async () => {
-  await withTunnelsDir(async (dir, _io, calls) => {
-    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
+  await withTunnelsDir(async (_dir, _io, calls) => {
     await writeInstanceTunnelToken(`  ${TOKEN} \n`);
     assert(
       calls.some((c) =>
         c.includes("enable turbopanel-tunnel-instance.service")
       ),
-    );
-    // The old file must not be migrated back on the next start.
-    assertEquals(
-      await Deno.stat(join(dir, "instance.token")).catch(() => null),
-      null,
     );
     calls.length = 0;
     await writeInstanceTunnelToken("");
@@ -151,33 +75,6 @@ test("the instance token becomes the instance service and an empty one removes i
       ),
     );
     assert(calls.some((c) => c.includes("tunnel-env-remove instance")));
-  });
-});
-
-test("a file whose service fails to start stays in place for the next start", async () => {
-  await withTunnelsDir(async (dir, io) => {
-    await Deno.writeTextFile(join(dir, "instance.token"), TOKEN);
-    const run = io.run;
-    io.run = (command, args) =>
-      args.includes("restart")
-        ? Promise.resolve({ success: false, stdout: "", stderr: "no" })
-        : run(command, args);
-    assertEquals(await migrateLegacyTokenFiles(io), []);
-    assertEquals((await Deno.stat(join(dir, "instance.token"))).isFile, true);
-  });
-});
-
-test("a stale file never overwrites a service that already exists", async () => {
-  await withTunnelsDir(async (dir, io, calls) => {
-    await writeInstanceTunnelToken(TOKEN);
-    await Deno.writeTextFile(join(dir, "instance.token"), `${TOKEN}AA`);
-    calls.length = 0;
-    assertEquals(await migrateLegacyTokenFiles(io), []);
-    assertEquals(calls, []);
-    assertEquals(
-      await Deno.stat(join(dir, "instance.token")).catch(() => null),
-      null,
-    );
   });
 });
 
@@ -228,6 +125,58 @@ test("the update run moves an older tunnel to the pinned version", async () => {
       calls.filter((c) => c.endsWith(" tunnel-loopback-sync")).length,
       1,
     );
+  });
+});
+
+test("a daemon start with a changed pin runs the whole rolling update in order", async () => {
+  await withTunnelsDir(async (dir, io, calls) => {
+    await writeOldRecord(dir);
+    const steps: string[] = [];
+    // The pinned program is downloaded and verified before any unit is made.
+    io.ensureBinary = () => {
+      steps.push("download-and-verify");
+      return Promise.resolve(
+        "/opt/turbopanel/vendor/cloudflared/2026.11.2/cloudflared",
+      );
+    };
+    io.probe = () => {
+      steps.push("ready");
+      return Promise.resolve({ kind: "ready", connections: 4 });
+    };
+    io.portFree = () => Promise.resolve(true);
+    io.unitExists = () => Promise.resolve(false);
+    io.sleep = () => Promise.resolve();
+    io.unitTexts = () => Promise.resolve([]);
+    let prunedDone = false;
+    io.pruneVersions = (keep) => {
+      steps.push(`prune keep=${[...keep].join(",")}`);
+      prunedDone = true;
+      return Promise.resolve();
+    };
+    const run = io.run;
+    io.run = (command, args) => {
+      const text = [command, ...args].join(" ");
+      if (text.includes("start turbopanel-tunnel-")) steps.push("start-new");
+      if (text.includes("disable --now turbopanel-tunnel-")) {
+        steps.push("stop-old");
+      }
+      return args.includes("is-active")
+        ? Promise.resolve({ success: true, stdout: "active", stderr: "" })
+        : run(command, args);
+    };
+    await startTunnels(new AbortController().signal);
+    await waitFor("the old versions to be pruned", () => prunedDone, {
+      timeoutMs: 60_000,
+    });
+    const order = ["download-and-verify", "start-new", "ready", "stop-old"];
+    const seen = steps.filter((s) => order.includes(s));
+    assertEquals([...new Set(seen)], order, steps.join("\n"));
+    assertEquals(steps.at(-1), "prune keep=2026.11.2");
+    assert(calls.some((c) => c.includes(`start turbopanel-tunnel-${UUID}-b`)));
+    const record = JSON.parse(
+      await Deno.readTextFile(join(dir, `${UUID}.json`)),
+    );
+    assertEquals([record.slot, record.version], ["b", "2026.11.2"]);
   });
 });
 

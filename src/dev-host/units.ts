@@ -2,9 +2,10 @@
  * systemd facts for the development host's units: one `systemctl show` for
  * all four per status tick, and the control plane unit's database URL for a
  * migration (read the way `tp-orchestrate migrate` reads it, plus the unit's
- * environment files, where the development install keeps it).
+ * environment files, where the install keeps it).
  */
 import type { RunCommand } from "./commands.ts";
+import { hostSudoArgs } from "../permissions/host-sudo.ts";
 
 export type UnitState = {
   activeState: string;
@@ -119,7 +120,8 @@ const DATABASE_URL = "TURBOPANEL_DATABASE_URL";
 export async function readInstanceDatabaseUrl(
   run: RunCommand,
   unit: string,
-  readFile: (path: string) => Promise<string | null> = readTextOrNull,
+  readFile: (path: string) => Promise<string | null> = (path) =>
+    readTextOrSudo(run, path),
 ): Promise<string | null> {
   const result = await run("systemctl", [
     "show",
@@ -161,6 +163,23 @@ function urlFromEnvironment(value: string): string | null {
   const prefix = `${DATABASE_URL}=`;
   const pair = splitEnvironment(value).findLast((p) => p.startsWith(prefix));
   return pair === undefined ? null : pair.slice(prefix.length);
+}
+
+/**
+ * An environment file as the daemon account sees it, or through `sudo -n cat`
+ * when that account may not read it: the instance's passwords file is
+ * root-only (0600). A development host has full sudo; a refusal reads as null.
+ */
+async function readTextOrSudo(
+  run: RunCommand,
+  path: string,
+): Promise<string | null> {
+  const direct = await readTextOrNull(path);
+  if (direct !== null) return direct;
+  const result = await run("sudo", hostSudoArgs(["-n", "cat", path]), {
+    timeoutMs: 15_000,
+  });
+  return result.code === 0 ? result.stdout : null;
 }
 
 async function readTextOrNull(path: string): Promise<string | null> {

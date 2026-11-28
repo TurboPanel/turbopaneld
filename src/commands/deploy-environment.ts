@@ -2,6 +2,7 @@ import {
   buildStorageVolumesFragment,
   declaredVolumeUsers,
 } from "../deploy/apply-storage-volumes.ts";
+import { isResolvedCommitSha } from "../deploy/commit-sha.ts";
 import { openPrincipalPasswordEnvelopes } from "../deploy/principal-password-envelope.ts";
 import { applyVolumeAccess } from "../deploy/volume-access.ts";
 import {
@@ -9,6 +10,7 @@ import {
   ensureNamedVolumeOwners,
   namedVolumeOwnerTargets,
 } from "../deploy/named-volume-owner.ts";
+import { generatedFileTimes } from "../deploy/generated-files-changed.ts";
 import { buildHostingLabelsFragment } from "../deploy/compose-labels.ts";
 import {
   applyDeployCachesAndReach,
@@ -17,6 +19,23 @@ import {
 import { assertComposePolicy } from "../deploy/compose-final-policy.ts";
 import { assertNoReservedOwnerLabels } from "../deploy/compose-reserved-labels.ts";
 import { assertComposeBuildPolicy } from "../deploy/compose-build-policy.ts";
+import {
+  assertBuildContextsPresent,
+  composeServices,
+  deployAlwaysBuilds,
+} from "../deploy/compose-build-contexts.ts";
+import {
+  COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME,
+  type ComposeCheckoutDirs,
+  pruneComposeCheckout,
+  readComposeCheckoutDirs,
+  restoreLiveComposeCheckoutMarker,
+  unfollowComposeCheckout,
+} from "../deploy/compose-checkout-marker.ts";
+import {
+  applyComposeCheckout,
+  type ApplyComposeCheckoutDeps,
+} from "../deploy/compose-checkout.ts";
 import {
   DeployCancelledError,
   type DeployCancelToken,
@@ -75,6 +94,7 @@ import {
   type RunDockerStreamedFn,
 } from "../deploy/docker-cli.ts";
 import { captureDecryptedSecrets } from "../logs/capture.ts";
+import { rememberSecretPlaintexts } from "../logs/redactor.ts";
 import { resolveSiteSecretEnv } from "../deploy/site/site-secret-env.ts";
 import { materializeSiteEnvFiles } from "../deploy/site/site-env-file.ts";
 import { requestPhpPatchPassAfterDeploy } from "../deploy/site/php-patch-restart.ts";
@@ -94,7 +114,29 @@ import {
   type CommandOutputSink,
   createNoopCommandOutputSink,
 } from "../logs/contracts.ts";
+import { cachedPhpSiteKeySecret } from "../deploy/site/php-site-key.ts";
+import {
+  applyShareLoginsToCompose,
+  pruneStaleShareVolumes,
+  resolveShareLogins,
+  type ShareLogin,
+} from "../deploy/network-share-logins.ts";
 import { ensureDocker as defaultEnsureDocker } from "../deploy/ensure-docker.ts";
+import {
+  assertNetworkSharesFinal,
+  describeNetworkShare,
+  hasNetworkShares,
+  NETWORK_SHARES_REFUSAL_NOTE,
+  networkShareVolumes,
+} from "../deploy/network-shares.ts";
+import {
+  assertShareAddressesPinned,
+  checkShareTargets,
+  pinShareAddresses,
+  type ShareTargetDeps,
+} from "../deploy/network-share-targets.ts";
+import { ensureSmbTools as defaultEnsureSmbTools } from "../deploy/smb-tools.ts";
+import { runSmbToolsSetup } from "../orchestration/ansible.ts";
 import { ensureBuildkitImageBuild } from "../deploy/release/image-build.ts";
 import { observeBuildSlot } from "../deploy/release/build-sandbox.ts";
 import { nativeAppRuntimeKind } from "../deploy/native/unit.ts";
@@ -136,6 +178,8 @@ import {
 import {
   materializeStorageEntries,
   resolveVolumeOwnerIds,
+  storageHostPath,
+  storageRootPath,
   type VolumeOwnerIds,
 } from "../deploy/materialize-storage.ts";
 import {
@@ -221,7 +265,9 @@ import {
   syncAccountWallOrThrow,
   syncAccountWallQuietly,
 } from "../deploy/account-wall.ts";
-import { runPrivileged as defaultRunPrivileged } from "../deploy/release/release-layout.ts";
+import {
+  runPrivileged as defaultRunPrivileged,
+} from "../deploy/release/release-layout.ts";
 import type { RunFn } from "../deploy/ensure-principal.ts";
 import {
   ensureExternalDockerNetworks as defaultEnsureExternalDockerNetworks,
@@ -248,6 +294,7 @@ import {
   collectAuthoredHostPaths,
   collectResolvedHostPaths,
   priorWritableMounts,
+  type StateTreeOptions,
 } from "../deploy/compose-host-paths.ts";
 import {
   configHostDirectory,
@@ -422,6 +469,8 @@ function assertSafeDeploymentIdentifiers(
 
 export type EnvironmentDeployDeps = {
   decryptSecrets?: DecryptSecretsFn;
+  /** Test seam: the clone behind `composeCheckout` (see `compose-checkout.ts`). */
+  composeCheckoutFn?: ApplyComposeCheckoutDeps["checkoutFn"];
   /**
    * Execution-log transcript sink (`src/logs/`). Optional everywhere — the
    * default no-op sink keeps existing callers and tests unchanged.
@@ -434,6 +483,13 @@ export type EnvironmentDeployDeps = {
    * Ansible install on hermetic suite paths that still exercise compose.
    */
   ensureDocker?: () => Promise<void>;
+  /**
+   * Test seam — defaults to {@link defaultEnsureSmbTools} (installs
+   * `cifs-utils` through the privileged playbook when a share volume needs it).
+   */
+  ensureSmbTools?: (log: (line: string) => void) => Promise<void>;
+  /** Test seam — DNS, own-address and Docker-network reads for share hosts. */
+  shareTargets?: ShareTargetDeps;
   /** Test seam — defaults to {@link waitForHealthGate} (real polling and sleeps). */
   waitForHealth?: typeof waitForHealthGate;
   /**
@@ -968,7 +1024,7 @@ function serviceIdsForManifest(
  * engine skipped (no owning principal) and for the marker-only write path, which
  * publishes the manifest without running the engine at all.
  */
-function releasesForManifest(
+export function releasesForManifest(
   payload: EnvironmentDeployPayload,
   applied: readonly AppliedRelease[] = [],
 ): DeploymentManifestRelease[] {
@@ -978,7 +1034,11 @@ function releasesForManifest(
   const out: DeploymentManifestRelease[] = [];
   for (const entry of payload.sourceMaterial ?? []) {
     const result = appliedByService.get(entry.composeServiceName);
-    const commitSha = result?.commitSha ?? entry.commitSha;
+    // Only a resolved commit id is recorded: the payload's value can be a
+    // placeholder (a branch name) for a release that never got built.
+    const commitSha = [result?.commitSha, entry.commitSha].find(
+      isResolvedCommitSha,
+    );
     const commitMessage = result?.commitMessage ?? entry.commitMessage;
     const commitAuthor = result?.commitAuthor ?? entry.commitAuthor;
     const serviceId = result?.serviceId ??
@@ -994,7 +1054,7 @@ function releasesForManifest(
       releaseId: result?.releaseId ?? entry.rollbackToReleaseId ??
         entry.releaseId,
       sourceId: entry.sourceId,
-      commitSha,
+      ...(commitSha === undefined ? {} : { commitSha }),
       ...(commitMessage === undefined ? {} : { commitMessage }),
       ...(commitAuthor === undefined ? {} : { commitAuthor }),
       ...(entry.ref.length > 0 ? { ref: entry.ref } : {}),
@@ -1455,15 +1515,30 @@ export function siteCronSpec(
   };
 }
 
+type ApplyDeployCronJobsInput = {
+  layout: LayoutPaths;
+  parsedPayload: EnvironmentDeployPayload;
+  sites: readonly EnvironmentDeploySite[];
+  releaseBindings: ReadonlyMap<string, SiteRelease>;
+  managedBindings: ReadonlyMap<string, SiteManagedDirectory>;
+  nativeAppServices: readonly EnvironmentDeployNativeAppService[];
+  nativeAppBindings: NativeAppBindings;
+  onLine: (stream: "stdout" | "stderr", line: string) => void;
+};
+
 async function applyDeployCronJobs(
-  layout: LayoutPaths,
-  parsedPayload: EnvironmentDeployPayload,
-  sites: readonly EnvironmentDeploySite[],
-  releaseBindings: ReadonlyMap<string, SiteRelease>,
-  managedBindings: ReadonlyMap<string, SiteManagedDirectory>,
-  nativeAppServices: readonly EnvironmentDeployNativeAppService[],
-  nativeAppBindings: NativeAppBindings,
+  input: ApplyDeployCronJobsInput,
 ): Promise<void> {
+  const {
+    layout,
+    parsedPayload,
+    sites,
+    releaseBindings,
+    managedBindings,
+    nativeAppServices,
+    nativeAppBindings,
+    onLine,
+  } = input;
   const specs: CronApplySpec[] = [];
   for (const site of sites) {
     const spec = siteCronSpec(
@@ -1499,8 +1574,18 @@ async function applyDeployCronJobs(
     });
   }
   try {
+    if (specs.length > 0) {
+      onLine("stdout", `applying cron jobs for ${specs.length} service(s)`);
+    }
     await applyCronJobs(layout, parsedPayload.environmentId, specs);
+    if (specs.length > 0) onLine("stdout", "cron jobs applied");
   } catch (err) {
+    onLine(
+      "stderr",
+      `cron could not be applied: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
     // Warn, do not fail. A broken timer is a real problem and a bad reason to
     // refuse to publish an application that is otherwise ready — and the
     // transcript is where the operator sees it.
@@ -1513,22 +1598,42 @@ async function applyDeployCronJobs(
   }
 }
 
-async function applyDeploySites(
-  layout: LayoutPaths,
-  environmentId: string,
-  sites: EnvironmentDeploySite[],
-  dockerBindAddress: string | null,
-  releaseBindings: ReadonlyMap<string, SiteRelease>,
-  managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>,
-  hideWebServerNames: boolean,
-): Promise<void> {
+type ApplyDeploySitesInput = {
+  layout: LayoutPaths;
+  environmentId: string;
+  sites: EnvironmentDeploySite[];
+  dockerBindAddress: string | null;
+  releaseBindings: ReadonlyMap<string, SiteRelease>;
+  managedDirectoryBindings: ReadonlyMap<string, SiteManagedDirectory>;
+  hideWebServerNames: boolean;
+  onLine: (stream: "stdout" | "stderr", line: string) => void;
+};
+
+async function applyDeploySites(input: ApplyDeploySitesInput): Promise<void> {
+  const {
+    layout,
+    environmentId,
+    sites,
+    dockerBindAddress,
+    releaseBindings,
+    managedDirectoryBindings,
+    hideWebServerNames,
+    onLine,
+  } = input;
   if (sites.length === 0) return;
+  onLine(
+    "stdout",
+    `applying ${sites.length} site(s): ${
+      sites.map((site) => site.composeServiceName).join(", ")
+    }`,
+  );
   await applySites(layout, environmentId, sites, {
     hideWebServerNames,
     dockerBindAddress,
     releaseBindings,
     managedDirectoryBindings,
   });
+  onLine("stdout", "sites applied");
 }
 
 /**
@@ -1653,6 +1758,30 @@ export function ownedVolumeRoots(
 }
 
 /**
+ * The daemon's own state trees and the storage locations of this deploy: the
+ * only places inside them a bind source may name (`compose-host-paths.ts`).
+ */
+export function ownedStateTree(
+  layout: Pick<LayoutPaths, "stateDir" | "daemonStateDir">,
+  payload: Pick<EnvironmentDeployPayload, "organizationId" | "storageMaterial">,
+): StateTreeOptions {
+  return {
+    storageRoot: storageRootPath(layout),
+    stateDirs: [layout.stateDir, layout.daemonStateDir],
+    locations: (payload.storageMaterial ?? [])
+      .filter((entry) => entry.kind !== "volume" && entry.provider !== "docker")
+      .map((entry) =>
+        storageHostPath(
+          layout,
+          payload.organizationId,
+          entry.storageId,
+          entry.locationId,
+        )
+      ),
+  };
+}
+
+/**
  * A container whose compose file names a numeric user other than the site
  * owner's gets an access entry on the volume folder for that uid. Never fails
  * the deploy: see `deploy/volume-access.ts`.
@@ -1729,6 +1858,8 @@ type DeployContainerServicesInput = {
   runStreamed: RunDockerStreamedFn;
   logSink: CommandOutputSink;
   decryptSecrets: DecryptSecretsFn | undefined;
+  ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
+  shareTargets: ShareTargetDeps | undefined;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -1895,6 +2026,25 @@ type LineHandler = (
   event: { stream: "stdout" | "stderr"; line: string },
 ) => void;
 
+/**
+ * Compose image builds run in Docker's builder, which has no per-build core
+ * or memory limit here: when a limit was set, say so rather than let it look enforced.
+ */
+export function noteComposeBuildLimits(
+  payload: Pick<EnvironmentDeployPayload, "sourceMaterial">,
+  onLine: LineHandler,
+): void {
+  // The control plane sends limits on each source entry, not deploy-wide.
+  const limited = payload.sourceMaterial?.some((entry) =>
+    entry.buildLimits !== undefined
+  );
+  if (!limited) return;
+  onLine({ stream: "stdout", line: COMPOSE_BUILD_LIMITS_NOTICE });
+}
+
+export const COMPOSE_BUILD_LIMITS_NOTICE =
+  "Build limits are set, but Docker Compose image builds run in Docker's builder, which this server does not limit per build";
+
 /** `docker compose build --no-cache --pull` for the whole project. */
 async function runComposeBuild(
   input: DeployContainerServicesInput,
@@ -1907,6 +2057,7 @@ async function runComposeBuild(
     `cacheless rebuild for compose project ${parsedPayload.projectName}`,
   );
   logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+  noteComposeBuildLimits(parsedPayload, onLine);
   const build = await runStreamed([
     ...composeFileArgs(parsedPayload.projectName, chain),
     "build",
@@ -1924,12 +2075,34 @@ async function runComposeBuild(
   }
 }
 
+/** `compose build` with the layer cache: only services that have a `build:` are built. */
+async function runPlainComposeBuild(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+): Promise<void> {
+  const { parsedPayload, runStreamed, logSink } = input;
+  logSink.setPhase(COMMAND_LOG_PHASES.BUILD);
+  noteComposeBuildLimits(parsedPayload, onLine);
+  const build = await runStreamed([
+    ...composeFileArgs(parsedPayload.projectName, chain),
+    "build",
+  ], { onLine });
+  input.cancel?.throwIfCancelled("while the images were building");
+  if (!build.success) {
+    throw new Error(
+      logSink.redactSummary(build.stderr) || "Docker Compose build failed",
+    );
+  }
+}
+
 type SequentialDeployContext = {
   chain: string[];
   serviceHooks: EnvironmentDeployServiceHook[];
   labeledServices: string[];
   deploymentDir: string;
   onLine: LineHandler;
+  fileTimes: ReadonlyMap<string, number>;
 };
 
 const DEFAULT_HEALTH_TIMEOUT_SECONDS = 120;
@@ -1976,6 +2149,7 @@ async function deploySequentially(
     hasHooks: serviceHooks.length > 0,
     hooksMigrate: serviceHooks.some((hook) => Boolean(hook.preDeployCommand)),
     breakingMigration: parsedPayload.migrations === "breaking",
+    fileTimes: ctx.fileTimes,
     steps,
   });
   if (serviceHooks.length > 0) {
@@ -2135,21 +2309,12 @@ async function prepareSequentialDeploy(
   chain: string[],
   onLine: LineHandler,
 ): Promise<void> {
-  const { parsedPayload, runStreamed, logSink } = input;
+  const { parsedPayload, runStreamed } = input;
   await ensureDeployNetworks(input);
   if (parsedPayload.noCache === true) {
     await runComposeBuild(input, chain, onLine);
   } else {
-    const build = await runStreamed([
-      ...composeFileArgs(parsedPayload.projectName, chain),
-      "build",
-    ], { onLine });
-    input.cancel?.throwIfCancelled("while the images were building");
-    if (!build.success) {
-      throw new Error(
-        logSink.redactSummary(build.stderr) || "Docker Compose build failed",
-      );
-    }
+    await runPlainComposeBuild(input, chain, onLine);
   }
   // Best effort: `up` pulls anything still missing.
   await runStreamed([
@@ -2158,6 +2323,23 @@ async function prepareSequentialDeploy(
     "--ignore-buildable",
   ], { onLine });
   input.cancel?.throwIfCancelled("while the images were being pulled");
+}
+
+/**
+ * What a failed deploy puts back: a cancel after publish reverts the published
+ * files; a failure before publish leaves the live compose file running from
+ * its own checkout tree, so its marker is restored.
+ */
+async function undoFailedPublish(
+  deploymentDir: string,
+  published: { hadPrevious: boolean } | null,
+  err: unknown,
+): Promise<void> {
+  if (!published) {
+    await restoreLiveComposeCheckoutMarker(deploymentDir);
+  } else if (err instanceof DeployCancelledError) {
+    await revertPublishedCompose(deploymentDir, published.hadPrevious);
+  }
 }
 
 /**
@@ -2182,6 +2364,9 @@ async function revertPublishedCompose(
       () => undefined,
     );
     await removeComposeEnvFile(deploymentDir);
+    await Deno.remove(
+      join(deploymentDir, COMPOSE_CHECKOUT_LIVE_MARKER_FILENAME),
+    ).catch(() => undefined);
   } catch (err) {
     logWarn(
       "deploy",
@@ -2190,6 +2375,191 @@ async function revertPublishedCompose(
       }`,
     );
   }
+}
+
+/**
+ * Put the repository of a Git Compose project on the host before anything is
+ * built or started, or stop following the one an earlier deploy left when this
+ * deploy names none (its trees stay until the new version is up). A hostings-only run touches neither: it builds and restarts
+ * nothing, and its payload carries no repository.
+ */
+export async function applyDeployComposeCheckout(
+  payload: EnvironmentDeployPayload,
+  deploymentDir: string,
+  deps: {
+    logSink: CommandOutputSink;
+    decryptSecrets: DecryptSecretsFn | undefined;
+    /** Where the clone is made, outside the deployment directory. */
+    scratchDir: string;
+    signal?: AbortSignal;
+    /** Test seam — see {@link applyComposeCheckout}. */
+    checkoutFn?: ApplyComposeCheckoutDeps["checkoutFn"];
+  },
+): Promise<void> {
+  if (payload.hostingsOnly === true) return;
+  if (!payload.composeCheckout) {
+    await unfollowComposeCheckout(deploymentDir);
+    return;
+  }
+  deps.logSink.setPhase(COMMAND_LOG_PHASES.FETCH);
+  const outcome = await applyComposeCheckout(
+    deploymentDir,
+    payload.composeCheckout,
+    {
+      scratchDir: deps.scratchDir,
+      decryptSecrets: deps.decryptSecrets,
+      ...(deps.checkoutFn ? { checkoutFn: deps.checkoutFn } : {}),
+      onOutput: (stream, line) => deps.logSink.onLine(stream, line),
+      redactSummary: (text) => deps.logSink.redactSummary(text),
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    },
+  );
+  deps.logSink.onLine(
+    "stdout",
+    outcome.fetched
+      ? `repository checked out at ${outcome.commitSha}`
+      : `repository already at ${outcome.commitSha}`,
+  );
+}
+
+/** What `applyDeployComposeCheckout` needs from this deploy's runtime. */
+function composeCheckoutDeps(
+  payload: { environmentId: string },
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  runtime: Pick<
+    ReturnType<typeof resolveEnvironmentDeployRuntime>,
+    "logSink" | "decryptSecrets"
+  >,
+  deps: EnvironmentDeployDeps | undefined,
+  cancel: { signal: AbortSignal } | undefined,
+): Parameters<typeof applyDeployComposeCheckout>[2] {
+  return {
+    logSink: runtime.logSink,
+    decryptSecrets: runtime.decryptSecrets,
+    scratchDir: composeCheckoutScratchDir(layout, payload.environmentId),
+    ...(deps?.composeCheckoutFn ? { checkoutFn: deps.composeCheckoutFn } : {}),
+    ...(cancel === undefined ? {} : { signal: cancel.signal }),
+  };
+}
+
+/**
+ * The clone's scratch folder: under the daemon state directory, outside the
+ * deployment directory (which a bind mount may reach) and outside the release
+ * scratch folders, which are keyed by service.
+ */
+export function composeCheckoutScratchDir(
+  layout: Pick<LayoutPaths, "daemonStateDir">,
+  environmentId: string,
+): string {
+  return join(layout.daemonStateDir, "compose-checkout-scratch", environmentId);
+}
+
+/**
+ * The build that runs before an in-place `up -d`. `up -d` never rebuilds an
+ * image that exists, so a project whose services build from the repository
+ * checkout builds first: a new commit (or a rollback to an older one) would
+ * otherwise keep serving the image of the previous commit. An unchanged tree
+ * is a layer-cache hit.
+ */
+async function buildBeforeInPlaceUp(
+  input: DeployContainerServicesInput,
+  chain: string[],
+  onLine: LineHandler,
+  hasCheckout: boolean,
+): Promise<void> {
+  if (input.parsedPayload.noCache === true) {
+    await runComposeBuild(input, chain, onLine);
+  } else if (hasCheckout) {
+    await runPlainComposeBuild(input, chain, onLine);
+  }
+}
+
+/**
+ * What a successful deploy lets go of: the secret and config files the plan no
+ * longer lists, and the checkout trees of earlier commits (their containers are
+ * gone now).
+ */
+async function pruneAfterDeploy(
+  input: DeployContainerServicesInput,
+  shareVolumeNames: ReadonlyMap<string, string>,
+): Promise<void> {
+  await pruneStaleShareVolumes(
+    input.parsedPayload.projectName,
+    shareVolumeNames,
+    input.run,
+  );
+  await pruneDeploySecrets(input.layout, input.parsedPayload);
+  await pruneDeployConfigFiles(input.layout, input.parsedPayload);
+  await pruneComposeCheckout(input.deploymentDir);
+}
+
+/**
+ * The option fragments the build and host-path checks take for a checkout:
+ * both empty when this deploy has no repository checkout.
+ */
+function composeCheckoutOptions(dirs: ComposeCheckoutDirs | null): {
+  root: { checkoutRoot?: string };
+  dirs: { checkout?: ComposeCheckoutDirs };
+} {
+  if (!dirs) return { root: {}, dirs: {} };
+  return { root: { checkoutRoot: dirs.root }, dirs: { checkout: dirs } };
+}
+
+/**
+ * The SMB logins of a deploy, decrypted before anything is written. Logins
+ * without the server's permission refuse the deploy; they are added to the
+ * compose only after every policy check has judged the author's text.
+ */
+async function resolveDeployShareLogins(
+  payload: EnvironmentDeployPayload,
+  decryptSecrets: DeployContainerServicesInput["decryptSecrets"],
+): Promise<Map<string, ShareLogin>> {
+  const entries = payload.networkShareCredentials ?? [];
+  if (entries.length > 0 && payload.allowNetworkShares !== true) {
+    throw new Error(
+      `networkShareCredentials were sent, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+    );
+  }
+  return await resolveShareLogins(
+    entries,
+    payload.variableMaterial ?? [],
+    decryptSecrets,
+  );
+}
+
+/**
+ * SMB share volumes the policy accepted: the share password never reaches the
+ * transcript, then the mount helper is made ready before compose up needs it.
+ */
+async function prepareNetworkShares(
+  document: Record<string, unknown>,
+  logins: ReadonlyMap<string, ShareLogin>,
+  logSink: CommandOutputSink,
+  ensureSmbTools: DeployContainerServicesInput["ensureSmbToolsFn"],
+): Promise<void> {
+  if (!hasNetworkShares(document)) return;
+  const passwords = [...logins.values()].map((l) => l.password);
+  logSink.addSecrets(passwords);
+  rememberSecretPlaintexts(passwords);
+  for (const [name, spec] of networkShareVolumes(document)) {
+    logSink.onLine("stdout", describeNetworkShare(name, spec));
+  }
+  await ensureSmbTools((line) => logSink.onLine("stdout", line));
+}
+
+/** The logins into the staged compose; the key is read only when there are some. */
+async function applyDeployShareLogins(
+  yaml: string,
+  projectName: string,
+  logins: ReadonlyMap<string, ShareLogin>,
+  layout: LayoutPaths,
+) {
+  return await applyShareLoginsToCompose(
+    yaml,
+    projectName,
+    logins,
+    logins.size === 0 ? new Uint8Array() : await cachedPhpSiteKeySecret(layout),
+  );
 }
 
 /**
@@ -2223,6 +2593,12 @@ async function deployContainerServices(
   let published = false;
   let hadPrevious = false;
   const stageDir = await resetComposeStageDir(deploymentDir);
+  // The repository checkout of a Git Compose project, when this deploy has one
+  // (`deploy/compose-checkout-marker.ts`): Compose resolves relative paths
+  // against it, and the checks below treat it as inside the deployment.
+  const checkout = composeCheckoutOptions(
+    await readComposeCheckoutDirs(deploymentDir),
+  );
   // Read before publish replaces the live files.
   const previousProjects = await readPreviousProjects(deploymentDir);
   let retiredEarlier: string[] = [];
@@ -2251,6 +2627,14 @@ async function deployContainerServices(
       parsedPayload.variableMaterial ?? [],
       decryptSecrets,
     );
+    const fileTimes = await generatedFileTimes(layout, parsedPayload);
+    // SMB logins are decrypted here but added to the compose only after every
+    // policy check below has judged the author's text (a login is never
+    // compose text from the control plane).
+    const shareLogins = await resolveDeployShareLogins(
+      parsedPayload,
+      decryptSecrets,
+    );
 
     const resolved = await resolveComposeModel(
       parsedPayload.projectName,
@@ -2264,13 +2648,26 @@ async function deployContainerServices(
     // `extends` already expanded): host-level service fields need the control
     // plane's approval, and built images may not take platform image names.
     assertComposePolicy(resolved.document ?? {}, {
+      volumeNamespace: {
+        project: parsedPayload.projectName,
+        owned: (parsedPayload.storageMaterial ?? []).flatMap((entry) =>
+          entry.volumeName ? [entry.volumeName] : []
+        ),
+      },
       hostLevelApproved: parsedPayload.hostLevelApproved === true,
+      allowNetworkShares: parsedPayload.allowNetworkShares === true,
       platformNetworks: [
         parsedPayload.hostingIngressNetwork,
         parsedPayload.managedNetwork,
       ].filter((n): n is string => typeof n === "string"),
       helperReach: parsedPayload.helperReach,
     });
+    // Where each share really points (names resolved on the daemon, own and
+    // Docker network addresses refused) is judged once the policy accepted it.
+    const sharePins = await checkShareTargets(
+      resolved.document ?? {},
+      input.shareTargets,
+    );
     // Build options no deploy may carry (host network, privileges, SSH agent,
     // internal extra_hosts or remote contexts, secret files outside); no
     // approval reaches these, bar a public remote context the organization
@@ -2291,6 +2688,7 @@ async function deployContainerServices(
     );
     assertComposeBuildPolicy(resolved.document ?? {}, {
       stageDir,
+      ...checkout.root,
       exemptSecretNames: daemonSecretNames,
       remoteBuildSourcesApproved:
         parsedPayload.remoteBuildSourcesApproved === true,
@@ -2299,29 +2697,53 @@ async function deployContainerServices(
     // where a bind source really resolves. `hostLevelApproved` (absent reads
     // false) lets absolute and Docker-socket sources through; it never
     // excuses a symlink escape, a nested writable bind, or the staging dir.
+    const resolvedHostPaths = collectResolvedHostPaths(
+      resolved.document ?? {},
+      daemonSecretNames,
+      daemonConfigFiles,
+    );
     await assertComposeHostPathsConfined(
-      [
-        collectResolvedHostPaths(
-          resolved.document ?? {},
-          daemonSecretNames,
-          daemonConfigFiles,
-        ),
-        collectAuthoredHostPaths(yaml),
-      ],
+      [resolvedHostPaths, collectAuthoredHostPaths(yaml)],
       {
         deploymentDir,
         stageDir,
+        ...checkout.dirs,
         hostLevelApproved: parsedPayload.hostLevelApproved === true,
         ownerTree: {
           homeRoot: layout.principalHomeRoot,
           volumes: ownedVolumeRoots(layout, parsedPayload),
         },
+        stateTree: ownedStateTree(layout, parsedPayload),
         priorWritableMounts: await priorWritableMounts(
           parsedPayload.projectName,
           deploymentDir,
           run,
         ),
       },
+    );
+
+    // Only a Git Compose project has its repository on the host (the checkout);
+    // for any other project a local build context has nothing behind it, so say
+    // so up front.
+    // `up -d` only builds when an image is missing, so a service that sets
+    // `image` is checked only where `compose build` always runs.
+    await assertBuildContextsPresent([resolvedHostPaths], {
+      stageDir,
+      deploymentDir,
+      ...checkout.root,
+      services: composeServices(resolved.document),
+      alwaysBuilds: deployAlwaysBuilds(parsedPayload),
+    });
+
+    // SMB share volumes (the policy above already accepted them): the share
+    // password never reaches the transcript, then the mount helper is made
+    // ready before compose up needs it.
+    const shareDocument = resolved.document ?? {};
+    await prepareNetworkShares(
+      shareDocument,
+      shareLogins,
+      logSink,
+      input.ensureSmbToolsFn,
     );
 
     const volumeOwnerIds = await resolveVolumeOwnerIds(
@@ -2350,6 +2772,18 @@ async function deployContainerServices(
       layout,
       parsedPayload,
     );
+    // Each share dials the address that was just checked, never the name
+    // again (DNS rebinding).
+    yaml = pinShareAddresses(yaml, shareDocument, sharePins);
+    // The judged compose gets its share logins last, in the staged file that
+    // is published (0640) and read by every later `compose up`.
+    const shareApplied = await applyDeployShareLogins(
+      yaml,
+      parsedPayload.projectName,
+      shareLogins,
+      layout,
+    );
+    yaml = shareApplied.yaml;
     await writeComposeFileSecure(stagedPath, yaml);
 
     const labeledServices = [...resolved.serviceNames].sort((a, b) =>
@@ -2390,6 +2824,24 @@ async function deployContainerServices(
     }
 
     await validateComposeConfig(parsedPayload.projectName, [stagedPath], run);
+    // Last look before anything starts: the compose that will run, read back
+    // as Compose resolves it, must still hold only shares the daemon accepts.
+    if (hasNetworkShares(shareDocument)) {
+      const finalDocument = (await resolveComposeModel(
+        parsedPayload.projectName,
+        [stagedPath],
+        run,
+      )).document ?? {};
+      assertNetworkSharesFinal(finalDocument, {
+        allowNetworkShares: parsedPayload.allowNetworkShares === true,
+        injectedLogins: shareApplied.injected,
+      });
+      await assertShareAddressesPinned(
+        finalDocument,
+        sharePins,
+        input.shareTargets,
+      );
+    }
 
     cancel?.throwIfCancelled("before the new version was published");
     const chain = await publishStagedRuntimeCompose(
@@ -2478,9 +2930,9 @@ async function deployContainerServices(
         labeledServices,
         deploymentDir,
         onLine,
+        fileTimes,
       });
-      await pruneDeploySecrets(layout, parsedPayload);
-      await pruneDeployConfigFiles(layout, parsedPayload);
+      await pruneAfterDeploy(input, shareApplied.volumeNames);
       return sequential;
     }
     if (serviceHooks.length > 0) {
@@ -2502,9 +2954,12 @@ async function deployContainerServices(
 
     await ensureDeployNetworks(input);
 
-    if (parsedPayload.noCache === true) {
-      await runComposeBuild(input, chain, onLine);
-    }
+    await buildBeforeInPlaceUp(
+      input,
+      chain,
+      onLine,
+      checkout.dirs.checkout !== undefined,
+    );
 
     cancel?.commit("before the new version was started");
     logSink.setPhase(COMMAND_LOG_PHASES.COMPOSE_UP);
@@ -2535,16 +2990,17 @@ async function deployContainerServices(
 
     // The new release is up and its hooks passed: only now may the files the
     // previous one needed (and this plan no longer lists) be removed.
-    await pruneDeploySecrets(layout, parsedPayload);
-    await pruneDeployConfigFiles(layout, parsedPayload);
+    await pruneAfterDeploy(input, shareApplied.volumeNames);
     return {
       serviceNames: labeledServices,
       composePaths: chain,
     };
   } catch (err) {
-    if (published && err instanceof DeployCancelledError) {
-      await revertPublishedCompose(deploymentDir, hadPrevious);
-    }
+    await undoFailedPublish(
+      deploymentDir,
+      published ? { hadPrevious } : null,
+      err,
+    );
     if (retiredEarlier.length > 0 && err instanceof Error) {
       err.message +=
         " The containers this environment had under its earlier compose project name were already removed; deploy again to bring it back.";
@@ -2740,6 +3196,8 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
   currentPhase: () => string;
   decryptSecrets: DecryptSecretsFn | undefined;
   ensureDockerFn: () => Promise<void>;
+  ensureSmbToolsFn: (log: (line: string) => void) => Promise<void>;
+  shareTargets: ShareTargetDeps | undefined;
   ensureExternalNetworks: (
     networks: readonly ExternalDockerNetworkSpec[],
   ) => Promise<void>;
@@ -2777,6 +3235,13 @@ function resolveEnvironmentDeployRuntime(deps?: EnvironmentDeployDeps): {
     decryptSecrets: captureDecryptedSecrets(deps?.decryptSecrets, logSink),
     ensureDockerFn: deps?.ensureDocker ??
       (() => defaultEnsureDocker({ onEvent: dockerEvents })),
+    shareTargets: deps?.shareTargets,
+    ensureSmbToolsFn: deps?.ensureSmbTools ??
+      ((log) =>
+        defaultEnsureSmbTools({
+          log,
+          runSetup: () => runSmbToolsSetup(),
+        })),
     ensureExternalNetworks: deps?.ensureExternalDockerNetworks ??
       ((networks: readonly ExternalDockerNetworkSpec[]) =>
         defaultEnsureExternalDockerNetworks(networks, run)),
@@ -2900,6 +3365,41 @@ export async function handleEnvironmentDeploy(
   );
 }
 
+/**
+ * Runs one deploy and, when it throws, makes the live compose file's checkout
+ * marker the current one again. The marker changes early in the deploy (the
+ * fetch, or the unfollow), long before the compose file is published, so any
+ * later failure (source builds, mount paths, the stage directory) would
+ * otherwise leave Compose calls for the still-live file pointed at the wrong
+ * tree. After a publish the live marker equals the current one, so this is a
+ * no-op for a failure that comes later.
+ */
+async function keepLiveCheckoutOnFailure<T>(
+  payload: Pick<EnvironmentDeployPayload, "projectId" | "environmentId">,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    const deploymentDir = environmentDeploymentDir(
+      resolveLayout(Deno.env.toObject()),
+      payload.projectId,
+      payload.environmentId,
+    );
+    try {
+      await restoreLiveComposeCheckoutMarker(deploymentDir);
+    } catch (restoreErr) {
+      logWarn(
+        "deploy",
+        `could not restore the live checkout marker: ${
+          restoreErr instanceof Error ? restoreErr.message : String(restoreErr)
+        }`,
+      );
+    }
+    throw err;
+  }
+}
+
 async function handleEnvironmentDeployLocked(
   parsedPayload: ReturnType<typeof parseEnvironmentDeployPayload>,
   daemonReceivedAt: string,
@@ -2925,7 +3425,12 @@ async function handleEnvironmentDeployLocked(
           waiting: () => progress?.running(false),
           acquired: () => progress?.running(true),
         },
-        () => deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
+        () =>
+          keepLiveCheckoutOnFailure(
+            parsedPayload,
+            () =>
+              deployEnvironmentHolding(parsedPayload, daemonReceivedAt, deps),
+          ),
       );
     deps?.progress?.finish("succeeded");
     return result;
@@ -3344,6 +3849,11 @@ async function deployEnvironmentHolding(
   // so `<principalHome>/sites/<serviceId>/current` already resolves by the time
   // the site apply below points a document root at it.
   cancel?.throwIfCancelled("while the host was being prepared");
+  await applyDeployComposeCheckout(
+    parsedPayload,
+    deploymentDir,
+    composeCheckoutDeps(parsedPayload, layout, runtime, deps, cancel),
+  );
   const appliedReleases = await applySourceReleases(layout, parsedPayload, {
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
@@ -3448,6 +3958,7 @@ async function deployEnvironmentHolding(
   const siteLifecycleIo: SiteLifecycleIo = {
     run: runtime.runPrivileged,
     onLine: (stream, line) => runtime.logSink.onLine(stream, line),
+    redact: (text) => runtime.logSink.redactSummary(text),
   };
   // Commands that must pass before the new release takes traffic: every
   // site's run first, then the held sites switch; one failure switches none.
@@ -3465,18 +3976,19 @@ async function deployEnvironmentHolding(
   if (sites.length > 0 || nativeAppServicesForHost.length > 0) {
     runtime.progress.start("start");
   }
-  await applyDeploySites(
+  await applyDeploySites({
     layout,
-    parsedPayload.environmentId,
+    environmentId: parsedPayload.environmentId,
     sites,
-    await resolveSiteDockerBindAddress(
+    dockerBindAddress: await resolveSiteDockerBindAddress(
       hasContainers,
       sites,
     ),
-    siteReleaseBindings,
-    siteManagedBindings,
-    parsedPayload.hideWebServerNames === true,
-  );
+    releaseBindings: siteReleaseBindings,
+    managedDirectoryBindings: siteManagedBindings,
+    hideWebServerNames: parsedPayload.hideWebServerNames === true,
+    onLine: siteLifecycleIo.onLine,
+  });
   // Commands that run right after the switch: a failure stops the deploy here,
   // so no worker restarts onto the release that just failed.
   await runPostDeployPhase(
@@ -3528,15 +4040,16 @@ async function deployEnvironmentHolding(
   // One call covers both lanes on purpose: `applyCronJobs` retires every timer
   // for this environment that the specs it was handed do not name, so splitting
   // this into two passes would make each one delete the other's units.
-  await applyDeployCronJobs(
+  await applyDeployCronJobs({
     layout,
     parsedPayload,
     sites,
-    siteReleaseBindings,
-    siteManagedBindings,
-    nativeAppServicesForHost,
-    nativeAppBindingsFromPayload(parsedPayload),
-  );
+    releaseBindings: siteReleaseBindings,
+    managedBindings: siteManagedBindings,
+    nativeAppServices: nativeAppServicesForHost,
+    nativeAppBindings: nativeAppBindingsFromPayload(parsedPayload),
+    onLine: siteLifecycleIo.onLine,
+  });
   // Workers last of the site pieces: the new release is live and its variables
   // are in place, so each restarts straight onto it.
   const workerWarnings = sites.length > 0 ||
@@ -3562,6 +4075,8 @@ async function deployEnvironmentHolding(
     runStreamed: runtime.runStreamed,
     logSink: runtime.logSink,
     decryptSecrets: runtime.decryptSecrets,
+    ensureSmbToolsFn: runtime.ensureSmbToolsFn,
+    shareTargets: runtime.shareTargets,
     ensureExternalNetworks: runtime.ensureExternalNetworks,
     ensureFabricDockerNetworks: runtime.ensureFabricDockerNetworks,
     ...(runtime.waitForHealth === undefined

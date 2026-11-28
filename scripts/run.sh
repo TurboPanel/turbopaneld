@@ -32,7 +32,7 @@
 # installs the control plane. It prints a short welcome (and, on a non-release
 # channel, a yellow non-stable warning) then proceeds; Ctrl-C or q at the
 # continue prompt backs out. Daemon arguments without a license
-# (--host, --tunnel-token, --instance-ca, TURBOPANEL_HOST …) still mean "you
+# (--host, --instance-ca, TURBOPANEL_HOST …) still mean "you
 # meant to enrol a daemon and forgot the license" and stop with that error.
 # Downloads the daemon package for its orchestration tree, then the instance
 # and UI release packages from the same channel (default: release), verifies
@@ -82,11 +82,6 @@ TP_CURL_FETCH_INSECURE="tp_curl_net_retry -fsSLk $TP_CURL_RETRY"
 # certificate. Every --cacert that must mean "this file only" also passes
 # --capath at this folder, which does not exist and so adds no roots.
 TP_NO_SYSTEM_CAPATH=/nonexistent
-# Set once trust material came in, or was removed, over the system roots or
-# an unverified connection during this run (see tp_learn_panel_identity).
-TP_TRUST_FROM_OPEN_LEG=false
-# Whether this host had a stored trust file when the run began.
-TP_STORED_TRUST_AT_START=false
 
 # Release artifact downloads (channel manifest, verified binary/orchestration/JS
 # artifacts, and the Deno runtime zip) always verify TLS against public trust.
@@ -264,9 +259,7 @@ from pathlib import Path
 PATH = "/api/daemon/v1/instance/identity"
 body_path, header, out, expected = sys.argv[1:5]
 out = Path(out)
-# No tok.sig.txt: a document checked on its own (learning the key on upgrade).
-tok_file = out / "tok.sig.txt"
-tok_sig = tok_file.read_text().strip() if tok_file.exists() else None
+tok_sig = (out / "tok.sig.txt").read_text().strip()
 
 def b64d(text):
     try:
@@ -306,13 +299,12 @@ head_kid, _, head_sig = header.strip().partition(":")
 if head_kid != kid:
     raise SystemExit("signature header names another key")
 sig = b64d(head_sig)
-tsig = b64d(tok_sig) if tok_sig is not None else bytes(64)
+tsig = b64d(tok_sig)
 if len(sig) != 64 or len(tsig) != 64:
     raise SystemExit("signature is not 64 bytes")
 (out / "doc.msg").write_bytes(("tp-http\n%s\n" % PATH).encode() + raw)
 (out / "doc.sig").write_bytes(sig)
-if tok_sig is not None:
-    (out / "tok.sig").write_bytes(tsig)
+(out / "tok.sig").write_bytes(tsig)
 (out / "kid").write_text(kid)
 der = bytes.fromhex("302a300506032b6570032100") + pub
 pem = base64.b64encode(der).decode()
@@ -517,9 +509,6 @@ tp_check_fetched_trust() {
     fi
     tp_print_error "The ${_ct_what} downloaded from ${HOST_URL} does not match ${_ct_expected} (got $(tp_pem_files_pin "$_ct_src"); expected ${CA_PIN}). Nothing was installed. Someone may be intercepting this connection, or the panel's certificates changed. Copy a fresh command from Add Server and try again."
     return 1
-  fi
-  if [ "$_ct_leg" != stored ]; then
-    TP_TRUST_FROM_OPEN_LEG=true
   fi
   if [ "$_ct_leg" = insecure ] && [ "${TP_TOFU_WARNED:-false}" != true ]; then
     TP_TOFU_WARNED=true
@@ -773,24 +762,35 @@ tp_instance_bootstrap_curl() {
   printf '%s' "curl -sSL"
 }
 
+# The last line of curl's captured stderr in $1, single line and short.
+tp_curl_reason() {
+  _cr_file="$1"
+  [ -s "$_cr_file" ] || return 0
+  tail -n 1 "$_cr_file" | tr -d '\r' | cut -c1-200
+}
+
 tp_fetch_uploaded_trust() {
   _trust_leg="$(tp_bootstrap_leg)"
   _curl_base="$(tp_instance_bootstrap_curl)"
   _trust_tmp="$(mktemp)"
+  _trust_err="$(mktemp)"
+  _trust_err2="$(mktemp)"
+  # curl's stderr is kept out of sight; only the stored-issuer failure shows
+  # its reason (one line), the quiet paths below say it in plain words.
   # shellcheck disable=SC2086
-  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+  _trust_code=$(tp_curl_http_code $_curl_base -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>"$_trust_err")
   if [ "$_trust_code" = 000 ] && [ "$_trust_leg" = stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
     # The stored issuer does not verify the control plane any more. Ask
     # again over the public roots (a control plane now behind a public
     # edge): what comes back is checked against this host's list and must
     # still sign the presented certificate before it is stored.
     _trust_leg=system
-    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust")
+    _trust_code=$(tp_curl_http_code curl -sSL -o "$_trust_tmp" "${HOST_URL%/}/api/daemon/v1/instance/uploaded-trust" 2>"$_trust_err2")
   fi
   case "$_trust_code" in
     200)
       if ! tp_install_verified_uploaded_trust "$_trust_tmp" "$_trust_leg"; then
-        rm -f "$_trust_tmp"
+        rm -f "$_trust_tmp" "$_trust_err" "$_trust_err2"
         return 1
       fi
       ;;
@@ -802,9 +802,6 @@ tp_fetch_uploaded_trust() {
         # host that pins it; it stays, and the daemon still trusts it.
         tp_print_step "~" "The control plane no longer offers a private uploaded issuer over public TLS — keeping the stored one ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) this server pins"
       else
-        if [ "$_trust_leg" != stored ] && [ -f "$UPLOADED_TRUST_PATH" ]; then
-          TP_TRUST_FROM_OPEN_LEG=true
-        fi
         rm -f "$UPLOADED_TRUST_PATH"
       fi
       ;;
@@ -813,16 +810,30 @@ tp_fetch_uploaded_trust() {
       # replaced from an unverified (-k) fetch: an on-path attacker would
       # pick the replacement. Keep it and stop.
       if [ -f "$UPLOADED_TRUST_PATH" ]; then
-        rm -f "$_trust_tmp"
-        tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH")) — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
+        _trust_reason="$(tp_curl_reason "$_trust_err")"
+        _trust_reason2="$(tp_curl_reason "$_trust_err2")"
+        rm -f "$_trust_tmp" "$_trust_err" "$_trust_err2"
+        if [ -n "$_trust_reason2" ]; then
+          _trust_reason="${_trust_reason:+${_trust_reason}; }over the public roots: ${_trust_reason2}"
+        fi
+        tp_print_error "Could not reach or verify ${HOST_URL} with the stored private uploaded issuer ($(tp_ca_fingerprint "$UPLOADED_TRUST_PATH"))${_trust_reason:+ (${_trust_reason})} — keeping it. If the control plane's issuer really changed, confirm the new issuer's fingerprint out of band, then re-run with --insecure-tls to re-bootstrap trust."
         return 1
+      fi
+      # Nothing stored, and the fetch could not verify the control plane
+      # against the Platform CA. Behind a publicly trusted certificate (a
+      # public edge) that can never pass and no private issuer exists: say so
+      # plainly instead of showing curl's raw error. Nothing is stored here.
+      if tp_system_roots_validate_leaf 2>/dev/null; then
+        tp_print_step "–" "No private issuer needed: the control plane uses a publicly trusted certificate"
+      else
+        tp_print_step "~" "Could not fetch a private uploaded issuer (the control plane did not answer or did not verify against the Platform CA). The trust check below decides whether the install can go on"
       fi
       ;;
     *)
       tp_print_step "~" "Could not download private uploaded issuer (HTTP ${_trust_code}) — keeping existing issuer if present"
       ;;
   esac
-  rm -f "$_trust_tmp"
+  rm -f "$_trust_tmp" "$_trust_err" "$_trust_err2"
   return 0
 }
 
@@ -876,9 +887,6 @@ tp_fetch_instance_ca() {
       then
         tp_print_step "~" "The control plane offers no Platform CA over this connection — keeping the one this server pins ($(tp_ca_fingerprint "$CA_PATH"))"
       else
-        if [ "$_ca_leg" != stored ] && [ -f "$CA_PATH" ]; then
-          TP_TRUST_FROM_OPEN_LEG=true
-        fi
         rm -f "$CA_PATH"
       fi
       ;;
@@ -926,7 +934,6 @@ tp_refetch_instance_ca_unpinned() {
         return 0
       fi
       tp_print_ok "Control plane now presents a publicly trusted certificate — Platform CA no longer needed (was ${_old_fp:-unknown})"
-      TP_TRUST_FROM_OPEN_LEG=true
       rm -f "$CA_PATH" "$_ca_retry"
       return 0
       ;;
@@ -1060,6 +1067,18 @@ tp_manifest_field() {
   _field="$2"
   # shellcheck disable=SC2086
   printf '%s' "$_json" | grep -o "\"$_field\":\"[^\"]*\"" | head -1 | sed 's/.*":"//' | tr -d '"'
+}
+
+# A top-level string field of the manifest, read as JSON so a same-named key
+# inside an artifact object can never stand in for it. Nothing when the field
+# is missing or is not a string.
+tp_manifest_top_field() {
+  _top_json="$1"
+  _top_name="$2"
+  printf '%s' "$_top_json" | python3 -c 'import json, sys
+v = json.load(sys.stdin).get(sys.argv[1])
+if isinstance(v, str) and "\n" not in v:
+    print(v)' "$_top_name" 2>/dev/null || true
 }
 
 tp_manifest_artifact_field() {
@@ -1228,11 +1247,11 @@ tp_manifest_signature_bypass() {
 tp_resolve_channel_manifest() {
   _manifest_json="$1"
   _compact="$(tp_manifest_compact "$_manifest_json")"
-  _manifest_host="$(tp_manifest_field "$_compact" "defaultControlPlaneUrl")"
-  _manifest_commit="$(tp_manifest_field "$_compact" "commit")"
-  _manifest_build_id="$(tp_manifest_field "$_compact" "buildId")"
-  _manifest_version="$(tp_manifest_field "$_compact" "version")"
-  _manifest_built_at="$(tp_manifest_field "$_compact" "builtAt")"
+  _manifest_host="$(tp_manifest_top_field "$_manifest_json" "defaultControlPlaneUrl")"
+  _manifest_commit="$(tp_manifest_top_field "$_manifest_json" "commit")"
+  _manifest_build_id="$(tp_manifest_top_field "$_manifest_json" "buildId")"
+  _manifest_version="$(tp_manifest_top_field "$_manifest_json" "version")"
+  _manifest_built_at="$(tp_manifest_top_field "$_manifest_json" "builtAt")"
   _linux_arch="$(tp_resolve_linux_arch)" || return 1
   _binary_artifact_url="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "url")"
   _binary_artifact_sha256="$(tp_manifest_binary_artifact_field "$_compact" "$_linux_arch" "$TP_MANIFEST_SHA_FIELD")"
@@ -1242,6 +1261,11 @@ tp_resolve_channel_manifest() {
   _orchestration_artifact_sha256="$(tp_manifest_artifact_field "$_compact" "orchestrationArtifact" "$TP_MANIFEST_SHA_FIELD")"
   if [ -z "$_manifest_host" ]; then
     _manifest_host="https://turbopanel.app"
+  fi
+  # Every published manifest carries a version: the build floor records it.
+  if [ -z "$_manifest_version" ]; then
+    tp_print_error "signed manifest has no version; refusing to install (the build floor needs it)"
+    return 1
   fi
   if [ -z "$_binary_artifact_url" ] || [ -z "$_binary_artifact_sha256" ] \
     || [ -z "$_js_fallback_artifact_url" ] || [ -z "$_js_fallback_artifact_sha256" ] \
@@ -1366,7 +1390,7 @@ tp_read_daemon_build_floor() {
   if [ ! -x "$_rdf_bin" ] || [ -L "$_rdf_bin" ]; then
     return 0
   fi
-  _rdf_line="$(timeout 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
+  _rdf_line="$(timeout -k 2 10 "$_rdf_bin" --version 2>/dev/null | head -1)" || return 0
   # turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
   printf '%s' "$_rdf_line" | sed -n 's/^turbopaneld v\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}\([^[:space:]]\{1,\}\)[[:space:]]\{1,\}(.*,[[:space:]]*\([^,)[:space:]]\{1,\}\))[[:space:]]*$/\2\t\1\t\3/p' | head -1
 }
@@ -1792,6 +1816,12 @@ tp_emit_update_stage() {
   printf '%s%s\n' "::turbopanel-stage::" "$_stage_name"
 }
 
+# The `--version` line of a binary, or nothing when it hangs (10 s) or fails.
+tp_binary_version_line() {
+  _vl_bin="$1"
+  timeout -k 2 10 "$_vl_bin" --version 2>/dev/null | head -1 || true
+}
+
 # Documented `turbopaneld --version` line:
 #   turbopaneld v<semver> <commit> (<channel>, <buildId>, <builtAt>)
 tp_parse_daemon_commit_from_version() {
@@ -1898,10 +1928,10 @@ tp_arm_update_guard() {
   _armed_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   _previous_commit=""
   if [ -x "$_native_prev" ]; then
-    _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_native_prev" --version 2>/dev/null || true)")"
+    _previous_commit="$(tp_parse_daemon_commit_from_version "$(tp_binary_version_line "$_native_prev")")"
   fi
   if [ -z "$_previous_commit" ] && [ -x "$_js_prev" ]; then
-    _previous_commit="$(tp_parse_daemon_commit_from_version "$("$_js_prev" --version 2>/dev/null || true)")"
+    _previous_commit="$(tp_parse_daemon_commit_from_version "$(tp_binary_version_line "$_js_prev")")"
   fi
   # The record the guard acts on is root's: <install>/lib is root-owned and the
   # daemon cannot write it, so the daemon cannot arm a rollback, keep an old
@@ -2004,15 +2034,16 @@ tp_apt_get() {
 
 # One `key=value` field of the daemon's enroll status file (see
 # src/instance/enroll-status.ts), "" when absent. The daemon account can
-# write that file and this runs as root: a link is ignored, only the first
-# 4 KiB are read, and control characters are dropped. Never sourced.
+# write that file and this runs as root: a link is ignored (and not followed
+# even if swapped in after the check), only the first 4 KiB are read, and
+# control characters are dropped. Never sourced.
 tp_enroll_status_field() {
   _esf_file="$1"
   _esf_key="$2"
   if [ ! -f "$_esf_file" ] || [ -L "$_esf_file" ]; then
     return 0
   fi
-  head -c 4096 "$_esf_file" 2>/dev/null | sed -n "s/^${_esf_key}=//p" | head -n 1 | tr -d '\000-\037\177'
+  dd if="$_esf_file" iflag=nofollow,nonblock bs=4096 count=1 status=none 2>/dev/null | sed -n "s/^${_esf_key}=//p" | head -n 1 | tr -d '\000-\037\177'
 }
 
 # True when the daemon release just installed lists feature $1 in the
@@ -2101,6 +2132,10 @@ tp_wait_for_enrollment() {
             tp_print_error "The control plane did not prove it holds the panel key this server pinned (${_we_reason:-no reason given})."
             tp_print_detail "Check that the command was copied from the right control plane, then copy a fresh one from Add Server and run it here."
             return 1
+            ;;
+          awaiting-license)
+            # The daemon can look before the staged license is readable; it
+            # re-checks by itself, so keep waiting for its next answer.
             ;;
           awaiting-seat)
             tp_print_detail "The organization has no free server size for this server yet; once one is bought in the panel, this server joins by itself"
@@ -2194,7 +2229,7 @@ tp_probe_native_daemon() {
   if [ ! -x "$_bin" ]; then
     return 1
   fi
-  if "$_bin" --version >/dev/null 2>&1; then
+  if timeout -k 2 10 "$_bin" --version >/dev/null 2>&1; then
     return 0
   fi
   return 1
@@ -2397,7 +2432,6 @@ tp_pinned_channel_manifest_url() {
 # segment, and one exact rail shape per kind (daemon, instance, ui):
 #   any kind  https://github.com/TurboPanel/<repo>/releases/download/<tag>/manifest*.json
 #             https://github.com/TurboPanel/<repo>/releases/latest/download/manifest*.json
-# (dl.trbp.nl is no longer on the rail: the trunk CDN drop was retired.)
 # Byte-identical in scripts/run.sh and orchestration/scripts/tp-orchestrate;
 # src/update/urls.ts releaseManifestUrlAllowed is the TypeScript copy, and
 # src/testing/release-manifest-url-corpus.json pins all three together.
@@ -3237,7 +3271,6 @@ HOST_URL=""
 DL_BASE=""
 INSTANCE_CA=""
 CA_PIN=""
-TUNNEL_TOKEN=""
 INSECURE_TLS=false
 NO_START=false
 INSTANCE_INSTALL=false
@@ -3276,9 +3309,6 @@ while [ $# -gt 0 ]; do
     --instance-ca-fingerprint)
       [ $# -ge 2 ] || { tp_print_error "--instance-ca-fingerprint requires an argument"; exit 1; }
       CA_PIN="$2"; shift 2 ;;
-    --tunnel-token)
-      [ $# -ge 2 ] || { tp_print_error "--tunnel-token requires an argument"; exit 1; }
-      TUNNEL_TOKEN="$2"; shift 2 ;;
     --dev-allow-unsigned)
       export TURBOPANEL_DEV_ALLOW_UNSIGNED_MANIFEST=1; shift ;;
     --allow-downgrade)
@@ -3366,7 +3396,6 @@ if [ -n "$PANEL_FINGERPRINT" ] && ! tp_panel_fingerprint_ok "$PANEL_FINGERPRINT"
   exit 1
 fi
 [ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"
-[ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"
 [ -n "$HOST_URL" ] || HOST_URL="${TURBOPANEL_HOST:-}"
 [ -n "$DL_BASE" ] || DL_BASE="${TURBOPANEL_DL_BASE:-}"
 [ -n "$CA_PIN" ] || CA_PIN="${TURBOPANEL_INSTANCE_CA_FINGERPRINT:-}"
@@ -3456,7 +3485,7 @@ fi
 # non-stable-channel warning) print from tp_print_header once privileges are
 # settled, so a sudo re-exec does not show the banner twice.
 if [ "$DAEMON_ONLY" != true ] && [ "$INSTANCE_INSTALL" != true ] && [ -z "$LICENSE" ] && [ -z "$HOST_URL" ] \
-  && [ -z "$TUNNEL_TOKEN" ] && [ -z "$INSTANCE_CA" ] && [ -z "$CA_PIN" ] && [ -z "$DL_BASE" ] \
+  && [ -z "$INSTANCE_CA" ] && [ -z "$CA_PIN" ] && [ -z "$DL_BASE" ] \
   && [ -z "$MANIFEST_URL" ] && [ -z "$INSTANCE_MANIFEST_URL" ] \
   && [ -z "$UI_MANIFEST_URL" ]; then
   INSTANCE_INSTALL=true
@@ -3494,8 +3523,8 @@ if [ "$INSTANCE_INSTALL" = true ]; then
   # no control-plane URL (this host becomes one), and the packages only exist
   # on the GitHub rail — so the channel defaults to release, not trunk.
   [ -n "${TURBOPANEL_UPDATE_CHANNEL:-}" ] || export TURBOPANEL_UPDATE_CHANNEL=release
-  if [ -n "$LICENSE" ] || [ -n "$TUNNEL_TOKEN" ] || [ -n "$INSTANCE_CA" ]; then
-    tp_print_error "--instance installs a control plane: it takes no --license, --tunnel-token or --instance-ca (the co-located daemon is installed with it and enrols itself once the wizard has issued the first license)"
+  if [ -n "$LICENSE" ] || [ -n "$INSTANCE_CA" ]; then
+    tp_print_error "--instance installs a control plane: it takes no --license or --instance-ca (the co-located daemon is installed with it and enrols itself once the wizard has issued the first license)"
     exit 1
   fi
   if ! tp_builtin_repo_manifest_url turbopanel "$TURBOPANEL_UPDATE_CHANNEL" >/dev/null; then
@@ -3566,10 +3595,6 @@ if ! tp_is_root; then
     export TURBOPANEL_INSTALL_TOKEN="$INSTALL_TOKEN"
     _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_INSTALL_TOKEN"
   fi
-  if [ -n "$TUNNEL_TOKEN" ]; then
-    export TURBOPANEL_TUNNEL_TOKEN="$TUNNEL_TOKEN"
-    _sudo_keep="${_sudo_keep:+${_sudo_keep},}TURBOPANEL_TUNNEL_TOKEN"
-  fi
   # Not secrets, but sudo resets the environment and the last step
   # (tp-kernel-features installer-step) reads them on the root side.
   if [ "${TURBOPANEL_SKIP_KERNEL_SWITCH:-}" = "1" ]; then
@@ -3628,17 +3653,6 @@ RUN_DIR="/run/turbopanel"
 ENV_FILE="$CONFIG_DIR/daemon.env"
 CA_PATH="$CONFIG_DIR/instance-ca.pem"
 UPLOADED_TRUST_PATH="$CONFIG_DIR/instance-uploaded-trust.pem"
-# A host that already carries an expected CA list keeps it when this run
-# brings none, so re-running an old command cannot downgrade it to trust on
-# first use. A host with stored trust files but no list is held to the files
-# (tp_host_ca_pin).
-if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
-  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"
-  [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
-fi
-if [ -f "$CA_PATH" ] || [ -f "$UPLOADED_TRUST_PATH" ]; then
-  TP_STORED_TRUST_AT_START=true
-fi
 # Root-owned parent on purpose (not $STATE_DIR, which tp owns): see
 # tp_stage_daemon_license. Passed to the daemon-config role in the vars file.
 LICENSE_STAGING_DIR="/var/lib/turbopanel-license-staging"
@@ -3740,6 +3754,15 @@ if ! command -v sudo >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1 \
 fi
 rm -f "$_apt_log"
 tp_print_ok "Host prerequisites ready"
+# A host that already carries an expected CA list keeps it when this run
+# brings none, so re-running an old command cannot downgrade it to trust on
+# first use. A host with stored trust files but no list is held to the files
+# (tp_host_ca_pin). Read after the prerequisites above: fingerprinting the
+# stored files needs openssl, which a fresh host may only just have gotten.
+if [ -z "$CA_PIN" ] && [ "$INSTANCE_INSTALL" != true ]; then
+  CA_PIN="$(tp_host_ca_pin "$ENV_FILE" "$STATE_DIR/tls/instance-ca-pin" "$CA_PATH" "$UPLOADED_TRUST_PATH")"
+  [ -n "$CA_PIN" ] && CA_PIN_SOURCE="host"
+fi
 
 # One `key=value` line from a pin file ("" when the file or the key is absent).
 tp_pin_file_field() {
@@ -3752,16 +3775,11 @@ tp_pin_file_field() {
 # Decide what this run does with the panel key pin, before anything is
 # written. The pin file (lib/panel-identity) and the panel_key line in
 # lib/update-origin must agree. Outcomes in PIN_ACTION:
-#   none    a legacy install: nothing to pin (no key given, none stored)
+#   none    nothing to pin (an install from the licence form, no key given, none stored)
 #   write   first pin (fresh install with a TOKEN, or --unsafe-no-panel-key)
 #   refresh the same key again: only urls= and updated= change
 #   keep    a re-run without a TOKEN (managed update): file untouched, and the
 #           stored key stays in update-origin
-#   learn   a re-run without a TOKEN on a host installed before panel keys
-#           (an update origin, no pin): tp_learn_panel_identity fetches the
-#           panel's signed identity document once the trust files are in
-#           place and pins its key with pinned_by=upgrade (or leaves the host
-#           as it was when that fails)
 # A different key is refused: a key change arrives only as a signed rotation
 # from the panel. A TOKEN-less run never loosens a stored pin.
 tp_resolve_panel_pin() {
@@ -3814,71 +3832,8 @@ tp_resolve_panel_pin() {
     PIN_HOSTS="$PANEL_URLS"
   else
     PIN_HOSTS="$_pp_ohosts"
-    # An update origin with no pin is a host installed before panel keys,
-    # updated now; a fresh install with the older license value has none.
-    if [ -z "$TOKEN_PAYLOAD" ] && [ -f "$_pp_origin" ] && [ ! -L "$_pp_origin" ]; then
-      PIN_ACTION=learn
-    fi
   fi
   return 0
-}
-
-# PIN_ACTION=learn: pin the key the control plane signs its identity document
-# with, as far as this host's existing TLS trust vouches for the connection
-# (never over --insecure-tls), and only from the control plane this host is
-# enrolled with (HOST_URL equal to the update origin's host=). Any failure (no
-# document, a bad signature or address, a control plane without a key) leaves
-# the host unpinned and the update goes on as before.
-tp_learn_panel_identity() {
-  [ "$PIN_ACTION" = learn ] || return 0
-  PIN_ACTION=none
-  if [ -z "$HOST_URL" ] || [ "${INSECURE_TLS:-false}" = true ]; then
-    return 0
-  fi
-  _lp_host="$(tp_pin_file_field "$INSTALL_ROOT/lib/update-origin" host)"
-  if [ "${HOST_URL%/}" != "${_lp_host%/}" ]; then
-    tp_print_detail "Not learning a panel key: ${HOST_URL} is not the control plane this server is enrolled with"
-    return 0
-  fi
-  # The key is only learned over trust this host already had: its stored
-  # trust files (curl checks them alone), or the public roots on a host
-  # that has none and pins none. Trust that arrived during this run over the
-  # public roots or an unverified connection does not count, or whoever
-  # served it could also pick the key.
-  _lp_leg="$(tp_bootstrap_leg)"
-  if [ "$TP_TRUST_FROM_OPEN_LEG" = true ] ||
-    { [ "$TP_STORED_TRUST_AT_START" = true ] && [ "$_lp_leg" != stored ]; } ||
-    { [ "$_lp_leg" = system ] && [ -n "${CA_PIN:-}" ]; }
-  then
-    tp_print_detail "Not learning a panel key: this run could not check ${HOST_URL} against trust this server already had; this server stays unpinned for now"
-    return 0
-  fi
-  _lp_dir="$(mktemp -d)"
-  _lp_curl="$(tp_instance_bootstrap_curl)"
-  # shellcheck disable=SC2086
-  if ! $_lp_curl -f --max-time 20 -D "$_lp_dir/headers" -o "$_lp_dir/body" "${HOST_URL%/}/api/daemon/v1/instance/identity" 2>/dev/null; then
-    tp_print_detail "Could not fetch a panel key from ${HOST_URL}; this server stays unpinned for now"
-    rm -rf "$_lp_dir"
-    return 0
-  fi
-  _lp_header="$(tr -d '\r' < "$_lp_dir/headers" | grep -i '^x-turbopanel-signature:' | tail -n 1 | sed 's/^[^:]*:[[:space:]]*//')"
-  if ! python3 -c "$(tp_identity_material_python)" "$_lp_dir/body" "$_lp_header" "$_lp_dir" "" 2>"$_lp_dir/err" \
-    || ! tp_verify_ed25519 "$_lp_dir/pub.pem" "$_lp_dir/doc.msg" "$_lp_dir/doc.sig"; then
-    tp_print_detail "The panel's identity document was refused ($(cat "$_lp_dir/err" 2>/dev/null)); this server stays unpinned"
-    rm -rf "$_lp_dir"
-    return 0
-  fi
-  PANEL_FINGERPRINT="$(cat "$_lp_dir/kid")"
-  PANEL_NEXT_FINGERPRINT=""
-  PANEL_KEYSET="$(cat "$_lp_dir/keyset")"
-  PANEL_RP_ID="$(cat "$_lp_dir/rp_id")"
-  PANEL_PASSKEYS="$(cat "$_lp_dir/passkeys")"
-  _lp_urls="$(cat "$_lp_dir/urls")"
-  PIN_HOSTS="${_lp_urls:-$HOST_URL}"
-  PIN_ACTION=write
-  PIN_LEARNED=true
-  rm -rf "$_lp_dir"
-  tp_print_ok "Pinned the panel key $PANEL_FINGERPRINT (learned on upgrade)"
 }
 
 # The install command's panel key, checked against the panel's own identity
@@ -3999,7 +3954,6 @@ fi
 tp_write_panel_identity_pin() {
   _wp_file="$INSTALL_ROOT/lib/panel-identity"
   _wp_by=install
-  [ "${PIN_LEARNED:-false}" = true ] && _wp_by=upgrade
   # The flag only matters for a token with no key; a checked key is a real pin.
   [ "$UNSAFE_NO_PANEL_KEY" = true ] && [ -z "$PANEL_FINGERPRINT" ] && _wp_by=unsafe
   _wp_now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -4094,7 +4048,6 @@ tp_write_colocated_update_origin_pin() {
   rm -f "$_pin_tmp"
 }
 if [ "$INSTANCE_INSTALL" != true ] && [ "$_colocated_daemon_refresh" != true ]; then
-  tp_learn_panel_identity
   tp_write_update_origin_pin
   tp_write_panel_identity_pin
 else
@@ -4257,9 +4210,6 @@ trap 'rm -f "$VARS_FILE"' EXIT
   fi
   if [ -n "$UI_MANIFEST_URL" ]; then
     printf 'turbopanel_ui_manifest_url: %s\n' "$UI_MANIFEST_URL"
-  fi
-  if [ -n "$TUNNEL_TOKEN" ]; then
-    printf 'turbopanel_tunnel_token: %s\n' "$TUNNEL_TOKEN"
   fi
 } > "$VARS_FILE"
 

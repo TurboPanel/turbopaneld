@@ -260,6 +260,8 @@ test("stale uploaded issuer and a failed trust fetch do not anchor insecure boot
     "tp_print_error",
     "tp_instance_bootstrap_curl",
     "tp_curl_http_code",
+    "tp_system_roots_validate_leaf",
+    "tp_curl_reason",
     "tp_install_verified_uploaded_trust",
     "tp_fetch_uploaded_trust",
   ].map((name) => extractShellFunction(source, name)).join("\n");
@@ -376,6 +378,8 @@ async function fetchUploadedTrust(vars: string[]) {
   const helpers = [
     "tp_bootstrap_leg",
     "tp_instance_bootstrap_curl",
+    "tp_system_roots_validate_leaf",
+    "tp_curl_reason",
     "tp_fetch_uploaded_trust",
   ].map((name) => extractShellFunction(source, name)).join("\n");
   const dir = await Deno.makeTempDir({ prefix: "tp-run-sh-trust-leg-" });
@@ -397,13 +401,15 @@ async function fetchUploadedTrust(vars: string[]) {
           "tp_print_error() { printf 'ERR %s\\n' \"$1\" >&2; }",
           'tp_install_verified_uploaded_trust() { echo "install leg=$2"; }',
           "tp_curl_http_code() {",
-          "  echo FETCH >&2",
+          '  echo "$*" >>"$UPLOADED_TRUST_PATH.log"',
+          '  echo "curl: (60) SSL certificate problem: unable to get local issuer certificate" >&2',
           '  case " $* " in *" --cacert "*) printf 000 ;; *) printf "%s" "$SYSTEM_CODE" ;; esac',
           "}",
           ...vars,
           helpers,
           "tp_fetch_uploaded_trust",
           'if [ -f "$UPLOADED_TRUST_PATH" ]; then echo kept; else echo removed; fi',
+          'echo "issuer-requests=$(grep -c uploaded-trust "$UPLOADED_TRUST_PATH.log")"',
         ].join("\n"),
       ],
       stdout: "piped",
@@ -445,6 +451,12 @@ test("a stored issuer that verifies nothing over either leg is kept and stops th
   const out = await fetchUploadedTrust(["SYSTEM_CODE=000"]);
   assertEquals(out.status === 0, false);
   assertStringIncludes(out.stderr, "keeping it");
+  // The cause stays visible on this path, on one line.
+  assertStringIncludes(out.stderr, "SSL certificate problem");
+  assertEquals(
+    out.stderr.split("\n").filter((l) => l.startsWith("ERR")).length,
+    1,
+  );
 });
 
 test("a fresh install behind a public edge, with only the new CA stored, makes no second issuer request", async () => {
@@ -456,7 +468,44 @@ test("a fresh install behind a public edge, with only the new CA stored, makes n
     'mv "$UPLOADED_TRUST_PATH" "$CA_PATH"',
   ]);
   assertEquals(out.status, 0, out.stderr);
-  assertEquals(out.stderr.split("FETCH").length - 1, 1);
+  assertStringIncludes(out.stdout, "issuer-requests=1");
   assertEquals(out.stdout.includes("install leg="), false);
   assertStringIncludes(out.stdout, "removed");
+});
+
+test("behind a public edge the issuer fetch says why and shows no raw curl error", async () => {
+  // Only the Platform CA is stored: the issuer fetch cannot verify the
+  // public certificate, answers 000, and the public roots do verify it.
+  const out = await fetchUploadedTrust([
+    "SYSTEM_CODE=200",
+    'CA_PATH="$UPLOADED_TRUST_PATH.ca"',
+    'mv "$UPLOADED_TRUST_PATH" "$CA_PATH"',
+  ]);
+  assertEquals(out.status, 0, out.stderr);
+  assertStringIncludes(out.stdout, "No private issuer needed");
+  assertEquals(out.stderr.includes("curl:"), false);
+  assertEquals(out.stdout.includes("install leg="), false);
+  assertStringIncludes(out.stdout, "removed");
+});
+
+test("an unreachable control plane without a stored issuer is reported plainly, with no raw curl error", async () => {
+  const out = await fetchUploadedTrust([
+    "SYSTEM_CODE=000",
+    'CA_PATH="$UPLOADED_TRUST_PATH.ca"',
+    'mv "$UPLOADED_TRUST_PATH" "$CA_PATH"',
+  ]);
+  assertEquals(out.status, 0, out.stderr);
+  assertEquals(out.stdout.includes("No private issuer needed"), false);
+  assertStringIncludes(out.stdout, "Could not fetch a private uploaded issuer");
+  assertEquals(out.stderr.includes("curl:"), false);
+});
+
+test("a private control plane still fetches and stores its issuer", async () => {
+  // Stored leg answers 200 itself: the issuer goes to the verified install.
+  const out = await fetchUploadedTrust([
+    'tp_curl_http_code() { echo "$*" >>"$UPLOADED_TRUST_PATH.log"; printf 200; }',
+  ]);
+  assertEquals(out.status, 0, out.stderr);
+  assertStringIncludes(out.stdout, "install leg=stored");
+  assertEquals(out.stdout.includes("No private issuer needed"), false);
 });

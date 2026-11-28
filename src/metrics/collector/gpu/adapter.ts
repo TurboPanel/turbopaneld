@@ -26,7 +26,7 @@ export type GpuThermalReading = {
  * The GPU's own memory size this tick. It is not a `GpuSample` field: it rides
  * `extended.gpuSizes`, the divisor of the used-memory percentage, so a card
  * whose memory is reported differently after a driver change never needs a new
- * topology generation.
+ * topology report.
  */
 export type GpuSizeReading = {
   memoryTotalBytes: number | null;

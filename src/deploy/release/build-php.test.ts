@@ -272,3 +272,63 @@ test("a failed PHP install adds one line after the failure, in either runner", a
     assertEquals(later.includes(hint), false);
   });
 });
+
+/** What a PHP site's build ran for a checkout that also ships a Node lockfile. */
+async function runPhpWithNodeFiles(
+  build: Parameters<typeof runReleaseBuild>[0]["build"],
+  packageJson = '{"scripts":{"build":"vite build"}}',
+): Promise<string[]> {
+  const ran: string[] = [];
+  await withDir(async (dir) => {
+    await Deno.writeTextFile(join(dir, "composer.json"), "{}");
+    await Deno.writeTextFile(join(dir, "composer.lock"), "{}");
+    await Deno.writeTextFile(join(dir, "package.json"), packageJson);
+    await Deno.writeTextFile(join(dir, "package-lock.json"), "{}");
+    await runReleaseBuild({
+      build,
+      workingDir: dir,
+      nativeRuntime: RUNTIME,
+      phpCliExists: () => Promise.resolve(true),
+      runCommand: (command) => {
+        ran.push(command);
+        return Promise.resolve();
+      },
+    });
+  });
+  return ran;
+}
+
+test("a PHP site with a package.json derives no Node install or build on its own", async () => {
+  assertEquals(await runPhpWithNodeFiles({ kind: "native" }), [
+    PHP_DEPENDENCY_INSTALL_COMMAND,
+  ]);
+});
+
+test("a PHP site's authored commands run as written without a derived Node install", async () => {
+  assertEquals(
+    await runPhpWithNodeFiles({ kind: "native", buildCommand: "php -v" }),
+    [PHP_DEPENDENCY_INSTALL_COMMAND, "php -v"],
+  );
+  assertEquals(
+    await runPhpWithNodeFiles({
+      kind: "native",
+      installCommand: "true",
+      buildCommand: "php artisan about",
+    }),
+    [PHP_DEPENDENCY_INSTALL_COMMAND, "true", "php artisan about"],
+  );
+});
+
+test("a PHP site asks for Node with a package manager or a Node command", async () => {
+  assertEquals(
+    await runPhpWithNodeFiles({ kind: "native", packageManager: "npm" }),
+    [PHP_DEPENDENCY_INSTALL_COMMAND, "npm ci --include=dev", "npm run build"],
+  );
+  assertEquals(
+    await runPhpWithNodeFiles({
+      kind: "native",
+      installCommand: "npm ci --omit=dev",
+    }),
+    [PHP_DEPENDENCY_INSTALL_COMMAND, "npm ci --omit=dev", "npm run build"],
+  );
+});

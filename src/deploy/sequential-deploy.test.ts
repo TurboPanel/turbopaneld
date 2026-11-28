@@ -134,7 +134,9 @@ async function outcomeOf(
 test("success: prepare, stop previous, up, gate, in that order", async () => {
   const { steps, calls } = harness();
   await runSequentialDeploy(input(steps));
-  const verbs = calls.filter((c) => !c.startsWith("phase") && c !== "gate");
+  const verbs = calls.filter((c) =>
+    !c.startsWith("phase") && c !== "gate" && !c.endsWith("--hash *")
+  );
   assertEquals(verbs[0], "prepare");
   assertEquals(
     verbs[1],
@@ -292,4 +294,154 @@ test("secrets in docker output are redacted before they reach the reason", async
     SequentialDeployError,
   );
   assert(!(err as Error).message.includes("s3cret"));
+});
+
+/** Docker answers for the unchanged-service check. */
+type Docker = {
+  /** Hash the new chain computes per service. */
+  liveHashes: Record<string, string>;
+  /** Hash stamped on the running containers, when not the live one. */
+  stamped?: Record<string, string>;
+  /** Services whose container runs an image the tag no longer resolves to. */
+  staleImage?: string[];
+  /** When each service's container started (ISO); defaults to 2026-01-01. */
+  startedAt?: Record<string, string>;
+  hashBroken?: boolean;
+  psFails?: boolean;
+  noContainers?: boolean;
+  imageInspectFails?: boolean;
+};
+
+function dockerHarness(docker: Docker) {
+  const base = harness();
+  const stops: string[][] = [];
+  const ok = (stdout: string) =>
+    Promise.resolve({ success: true, stderr: "", stdout });
+  const fail = () =>
+    Promise.resolve({ success: false, stderr: "x", stdout: "" });
+  const steps: SequentialDeploySteps = {
+    ...base.steps,
+    run: (args) => {
+      if (args.includes("--services")) return ok("web\ndb\nworker\n");
+      if (args.includes("--hash")) {
+        if (docker.hashBroken) return fail();
+        return ok(
+          Object.entries(docker.liveHashes).map(([n, h]) => `${n} ${h}\n`)
+            .join(""),
+        );
+      }
+      if (args.includes("ps")) {
+        if (docker.psFails) return fail();
+        return ok(docker.noContainers ? "" : `c-${args.at(-1)}\n`);
+      }
+      if (args[0] === "inspect") {
+        const service = args.at(-1)!.slice(2);
+        const hash = docker.stamped?.[service] ?? docker.liveHashes[service];
+        const id = docker.staleImage?.includes(service) ? "old" : "img";
+        const started = docker.startedAt?.[service] ?? "2026-01-01T00:00:00Z";
+        return ok(`${hash} ${id} ${service}:1 ${started}\n`);
+      }
+      if (args[0] === "image") {
+        return docker.imageInspectFails ? fail() : ok("img\n");
+      }
+      return ok("");
+    },
+    runStreamed: (args) => {
+      const at = args.indexOf("stop");
+      if (at >= 0) stops.push(args.slice(at + 1));
+      return Promise.resolve({ success: true, stderr: "" });
+    },
+  };
+  return { steps, stops };
+}
+
+const SAME = { web: "h1", db: "h2", worker: "h3" };
+const ALL = [["web", "db", "worker"]];
+
+test("sequential: a service whose config hash is unchanged is not stopped", async () => {
+  const { steps, stops } = dockerHarness({
+    liveHashes: SAME,
+    stamped: { worker: "old-hash" },
+  });
+  await runSequentialDeploy(input(steps));
+  assertEquals(stops, [["worker"]]);
+});
+
+test("sequential: nothing stops when every service is unchanged", async () => {
+  const { steps, stops } = dockerHarness({ liveHashes: SAME });
+  await runSequentialDeploy(input(steps));
+  assertEquals(stops, []);
+});
+
+test("sequential: a changed env value or tag (a different stamped hash) stops the service", async () => {
+  const { steps, stops } = dockerHarness({
+    liveHashes: SAME,
+    stamped: { web: "x", db: "y" },
+  });
+  await runSequentialDeploy(input(steps));
+  assertEquals(stops, [["web", "db"]]);
+});
+
+test("sequential: a re-pulled image stops a service whose config is unchanged", async () => {
+  const { steps, stops } = dockerHarness({
+    liveHashes: SAME,
+    staleImage: ["web"],
+  });
+  await runSequentialDeploy(input(steps));
+  assertEquals(stops, [["web"]]);
+});
+
+test("sequential: a file written after the container started stops it, even when an earlier attempt wrote it", async () => {
+  const { steps, stops } = dockerHarness({ liveHashes: SAME });
+  // The earlier failed attempt wrote db's secret at 2026-02-01, after db
+  // started (2026-01-01); this retry rewrites identical content.
+  await runSequentialDeploy(
+    input(steps, {
+      fileTimes: new Map([
+        ["db", Date.parse("2026-02-01T00:00:00Z")],
+        ["web", Date.parse("2025-12-01T00:00:00Z")],
+      ]),
+    }),
+  );
+  assertEquals(stops, [["db"]]);
+});
+
+test("sequential: a container restarted after its files changed is left running", async () => {
+  const { steps, stops } = dockerHarness({
+    liveHashes: SAME,
+    startedAt: { db: "2026-03-01T00:00:00Z" },
+  });
+  await runSequentialDeploy(
+    input(steps, {
+      fileTimes: new Map([["db", Date.parse("2026-02-01T00:00:00Z")]]),
+    }),
+  );
+  assertEquals(stops, []);
+});
+
+for (
+  const [name, docker] of [
+    ["hashes unreadable", { hashBroken: true }],
+    ["ps failing", { psFails: true }],
+    ["no containers found", { noContainers: true }],
+    ["image inspect failing", { imageInspectFails: true }],
+  ] as const
+) {
+  test(`sequential: ${name} stops every service`, async () => {
+    const { steps, stops } = dockerHarness({ liveHashes: SAME, ...docker });
+    await runSequentialDeploy(input(steps));
+    assertEquals(stops, ALL);
+  });
+}
+
+test("sequential: a migrating deploy stops every service as before", async () => {
+  for (
+    const over of [{ hooksMigrate: true, hasHooks: true }, {
+      breakingMigration: true,
+    }]
+  ) {
+    const { steps, stops } = dockerHarness({ liveHashes: SAME });
+    await runSequentialDeploy(input(steps, over));
+    assertEquals(stops, ALL);
+  }
 });

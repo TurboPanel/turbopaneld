@@ -466,6 +466,15 @@ test("the unit loads its loopback rules as root before PHP starts, so a failed l
   }
 });
 
+test("the guard names the helper folder it is given, the checkout's scripts in development", () => {
+  const dir = "/home/dev/turbopanel/turbopaneld/orchestration/scripts";
+  const unit = sitePhpServiceUnit(
+    { ...SPEC, libDir: dir },
+    { writablePaths: [] },
+  );
+  assertStringIncludes(unit, `\nExecStartPre=+${dir}/tp-php-loopback sync\n`);
+});
+
 test("vhost references are read from the socket path, nothing else", () => {
   assertEquals(
     sitePhpRuntimeIdsIn(

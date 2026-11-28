@@ -11,6 +11,11 @@
  */
 
 import { isBindStyleVolume, isSafeTmpfsVolume } from "./compose-host-paths.ts";
+import {
+  isNetworkShareVolume,
+  NETWORK_SHARES_REFUSAL_NOTE,
+  networkShareFindings,
+} from "./network-shares.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -75,17 +80,10 @@ export const RESERVED_HOST_PORT_RANGES: ReadonlyArray<
   [6070, 6070],
   [7080, 7081],
   [7443, 7443],
+  [9443, 9443],
   [18080, 18999],
   [19100, 19799],
 ];
-
-/**
- * Not checkable here, by design: a volume's `name:` / `external:` pointing at
- * another project's volume. The control plane rewrites its own storage volumes
- * to external named volumes before the daemon sees them, so the daemon cannot
- * tell an authored reference from a platform one; the control plane's
- * host-access gate owns that rule.
- */
 
 export const COMPOSE_POLICY_REFUSED_CODE = "compose_policy_refused";
 
@@ -153,15 +151,38 @@ function imageShadowFindings(
     );
 }
 
-function volumeFindings(volumes: unknown): string[] {
+type VolumeFindingOptions = {
+  /** Host-level approval waives every volume rule except the share checks. */
+  approved: boolean;
+  allowNetworkShares: boolean;
+};
+
+function volumeFindings(
+  volumes: unknown,
+  opts: VolumeFindingOptions,
+): string[] {
   if (!isRecord(volumes)) return [];
   const found: string[] = [];
   for (const [name, spec] of Object.entries(volumes)) {
     if (!isRecord(spec) || !isRecord(spec.driver_opts)) continue;
-    const opts = spec.driver_opts;
-    if (Object.keys(opts).length === 0) continue;
+    const driverOpts = spec.driver_opts;
+    if (Object.keys(driverOpts).length === 0) continue;
+    // An SMB share is judged first and on its own rules (never as a bind).
+    // Shares are off unless the control plane allowed them for this server;
+    // host-level approval never turns them on.
+    if (isNetworkShareVolume(spec)) {
+      found.push(
+        ...(opts.allowNetworkShares ? networkShareFindings(name, spec, {}) : [
+          `volume ${name} mounts an SMB network share, but ${NETWORK_SHARES_REFUSAL_NOTE}`,
+        ]),
+      );
+      continue;
+    }
+    if (opts.approved) continue;
     // A bind-style mount is a host path: the path checks confine it.
-    if (isBindStyleVolume(opts) || isSafeTmpfsVolume(opts)) continue;
+    if (isBindStyleVolume(driverOpts) || isSafeTmpfsVolume(driverOpts)) {
+      continue;
+    }
     found.push(
       `volume ${name} mounts something other than plain Docker storage (overlay, network and other filesystem types can reach host paths; only a sized tmpfs is allowed without host-level approval)`,
     );
@@ -292,8 +313,56 @@ function networkFindings(networks: unknown): string[] {
   return found;
 }
 
+/**
+ * The volume names this deploy may mount: Compose names a volume
+ * `<project>_<key>` unless the file sets `name:`, and `external: true` or an
+ * explicit `name:` can point at any volume on the host (a managed database's
+ * data volume, another project's data). Only the project's own prefix and the
+ * names the control plane sent as this deploy's storage are accepted.
+ */
+export type VolumeNamespace = {
+  /** The Compose project name this deploy runs under. */
+  project: string;
+  /** `volumeName` of every docker storage entry this deploy was sent. */
+  owned: readonly string[];
+};
+
+/** The name Compose gives a top-level volume once the project is known. */
+function effectiveVolumeName(
+  project: string,
+  key: string,
+  spec: Record<string, unknown>,
+): string {
+  if (typeof spec.name === "string" && spec.name !== "") return spec.name;
+  return spec.external === true || isRecord(spec.external)
+    ? key
+    : `${project}_${key}`;
+}
+
+/** Host-level approval never excuses a volume that belongs to someone else. */
+function volumeNamespaceFindings(
+  volumes: unknown,
+  ns: VolumeNamespace,
+): string[] {
+  if (!isRecord(volumes)) return [];
+  const found: string[] = [];
+  for (const [key, raw] of Object.entries(volumes)) {
+    const spec = isRecord(raw) ? raw : {};
+    const name = effectiveVolumeName(ns.project, key, spec);
+    if (name.startsWith(`${ns.project}_`) || ns.owned.includes(name)) continue;
+    found.push(
+      `volume ${key} names the Docker volume \`${name}\`, which is not this project's own (volumes outside \`${ns.project}_\` and this environment's storage cannot be mounted)`,
+    );
+  }
+  return found;
+}
+
 export type ComposePolicyOptions = {
+  /** When set, a top-level volume must stay in this namespace, approved or not. */
+  volumeNamespace?: VolumeNamespace;
   hostLevelApproved?: boolean;
+  /** `environment.deploy` `allowNetworkShares`: SMB share volumes may be mounted. */
+  allowNetworkShares?: boolean;
   platformNetworks?: readonly string[];
   /** The helper ports this deploy opens to an account; each exempts its one publish. */
   helperReach?: readonly HelperReachPublish[];
@@ -328,10 +397,14 @@ export function collectComposePolicyFindings(
     // Joining the hosting-ingress or managed network by hand is never
     // approved: the daemon attaches those itself.
     ...platformNetworkFindings(document.networks, opts.platformNetworks ?? []),
-    ...(approved ? [] : [
-      ...volumeFindings(document.volumes),
-      ...networkFindings(document.networks),
-    ]),
+    ...(opts.volumeNamespace
+      ? volumeNamespaceFindings(document.volumes, opts.volumeNamespace)
+      : []),
+    ...volumeFindings(document.volumes, {
+      approved,
+      allowNetworkShares: opts.allowNetworkShares === true,
+    }),
+    ...(approved ? [] : networkFindings(document.networks)),
   ];
 }
 

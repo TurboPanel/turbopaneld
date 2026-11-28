@@ -124,6 +124,30 @@ test("reportVocabularyFailures defaults to console and Deno.exit", () => {
   }
 });
 
+test("runVocabularyCheck skips nested checkouts and local dot-directories", async () => {
+  const root = await Deno.makeTempDir({ prefix: "vocab-nested-" });
+  try {
+    const bad = `node${" agent"}\n`;
+    await Deno.mkdir(join(root, "wt/src"), { recursive: true });
+    await Deno.writeTextFile(join(root, "wt/.git"), "gitdir: elsewhere\n");
+    await Deno.writeTextFile(join(root, "wt/src/bad.ts"), bad);
+    await Deno.mkdir(join(root, ".local-state"), { recursive: true });
+    await Deno.writeTextFile(join(root, ".local-state/bad.json"), bad);
+    await Deno.mkdir(join(root, ".github"), { recursive: true });
+    await Deno.writeTextFile(join(root, ".github/bad.yml"), bad);
+
+    const failures = await runVocabularyCheck(root);
+    assertEquals(failures.some((line) => line.includes("wt/")), false);
+    assertEquals(failures.some((line) => line.includes(".local-state")), false);
+    assertEquals(
+      failures.some((line) => line.includes(".github/bad.yml")),
+      true,
+    );
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
 test("runVocabularyCheck walks fixtures and skips lockfiles and skip dirs", async () => {
   const root = await Deno.makeTempDir({ prefix: "vocab-walk-" });
   try {

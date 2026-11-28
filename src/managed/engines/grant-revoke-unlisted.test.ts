@@ -6,7 +6,11 @@
  */
 import { assertEquals, assertRejects, assertStringIncludes } from "@std/assert";
 import type { ManagedApplyCredential } from "../../contracts/commands-contracts.ts";
-import { parseConnectionIds, revokeUnlistedGrants } from "./grant-databases.ts";
+import {
+  endSessionsWhenRightsChange,
+  parseConnectionIds,
+  revokeUnlistedGrants,
+} from "./grant-databases.ts";
 import {
   parseDatabaseGrantRows,
   type StoredGrantRow,
@@ -248,12 +252,166 @@ test("a name with a control character is left out of the plan", () => {
 test("each dialect reads its own processlist table", () => {
   assertStringIncludes(
     listConnectionsSql("u1"),
-    "FROM performance_schema.processlist WHERE USER = 'u1'",
+    "FROM performance_schema.processlist WHERE CAST(USER AS BINARY) = CAST('u1' AS BINARY)",
   );
   assertStringIncludes(
     mariadbListConnectionsSql("u1"),
-    "FROM information_schema.PROCESSLIST WHERE USER = 'u1'",
+    "FROM information_schema.PROCESSLIST WHERE CAST(USER AS BINARY) = CAST('u1' AS BINARY)",
   );
+});
+
+function widenHarness(
+  snapshots: string[],
+  sessionEnds?: Parameters<
+    typeof endSessionsWhenRightsChange
+  >[0]["sessionEnds"],
+) {
+  const ran: string[] = [];
+  const reads = [...snapshots];
+  const apply = () =>
+    endSessionsWhenRightsChange({
+      username: "u1",
+      snapshotSql: (u) => `SNAP ${u}`,
+      listConnectionsSql: (u) => `IDS ${u}`,
+      sessionEnds,
+      query: (sql) =>
+        Promise.resolve(sql.startsWith("SNAP") ? reads.shift() ?? "" : "5\n9"),
+      run: (sql) => {
+        ran.push(sql);
+        return Promise.resolve();
+      },
+    }, () => {
+      ran.push("GRANTS");
+      return Promise.resolve();
+    });
+  return { ran, apply };
+}
+
+test("a login moved up (read-write to owner) has its open sessions ended after the grants", async () => {
+  const marker = memoryMarker();
+  const { ran, apply } = widenHarness(["a\tb\tYYN", "a\tb\tYYY"], marker);
+  await apply();
+  assertEquals(ran, [
+    "GRANTS",
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+  assertEquals([...marker.names], []);
+});
+
+test("a login moved down has its open sessions ended too", async () => {
+  const { ran, apply } = widenHarness(["a\tb\tYYY", "a\tb\tYNN"]);
+  await apply();
+  assertEquals(ran.slice(1), [
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+});
+
+test("a login whose rights did not change loses no session and leaves no record", async () => {
+  const marker = memoryMarker();
+  const { ran, apply } = widenHarness(["a\tb\tYYY", "a\tb\tYYY"], marker);
+  await apply();
+  assertEquals(ran, ["GRANTS"]);
+  assertEquals([...marker.names], []);
+});
+
+test("a first apply (no grant row before) ends nothing and records nothing", async () => {
+  const marker = memoryMarker();
+  const { ran, apply } = widenHarness(["", "a\tb\tYYY"], marker);
+  await apply();
+  assertEquals(ran, ["GRANTS"]);
+  assertEquals([...marker.names], []);
+});
+
+test("a database added to the login ends no session", async () => {
+  const marker = memoryMarker();
+  const { ran, apply } = widenHarness(
+    ["a\tb\tYYY", "a\tb\tYYY\na\tc\tYYY"],
+    marker,
+  );
+  await apply();
+  assertEquals(ran, ["GRANTS"]);
+  assertEquals([...marker.names], []);
+});
+
+test("a client host added to the login ends no session", async () => {
+  const { ran, apply } = widenHarness([
+    "a\tb\tYYY",
+    "a\tb\tYYY\nz\tb\tYYY",
+  ]);
+  await apply();
+  assertEquals(ran, ["GRANTS"]);
+});
+
+test("a row that went away ends the sessions", async () => {
+  const { ran, apply } = widenHarness(["a\tb\tYYY\na\tc\tYYY", "a\tb\tYYY"]);
+  await apply();
+  assertEquals(ran.slice(1), [
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+});
+
+test("an owed record is honoured even with no row before", async () => {
+  const marker = memoryMarker();
+  await marker.add("rights:u1");
+  const { ran, apply } = widenHarness(["", "a\tb\tYYY"], marker);
+  await apply();
+  assertEquals(ran.slice(1), [
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+  assertEquals([...marker.names], []);
+});
+
+test("sessions the grant work already ended are not ended again", async () => {
+  const marker = memoryMarker();
+  const ran: string[] = [];
+  await endSessionsWhenRightsChange({
+    username: "u1",
+    snapshotSql: (u) => `SNAP ${u}`,
+    listConnectionsSql: (u) => `IDS ${u}`,
+    sessionEnds: marker,
+    query: (sql) => Promise.resolve(sql.startsWith("SNAP") ? "a\tb\tYYN" : "5"),
+    run: (sql) => {
+      ran.push(sql);
+      return Promise.resolve();
+    },
+  }, () => Promise.resolve(true));
+  assertEquals(ran, []);
+  assertEquals([...marker.names], []);
+});
+
+test("a failure after the grants is finished by the next apply", async () => {
+  const marker = memoryMarker();
+  await assertRejects(
+    () =>
+      endSessionsWhenRightsChange({
+        username: "u1",
+        snapshotSql: () => "SNAP",
+        listConnectionsSql: () => "IDS",
+        sessionEnds: marker,
+        query: (sql) => Promise.resolve(sql === "SNAP" ? "a\tb\tYYN" : ""),
+        run: () => Promise.reject(new Error("grant failed")),
+      }, () => Promise.reject(new Error("grant failed"))),
+    Error,
+    "grant failed",
+  );
+  assertEquals([...marker.names], ["rights:u1"]);
+  // Unchanged rows, but the record is still set: the sessions go now.
+  const second = widenHarness(["a\tb\tYYY", "a\tb\tYYY"], marker);
+  await second.apply();
+  assertEquals(second.ran.slice(1), [
+    "FLUSH PRIVILEGES;",
+    "KILL CONNECTION 5;",
+    "KILL CONNECTION 9;",
+  ]);
+  assertEquals([...marker.names], []);
 });
 
 function creds(
@@ -360,13 +518,48 @@ for (
       },
     };
     await assertRejects(() => engine.applyCredentials(ctx, creds({})), Error);
-    assertEquals([...names], ["ro_user"]);
+    assertEquals([...names].sort(), ["rights:ro_user", "ro_user"]);
     failProcesslist = false;
     await engine.applyCredentials(ctx, creds({}));
+    // One kill pass ends the login for both records.
     assertEquals(kills.length, 1);
     assertEquals([...names], []);
     await engine.applyCredentials(ctx, creds({}));
     assertEquals(kills.length, 1);
+  });
+
+  test(`${name}: a login that became owner has its open connections ended`, async () => {
+    const snapshots = [
+      `${hex("%")}\t${hex("b")}\tYYN`,
+      `${hex("%")}\t${hex("b")}\tYYY`,
+    ];
+    const inputs: string[] = [];
+    const ctx: ManagedEngineContext = {
+      containerId: "c1",
+      composeServiceName: "svc",
+      rootUsername: "root",
+      defaultDatabase: "b",
+      exec: (argv, input) => {
+        if (input !== undefined) inputs.push(input);
+        const q = argv.at(-1) ?? "";
+        const stdout = argv.includes("-e") && q.includes("CONCAT_WS")
+          ? snapshots.shift() ?? ""
+          : argv.includes("-e") && q.includes("FROM mysql.db")
+          ? rowsOutput([row("b")])
+          : argv.includes("-e") && /processlist/i.test(q)
+          ? "41"
+          : "";
+        return Promise.resolve({ success: true, stdout, stderr: "" });
+      },
+    };
+    await engine.applyCredentials(
+      ctx,
+      creds({ privileges: ["owner"], username: "mig" }),
+    );
+    const all = inputs.join("\n");
+    assertStringIncludes(all, "GRANT ALL PRIVILEGES ON `b`.* TO `mig`@");
+    assertStringIncludes(all, "KILL CONNECTION 41;");
+    assertEquals(snapshots.length, 0);
   });
 
   test(`${name}: root and backup logins are untouched end to end`, async () => {

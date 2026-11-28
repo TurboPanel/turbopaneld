@@ -1,8 +1,8 @@
 ---
-# Stages 1-2 of closing the Docker-socket route to root (observe mode). Installed
-# wherever Docker is, on managed hosts only. The daemon still talks to the real
-# socket and `tp` is still in the `docker` group, so a failure here would not
-# need to block the Docker install: the install is a block with a rescue.
+# Closing the Docker-socket route to root. Installed wherever Docker is, on
+# managed hosts only. The daemon talks to Docker only through the gate's socket
+# (stage 4), so in enforce mode (the default) a failure here fails the converge:
+# the install is a block with a rescue that only warns in observe mode.
 # Stage 3: Traefik's switch is on by default, so while it is on (or this
 # converge turns it on) Traefik depends on the gate's read-only socket and the
 # rescue fails the converge instead of only warning. In enforce mode
@@ -24,6 +24,16 @@
     fail_msg: "docker_gate_mode must be observe or enforce"
     quiet: true
 
+# The socket-proxy container Traefik falls back to mounts the engine socket,
+# which an enforcing gate refuses: with the switch off and enforce on, Traefik
+# would lose its Docker provider at its next apply.
+- name: Refuse an enforcing gate with Traefik's gate socket switched off
+  ansible.builtin.assert:
+    that:
+      - (docker_gate_mode | string) != 'enforce' or (docker_gate_ingress_socket | string | lower) in ['true', 'yes', '1', 'on']
+    fail_msg: "docker_gate_mode enforce needs docker_gate_ingress_socket explicitly on (an empty value leaves the switch as it is, possibly off): the socket-proxy fallback mounts the engine socket, which the enforcing gate refuses"
+    quiet: true
+
 - name: Check for the Docker binary
   ansible.builtin.stat:
     path: /usr/bin/docker
@@ -40,13 +50,25 @@
         path: "{{ docker_gate_deno_bin }}"
       register: _docker_gate_deno
 
-    - name: Skip the gate when the vendored Deno is missing
+    - name: Skip the gate when the vendored Deno is missing (observe mode only)
       ansible.builtin.debug:
         msg: >-
           WARNING: Docker gate NOT installed, so this host has no gate service
           and no read-only Docker socket: {{ docker_gate_deno_bin }} is
           missing. Run the deno-runtime role before the docker role.
-      when: not _docker_gate_deno.stat.exists
+      when:
+        - not _docker_gate_deno.stat.exists
+        - (docker_gate_mode | string) != 'enforce'
+
+    - name: Fail when the vendored Deno is missing and the gate is meant to enforce
+      ansible.builtin.fail:
+        msg: >-
+          Docker gate NOT installed: {{ docker_gate_deno_bin }} is missing, and
+          the daemon reaches Docker only through the gate. Run the deno-runtime
+          role before the docker role.
+      when:
+        - not _docker_gate_deno.stat.exists
+        - (docker_gate_mode | string) == 'enforce'
 
     - name: Install the gate service and files
       ansible.builtin.include_tasks: deploy.yml
@@ -55,7 +77,7 @@
     - name: Report that the Docker gate could not be installed
       ansible.builtin.debug:
         msg: >-
-          Docker gate not installed (observe mode, nothing depends on it):
+          Docker gate not installed:
           {{ ansible_failed_result.msg | default('unknown error') }}
 
     - name: Fail the converge when the gate is meant to enforce

@@ -28,6 +28,8 @@ import {
 
 export type SiteLifecycleUnitBase = {
   layout: Pick<LayoutPaths, "principalHomeRoot" | "libDir">;
+  /** Where `tp-php-loopback` is (`hostHelperDir`); the layout's `libDir` when omitted. */
+  helperDir?: string;
   username: string;
   workingDirectory: string;
   /** The site's root copy of its variables (`site-env-file.ts`). */
@@ -52,7 +54,9 @@ export function siteLifecycleHeadLines(base: SiteLifecycleUnitBase): string[] {
     `EnvironmentFile=${base.environmentFile}`,
     // Root (`+`), before the process starts: loads the per-account loopback
     // rules. When it fails the unit does not start.
-    `ExecStartPre=${sitePhpLoopbackGuard(base.layout.libDir)}`,
+    `ExecStartPre=${
+      sitePhpLoopbackGuard(base.helperDir ?? base.layout.libDir)
+    }`,
   ];
 }
 

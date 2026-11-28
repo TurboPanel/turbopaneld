@@ -23,6 +23,3 @@ warn_list:
 
 exclude_paths:
   - .cache/
-  # Agent worktrees are checkouts of this same repo; linting them double-counts
-  # every finding against a stale copy.
-  - .claude/

@@ -1,0 +1,39 @@
+---
+# An updated host never re-renders the cache unit, so the retry settings the
+# template now carries reach it as a drop-in instead: no start limit, and a
+# growing delay between restarts. Only where the unit exists. daemon-reload
+# only; the running service is not restarted (the daemon runs this play).
+# RestartSteps needs systemd 254; an older systemd ignores it with a warning.
+- name: Check for an installed cache unit
+  ansible.builtin.stat:
+    path: "/etc/systemd/system/{{ redis_service_name }}.service"
+  register: _redis_unit
+
+- name: Install the cache unit retry drop-in
+  when: _redis_unit.stat.exists
+  block:
+    - name: Create the drop-in directory
+      ansible.builtin.file:
+        path: "/etc/systemd/system/{{ redis_service_name }}.service.d"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+    - name: Write the retry drop-in
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ redis_service_name }}.service.d/10-retry.conf"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          StartLimitIntervalSec=0
+
+          [Service]
+          RestartSteps=10
+          RestartMaxDelaySec=120
+      register: _redis_dropin
+    - name: Reload systemd after the retry drop-in changed
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: _redis_dropin.changed

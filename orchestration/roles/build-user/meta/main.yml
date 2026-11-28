@@ -3,8 +3,7 @@ galaxy_info:
   author: turbopanel
   description: >-
     Provision the root-owned /var/lib/turbopanel-build tree that tp-host
-    build-run runs sandboxed builds from, and retire the shared tpbuild
-    account, its cache and tpbuild.slice (builds now run as a per-build
+    build-run runs sandboxed builds from (builds run as a per-build
     systemd DynamicUser in the site owner's slice).
   license: AGPL-3.0
   min_ansible_version: "2.14"

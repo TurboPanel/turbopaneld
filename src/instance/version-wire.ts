@@ -25,10 +25,8 @@
  *
  * `DAEMON_WIRE_FEATURES` is the advertised feature set: this daemon lists it
  * on `hello`, and the control plane lists it on the attach `version` frame.
- * `instanceSupports` reads the peer's list. That is distinct from
- * `DAEMON_FEATURE_MIN_VERSIONS`, which infers support from a semver floor.
- * A new wire message is gated on the advertisement. It does not raise
- * either floor.
+ * `instanceSupports` reads the peer's list. A new wire message is gated on
+ * the advertisement. It does not raise either floor.
  */
 
 export const INSTANCE_VERSION_HEADER = "x-turbopanel-version";
@@ -46,25 +44,11 @@ export const INSTANCE_VERSION_HEADER = "x-turbopanel-version";
 export const MIN_SUPPORTED_INSTANCE_VERSION = "0.1.22";
 
 /**
- * Panel features that need a daemon at or above a semver (the daemon renders
- * the artifact). `instance-cert-sources-per-hostname` opens when the connected
- * daemon is the release that renders per-hostname certificate sources in
- * `orchestration/roles/caddy/templates/Caddyfile.j2` — currently the 0.1.1
- * daemon line. The UI gate calls `resolveDaemonCapabilities` in the instance
- * twin; do not re-implement the comparison.
- */
-export const DAEMON_FEATURE_MIN_VERSIONS: Readonly<Record<string, string>> = {
-  "instance-cert-sources-per-hostname": "0.1.1",
-};
-
-/**
  * Features this process advertises on the cell wire. Twin of
  * `DAEMON_WIRE_FEATURES` in `turbopanel/src/lib/version-wire.ts` —
  * contract-drift keeps them equal.
  *
- * This list is what the peer says it supports. `DAEMON_FEATURE_MIN_VERSIONS`
- * is the semver-floor inference for daemon-rendered artifacts. Do not treat
- * them as the same gate.
+ * This list is what the peer says it supports.
  */
 export const DAEMON_WIRE_FEATURES = [
   "managed-upgrade-v1",
@@ -118,7 +102,6 @@ export const DAEMON_WIRE_FEATURES = [
   "signin-v2",
   "hosting-via-header-v1",
   "dev-host-v1",
-  "topology-generation-optional-v1",
   "signed-reports-v1",
   "panel-bound-session-v1",
   "panel-keyset-statements-v1",
@@ -134,6 +117,14 @@ export const DAEMON_WIRE_FEATURES = [
   "site-db-url-ca-v1",
   "project-cache-v1",
   "tunnel-lock-add-v1",
+  "build-limits-v1",
+  "tunnel-peer-mtls-v1",
+  "hosting-name-tls-v1",
+  "acme-issue-dns-v1",
+  "command-recovery-v2",
+  "compose-checkout-v1",
+  "network-shares-v1",
+  "terminal-container-v1",
 ] as const;
 
 /**
@@ -143,6 +134,14 @@ export const DAEMON_WIRE_FEATURES = [
  * progress as a keepalive.
  */
 export const COMMAND_RECOVERY_FEATURE = "command-recovery-v1";
+
+/**
+ * `hello.commandState` tells the control plane which commands this process
+ * and its on-disk journal still know (`CommandStateReport`), so it can tell a
+ * command the daemon never received from one it already ran. Wire contract:
+ * `src/commands/AGENTS.md`. Old control planes ignore the field and the name.
+ */
+export const COMMAND_RECOVERY_V2_FEATURE = "command-recovery-v2";
 
 export type DaemonWireFeature = (typeof DAEMON_WIRE_FEATURES)[number];
 
@@ -334,7 +333,7 @@ export const PANEL_KEYSET_KEY_SIGNATURE_FEATURE: DaemonWireFeature =
  * signed by its server key) and opens the `sealed` answer of
  * `POST /api/daemon/v1/secrets/decrypt`. A control plane that sees the feature
  * seals every decrypt answer, and the Hosting Account password hash, to that
- * key; once the daemon has opened one it refuses a plaintext answer.
+ * key; the daemon refuses a plaintext answer.
  */
 export const DAEMON_SEALED_SECRETS_FEATURE: DaemonWireFeature =
   "daemon-sealed-secrets-v1";
@@ -350,7 +349,7 @@ export const DAEMON_SEALED_PRINCIPAL_RECONCILE_FEATURE: DaemonWireFeature =
 /**
  * This daemon opens `tpdaemon` envelopes on `public-urls-update`
  * (`keyEnvelope`) and `tunnel-token` (`tokenEnvelope`), so the control plane
- * seals those instance secrets instead of sending plaintext.
+ * seals those instance secrets.
  */
 export const SEALED_INSTANCE_SECRETS_FEATURE: DaemonWireFeature =
   "sealed-instance-secrets-v1";
@@ -389,6 +388,27 @@ export const ACME_ISSUE_FEATURE: DaemonWireFeature = "acme-issue-v1";
  */
 export const ACME_ISSUE_ONE_CERT_FEATURE: DaemonWireFeature =
   "acme-issue-one-cert-v1";
+
+/**
+ * `EnvironmentDeployHosting.nameTls`: each served name of a hosting row, and
+ * each name its `www` mode only redirects, may carry its own `tlsId` /
+ * `tlsMode`, replacing the row's for that name; a redirect name with no entry
+ * follows its target's. The control plane sends the field only to a daemon
+ * that lists this feature; an older daemon would ignore it and serve every name with the
+ * row's choice. Without the field nothing changes.
+ */
+export const HOSTING_NAME_TLS_FEATURE: DaemonWireFeature =
+  "hosting-name-tls-v1";
+
+/**
+ * `acme-issue-request` may carry `challenge: 'dns-01'`: the order is proved
+ * through DNS, with the control plane publishing the TXT records over
+ * `acme-dns-publish` / `acme-dns-published` / `acme-dns-remove` (this daemon
+ * holds no DNS credential), and wildcard names are allowed. The control plane
+ * sends `dns-01` only to a daemon that lists this feature: an older daemon
+ * drops the field and would run the HTTP proof instead.
+ */
+export const ACME_ISSUE_DNS_FEATURE: DaemonWireFeature = "acme-issue-dns-v1";
 
 /**
  * Planned Postgres switchover: the fence stop reports the old primary's final
@@ -493,11 +513,8 @@ export const MANAGED_HA_BOOT_HOLD_FEATURE: DaemonWireFeature =
   "managed-ha-boot-hold-v1";
 
 /**
- * Metrics schema wire version 8. This daemon can produce wire version 8 samples (`metadata.version`
- * 8: the `extended` section and the `durable` flag). It stamps
- * `METRICS_LEGACY_WIRE_VERSION` until the control plane it is attached to
- * lists this feature, so a daemon updated ahead of the control plane keeps
- * sending samples the old control plane accepts.
+ * Metrics schema wire version 8: `metadata.version` 8, the `extended` section
+ * and the `durable` flag. It is the only version the daemon sends.
  */
 export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
 
@@ -508,19 +525,6 @@ export const METRICS_V8_FEATURE: DaemonWireFeature = "metrics-v8";
  * drop every sample, so the daemon sends the sizes only once this is listed.
  */
 export const METRICS_V8_SIZES_FEATURE: DaemonWireFeature = "metrics-v8-sizes";
-
-/**
- * The control plane no longer needs this daemon's topology generation numbers:
- * it matches a sample to the stored topology by the entity ids the sample
- * names and tells topology reports apart by their content. Once it is listed
- * the daemon leaves `metadata.topologyGeneration` off its samples,
- * `generation` and `bootGeneration` off its `topology-report` (and its
- * snapshot), and stops sending the `topology_generation_changed` event. The
- * generation is still tracked here: the topology reporter and the event
- * collector use it to notice a change.
- */
-export const TOPOLOGY_GENERATION_OPTIONAL_FEATURE: DaemonWireFeature =
-  "topology-generation-optional-v1";
 
 /**
  * This daemon deploys sites with `engine: 'nginx+apache'` (nginx in front of
@@ -755,14 +759,6 @@ function resolvePeerCapabilities(
   return out;
 }
 
-/** Which daemon-rendered features a reported daemon version can serve. */
-export function resolveDaemonCapabilities(
-  reportedVersion: string | undefined | null,
-  floors: Readonly<Record<string, string>> = DAEMON_FEATURE_MIN_VERSIONS,
-): Record<string, boolean> {
-  return resolvePeerCapabilities(reportedVersion, floors);
-}
-
 /** Which instance-side features a reported control-plane version can serve. */
 export function resolveInstanceCapabilities(
   reportedVersion: string | undefined | null,
@@ -835,3 +831,54 @@ export const PROJECT_CACHE_FEATURE: DaemonWireFeature = "project-cache-v1";
  * control plane leaves such a name to the site's next deploy and warns.
  */
 export const TUNNEL_LOCK_ADD_FEATURE: DaemonWireFeature = "tunnel-lock-add-v1";
+
+/**
+ * `environment.deploy` may carry `buildLimits` (deploy-wide and per source
+ * entry): the most CPU cores and memory one build may use. A daemon without it ignores the
+ * field and builds with its fixed limit. Additive; no floor moved.
+ */
+export const BUILD_LIMITS_FEATURE: DaemonWireFeature = "build-limits-v1";
+
+/**
+ * `server.tunnel.routes` may carry `peerClientAuth`, and the daemon presents
+ * its peer certificate as a client certificate on the hop between servers
+ * when that certificate allows it. `verify` checks a client certificate when
+ * one is shown; `require` refuses a peer that shows none. Without the feature
+ * the field is ignored and the receiving side stays as it was. Additive; no
+ * floor moved.
+ */
+export const TUNNEL_PEER_MTLS_FEATURE: DaemonWireFeature =
+  "tunnel-peer-mtls-v1";
+
+/**
+ * `compose-checkout-v1`: `environment.deploy` may carry `composeCheckout`, the
+ * repository a Git Compose project's compose file was read from. The daemon
+ * checks the pinned commit out into the deployment directory before building,
+ * so the compose file's relative paths resolve. The control plane sends it only
+ * to a daemon that lists this feature; an older daemon would ignore the field
+ * and deploy without the repository files.
+ */
+export const COMPOSE_CHECKOUT_FEATURE: DaemonWireFeature =
+  "compose-checkout-v1";
+
+/**
+ * `network-shares-v1`: `environment.deploy` may carry `allowNetworkShares`.
+ * When it is true the daemon accepts Compose volumes of type `cifs` / `smb3`
+ * that pass its checks (a public share address, allowlisted mount options) and
+ * installs the SMB mount tools (`cifs-utils`) on a Debian-family host before
+ * compose up. The control plane sends the field only to a daemon that lists
+ * this feature; an older daemon would ignore it and refuse the volume.
+ */
+export const NETWORK_SHARES_FEATURE: DaemonWireFeature = "network-shares-v1";
+
+/**
+ * `terminal-container-v1`: the control plane may send `shell-open` and
+ * `shell-kill` on the signed session and relay binary terminal frames
+ * (`src/shell/frames.ts`) over the same socket. The daemon opens an
+ * interactive `docker exec` in a tenant container, answers with signed
+ * `shell-opened`, `shell-closed` and `shell-error` reports, and takes binary
+ * frames only for a live session, authenticated by that session's key. The
+ * control plane sends none of it to a daemon that does not list the feature.
+ */
+export const TERMINAL_CONTAINER_FEATURE: DaemonWireFeature =
+  "terminal-container-v1";

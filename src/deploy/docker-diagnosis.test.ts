@@ -10,9 +10,9 @@ import {
 
 const test = Deno.test.bind(Deno);
 
-// kore, 2026-09-27: tp in docker (989), daemon process started before that.
-const KORE_GROUP_FILE = "root:x:0:\ntp:x:9999:\ndocker:x:989:tp\n";
-const KORE_STALE_STATUS =
+// host-b, 2026-09-27: tp in docker (989), daemon process started before that.
+const HOST_B_GROUP_FILE = "root:x:0:\ntp:x:9999:\ndocker:x:989:tp\n";
+const HOST_B_STALE_STATUS =
   "Name:\tturbopaneld\nUid:\t9999\t9999\t9999\t9999\nGroups:\t9999 \n";
 const FRESH_STATUS = "Name:\tturbopaneld\nGroups:\t989 9999\n";
 
@@ -28,13 +28,13 @@ test("parseSystemctlShow reads ActiveState and Result", () => {
 });
 
 test("parseProcessGroups reads the Groups line", () => {
-  assertEquals(parseProcessGroups(KORE_STALE_STATUS), [9999]);
+  assertEquals(parseProcessGroups(HOST_B_STALE_STATUS), [9999]);
   assertEquals(parseProcessGroups(FRESH_STATUS), [989, 9999]);
   assertEquals(parseProcessGroups("Name:\tx\n"), []);
 });
 
 test("parseDockerGroup finds the docker gid and members", () => {
-  assertEquals(parseDockerGroup(KORE_GROUP_FILE), {
+  assertEquals(parseDockerGroup(HOST_B_GROUP_FILE), {
     gid: 989,
     members: ["tp"],
   });
@@ -109,8 +109,8 @@ test("diagnoseDockerUnreachable reads the host through its seams", async () => {
   const msg = await diagnoseDockerUnreachable("permission denied", {
     systemctlShow: () =>
       Promise.resolve("ActiveState=active\nResult=success\n"),
-    readProcStatus: () => Promise.resolve(KORE_STALE_STATUS),
-    readGroupFile: () => Promise.resolve(KORE_GROUP_FILE),
+    readProcStatus: () => Promise.resolve(HOST_B_STALE_STATUS),
+    readGroupFile: () => Promise.resolve(HOST_B_GROUP_FILE),
     username: () => Promise.resolve("tp"),
   });
   assertStringIncludes(msg, "restart the daemon");
@@ -180,4 +180,60 @@ test("the default host reads never throw", async () => {
     assertEquals(typeof value, "string");
   }
   assertEquals(typeof (await diagnoseDockerUnreachable("x")), "string");
+});
+
+test("a daemon routed through the gate is pointed at the gate, not the docker group", () => {
+  const msg = explainDockerUnreachable({
+    service: { activeState: "active", result: "success" },
+    processGroups: [9999],
+    dockerGroup: { gid: 989, members: [] },
+    username: "tp",
+    probeStderr: "permission denied\nsecond line",
+    gateSocket: "/run/turbopanel-gate/docker.sock",
+  });
+  assertStringIncludes(msg, "/run/turbopanel-gate/docker.sock");
+  assertStringIncludes(msg, "permission denied");
+  assertStringIncludes(msg, "turbopanel-docker-gate");
+  assertEquals(msg.includes("docker group"), false);
+});
+
+test("a gate message without probe output has no detail suffix", () => {
+  const msg = explainDockerUnreachable({
+    service: null,
+    processGroups: [],
+    dockerGroup: null,
+    username: "tp",
+    probeStderr: "",
+    gateSocket: "/run/turbopanel-gate/docker.sock",
+  });
+  assertEquals(
+    msg,
+    "Docker gate unreachable at /run/turbopanel-gate/docker.sock; check `systemctl status turbopanel-docker-gate`",
+  );
+});
+
+test("the host read takes the gate socket from the environment", async () => {
+  const io = {
+    systemctlShow: () => Promise.resolve(""),
+    readProcStatus: () => Promise.resolve(""),
+    readGroupFile: () => Promise.resolve(""),
+    username: () => Promise.resolve("tp"),
+  };
+  const prior = Deno.env.get("TURBOPANEL_DOCKER_SOCKET");
+  try {
+    Deno.env.set("TURBOPANEL_DOCKER_SOCKET", "  /run/gate/docker.sock  ");
+    assertStringIncludes(
+      await diagnoseDockerUnreachable("denied", io),
+      "Docker gate unreachable at /run/gate/docker.sock: denied",
+    );
+    // Blank counts as unset: the group checks run instead.
+    Deno.env.set("TURBOPANEL_DOCKER_SOCKET", "   ");
+    assertEquals(
+      (await diagnoseDockerUnreachable("denied", io)).includes("gate"),
+      false,
+    );
+  } finally {
+    if (prior === undefined) Deno.env.delete("TURBOPANEL_DOCKER_SOCKET");
+    else Deno.env.set("TURBOPANEL_DOCKER_SOCKET", prior);
+  }
 });

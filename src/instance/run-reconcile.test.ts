@@ -117,8 +117,8 @@ test("resolveRunScriptUrl uses CDN for self-hosted HTTPS installs", () => {
   assertEquals(
     resolveRunScriptUrl({
       kind: "url",
-      baseUrl: "https://huey.lan:8443",
-      wsBaseUrl: "wss://huey.lan:8443",
+      baseUrl: "https://server-a.example.lan:8443",
+      wsBaseUrl: "wss://server-a.example.lan:8443",
     }),
     CDN_RUN_SCRIPT,
   );
@@ -164,7 +164,7 @@ test("resolveBootstrapInsecureTls follows releaseTlsInsecure for an https origin
   assertEquals(
     resolveBootstrapInsecureTls({
       releaseTlsInsecure: "1",
-      runScriptUrl: "https://huey.lan:8443/run.sh",
+      runScriptUrl: "https://server-a.example.lan:8443/run.sh",
     }),
     true,
   );
@@ -173,13 +173,13 @@ test("resolveBootstrapInsecureTls follows releaseTlsInsecure for an https origin
 test("buildRunReconcileArgs includes TLS flags for an https instance URL", () => {
   assertEquals(
     buildRunReconcileArgs({
-      instanceUrl: "https://huey.lan:8443",
+      instanceUrl: "https://server-a.example.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
     [
       "--host",
-      "https://huey.lan:8443",
+      "https://server-a.example.lan:8443",
       "--instance-ca",
       "/etc/turbopanel/instance-ca.pem",
       "--insecure-tls",
@@ -215,15 +215,18 @@ test("downloadRunScript applies insecure TLS flags", async () => {
         });
       }
     } as typeof Deno.Command;
-    const script = await downloadRunScript("https://huey.lan:8443/run.sh", {
-      insecureTls: true,
-      caPath: "/etc/turbopanel/instance-ca.pem",
-    });
+    const script = await downloadRunScript(
+      "https://server-a.example.lan:8443/run.sh",
+      {
+        insecureTls: true,
+        caPath: "/etc/turbopanel/instance-ca.pem",
+      },
+    );
     assertEquals(capturedArgs, [
       "-fsSL",
       "-k",
       ...RETRY_ARGS,
-      "https://huey.lan:8443/run.sh",
+      "https://server-a.example.lan:8443/run.sh",
     ]);
     if (!script.trim()) {
       throw new Error("expected non-empty script");
@@ -245,7 +248,7 @@ test("resolveBootstrapInsecureTls uses CDN without insecure flag", () => {
 test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
-      runScriptUrl: "https://huey.lan:8443",
+      runScriptUrl: "https://server-a.example.lan:8443",
     }),
     true,
   );
@@ -254,7 +257,7 @@ test("resolveBootstrapInsecureTls enables insecure for self-hosted without CA", 
 test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
-      runScriptUrl: "https://huey.lan:8443",
+      runScriptUrl: "https://server-a.example.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
     }),
     false,
@@ -264,13 +267,13 @@ test("resolveBootstrapInsecureTls prefers platform CA for self-hosted", () => {
 test("buildRunReconcileArgs includes self-hosted flags", () => {
   assertEquals(
     buildRunReconcileArgs({
-      instanceUrl: "https://huey.lan:8443",
+      instanceUrl: "https://server-a.example.lan:8443",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       insecureTls: true,
     }),
     [
       "--host",
-      "https://huey.lan:8443",
+      "https://server-a.example.lan:8443",
       "--instance-ca",
       "/etc/turbopanel/instance-ca.pem",
       "--insecure-tls",
@@ -282,13 +285,13 @@ test("buildRunReconcileArgs includes self-hosted flags", () => {
 test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
   assertEquals(
     buildRunReconcileArgs({
-      instanceUrl: "https://huey.lan:8443",
+      instanceUrl: "https://server-a.example.lan:8443",
       instanceCaPath: "/tmp/platform-ca.pem",
       insecureTls: true,
     }),
     [
       "--host",
-      "https://huey.lan:8443",
+      "https://server-a.example.lan:8443",
       "--instance-ca",
       "/tmp/platform-ca.pem",
       "--insecure-tls",
@@ -299,7 +302,7 @@ test("buildRunReconcileArgs passes non-canonical instance CA path", () => {
 
 test("buildRunReconcileArgs never emits a release-insecure token during insecure instance bootstrap", () => {
   const args = buildRunReconcileArgs({
-    instanceUrl: "https://huey.lan:8443",
+    instanceUrl: "https://server-a.example.lan:8443",
     insecureTls: true,
   });
   // Instance bootstrap relaxation is expressed only as --insecure-tls, which
@@ -330,7 +333,7 @@ test("executeRunReconcile keeps release downloads TLS-verified when instance boo
 
     const args = buildRunReconcileArgs({
       // Self-hosted, self-signed, no CA on disk → insecure instance bootstrap.
-      instanceUrl: "https://huey.lan:8443",
+      instanceUrl: "https://server-a.example.lan:8443",
       insecureTls: true,
     });
     await executeRunReconcile({
@@ -449,7 +452,7 @@ test("resolveBootstrapInsecureTls honors releaseTlsInsecure for HTTPS", () => {
   assertEquals(
     resolveBootstrapInsecureTls({
       releaseTlsInsecure: "1",
-      runScriptUrl: "https://huey.lan:8443/run.sh",
+      runScriptUrl: "https://server-a.example.lan:8443/run.sh",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
     }),
     true,
@@ -473,14 +476,14 @@ test("downloadRunScript uses -k for insecure HTTPS", async () => {
         });
       }
     } as typeof Deno.Command;
-    await downloadRunScript("https://huey.lan:8443/run.sh", {
+    await downloadRunScript("https://server-a.example.lan:8443/run.sh", {
       insecureTls: true,
     });
     assertEquals(capturedArgs, [
       "-fsSL",
       "-k",
       ...RETRY_ARGS,
-      "https://huey.lan:8443/run.sh",
+      "https://server-a.example.lan:8443/run.sh",
     ]);
   } finally {
     Deno.Command = originalCommand;
@@ -504,7 +507,7 @@ test("downloadRunScript uses --cacert when platform CA is provided", async () =>
         });
       }
     } as typeof Deno.Command;
-    await downloadRunScript("https://huey.lan:8443/run.sh", {
+    await downloadRunScript("https://server-a.example.lan:8443/run.sh", {
       caPath: "/etc/turbopanel/instance-ca.pem",
     });
     assertEquals(capturedArgs, [
@@ -514,7 +517,7 @@ test("downloadRunScript uses --cacert when platform CA is provided", async () =>
       "--capath",
       "/nonexistent",
       ...RETRY_ARGS,
-      "https://huey.lan:8443/run.sh",
+      "https://server-a.example.lan:8443/run.sh",
     ]);
   } finally {
     Deno.Command = originalCommand;
@@ -538,12 +541,12 @@ test("downloadRunScript accepts legacy boolean insecureTls option", async () => 
         });
       }
     } as typeof Deno.Command;
-    await downloadRunScript("https://huey.lan:8443/run.sh", true);
+    await downloadRunScript("https://server-a.example.lan:8443/run.sh", true);
     assertEquals(capturedArgs, [
       "-fsSL",
       "-k",
       ...RETRY_ARGS,
-      "https://huey.lan:8443/run.sh",
+      "https://server-a.example.lan:8443/run.sh",
     ]);
   } finally {
     Deno.Command = originalCommand;
@@ -566,7 +569,7 @@ test("downloadRunScript surfaces curl stderr on failure", async () => {
     } as typeof Deno.Command;
     let message = "";
     try {
-      await downloadRunScript("https://huey.lan:8443/run.sh");
+      await downloadRunScript("https://server-a.example.lan:8443/run.sh");
     } catch (err) {
       if (!(err instanceof Error)) {
         throw new TypeError("expected Error");
@@ -595,7 +598,7 @@ test("downloadRunScript rejects empty script body", async () => {
     } as typeof Deno.Command;
     let message = "";
     try {
-      await downloadRunScript("https://huey.lan:8443/run.sh");
+      await downloadRunScript("https://server-a.example.lan:8443/run.sh");
     } catch (err) {
       if (!(err instanceof Error)) {
         throw new TypeError("expected Error");
@@ -782,7 +785,7 @@ test("resolveAutomaticUpdateTrust: the CDN and public origins use system trust",
 test("resolveAutomaticUpdateTrust: a private origin needs the Platform CA on disk", () => {
   assertEquals(
     resolveAutomaticUpdateTrust({
-      runScriptUrl: "https://huey.lan:8443/run.sh",
+      runScriptUrl: "https://server-a.example.lan:8443/run.sh",
       instanceCaPath: "/etc/turbopanel/instance-ca.pem",
       originNeedsInsecureTls: needsInsecure,
       caFileExists: () => true,
@@ -821,7 +824,7 @@ test("resolveAutomaticUpdateTrust: no CA is a trust-repair error, never curl -k"
   assertThrows(
     () =>
       resolveAutomaticUpdateTrust({
-        runScriptUrl: "https://huey.lan:8443/run.sh",
+        runScriptUrl: "https://server-a.example.lan:8443/run.sh",
         originNeedsInsecureTls: needsInsecure,
       }),
     UpdateTrustRepairError,
@@ -830,7 +833,7 @@ test("resolveAutomaticUpdateTrust: no CA is a trust-repair error, never curl -k"
   assertThrows(
     () =>
       resolveAutomaticUpdateTrust({
-        runScriptUrl: "https://huey.lan:8443/run.sh",
+        runScriptUrl: "https://server-a.example.lan:8443/run.sh",
         instanceCaPath: "/etc/turbopanel/instance-ca.pem",
         originNeedsInsecureTls: needsInsecure,
         caFileExists: () => false,
@@ -1718,6 +1721,59 @@ test("executeInstanceUpdateReconcile re-renders the units once, after the swap a
   assertEquals(order.filter((name) => name === "restart").length, 1);
 });
 
+test("executeInstanceUpdateReconcile writes the password files before the migration reads them", async () => {
+  // A host updated in place has no runtime.secrets.env yet: the migration
+  // reads its database URL from it, so the file must exist first.
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const order: string[] = [];
+  const base = managedUpdateHooks(calls);
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    hooks: {
+      ...base,
+      run: (bin, args, onStage) => {
+        order.push(
+          args.includes("update-instance") ? "update-instance" : args.at(-1) ??
+            "",
+        );
+        return base.run!(bin, args, onStage);
+      },
+      migrate: () => {
+        order.push("migrate");
+        return base.migrate!();
+      },
+    },
+  });
+  const secretsAt = order.indexOf("instance-secrets-refresh.yml");
+  assertEquals(secretsAt > order.indexOf("update-instance"), true);
+  assertEquals(secretsAt >= 0 && secretsAt < order.indexOf("migrate"), true);
+  assertEquals(
+    order.filter((name) => name === "instance-secrets-refresh.yml").length,
+    1,
+  );
+});
+
+test("executeInstanceUpdateReconcile warns and carries on when the password file refresh fails", async () => {
+  const calls: Array<{ bin: string; args: string[] }> = [];
+  const base = managedUpdateHooks(calls);
+  const stages: string[] = [];
+  await executeInstanceUpdateReconcile({
+    channel: "release",
+    onStage: (stage) => stages.push(stage),
+    hooks: {
+      ...base,
+      run: (bin, args, onStage) => {
+        if (args.at(-1) === "instance-secrets-refresh.yml") {
+          calls.push({ bin, args });
+          return Promise.resolve({ code: 2, stdout: "", stderr: "boom" });
+        }
+        return base.run!(bin, args, onStage);
+      },
+    },
+  });
+  assertEquals(stages.at(-1), "done");
+});
+
 test("executeInstanceUpdateReconcile warns and carries on when the unit refresh fails", async () => {
   const calls: Array<{ bin: string; args: string[] }> = [];
   const base = managedUpdateHooks(calls);
@@ -2448,7 +2504,7 @@ test("reconcileHelperInvocation picks update-colocated for a panel host and upda
 test("the host license never reaches the root helper's argv, only its stdin", () => {
   const license = encodeLicenseArg("license-id", "secret-token");
   const args = buildRunReconcileArgs({
-    instanceUrl: "https://huey.lan:8443",
+    instanceUrl: "https://server-a.example.lan:8443",
     instanceCaPath: "/etc/turbopanel/instance-ca.pem",
   });
   const invocation = reconcileHelperInvocation({ args, channel: "canary" });

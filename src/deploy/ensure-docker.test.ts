@@ -1,5 +1,9 @@
 import { assertEquals, assertRejects } from "@std/assert";
 import { ensureDocker } from "./ensure-docker.ts";
+import {
+  resolveDockerInvocation,
+  setDockerCliIoForTest,
+} from "./docker-cli.ts";
 
 /**
  * Jest/Mocha-shaped alias for {@link Deno.test}.
@@ -224,4 +228,40 @@ test("a caller arriving after a failed run starts a fresh one", async () => {
   await assertRejects(() => ensureDocker(failing), Error, "down");
   await assertRejects(() => ensureDocker(failing), Error, "down");
   assertEquals(setupCalls, 2);
+});
+
+test("ensureDocker drops the cached docker invocation once docker-setup has run", async () => {
+  let denied = false;
+  const restore = setDockerCliIoForTest({
+    runRaw: (command) =>
+      Promise.resolve(
+        command === "/usr/bin/docker" && denied
+          ? {
+            success: false,
+            code: 1,
+            stdout: "",
+            stderr:
+              "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+          }
+          : { success: true, code: 0, stdout: "24.0.0", stderr: "" },
+      ),
+  });
+  const previousUser = Deno.env.get("USER");
+  Deno.env.set("USER", "tp");
+  try {
+    assertEquals((await resolveDockerInvocation()).prefixArgs, []);
+    await ensureDocker({
+      dockerBinaryPresent: () => Promise.resolve(false),
+      dockerEngineReachable: () => Promise.resolve(true),
+      runDockerSetup: () => {
+        denied = true;
+        return Promise.resolve();
+      },
+    });
+    assertEquals((await resolveDockerInvocation()).bin, "/usr/bin/sudo");
+  } finally {
+    if (previousUser === undefined) Deno.env.delete("USER");
+    else Deno.env.set("USER", previousUser);
+    restore();
+  }
 });

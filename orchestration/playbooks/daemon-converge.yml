@@ -24,6 +24,14 @@
     turbopanel_user: tp
     turbopanel_group: tp
     turbopanel_service_name: turbopaneld
+    # Rendered into the unit and the backup wrapper below; the same values as
+    # the daemon-launch role defaults (pinned equal by
+    # src/orchestration/docker-gate-role.test.ts), which this play does not load.
+    turbopanel_backup_run_bin: "{{ turbopanel_install_root }}/lib/tp-backup-run"
+    turbopanel_docker_gate_run_dir: /run/turbopanel-gate
+    turbopanel_docker_gate_build_dir: "{{ turbopanel_docker_gate_run_dir }}/build"
+    turbopanel_docker_gate_service: turbopanel-docker-gate.service
+    turbopanel_docker_gate_wait_seconds: 60
     # Managed daemon-only hosts have no co-located instance service to order after.
     turbopanel_after_instance_service: false
 
@@ -63,8 +71,7 @@
     - role: time-sync
     # Debian security updates on their own; never restarts the server.
     - role: os-security-updates
-    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds
-    # (and the retired shared tpbuild account removed).
+    # /var/lib/turbopanel-build for tp-host build-run's sandboxed builds.
     - role: build-user
 
   # Entering one task file of a role needs import_role: Ansible ignores
@@ -80,24 +87,39 @@
       ansible.builtin.import_role:
         name: docker
         tasks_from: converge-builder
-    # Existing Docker hosts get the observe-mode gate on their next converge;
+    # Existing Docker hosts get the enforcing gate on their next converge;
     # the role is a no-op where Docker is absent (docker-setup installs it
     # there, via the docker role).
-    - name: Docker gate (no-op without Docker, observe mode)
+    - name: Docker gate (no-op without Docker, enforce mode)
       ansible.builtin.import_role:
         name: docker-gate
-    # Orchestrator host prep is normally lazy on managed.ha.reconcile; backfill
-    # host-prep.ok on hosts that already have root-only libexec wait-ready.
-    - name: Backfill the Orchestrator host prep marker
+    # The daemon reaches Docker only through the gate: take it out of the
+    # docker group on hosts provisioned before that (managed hosts only).
+    - name: Take the daemon out of the docker group
       ansible.builtin.import_role:
-        name: orchestrator
-        tasks_from: backfill-host-prep-marker.yml
-    # Hosting Caddy edge (tpedge + ingress guard) is normally lazy on deploy;
-    # backfill enrolled/updated hosts before their first compose deploy.
-    - name: Backfill the hosting Caddy edge account
+        name: docker
+        tasks_from: converge-group
+    # Repairs that a fresh install makes but an update never reached. Both are
+    # idempotent and skip what is absent (no Caddy vendored yet, no uv locks).
+    - name: Repair the Caddy runtime directory modes
       ansible.builtin.import_role:
-        name: hosting-caddy
-        tasks_from: backfill-edge-account.yml
+        name: caddy
+        tasks_from: repair-modes.yml
+    - name: Repair the vendored lock file modes
+      ansible.builtin.import_role:
+        name: turbopanel-user
+        tasks_from: vendor-locks.yml
+    # An update never reaches the php-fpm role's install tasks, so the shared
+    # masters' pidfile and sockets move to the root-owned run tree here, as
+    # root, before the daemon takes any command. A no-op once moved.
+    - name: Move the php-fpm run tree to the root-owned folder
+      ansible.builtin.import_role:
+        name: php-fpm
+        tasks_from: converge-run-tree.yml
+    - name: Give the cache unit its retry settings
+      ansible.builtin.import_role:
+        name: redis
+        tasks_from: retry-dropin.yml
 
   # Already-provisioned managed daemons only ever receive this lightweight
   # converge (see src/orchestration/setup.ts), never a full reinstall. Refresh
@@ -124,6 +146,23 @@
         mode: "0640"
       when: turbopanel_daemon_unit.stat.exists
       notify: Reload systemd for refreshed daemon unit
+
+    # The scheduled-backup runner is a separate file the daemon-launch role
+    # installs; an existing host never re-runs that role, so without this its
+    # backups would keep reaching the engine directly instead of the gate.
+    - name: Check for an installed scheduled-backup runner
+      ansible.builtin.stat:
+        path: "{{ turbopanel_backup_run_bin }}"
+      register: turbopanel_backup_run_installed
+
+    - name: Refresh the scheduled-backup runner wrapper
+      ansible.builtin.template:
+        src: "{{ turbopanel_orchestration_dir }}/roles/daemon-launch/templates/tp-backup-run.j2"
+        dest: "{{ turbopanel_backup_run_bin }}"
+        owner: root
+        group: "{{ turbopanel_group }}"
+        mode: "0750"
+      when: turbopanel_backup_run_installed.stat.exists
 
   handlers:
     - name: Reload systemd for refreshed daemon unit

@@ -258,7 +258,7 @@ test("normalizeManagedFileOwnership runs ownership script in a throwaway engine 
   assertEquals(calls.length, 1);
   assertEquals(calls[0]?.includes("postgres:18-alpine"), true);
   assertEquals(
-    calls[0]?.includes("/var/lib/turbopanel/managed/managed1:/managed"),
+    calls[0]?.includes("/var/lib/turbopanel/managed/managed1:/managed:rw"),
     true,
   );
   assertEquals(
@@ -461,7 +461,7 @@ Deno.test("normalizeManagedSecretOwnership hands the file over in a locked-down 
   assertEquals(script.includes("USER_NAME='postgres'"), true);
   // Only the secrets directory, no whole-root mount, no network, minimal caps.
   assertEquals(
-    chown.includes("/state/managed/x/secrets:/managed/secrets"),
+    chown.includes("/state/managed/x/secrets:/managed/secrets:rw"),
     true,
   );
   assertEquals(chown.some((a) => a === "/state/managed/x:/managed"), false);

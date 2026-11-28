@@ -111,15 +111,6 @@ test("every root file and copy task in instance-certs refuses to follow a link",
       }
     }
   }
-  const le = await readTasks(LE_TASKS);
-  const migrate = named(
-    le,
-    "Migrate validated legacy control-plane certificates",
-  )["ansible.builtin.command"] as { argv: string[] };
-  assertStringIncludes(
-    migrate.argv.join("\n"),
-    'for path in "$LE_DEST" "$dest_crt" "$dest_key"; do',
-  );
 });
 
 test("instance-certs checks its folders before any root task touches them", async () => {

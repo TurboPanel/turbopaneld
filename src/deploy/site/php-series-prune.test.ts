@@ -42,7 +42,7 @@ test("a runtime id says which series it runs on", () => {
 
 test("a config names the series of its pool socket, lsphp and runtime socket", () => {
   const text = [
-    "fastcgi_pass unix:/run/turbopanel/php/8.2/tp-env-web.sock;",
+    "fastcgi_pass unix:/run/turbopanel-phpfpm/8.2/tp-env-web.sock;",
     "path /opt/turbopanel/vendor/lsphp/8.5/current/bin/lsphp",
     "SetHandler proxy:unix:/run/turbopanel-php-shop-0123456789ab-fpm81/php.sock",
   ].join("\n");
@@ -51,6 +51,11 @@ test("a config names the series of its pool socket, lsphp and runtime socket", (
     ["8.1", "8.2", "8.5"],
   );
   assertEquals(phpSeriesNamedIn("listen 80;").size, 0);
+  // A vhost written before the socket tree moved still names its series.
+  assertEquals(
+    [...phpSeriesNamedIn("fastcgi_pass unix:/run/turbopanel/php/8.3/a.sock;")],
+    ["8.3"],
+  );
 });
 
 test("a series is used by a site pool, a runtime or a config, never by the bootstrap pool alone", () => {

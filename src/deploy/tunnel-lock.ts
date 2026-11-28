@@ -16,14 +16,15 @@
  * lock stays without one unless its entry says `lock: true` (feature
  * `tunnel-lock-add-v1`, a local-only name): then the block is made into what a
  * deploy with a lock renders (the lock lines, `trusted_proxies` on every
- * `reverse_proxy`, loopback in a `bind`, no plain HTTP block). Nothing is ever
- * opened here, so a missing or empty `inbound` can only leave a lock as it was,
- * and an entry without `lock: true` never adds one. A bound site
- * (`bind` holding loopback) also gets this server's own addresses added when it
- * has peers, as a deploy would; nothing is ever taken out of a `bind`.
+ * `reverse_proxy`, loopback in a `bind`, no plain HTTP block; a block with
+ * automatic certificates gets `tls internal`). Nothing is ever opened here,
+ * so a missing or empty `inbound` can only leave a lock as it was, and an
+ * entry without `lock: true` never adds one. A bound site (`bind` holding
+ * loopback) also gets this server's own addresses added when it has peers, as
+ * a deploy would; nothing is ever taken out of a `bind`.
  */
 import type { TunnelInbound } from "../contracts/commands-contracts.ts";
-import { addressKey, parseSnippet } from "./caddy-snippet.ts";
+import { addressKey, braceBalance, parseSnippet } from "./caddy-snippet.ts";
 import { foldHostname } from "./hostname-fold.ts";
 import { tunnelLockLines, tunnelTrustedRanges } from "./tunnel-caddy.ts";
 
@@ -92,6 +93,8 @@ function relockBlock(
 }
 
 const TLS_LINE_RE = /^ {2}tls /;
+/** What a deploy writes for a locked name whose site used automatic certificates. */
+const AUTOMATIC_TLS = "  tls internal";
 const REVERSE_PROXY_RE = /^( *)reverse_proxy [^{]*$/;
 const REVERSE_PROXY_BLOCK_RE = /^( *)reverse_proxy .*\{$/;
 
@@ -130,20 +133,42 @@ function withLoopbackBind(line: string): string {
 }
 
 /**
+ * Where the `tls` line goes in a block that has none (an automatic certificate
+ * block): the empty line a deploy leaves in that place, at the block's own
+ * depth. Braces are counted as the parser counts them, so a nested block
+ * (`handle_errors`, a header block) never hides or fakes the spot. -1 when the
+ * block has no such line.
+ */
+function automaticTlsSlot(lines: readonly string[]): number {
+  let depth = braceBalance(lines[0] ?? "");
+  for (let i = 1; i < lines.length; i++) {
+    if (depth === 1 && lines[i] === "") return i;
+    depth += braceBalance(lines[i]!);
+  }
+  return -1;
+}
+
+/**
  * A block with no lock made into the locked block a deploy renders, or null
- * when its shape is not one the deploy writes (no `tls` line: an automatic
- * certificate block is left to the next deploy; no `reverse_proxy`: a redirect
- * block, which is never locked).
+ * when its shape is not one the deploy writes (no `reverse_proxy`: a redirect
+ * block, which is never locked). A block with no `tls` line (an automatic
+ * certificate) gets `tls internal` in the empty line where a deploy writes
+ * it: a locked name never asks for a public certificate.
  */
 function lockedBlock(
-  lines: readonly string[],
+  allLines: readonly string[],
   peers: readonly string[],
   listen: readonly string[],
 ): string[] | null {
-  const tls = lines.findIndex((line, index) =>
+  let lines = allLines;
+  let tls = lines.findIndex((line, index) =>
     index > 0 && TLS_LINE_RE.test(line)
   );
-  if (tls < 0) return null;
+  if (tls < 0) {
+    tls = automaticTlsSlot(lines);
+    if (tls < 0) return null;
+    lines = lines.map((line, index) => index === tls ? AUTOMATIC_TLS : line);
+  }
   // A block that proxies nothing (a `www` redirect) is never locked.
   if (
     !lines.some((line) =>

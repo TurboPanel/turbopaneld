@@ -853,6 +853,22 @@ test("instance-units-refresh re-renders the instance units and the Docker gate w
   }
 });
 
+test("instance-secrets-refresh runs only the password tasks, restarts nothing and never fails the update", () => {
+  const playbook = readPlaybook("instance-secrets-refresh.yml");
+  if (!playbook.includes("tasks_from: secrets.yml")) {
+    throw new TypeError("it must run instance-launch tasks/secrets.yml");
+  }
+  if (playbook.includes("units.yml")) {
+    throw new TypeError("it must not render units");
+  }
+  if (!/^ {4}instance_start: false$/m.test(playbook)) {
+    throw new TypeError("instance_start must be false");
+  }
+  if (!playbook.includes("rescue:")) {
+    throw new TypeError("a failure must be reported, not raised");
+  }
+});
+
 test("a co-located daemon refresh also installs the Docker gate", () => {
   const roles = readPlaybook("daemon-colocated-refresh.yml");
   if (!roles.includes("- role: docker-gate")) {
@@ -1257,15 +1273,6 @@ test("caddy role pins an upstream SHA-256 for caddy_version on both architecture
 test("caddy version pin stays aligned across install surfaces", () => {
   const { version } = readCaddyRolePin();
 
-  const ensureHosting = Deno.readTextFileSync(
-    join(fromMeta, "src", "deploy", "ensure-hosting-caddy.ts"),
-  );
-  const hostingVersion = requireCapture(
-    ensureHosting,
-    /HOSTING_CADDY_VERSION = "([\d.]+)"/,
-    "HOSTING_CADDY_VERSION",
-  );
-
   const installSh = Deno.readTextFileSync(
     join(fromMeta, "scripts", "install-hosting-caddy.sh"),
   );
@@ -1277,7 +1284,6 @@ test("caddy version pin stays aligned across install surfaces", () => {
 
   const download = readInstanceCaddyDownloaderPin();
 
-  assertEquals(hostingVersion, version, "ensure-hosting-caddy.ts");
   assertEquals(shellDefault, version, "install-hosting-caddy.sh");
   if (download) {
     assertEquals(download.version, version, "download-caddy.mjs");
@@ -1286,32 +1292,11 @@ test("caddy version pin stays aligned across install surfaces", () => {
 
 test("caddy SHA-256 pins stay aligned across install surfaces", () => {
   const pin = readCaddyRolePin();
-  const ensureHosting = Deno.readTextFileSync(
-    join(fromMeta, "src", "deploy", "ensure-hosting-caddy.ts"),
-  );
   const installSh = Deno.readTextFileSync(
     join(fromMeta, "scripts", "install-hosting-caddy.sh"),
   );
   const download = readInstanceCaddyDownloaderPin();
 
-  assertEquals(
-    requireCapture(
-      ensureHosting,
-      /amd64: "([0-9a-f]{64})"/,
-      "HOSTING_CADDY_SHA256 amd64",
-    ),
-    pin.amd64,
-    "ensure-hosting-caddy.ts amd64",
-  );
-  assertEquals(
-    requireCapture(
-      ensureHosting,
-      /arm64: "([0-9a-f]{64})"/,
-      "HOSTING_CADDY_SHA256 arm64",
-    ),
-    pin.arm64,
-    "ensure-hosting-caddy.ts arm64",
-  );
   assertEquals(
     requireCapture(
       installSh,

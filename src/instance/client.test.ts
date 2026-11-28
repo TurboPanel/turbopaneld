@@ -1,6 +1,8 @@
 import { type DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import { it } from "@std/testing/bdd";
+import { useTempCommandJournal } from "../testing/command-journal.ts";
 import { join } from "@std/path";
+import { sealedDecryptResponse } from "../testing/sealed-decrypt-response.ts";
 import {
   assert,
   assertEquals,
@@ -30,6 +32,11 @@ import {
   TUNNEL_TOKEN_REMOTE_REFUSAL,
   writeKeyId,
 } from "./client.ts";
+import {
+  isUpdateDraining,
+  resetBootConvergeForTests,
+  withCommandRunning,
+} from "../orchestration/boot-converge-gate.ts";
 import { wireCommandPorts } from "../commands/wire.ts";
 import {
   deliverCommandOutcome,
@@ -67,7 +74,12 @@ import {
   readActiveUpgradeContext,
   writeActiveUpgradeContext,
 } from "./update-active-context.ts";
-import { updateGuardPath, updateRollbackPath } from "./update-guard.ts";
+import {
+  readUpdateSkip,
+  updateGuardPath,
+  updateRollbackPath,
+  writeUpdateSkip,
+} from "./update-guard.ts";
 import { DaemonTokenManager } from "./token-manager.ts";
 import {
   setDrivetempDropinWriterForTests,
@@ -75,6 +87,9 @@ import {
 } from "../metrics/collector/sensors/drivetemp.ts";
 
 wireCommandPorts();
+// The connected-client tests dispatch real commands, which are journaled under
+// the daemon state dir; keep that in a temp folder.
+useTempCommandJournal();
 
 type EnrollIdentity = { serverId: string; keyId: string };
 
@@ -901,6 +916,149 @@ it({
       assertExists(hello);
       const daemonBuild = hello.daemonBuild as { commit?: string } | undefined;
       assertExists(daemonBuild?.commit);
+      socket.close(1000, "done");
+    } finally {
+      client.stop();
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+      Object.defineProperty(globalThis, "WebSocket", {
+        configurable: true,
+        writable: true,
+        value: originalWebSocket,
+      });
+      setOptionalEnv("TURBOPANEL_DAEMON_STATE_DIR", originalStateDir);
+      setOptionalEnv("TURBOPANEL_FORCE_ENROLL", originalForceEnroll);
+      await Deno.remove(tempDir, { recursive: true });
+    }
+  },
+});
+
+it({
+  name:
+    "InstanceClient answers a shell-open on a session that is not signed with an unverified shell-error",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  fn: async () => {
+    const tempDir = await Deno.makeTempDir();
+    const originalFetch = globalThis.fetch;
+    const originalWebSocket = globalThis.WebSocket;
+    const originalStateDir = Deno.env.get("TURBOPANEL_DAEMON_STATE_DIR");
+    const originalForceEnroll = Deno.env.get("TURBOPANEL_FORCE_ENROLL");
+    const sockets: MockWebSocket[] = [];
+
+    class TrackingWebSocket extends MockWebSocket {
+      constructor(url: string, options?: unknown) {
+        super(url, options);
+        sockets.push(this);
+      }
+    }
+
+    Object.defineProperty(globalThis, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: TrackingWebSocket,
+    });
+
+    const { signing, authToken, enroll } = await prepareVerifiedAuth();
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async (input: RequestInfo | URL) => {
+        await Promise.resolve();
+        const url = String(input);
+        if (url.endsWith("/api/health")) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        if (url.endsWith("/api/daemon/v1/jwks.json")) {
+          return jwksResponse(signing);
+        }
+        if (url.endsWith("/api/daemon/v1/auth/challenge")) {
+          return new Response(
+            JSON.stringify({
+              challengeId: "enroll-challenge",
+              nonce: "enroll-nonce",
+              at: new Date().toISOString(),
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/daemon/v1/enroll")) {
+          return new Response(JSON.stringify(enroll), {
+            status: 200,
+          });
+        }
+        if (url.endsWith("/api/daemon/v1/auth/session")) {
+          return new Response(
+            JSON.stringify({
+              token: authToken,
+              expiresAt: new Date(Date.now() + 900_000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+        });
+      },
+    });
+
+    Deno.env.set("TURBOPANEL_DAEMON_STATE_DIR", tempDir);
+    Deno.env.set("TURBOPANEL_FORCE_ENROLL", "1");
+    await Deno.writeTextFile(`${tempDir}/license.id`, "license-123\n");
+    await Deno.writeTextFile(`${tempDir}/license.token`, "token-abc\n");
+
+    const client = new InstanceClient({
+      config: {
+        kind: "url",
+        baseUrl: "https://instance.test",
+        wsBaseUrl: "wss://instance.test",
+      },
+    });
+
+    try {
+      client.start();
+      const socket = await waitFor("presence websocket", () => sockets.at(0));
+      socket.open();
+      const hello = await waitFor(
+        "hello frame",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "hello"
+          ),
+      );
+      assertExists(hello);
+      const sid = "00000000-0000-4000-8000-000000000001";
+      socket.receive({
+        type: "shell-open",
+        sid,
+        kind: "container",
+        userId: "u1",
+        container: { id: "c1" },
+        cols: 80,
+        rows: 24,
+        keySealed: "x",
+        idleSec: 120,
+        maxSec: 3600,
+        windowBytes: 16384,
+        maxFrameBytes: 16384,
+      });
+      const refusal = await waitFor(
+        "shell-error frame",
+        () =>
+          parseSentFrames(socket.sentFrames).find((frame) =>
+            frame.type === "shell-error"
+          ),
+      );
+      assertEquals(refusal.code, "unverified");
+      assertEquals(refusal.sid, sid);
       socket.close(1000, "done");
     } finally {
       client.stop();
@@ -3553,7 +3711,10 @@ it({
       );
       api.script(
         "/api/daemon/v1/secrets/decrypt",
-        () => new Response(JSON.stringify({ plaintexts: [] }), { status: 200 }),
+        () =>
+          new Response(JSON.stringify({ ok: true, sealed: [] }), {
+            status: 200,
+          }),
       );
       api.script(
         "/api/daemon/v1/deployments/secrets/rehydrate",
@@ -3580,6 +3741,9 @@ it({
 
         restoreDiskPreflight = installClientTestHooks({
           assertUpdateDiskPreflight: () => Promise.resolve(),
+          // No host docker: the attach-time addressing sync would otherwise
+          // run on its own and outlive the test body.
+          syncHostDockerNetworking: () => Promise.resolve("unchanged"),
           resolveUpdate: () =>
             Promise.reject(new MalformedManifestError("signature invalid")),
         });
@@ -3708,7 +3872,7 @@ it({
           socket.receive({
             type: "public-urls-update",
             id: "urls-1",
-            urls: ["https://203.0.113.50"],
+            hostnames: [{ host: "203.0.113.50", source: "platform-ca" }],
             at: new Date().toISOString(),
           });
           socket.receive({
@@ -3797,6 +3961,20 @@ it({
           assertEquals(networkFrame?.ok, false);
           assertEquals(networkFrame?.error, "no targets");
           await waitFor(
+            "metrics-capabilities-result",
+            () =>
+              lastFrameOfType(socket, "metrics-capabilities-result")
+                ? true
+                : undefined,
+          );
+          await waitFor(
+            "fan-out command outcome",
+            () =>
+              framesOfType(socket, "command-outcome").some((f) =>
+                (f as { id?: string }).id === "cmd-1"
+              ) || undefined,
+          );
+          await waitFor(
             "fabric-paths-result",
             () =>
               lastFrameOfType(socket, "fabric-paths-result") ? true : undefined,
@@ -3852,6 +4030,9 @@ it({
           assertEquals(sendThrew, true);
         } finally {
           client.stop();
+          // The command journal writes on its own queue; let it finish before
+          // the layout is removed.
+          await settleCommandJournalWrites();
           restoreDiskPreflight?.();
           for (const [key, value] of Object.entries(layoutPrior)) {
             if (value === undefined) Deno.env.delete(key);
@@ -4931,8 +5112,32 @@ it({
   },
 });
 
+function installDrainTestHooks(opts: {
+  onReconcile: () => Promise<void>;
+  sleep: (ms: number) => Promise<void>;
+  restart?: () => Promise<boolean>;
+  currentCommit?: string;
+}): () => void {
+  return installClientTestHooks({
+    updateResultHandoffDelayMs: 0,
+    restartDaemonService: opts.restart ?? (() => Promise.resolve(true)),
+    getBuildInfo: () => ({
+      commit: opts.currentCommit ?? "old",
+      buildId: "dev-old",
+      builtAt: "2026-08-01T00:00:00Z",
+      channel: "trunk",
+      sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+    }),
+    resolveUpdate: () => Promise.resolve(sampleUpdateInfo("commit-one")),
+    downloadRunScript: () => Promise.resolve("#!/bin/sh\nexit 0\n"),
+    executeRunReconcile: opts.onReconcile,
+    updateDrainSleep: opts.sleep,
+  });
+}
+
 it({
-  name: "update-result still carries errorCode when progress feature is closed",
+  name:
+    "update reports why it waits, waits for a running command, then installs",
   permissions: {
     env: true,
     read: true,
@@ -4942,36 +5147,237 @@ it({
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const restoreHooks = installClientTestHooks({
-      getBuildInfo: () => ({
-        commit: "old",
-        buildId: "dev-old",
-        builtAt: "2026-08-01T00:00:00Z",
-        channel: "trunk",
-        sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
-      }),
-      resolveUpdate: () =>
-        Promise.reject(new ManifestSignatureError("signature invalid")),
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      sleep: () => new Promise<void>(() => {}),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "version",
+        commit: "abc",
+        branch: "trunk",
+        instanceVersion: "0.1.1",
+        features: ["update-progress-v1"],
+        at: new Date().toISOString(),
+      });
+      await flushMicrotasks();
+      socket.receive({
+        type: "update",
+        id: "upd-drain",
+        upgradeId: "up-drain",
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "update drain to begin",
+        () => isUpdateDraining() || undefined,
+      );
+      const waiting = await waitFor(
+        "the waiting progress frame",
+        () =>
+          framesOfType(socket, "update-progress").find((f) =>
+            (f as { detail?: string }).detail?.includes(
+              "waiting for 1 running command",
+            )
+          ) as { stage?: string; unit?: string; id?: string } | undefined,
+      );
+      assertEquals(waiting.stage, "preparing");
+      assertEquals(waiting.unit, "daemon");
+      assertEquals(waiting.id, "upd-drain");
+      // The install has not started while the frame is out.
+      assertEquals(reconcileCalls, 0);
+      finishCommand();
+      await command;
+      const result = await waitFor(
+        "drained update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-drain"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(reconcileCalls, 1);
+      // A build was installed and the daemon restarts, so new work stays refused.
+      assertEquals(isUpdateDraining(), true);
+    } finally {
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "update installs at the wait cap, and a failed install takes commands again",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    let capReached!: () => void;
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.reject(new Error("install failed"));
+      },
+      sleep: () => new Promise<void>((resolve) => (capReached = resolve)),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-cap",
+        at: new Date().toISOString(),
+      });
+      await waitFor(
+        "update drain to begin",
+        () => isUpdateDraining() || undefined,
+      );
+      await waitFor("cap timer to start", () => capReached || undefined);
+      assertEquals(reconcileCalls, 0);
+      capReached();
+      const result = await waitFor(
+        "capped update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-cap"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(reconcileCalls, 1);
+      assertEquals(isUpdateDraining(), false);
+    } finally {
+      finishCommand();
+      await command;
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "a restart that throws reopens the gate and lets the next update run",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    const restoreHooks = installDrainTestHooks({
+      onReconcile: () => Promise.resolve(),
+      sleep: () => new Promise<void>(() => {}),
+      restart: () => Promise.reject(new Error("sudo not found")),
     });
     const { socket, restore } = await startConnectedClient();
     try {
       socket.receive({
         type: "update",
-        id: "upd-legacy",
-        upgradeId: "up-legacy",
+        id: "upd-throw",
         at: new Date().toISOString(),
       });
       const result = await waitFor(
-        "legacy signature update-result",
+        "restart failure update-result",
         () =>
           framesOfType(socket, "update-result").find((f) =>
-            (f as { id?: string }).id === "upd-legacy"
-          ) as { errorCode?: string; upgradeId?: string } | undefined,
+            (f as { id?: string }).id === "upd-throw"
+          ) as { ok?: boolean; errorCode?: string } | undefined,
       );
-      assertEquals(result.errorCode, "preflight_manifest");
-      assertEquals(result.upgradeId, "up-legacy");
-      assertEquals(framesOfType(socket, "update-progress").length, 0);
+      assertEquals(result.ok, false);
+      assertEquals(result.errorCode, "restart_failed");
+      assertEquals(isUpdateDraining(), false);
+      // The in-progress flag is cleared too: a second update is not refused.
+      socket.receive({
+        type: "update",
+        id: "upd-throw-2",
+        at: new Date().toISOString(),
+      });
+      const second = await waitFor(
+        "second update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-throw-2"
+          ) as { errorCode?: string } | undefined,
+      );
+      assertEquals(second.errorCode, "restart_failed");
     } finally {
+      resetBootConvergeForTests();
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name: "an update to the build already running does not drain or refuse work",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    resetBootConvergeForTests();
+    let reconcileCalls = 0;
+    const restoreHooks = installDrainTestHooks({
+      currentCommit: "commit-one",
+      onReconcile: () => {
+        reconcileCalls += 1;
+        return Promise.resolve();
+      },
+      sleep: () => new Promise<void>(() => {}),
+    });
+    let finishCommand!: () => void;
+    const command = withCommandRunning(
+      () => new Promise<void>((resolve) => (finishCommand = resolve)),
+    );
+    const { socket, restore } = await startConnectedClient();
+    try {
+      socket.receive({
+        type: "update",
+        id: "upd-same",
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "unchanged update-result",
+        () =>
+          framesOfType(socket, "update-result").find((f) =>
+            (f as { id?: string }).id === "upd-same"
+          ) as { ok?: boolean } | undefined,
+      );
+      assertEquals(result.ok, true);
+      assertEquals(reconcileCalls, 0);
+      assertEquals(isUpdateDraining(), false);
+    } finally {
+      finishCommand();
+      await command;
+      resetBootConvergeForTests();
       await restore();
       restoreHooks();
     }
@@ -5199,6 +5605,77 @@ it({
     }
   },
 });
+
+for (const skipped of ["signed-aaa", "other-build"]) {
+  it({
+    name: skipped === "signed-aaa"
+      ? "update refuses a build the guard rolled back"
+      : "update clears a skip record when a different build is asked for",
+    permissions: {
+      env: true,
+      read: true,
+      write: true,
+      sys: ["hostname", "networkInterfaces"],
+    },
+    sanitizeOps: false,
+    sanitizeResources: false,
+    fn: async () => {
+      const originalRunDir = Deno.env.get("TURBOPANEL_RUN_DIR");
+      const runDir = await Deno.makeTempDir({ prefix: "tp-skip-run-" });
+      Deno.env.set("TURBOPANEL_RUN_DIR", runDir);
+      let reconcileCalls = 0;
+      const restoreHooks = installClientTestHooks({
+        getBuildInfo: () => ({
+          commit: "old",
+          buildId: "dev-old",
+          builtAt: "2026-08-01T00:00:00Z",
+          channel: "trunk",
+          sourceUrl: "https://github.com/TurboPanel/turbopaneld/tree/old",
+        }),
+        resolveUpdate: () => Promise.resolve(sampleUpdateInfo("signed-aaa")),
+        executeRunReconcile: () => {
+          reconcileCalls += 1;
+          return Promise.resolve();
+        },
+      });
+      const { socket, restore } = await startConnectedClient();
+      try {
+        await writeUpdateSkip({
+          commit: skipped,
+          reason: "deadline",
+          at: new Date().toISOString(),
+        });
+        socket.receive({
+          type: "update",
+          id: "upd-skip",
+          at: new Date().toISOString(),
+        });
+        const result = await waitFor(
+          "skip update-result",
+          () =>
+            framesOfType(socket, "update-result").find((f) =>
+              (f as { id?: string }).id === "upd-skip"
+            ) as { ok?: boolean; errorCode?: string } | undefined,
+        );
+        if (skipped === "signed-aaa") {
+          assertEquals(result.ok, false);
+          assertEquals(result.errorCode, "update_skipped_after_rollback");
+          assertEquals(reconcileCalls, 0);
+          assertEquals((await readUpdateSkip())?.commit, "signed-aaa");
+        } else {
+          assertEquals(await readUpdateSkip(), null);
+        }
+      } finally {
+        await restore();
+        restoreHooks();
+        if (originalRunDir === undefined) {
+          Deno.env.delete("TURBOPANEL_RUN_DIR");
+        } else Deno.env.set("TURBOPANEL_RUN_DIR", originalRunDir);
+        await Deno.remove(runDir, { recursive: true });
+      }
+    },
+  });
+}
 
 it({
   name:
@@ -6812,7 +7289,7 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-ok",
-        urls: ["https://203.0.113.50"],
+        hostnames: [{ host: "203.0.113.50", source: "platform-ca" }],
         at: new Date().toISOString(),
       });
       const urls = await waitFor(
@@ -7182,14 +7659,20 @@ it({
     const emptyConfigDir = await Deno.makeTempDir({ prefix: "tp-no-ca-" });
     // A private-network overlay origin: run.sh comes from the instance host,
     // which is neither publicly trusted nor backed by a CA file here.
-    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://huey.lan:8443");
-    Deno.env.set("TURBOPANEL_DL_BASE", "https://huey.lan:8443/downloads");
+    Deno.env.set(
+      "TURBOPANEL_INSTANCE_URL",
+      "https://server-a.example.lan:8443",
+    );
+    Deno.env.set(
+      "TURBOPANEL_DL_BASE",
+      "https://server-a.example.lan:8443/downloads",
+    );
     Deno.env.set("TURBOPANEL_CONFIG_DIR", emptyConfigDir);
     Deno.env.delete("TURBOPANEL_INSTANCE_CA");
     // Even an operator-set release-insecure flag must not reach this path.
     Deno.env.set("TURBOPANEL_RELEASE_TLS_INSECURE", "1");
     const { socket, restore } = await startConnectedClient({
-      instanceBaseUrl: "https://huey.lan:8443",
+      instanceBaseUrl: "https://server-a.example.lan:8443",
     });
     try {
       socket.receive({
@@ -7245,12 +7728,18 @@ it({
     const caDir = await Deno.makeTempDir({ prefix: "tp-ca-" });
     const caPath = `${caDir}/instance-ca.pem`;
     await Deno.writeTextFile(caPath, "-----BEGIN CERTIFICATE-----\n");
-    Deno.env.set("TURBOPANEL_INSTANCE_URL", "https://huey.lan:8443");
-    Deno.env.set("TURBOPANEL_DL_BASE", "https://huey.lan:8443/downloads");
+    Deno.env.set(
+      "TURBOPANEL_INSTANCE_URL",
+      "https://server-a.example.lan:8443",
+    );
+    Deno.env.set(
+      "TURBOPANEL_DL_BASE",
+      "https://server-a.example.lan:8443/downloads",
+    );
     Deno.env.set("TURBOPANEL_INSTANCE_CA", caPath);
     Deno.env.set("TURBOPANEL_RELEASE_TLS_INSECURE", "1");
     const { socket, restore } = await startConnectedClient({
-      instanceBaseUrl: "https://huey.lan:8443",
+      instanceBaseUrl: "https://server-a.example.lan:8443",
     });
     try {
       socket.receive({
@@ -7267,7 +7756,10 @@ it({
       );
       assertEquals(result.ok, true, result.error);
       assertEquals(downloads.length, 1);
-      assertEquals(downloads[0]?.url, "https://huey.lan:8443/run.sh");
+      assertEquals(
+        downloads[0]?.url,
+        "https://server-a.example.lan:8443/run.sh",
+      );
       assertEquals(downloads[0]?.opts, { insecureTls: false, caPath });
     } finally {
       await restore();
@@ -8239,20 +8731,32 @@ it({
       const collectsBefore = collects.length;
       socket.close(1000, "connection lost");
 
-      const socket2 = await waitFor(
-        "reconnect websocket",
-        () => sockets.at(1),
-        5_000,
-      );
-      socket2.open();
-      await flushMicrotasks();
-      // Fresh lease manager: back to the baseline cadence despite the
-      // unexpired lease-b, so a collect still lands after the reconnect.
-      await waitFor(
-        "first collect after reconnect",
-        () => collects.length > collectsBefore || undefined,
-        5_000,
-      );
+      // Open every socket the reconnect loop dials after the dropped one (a
+      // transient failed attempt dials another) instead of trusting that
+      // exactly one is ever created, and fail with the socket states when no
+      // collect lands rather than a bare timeout.
+      let opened = 1;
+      try {
+        await waitFor(
+          "first collect after reconnect",
+          () => {
+            while (opened < sockets.length) {
+              sockets[opened++].open();
+            }
+            // Fresh lease manager: back to the baseline cadence despite the
+            // unexpired lease-b, so a collect still lands after the reconnect.
+            return collects.length > collectsBefore || undefined;
+          },
+          15_000,
+        );
+      } catch (err) {
+        const states = sockets.map((candidate) => candidate.readyState);
+        throw new Error(
+          `${(err as Error).message} (sockets: ${sockets.length}, states: ${
+            states.join(",")
+          })`,
+        );
+      }
     } finally {
       client.stop();
       restoreClientTime();
@@ -8275,16 +8779,20 @@ it({
   },
 });
 
-/** `/secrets/decrypt` for `startConnectedClient`: opens via `decrypt`, or to nothing. */
-function fakeDecryptResponse(
+/**
+ * `/secrets/decrypt` for `startConnectedClient`: opens via `decrypt`, or to
+ * nothing, and seals each answer to the client's own sealing key (read from
+ * its state folder), as the control plane does.
+ */
+async function fakeDecryptResponse(
   init: RequestInit | undefined,
   decrypt: ((ciphertexts: string[]) => (string | null)[]) | undefined,
-): Response {
+): Promise<Response> {
   const body = JSON.parse(String(init?.body ?? "{}")) as {
     ciphertexts?: string[];
   };
   const plaintexts = decrypt ? decrypt(body.ciphertexts ?? []) : [];
-  return new Response(JSON.stringify({ plaintexts }), { status: 200 });
+  return await sealedDecryptResponse(plaintexts);
 }
 
 const SEALED_KEY_ENVELOPE = "tpdaemon.v1.server.key.sealed-uploaded-key";
@@ -8326,7 +8834,6 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-sealed",
-        urls: ["https://panel.example.test"],
         hostnames: [
           { host: "panel.example.test", source: "platform-ca" },
           {
@@ -8391,7 +8898,6 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-unopenable",
-        urls: ["https://uploaded.example.test"],
         hostnames: [{
           host: "uploaded.example.test",
           source: "uploaded",
@@ -8420,7 +8926,127 @@ it({
 
 it({
   name:
-    "tunnel-token opens a sealed token, still takes a legacy one, and refuses an empty message",
+    "public-urls-update refuses a plaintext keyPem, without applying or opening anything",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    let decryptCalls = 0;
+    const { socket, restore } = await startConnectedClient({
+      decrypt: (ciphertexts) => {
+        decryptCalls += 1;
+        return openSealedFixtures(ciphertexts);
+      },
+    });
+    try {
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-plain-key",
+        hostnames: [{
+          host: "uploaded.example.test",
+          source: "uploaded",
+          uploadedCertId: "cert-1",
+          certPem: "uploaded-cert-pem",
+          keyPem: "plain-key-pem",
+        }],
+        at: new Date().toISOString(),
+      });
+      const result = await waitFor(
+        "plaintext-key public-urls-update-result",
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === "urls-plain-key"
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+      assertEquals(result.ok, false);
+      assertEquals(
+        String(result.error).includes(
+          "certificate key for uploaded.example.test arrived unsealed",
+        ),
+        true,
+      );
+      assertEquals(decryptCalls, 0);
+      assertEquals(applyCalls, 0);
+    } finally {
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "public-urls-update without hostnames fails, without applying, and one with hostnames applies",
+  permissions: {
+    env: true,
+    read: true,
+    write: true,
+    sys: ["hostname", "networkInterfaces"],
+  },
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    let applyCalls = 0;
+    const restoreHooks = installClientTestHooks({
+      applyPublicUrls: () => {
+        applyCalls += 1;
+        return Promise.resolve();
+      },
+    });
+    const { socket, restore } = await startConnectedClient();
+    const resultFor = (id: string) =>
+      waitFor(
+        `public-urls-update-result ${id}`,
+        () =>
+          framesOfType(socket, "public-urls-update-result").find((f) =>
+            (f as { id?: string }).id === id
+          ) as { ok?: boolean; error?: string } | undefined,
+      );
+    try {
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-no-hostnames",
+        at: new Date().toISOString(),
+      });
+      const refused = await resultFor("urls-no-hostnames");
+      assertEquals(refused.ok, false);
+      assertEquals(
+        String(refused.error).includes("carried no hostnames"),
+        true,
+      );
+      assertEquals(applyCalls, 0);
+
+      socket.receive({
+        type: "public-urls-update",
+        id: "urls-with-hostnames",
+        hostnames: [{ host: "203.0.113.50", source: "platform-ca" }],
+        at: new Date().toISOString(),
+      });
+      const accepted = await resultFor("urls-with-hostnames");
+      assertEquals(accepted.ok, true);
+      assertEquals(applyCalls, 1);
+    } finally {
+      await restore();
+      restoreHooks();
+    }
+  },
+});
+
+it({
+  name:
+    "tunnel-token opens a sealed token, refuses a plaintext one and an empty message, and treats an empty plain token as teardown",
   permissions: {
     env: true,
     read: true,
@@ -8459,13 +9085,14 @@ it({
       });
       assertEquals((await resultFor("tun-sealed")).ok, true);
 
+      // A plaintext token is refused and never written.
       socket.receive({
         type: "tunnel-token",
         id: "tun-legacy",
         token: "legacy-plaintext-token",
         at: new Date().toISOString(),
       });
-      assertEquals((await resultFor("tun-legacy")).ok, true);
+      assertEquals((await resultFor("tun-legacy")).ok, false);
 
       // Neither field: a failure, never an empty token that tears the tunnel down.
       socket.receive({
@@ -8476,7 +9103,16 @@ it({
       const empty = await resultFor("tun-empty");
       assertEquals(empty.ok, false);
 
-      assertEquals(written, [OPENED_TUNNEL_TOKEN, "legacy-plaintext-token"]);
+      // The empty plain token is the teardown: accepted and written as "".
+      socket.receive({
+        type: "tunnel-token",
+        id: "tun-teardown",
+        token: "",
+        at: new Date().toISOString(),
+      });
+      assertEquals((await resultFor("tun-teardown")).ok, true);
+
+      assertEquals(written, [OPENED_TUNNEL_TOKEN, ""]);
     } finally {
       await restore();
       restoreHooks();
@@ -8641,7 +9277,6 @@ it({
       socket.receive({
         type: "public-urls-update",
         id: "urls-not-host",
-        urls: ["https://panel.example.test"],
         hostnames: [{ host: "panel.example.test", source: "platform-ca" }],
         at: new Date().toISOString(),
       });

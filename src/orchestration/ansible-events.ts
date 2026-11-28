@@ -1,4 +1,4 @@
-import { logDebug, logError, logInfo } from "../util/logger.ts";
+import { logDebug, logError, logInfo, logWarn } from "../util/logger.ts";
 import { logComponent, presentStatusLine } from "./presentation.ts";
 import { runStreamingLines } from "./exec.ts";
 import { noteRepoKeyChanges, type RepoKeyLedger } from "./repo-key-changes.ts";
@@ -211,7 +211,7 @@ export class AnsibleRunSummaryCollector {
 }
 
 export type AnsibleEventLogLine = {
-  level: "DEBUG" | "INFO" | "ERROR";
+  level: "DEBUG" | "INFO" | "WARN" | "ERROR";
   component: string;
   message: string;
 };
@@ -240,6 +240,22 @@ export function formatAnsibleEventLog(
     }
     case "v2_runner_on_ok": {
       const okEvent = event as AnsibleTaskResultEvent;
+      const warning = Object.values(okEvent.hosts)
+        .map((host) => host.msg)
+        .find((msg): msg is string =>
+          typeof msg === "string" && msg.startsWith("WARNING:")
+        );
+      // A debug task that says WARNING: is a deliberate, visible notice (a
+      // step that fails open); keep its text in the log, not just its name.
+      if (warning) {
+        return {
+          level: "WARN",
+          component,
+          message: presentStatusLine(
+            "[warning] " + okEvent.task.name + ": " + warning,
+          ),
+        };
+      }
       const anyChanged = Object.values(okEvent.hosts).some((host) =>
         host.changed === true
       );
@@ -300,6 +316,9 @@ export function logAnsibleEvent(event: AnsibleEvent): void {
       break;
     case "INFO":
       logInfo(line.component, line.message);
+      break;
+    case "WARN":
+      logWarn(line.component, line.message);
       break;
     case "ERROR":
       logError(line.component, line.message);

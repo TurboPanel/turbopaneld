@@ -4,10 +4,11 @@ import { resolveLayout } from "../paths/layout.ts";
 import { withTempLayout } from "../testing/temp-layout.ts";
 import {
   classifyHostBoot,
+  classifyHostBootRecord,
   hostBootPath,
   markHostCleanShutdown,
   readHostBootRecord,
-  recordHostBoot,
+  recordHostBootPersist,
 } from "./host-boot.ts";
 
 /**
@@ -21,6 +22,16 @@ const test = Deno.test.bind(Deno);
 const BOOT_A = "11111111-1111-4111-8111-111111111111";
 const BOOT_B = "22222222-2222-4222-8222-222222222222";
 const NOW = "2026-10-06T10:00:00.000Z";
+
+/** What the daemon's start-up does: classify the previous record, then persist this run's. */
+async function recordHostBoot(
+  layout: Parameters<typeof classifyHostBootRecord>[0],
+  deps: Parameters<typeof classifyHostBootRecord>[1],
+) {
+  const kind = await classifyHostBootRecord(layout, deps);
+  await recordHostBootPersist(layout, deps);
+  return kind;
+}
 
 test("classifyHostBoot tells a power cut from a planned reboot and a daemon restart", () => {
   const running = { bootId: BOOT_A, startedAt: NOW };

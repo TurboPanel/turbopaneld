@@ -3,6 +3,8 @@ import {
   acknowledgeCommandOutcome,
   answerRepeatedDispatch,
   commandRecoveryReport,
+  commandsQuiet,
+  commandStateReport,
   deliverCommandOutcome,
   flushCommandOutcomes,
   interruptedFacts,
@@ -10,11 +12,13 @@ import {
   noteCommandProgress,
   noteSessionOpen,
   OUTCOME_BURST_MAX,
+  primeCommandJournal,
   PROGRESS_JOURNAL_INTERVAL_MS,
   RESEND_INTERVAL_MS,
   resetCommandOutboxForTests,
   sendCommandFrame,
   settleCommandJournalWrites,
+  STATE_MAX_IDS,
   UNACKED_MAX_ENTRIES,
   UNACKED_RETENTION_MS,
 } from "./command-outbox.ts";
@@ -48,6 +52,17 @@ async function withState(fn: () => Promise<void>): Promise<void> {
   }
 }
 
+/** Journal files holding a real outcome, not an id-only tombstone. */
+async function liveJournalNames(): Promise<string[]> {
+  const dir = `${Deno.env.get("TURBOPANEL_STATE_DIR")}/commands/inflight`;
+  const live: string[] = [];
+  for (const name of await journalNames()) {
+    const entry = JSON.parse(await Deno.readTextFile(`${dir}/${name}`));
+    if (!entry.tombstone) live.push(name);
+  }
+  return live;
+}
+
 async function journalNames(): Promise<string[]> {
   const dir = `${Deno.env.get("TURBOPANEL_STATE_DIR")}/commands/inflight`;
   try {
@@ -56,10 +71,6 @@ async function journalNames(): Promise<string[]> {
     return [];
   }
 }
-
-const recoveringPeer = {
-  supports: (feature: string) => feature === "command-recovery-v1",
-};
 
 function progressMessage() {
   return {
@@ -84,7 +95,7 @@ function runningPlan(current: string): CommandProgress {
 test("a repeated dispatch of a finished command gets its kept outcome on the new socket", async () => {
   await withState(async () => {
     const first = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(first.ws, recoveringPeer);
+    await flushCommandOutcomes(first.ws);
     await markCommandInFlight("cmd-rep");
     first.ws.readyState = WebSocket.CLOSED;
     await deliverCommandOutcome(first.ws, {
@@ -149,7 +160,7 @@ test("a socket that just opened gets held outcomes but every journal is kept", a
     assertEquals(await journalNames(), ["cmd-open.json"]);
 
     // The attach frame then says results are confirmed: still kept until the ack.
-    await flushCommandOutcomes(opened.ws, recoveringPeer);
+    await flushCommandOutcomes(opened.ws);
     assertEquals(await journalNames(), ["cmd-open.json"]);
     await acknowledgeCommandOutcome("cmd-open");
     assertEquals(await journalNames(), []);
@@ -159,10 +170,10 @@ test("a socket that just opened gets held outcomes but every journal is kept", a
 test("a running command's frames move to the socket attached after a reconnect", async () => {
   await withState(async () => {
     const dispatched = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(dispatched.ws, recoveringPeer);
+    await flushCommandOutcomes(dispatched.ws);
     dispatched.ws.readyState = WebSocket.CLOSED;
     const reconnected = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(reconnected.ws, recoveringPeer);
+    await flushCommandOutcomes(reconnected.ws);
     assertEquals(
       sendCommandFrame(dispatched.ws, progressMessage()),
       true,
@@ -186,11 +197,13 @@ test("an outcome sent into a closed socket is held and delivered on attach", asy
     const open = socket(WebSocket.OPEN);
     await flushCommandOutcomes(open.ws);
     assertEquals(open.sent.map((m) => [m.id, m.ok]), [["cmd-1", true]]);
+    assertEquals(await journalNames(), ["cmd-1.json"]);
+    await acknowledgeCommandOutcome("cmd-1");
     assertEquals(await journalNames(), []);
   });
 });
 
-test("an outcome sent on an open socket clears the journal", async () => {
+test("an outcome sent on an open socket stays journaled until acknowledged", async () => {
   await withState(async () => {
     await markCommandInFlight("cmd-2");
     const open = socket(WebSocket.OPEN);
@@ -200,6 +213,8 @@ test("an outcome sent on an open socket clears the journal", async () => {
       ok: true,
     });
     assertEquals(open.sent.length, 1);
+    assertEquals(await journalNames(), ["cmd-2.json"]);
+    await acknowledgeCommandOutcome("cmd-2");
     assertEquals(await journalNames(), []);
   });
 });
@@ -242,6 +257,8 @@ test("a command that finishes after a reconnect during the run is sent on the ne
     });
     assertEquals(oldWs.sent.length, 0);
     assertEquals(fresh.sent.map((m) => [m.id, m.ok]), [["cmd-5", true]]);
+    assertEquals(await journalNames(), ["cmd-5.json"]);
+    await acknowledgeCommandOutcome("cmd-5");
     assertEquals(await journalNames(), []);
   });
 });
@@ -262,16 +279,13 @@ test("a held outcome survives a daemon kill and is answered from the journal", a
     assertEquals(open.sent.length, 1);
     assertEquals(open.sent[0].ok, true);
     assertEquals(open.sent[0].result, { done: 1 });
+    assertEquals(await journalNames(), ["cmd-6.json"]);
+    await acknowledgeCommandOutcome("cmd-6");
     assertEquals(await journalNames(), []);
   });
 });
 
-// --- command-recovery-v1: results stay until the control plane confirms them ---
-
-const recovering = {
-  supports: (feature: string) => feature === "command-recovery-v1",
-};
-const older = { supports: () => false };
+// --- results stay until the control plane confirms them ---
 
 /** A fake clock whose timers fire only when the test says so. */
 function fakeTime() {
@@ -310,7 +324,7 @@ test("with the feature a sent outcome stays journaled until it is acknowledged",
   await withState(async () => {
     fakeTime();
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     await markCommandInFlight("cmd-r1");
     await deliverCommandOutcome(open.ws, {
       type: "command-outcome",
@@ -332,7 +346,7 @@ test("an unacknowledged outcome is sent again on the interval and on the next at
   await withState(async () => {
     const time = fakeTime();
     const first = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(first.ws, recovering);
+    await flushCommandOutcomes(first.ws);
     await markCommandInFlight("cmd-r2");
     await deliverCommandOutcome(first.ws, {
       type: "command-outcome",
@@ -346,7 +360,7 @@ test("an unacknowledged outcome is sent again on the interval and on the next at
     assertEquals(first.sent.length, 2);
     assertEquals(time.scheduled(), 1);
     const second = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(second.ws, recovering);
+    await flushCommandOutcomes(second.ws);
     assertEquals(second.sent.map((m) => m.id), ["cmd-r2"]);
     await acknowledgeCommandOutcome("cmd-r2");
     time.fire();
@@ -358,7 +372,7 @@ test("an outcome that could not be sent at all is sent on attach and still waits
   await withState(async () => {
     fakeTime();
     const closed = socket(WebSocket.CLOSED);
-    await flushCommandOutcomes(closed.ws, recovering);
+    await flushCommandOutcomes(closed.ws);
     await markCommandInFlight("cmd-r3");
     await deliverCommandOutcome(closed.ws, {
       type: "command-outcome",
@@ -367,7 +381,7 @@ test("an outcome that could not be sent at all is sent on attach and still waits
       error: "boom",
     });
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     assertEquals(open.sent.map((m) => [m.id, m.error]), [["cmd-r3", "boom"]]);
     assertEquals(await journalNames(), ["cmd-r3.json"]);
   });
@@ -377,7 +391,7 @@ test("a restart after the outcome was journaled sends that outcome, not an inter
   await withState(async () => {
     fakeTime();
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     await markCommandInFlight("cmd-r4");
     await deliverCommandOutcome(open.ws, {
       type: "command-outcome",
@@ -387,7 +401,7 @@ test("a restart after the outcome was journaled sends that outcome, not an inter
     });
     fakeTime(); // the daemon restarted: only the journal is left
     const fresh = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(fresh.ws, recovering);
+    await flushCommandOutcomes(fresh.ws);
     assertEquals(fresh.sent.map((m) => [m.id, m.ok, m.result]), [
       ["cmd-r4", true, { done: 1 }],
     ]);
@@ -404,7 +418,7 @@ test("a restart mid-command answers interrupted with the journaled facts and kee
     await settleCommandJournalWrites();
     fakeTime(); // killed mid-deploy
     const fresh = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(fresh.ws, recovering);
+    await flushCommandOutcomes(fresh.ws);
     assertEquals(fresh.sent.length, 1);
     const reply = fresh.sent[0];
     assertEquals(reply.ok, false);
@@ -420,7 +434,7 @@ test("a restart mid-command answers interrupted with the journaled facts and kee
     assertEquals(await journalNames(), ["cmd-r5.json"]);
     fakeTime(); // restarted again before the ack: the same answer, not a second kind
     const again = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(again.ws, recovering);
+    await flushCommandOutcomes(again.ws);
     assertEquals(again.sent[0].result, reply.result);
   });
 });
@@ -497,23 +511,6 @@ test("the step plan is journaled on a step change and then at most every interva
   });
 });
 
-test("an older control plane keeps the old behaviour: removed once sent", async () => {
-  await withState(async () => {
-    fakeTime();
-    const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, older);
-    await markCommandInFlight("cmd-r7");
-    await deliverCommandOutcome(open.ws, {
-      type: "command-outcome",
-      id: "cmd-r7",
-      ok: true,
-    });
-    assertEquals(open.sent.length, 1);
-    assertEquals(await journalNames(), []);
-    assertEquals(commandRecoveryReport(), undefined);
-  });
-});
-
 test("the report lists running and unconfirmed ids and stays within the bounds", async () => {
   await withState(async () => {
     fakeTime();
@@ -527,7 +524,7 @@ test("unconfirmed outcomes beyond the entry cap are dropped oldest first with a 
   await withState(async () => {
     fakeTime();
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     const ids = Array.from(
       { length: UNACKED_MAX_ENTRIES + 2 },
       (_, i) => `cap-${i}`,
@@ -541,8 +538,8 @@ test("unconfirmed outcomes beyond the entry cap are dropped oldest first with a 
         at: "2026-10-22T10:00:00.000Z",
       });
     }
-    await flushCommandOutcomes(open.ws, recovering);
-    const names = await journalNames();
+    await flushCommandOutcomes(open.ws);
+    const names = await liveJournalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("cap-0.json"), false);
   });
@@ -552,7 +549,7 @@ test("an unconfirmed outcome past the retention is dropped, one without a readab
   await withState(async () => {
     const time = fakeTime();
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     const outcomes: Array<[string, unknown]> = [
       ["old", "2026-10-22T10:00:00.000Z"],
       ["no-time", { not: "a time" }],
@@ -567,8 +564,8 @@ test("an unconfirmed outcome past the retention is dropped, one without a readab
       });
     }
     time.advance(UNACKED_RETENTION_MS + 1);
-    await flushCommandOutcomes(open.ws, recovering);
-    assertEquals(await journalNames(), ["no-time.json"]);
+    await flushCommandOutcomes(open.ws);
+    assertEquals(await liveJournalNames(), ["no-time.json"]);
   });
 });
 
@@ -576,7 +573,7 @@ test("past the entry cap the outcomes recorded first are dropped, whatever order
   await withState(async () => {
     fakeTime();
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     // They arrive newest first: order-<i> carries an older time as i grows.
     const count = UNACKED_MAX_ENTRIES + 2;
     for (let i = 0; i < count; i++) {
@@ -590,8 +587,8 @@ test("past the entry cap the outcomes recorded first are dropped, whatever order
           .toISOString(),
       });
     }
-    await flushCommandOutcomes(open.ws, recovering);
-    const names = await journalNames();
+    await flushCommandOutcomes(open.ws);
+    const names = await liveJournalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("order-0.json"), true);
     assertEquals(names.includes(`order-${count - 1}.json`), false);
@@ -614,12 +611,9 @@ function busiestMinute(sent: Record<string, unknown>[]): number {
 }
 
 /** Keep `count` results unconfirmed while the socket is down. */
-async function keepWhileDown(
-  count: number,
-  peer: { supports(feature: string): boolean } = recovering,
-) {
+async function keepWhileDown(count: number) {
   const closed = socket(WebSocket.CLOSED);
-  await flushCommandOutcomes(closed.ws, peer);
+  await flushCommandOutcomes(closed.ws);
   const ids = Array.from({ length: count }, (_, i) => `burst-${i}`);
   for (const id of ids) {
     await markCommandInFlight(id);
@@ -637,8 +631,8 @@ test("a reconnect with more kept results than the control plane takes per minute
     const time = fakeTime();
     const ids = await keepWhileDown(UNACKED_MAX_ENTRIES);
     const fresh = socket(WebSocket.OPEN);
-    noteSessionOpen(fresh.ws, { ...recovering, known: () => false });
-    await flushCommandOutcomes(fresh.ws, recovering);
+    noteSessionOpen(fresh.ws);
+    await flushCommandOutcomes(fresh.ws);
     // The attach does not send again what went out when the socket opened.
     assertEquals(fresh.sent.length, OUTCOME_BURST_MAX);
     assertEquals(new Set(fresh.sent.map((m) => m.id)).size, OUTCOME_BURST_MAX);
@@ -658,7 +652,7 @@ test("journal entries answered after a restart are paced too", async () => {
     const ids = await keepWhileDown(UNACKED_MAX_ENTRIES);
     const time = fakeTime(); // the daemon restarted: only the journals are left
     const fresh = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(fresh.ws, recovering);
+    await flushCommandOutcomes(fresh.ws);
     assertEquals(fresh.sent.length, OUTCOME_BURST_MAX);
     for (let tick = 0; tick < 6; tick++) {
       time.advance(RESEND_INTERVAL_MS);
@@ -669,29 +663,11 @@ test("journal entries answered after a restart are paced too", async () => {
   });
 });
 
-test("an older control plane gets a dead daemon's results paced and every journal still clears", async () => {
-  await withState(async () => {
-    const count = OUTCOME_BURST_MAX + 10;
-    await keepWhileDown(count, older);
-    const time = fakeTime();
-    const fresh = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(fresh.ws, older);
-    assertEquals(fresh.sent.length, OUTCOME_BURST_MAX);
-    assertEquals((await journalNames()).length, count - OUTCOME_BURST_MAX);
-    time.advance(RESEND_INTERVAL_MS);
-    time.fire();
-    await settleCommandJournalWrites();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    assertEquals(fresh.sent.length, count);
-    assertEquals(await journalNames(), []);
-  });
-});
-
 test("a result answered after a restart ages from when it was journaled, oldest dropped first", async () => {
   await withState(async () => {
     const first = fakeTime();
     const open = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(open.ws, recovering);
+    await flushCommandOutcomes(open.ws);
     const count = UNACKED_MAX_ENTRIES + 1;
     for (let i = 0; i < count; i++) {
       await markCommandInFlight(`aged-${i}`);
@@ -707,8 +683,8 @@ test("a result answered after a restart ages from when it was journaled, oldest 
     }
     fakeTime(); // restarted
     const fresh = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(fresh.ws, recovering);
-    let names = await journalNames();
+    await flushCommandOutcomes(fresh.ws);
+    let names = await liveJournalNames();
     assertEquals(names.length, UNACKED_MAX_ENTRIES);
     assertEquals(names.includes("aged-0.json"), false);
     assertEquals(names.includes(`aged-${count - 1}.json`), true);
@@ -716,9 +692,112 @@ test("a result answered after a restart ages from when it was journaled, oldest 
     // Restarted again a week later: every one is past the retention.
     fakeTime().advance(UNACKED_RETENTION_MS + count * 1000 + 1);
     const after = socket(WebSocket.OPEN);
-    await flushCommandOutcomes(after.ws, recovering);
+    await flushCommandOutcomes(after.ws);
     names = await journalNames();
     assertEquals(names, []);
     assertEquals(after.sent.length, 0);
+  });
+});
+
+test("commandState is incomplete until the journal is read, then lists a killed daemon's ids", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-old");
+    const first = commandStateReport();
+    resetCommandOutboxForTests(); // restart: nothing in memory
+    const before = commandStateReport();
+    assertEquals(before.known, []);
+    assertEquals(before.complete, false);
+    await primeCommandJournal();
+    const after = commandStateReport();
+    assertEquals(after.known, ["cmd-old"]);
+    assertEquals(after.complete, true);
+    assertEquals(typeof after.processStartId, "string");
+    assertEquals(after.processStartId, first.processStartId);
+    // Acknowledging forgets the id.
+    await acknowledgeCommandOutcome("cmd-old");
+    assertEquals(commandStateReport().known, []);
+  });
+});
+
+test("commandState is complete and empty for a fresh state directory", async () => {
+  await withState(async () => {
+    await primeCommandJournal();
+    assertEquals(commandStateReport().known, []);
+    assertEquals(commandStateReport().complete, true);
+    assertEquals(commandsQuiet(), true);
+  });
+});
+
+test("commandState lists running and unconfirmed ids and is incomplete past the cap", async () => {
+  await withState(async () => {
+    await primeCommandJournal();
+    await markCommandInFlight("run-1");
+    assertEquals(commandStateReport().known, ["run-1"]);
+    assertEquals(commandsQuiet(), false);
+    for (let i = 0; i < STATE_MAX_IDS; i++) await markCommandInFlight(`c-${i}`);
+    const report = commandStateReport();
+    assertEquals(report.known.length, STATE_MAX_IDS);
+    assertEquals(report.complete, false);
+  });
+});
+
+test("an outcome dropped for the entry cap keeps its id in commandState across a restart", async () => {
+  await withState(async () => {
+    await primeCommandJournal();
+    const closed = socket(WebSocket.CLOSED);
+    const total = UNACKED_MAX_ENTRIES + 3;
+    for (let i = 0; i < total; i++) {
+      await markCommandInFlight(`o-${i}`);
+      await deliverCommandOutcome(closed.ws, {
+        type: "command-outcome",
+        id: `o-${i}`,
+        ok: true,
+      });
+    }
+    await flushCommandOutcomes(socket(WebSocket.OPEN).ws);
+    await settleCommandJournalWrites();
+    const ids = Array.from({ length: total }, (_, i) => `o-${i}`);
+    const held = commandStateReport();
+    assertEquals(held.complete, true);
+    for (const id of ids) assertEquals(held.known.includes(id), true, id);
+    // After a restart the ids are still listed and no outcome is answered
+    // again for the dropped ones.
+    resetCommandOutboxForTests();
+    await primeCommandJournal();
+    const after = commandStateReport();
+    for (const id of ids) assertEquals(after.known.includes(id), true, id);
+    await flushCommandOutcomes(socket(WebSocket.OPEN).ws);
+    assertEquals(
+      (commandRecoveryReport()?.unacked.length ?? 0) <= UNACKED_MAX_ENTRIES,
+      true,
+    );
+    // A real acknowledgement still forgets one.
+    await acknowledgeCommandOutcome("o-0");
+    assertEquals(commandStateReport().known.includes("o-0"), false);
+  });
+});
+
+test("a command whose journal entry cannot be written is refused", async () => {
+  await withState(async () => {
+    assertEquals(await markCommandInFlight("bad/id"), false);
+    assertEquals(commandRecoveryReport(), undefined);
+    // The commands folder is a file, so the journal directory cannot be made.
+    const dir = Deno.env.get("TURBOPANEL_STATE_DIR")!;
+    await Deno.writeTextFile(`${dir}/commands`, "x");
+    assertEquals(await markCommandInFlight("cmd-nowrite"), false);
+    assertEquals(commandRecoveryReport(), undefined);
+    assertEquals(commandsQuiet(), true);
+  });
+});
+
+test("crash-left temp files are removed at startup", async () => {
+  await withState(async () => {
+    await markCommandInFlight("cmd-t");
+    const dir = `${Deno.env.get("TURBOPANEL_STATE_DIR")}/commands/inflight`;
+    await Deno.writeTextFile(`${dir}/cmd-x.json.abc.tmp`, "{");
+    resetCommandOutboxForTests();
+    await primeCommandJournal();
+    assertEquals(await journalNames(), ["cmd-t.json"]);
+    assertEquals(commandStateReport().known, ["cmd-t"]);
   });
 });

@@ -203,7 +203,7 @@ export function copyMountArg(
   const kind = mount.type === "volume"
     ? `type=volume,src=${mount.name}`
     : `type=bind,src=${mount.path}`;
-  return readonly ? `${kind},dst=${target},readonly` : `${kind},dst=${target}`;
+  return `${kind},dst=${target},readonly=${readonly}`;
 }
 
 /** The helper invocation that writes the copy's gzipped tar to stdout. */

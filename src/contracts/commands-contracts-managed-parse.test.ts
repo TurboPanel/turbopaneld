@@ -82,6 +82,7 @@ const VALID_INGRESS = {
     {
       managedId: MANAGED_ID,
       engine: "postgres",
+      family: "pgsql",
       protocolPort: 5432,
       writerHostgroup: 0,
       readerHostgroup: 1,
@@ -1816,4 +1817,21 @@ test("managed.ingress.reconcile app-login limits are optional and validated", ()
   ) {
     assertThrows(() => user(bad), TypeError);
   }
+});
+
+test("parseManagedIngressReconcilePayload rejects a cluster without family", () => {
+  assertEquals(
+    parseManagedIngressReconcilePayload(VALID_INGRESS).clusters[0]?.family,
+    "pgsql",
+  );
+  const { family: _family, ...noFamily } = VALID_INGRESS.clusters[0];
+  assertThrows(
+    () =>
+      parseManagedIngressReconcilePayload({
+        ...VALID_INGRESS,
+        clusters: [noFamily],
+      }),
+    TypeError,
+    "Invalid managed.ingress.reconcile cluster family",
+  );
 });

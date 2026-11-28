@@ -32,27 +32,3 @@
     owner: root
     group: root
     mode: "0700"
-
-# Retired with the shared build account: the per-project caches it owned
-# (shared by every site owner's builds), its slice and the account itself. A
-# cache is only a cache: the next build fills its own.
-- name: Remove the retired shared build cache
-  ansible.builtin.file:
-    path: "{{ build_root }}/cache"
-    state: absent
-
-- name: Remove the retired build slice
-  ansible.builtin.file:
-    path: "/etc/systemd/system/{{ build_retired_slice }}"
-    state: absent
-  notify: Reload systemd for the build slice
-
-- name: Remove the retired shared build account
-  ansible.builtin.user:
-    name: "{{ build_retired_user }}"
-    state: absent
-
-- name: Remove the retired shared build group
-  ansible.builtin.group:
-    name: "{{ build_retired_user }}"
-    state: absent

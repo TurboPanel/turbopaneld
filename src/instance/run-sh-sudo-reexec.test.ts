@@ -55,30 +55,24 @@ async function reexec(
 
 const LICENSE = btoa("lic-id:lic-secret").replaceAll("+", "-")
   .replaceAll("/", "_");
-const TUNNEL = "tunnel-secret-value";
 
-test("the sudo re-exec passes the license and tunnel token in the environment, not argv", async () => {
+test("the sudo re-exec passes the license in the environment, not argv", async () => {
   if (Deno.uid() === 0) return; // root never re-execs
   const result = await reexec([
     "--license",
     LICENSE,
-    "--tunnel-token",
-    TUNNEL,
     "--host",
     "https://cp.example.com",
   ]);
   assertEquals(result.status, 0, result.stderr);
   assertEquals(result.argv.includes(LICENSE), false, result.argv);
-  assertEquals(result.argv.includes(TUNNEL), false, result.argv);
   assertEquals(result.argv.includes("--license"), false, result.argv);
-  assertEquals(result.argv.includes("--tunnel-token"), false, result.argv);
   assertStringIncludes(
     result.argv,
-    "--preserve-env=TURBOPANEL_LICENSE,TURBOPANEL_TUNNEL_TOKEN\nsh\n-s\n--\n",
+    "--preserve-env=TURBOPANEL_LICENSE\nsh\n-s\n--\n",
   );
   assertStringIncludes(result.argv, "--host\nhttps://cp.example.com\n");
   assertStringIncludes(result.env, `TURBOPANEL_LICENSE=${LICENSE}\n`);
-  assertStringIncludes(result.env, `TURBOPANEL_TUNNEL_TOKEN=${TUNNEL}\n`);
 });
 
 test("the sudo re-exec preserves only the secrets that are set", async () => {
@@ -90,7 +84,6 @@ test("the sudo re-exec preserves only the secrets that are set", async () => {
     result.argv,
     "--preserve-env=TURBOPANEL_LICENSE\nsh\n-s\n--\n",
   );
-  assertEquals(result.env.includes("TURBOPANEL_TUNNEL_TOKEN="), false);
 });
 
 test("the sudo re-exec keeps the Raspberry Pi skip settings when they are set", async () => {
@@ -121,13 +114,12 @@ test("the sudo re-exec keeps a plain sudo when no secret is set", async () => {
   assertEquals(result.argv.startsWith("sh\n-s\n--\n"), true, result.argv);
 });
 
-test("run.sh reads the tunnel token from TURBOPANEL_TUNNEL_TOKEN on the root side", async () => {
+test("run.sh reads the license from TURBOPANEL_LICENSE on the root side", async () => {
   const source = await Deno.readTextFile(runShPath);
   assertStringIncludes(
     source,
-    '[ -n "$TUNNEL_TOKEN" ] || TUNNEL_TOKEN="${TURBOPANEL_TUNNEL_TOKEN:-}"',
+    '[ -n "$LICENSE" ] || LICENSE="${TURBOPANEL_LICENSE:-}"',
   );
-  assertEquals(source.includes('--tunnel-token "$TUNNEL_TOKEN"'), false);
   assertEquals(source.includes('--license "$LICENSE"'), false);
 });
 

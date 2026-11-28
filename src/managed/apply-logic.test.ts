@@ -20,13 +20,16 @@ import {
   provisionManagedRootPasswordFile,
   writeManagedRootPasswordFile,
 } from "./apply.ts";
-import { normalizeManagedCompose } from "./compose.ts";
 import {
   managedDir,
   managedEnvFilePath,
   managedRootPasswordPath,
 } from "./engine-paths.ts";
 import { createNoopCommandOutputSink } from "../logs/contracts.ts";
+import {
+  resolveDockerInvocation,
+  setDockerCliIoForTest,
+} from "../deploy/docker-cli.ts";
 import type { ManagedEngineContext } from "./engines/types.ts";
 
 /**
@@ -176,7 +179,7 @@ test("primary applyManagedEngineState still mutates credentials/databases", asyn
   ]);
 });
 
-test("primary applyManagedEngineState runs host prep then ensures ProxySQL monitor", async () => {
+test("primary applyManagedEngineState ensures the payload ProxySQL monitor roles", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {
@@ -236,30 +239,13 @@ test("primary applyManagedEngineState runs host prep then ensures ProxySQL monit
         engine as never,
         payload,
         credentials,
-        {
-          runHostPrep: async () => {
-            calls.push("hostPrep");
-            const layout = resolveLayout(Deno.env.toObject());
-            await Deno.mkdir(`${layout.configDir}/proxysql`, {
-              recursive: true,
-            });
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/admin.cnf`,
-              "[client]\nuser=admin\npassword=admin-secret\n",
-            );
-            await Deno.writeTextFile(
-              `${layout.configDir}/proxysql/monitor.cnf`,
-              "[client]\nuser=tp_monitor\npassword=mon-s3cret\n",
-            );
-          },
-        },
+        { monitorUsers: [{ user: "tp_monitor", password: "mon-s3cret" }] },
       );
 
       assertEquals(calls, [
         "waitReady",
         "applyDatabases",
         "applyCredentials",
-        "hostPrep",
         "ensure:tp_monitor",
         "readVersion",
       ]);
@@ -447,7 +433,7 @@ test("primary applyManagedEngineState skips drop when only the root username is 
   assertEquals(state.appliedUsers, ["postgres"]);
 });
 
-test("primary applyManagedEngineState skips ProxySQL monitor when monitor.cnf is missing", async () => {
+test("primary applyManagedEngineState skips ProxySQL monitor roles when the payload has no monitorUsers", async () => {
   await withTempLayout(async (fixture) => {
     const prior: Record<string, string | undefined> = {};
     for (const [key, value] of Object.entries(fixture.env)) {
@@ -844,7 +830,7 @@ test("writeManagedRootPasswordFile writes 0600 once and never rewrites a handed-
   }
 });
 
-test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a changed one to the file form", async () => {
+test("chooseManagedCompose always builds the file form", async () => {
   const dir = await Deno.makeTempDir();
   try {
     const path = `${dir}/docker-compose.yml`;
@@ -867,13 +853,6 @@ test("chooseManagedCompose leaves an unchanged legacy cluster alone and moves a 
 
     const fresh = await chooseManagedCompose(path, payload);
     assertEquals(fresh.composeYaml.includes("POSTGRES_PASSWORD_FILE"), true);
-
-    const legacy = normalizeManagedCompose(payload, {
-      legacyRootPasswordEnv: true,
-    });
-    await Deno.writeTextFile(path, legacy.composeYaml);
-    const same = await chooseManagedCompose(path, payload);
-    assertEquals(same.composeYaml, legacy.composeYaml);
 
     const changed = await chooseManagedCompose(path, {
       ...payload,
@@ -1004,5 +983,72 @@ test("composeUpManagedEngine skips the env file and --env-file when the compose 
       () => Deno.stat(managedEnvFilePath(layout, payload.managedId)),
       Deno.errors.NotFound,
     );
+  });
+});
+
+test("composeUpManagedEngine re-runs compose up after docker-setup and re-resolves how docker is called", async () => {
+  await withTempLayout(async (fixture) => {
+    let denied = false;
+    const restoreIo = setDockerCliIoForTest({
+      runRaw: (command) =>
+        Promise.resolve(
+          command === "/usr/bin/docker" && denied
+            ? {
+              success: false,
+              code: 1,
+              stdout: "",
+              stderr:
+                "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+            }
+            : { success: true, code: 0, stdout: "24.0.0", stderr: "" },
+        ),
+    });
+    const previousUser = Deno.env.get("USER");
+    Deno.env.set("USER", "tp");
+    try {
+      // An earlier streamed call settled on direct docker before the install.
+      assertEquals((await resolveDockerInvocation()).prefixArgs, []);
+      const streamed: string[][] = [];
+      const { layout, payload, args } = composeUpFixture(
+        fixture,
+        "services: {}\n# no password here",
+        () => Promise.reject(new Error("helper must not run")),
+        streamed,
+      );
+      await Deno.mkdir(managedDir(layout, payload.managedId), {
+        recursive: true,
+      });
+      let setups = 0;
+      const attempts: string[][] = [];
+      await composeUpManagedEngine({
+        ...args,
+        runDockerSetup: () => {
+          setups += 1;
+          denied = true; // docker now installed, group not yet in this process
+          return Promise.resolve();
+        },
+        runStreamed: (callArgs) => {
+          attempts.push(callArgs);
+          return Promise.resolve(
+            attempts.length === 1
+              ? {
+                success: false,
+                code: 1,
+                stdout: "",
+                stderr:
+                  "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+              }
+              : { success: true, code: 0, stdout: "", stderr: "" },
+          );
+        },
+      });
+      assertEquals(setups, 1);
+      assertEquals(attempts.length, 2);
+      assertEquals((await resolveDockerInvocation()).bin, "/usr/bin/sudo");
+    } finally {
+      if (previousUser === undefined) Deno.env.delete("USER");
+      else Deno.env.set("USER", previousUser);
+      restoreIo();
+    }
   });
 });

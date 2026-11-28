@@ -69,6 +69,7 @@ test("run.sh arms the update guard on the executed installer path", async () => 
   const helpers = [
     "tp_print_error",
     "tp_parse_daemon_commit_from_version",
+    "tp_binary_version_line",
     "tp_daemon_file_group",
     "tp_root_safe_stage",
     "tp_root_safe_write",

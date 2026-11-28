@@ -193,7 +193,7 @@ test({
       ]);
       assertEquals(netInsertPrimary.success, true, netInsertPrimary.stderr);
     } finally {
-      await docker(["rm", "-f", name]);
+      await docker(["rm", "-f", "-v", name]);
     }
   },
 });

@@ -375,3 +375,84 @@ test({
       );
     }),
 });
+
+/**
+ * Fake docker for the unchanged-service check: every service hashes to `h1`
+ * and runs `img`; its container started at `startedAt`.
+ */
+function unchangedDocker(startedAt: () => string) {
+  const stops: string[][] = [];
+  const base = fakeDocker([HEALTHY]);
+  const run = (args: string[]): Promise<DockerCliResult> => {
+    if (args.includes("--hash")) return ok("web h1\n");
+    if (args.includes("ps") && args.includes("-q")) return ok("c1\n");
+    if (args[0] === "inspect") {
+      return ok(`h1 img nginx:1 ${startedAt()}\n`);
+    }
+    if (args[0] === "image") return ok("img\n");
+    const stop = args.indexOf("stop");
+    if (stop >= 0) stops.push(args.slice(stop + 1));
+    return base.run(args);
+  };
+  return { run, stops };
+}
+
+function withConfig(text: string): EnvironmentDeployPayload {
+  return payload("nginx:1", {
+    deployStrategy: "sequential",
+    // A different config text is a different desired state.
+    desiredHash: createHash("sha256").update(text).digest("hex"),
+    configFiles: [{
+      composeServiceName: "web",
+      source: "app",
+      relativePath: "app.conf",
+      parts: [{ text }],
+    }],
+  });
+}
+
+async function withRunDir<T>(fn: () => Promise<T>) {
+  const dir = await Deno.makeTempDir({ prefix: "tp-deploy-seq-run-" });
+  const saved = Deno.env.get("TURBOPANEL_RUN_DIR");
+  Deno.env.set("TURBOPANEL_RUN_DIR", dir);
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) Deno.env.delete("TURBOPANEL_RUN_DIR");
+    else Deno.env.set("TURBOPANEL_RUN_DIR", saved);
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+test({
+  name:
+    "sequential: a redeploy whose config file did not change leaves the service running",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withRunDir(() =>
+      withState(async () => {
+        const docker = unchangedDocker(() => "2999-01-01T00:00:00Z");
+        await deploy(withConfig("one"), docker.run);
+        docker.stops.length = 0;
+        await deploy(withConfig("one"), docker.run);
+        assertEquals(docker.stops, []);
+      })
+    ),
+});
+
+test({
+  name:
+    "sequential: a config file changed after the container started stops the service",
+  permissions: { env: true, read: true, write: true, run: true },
+  fn: () =>
+    withRunDir(() =>
+      withState(async () => {
+        const docker = unchangedDocker(() => "2000-01-01T00:00:00Z");
+        await deploy(withConfig("one"), docker.run);
+        docker.stops.length = 0;
+        // The earlier attempt's file is newer than the container's start.
+        await deploy(withConfig("two"), docker.run);
+        assertEquals(docker.stops, [["web"]]);
+      })
+    ),
+});

@@ -75,10 +75,10 @@ there (`TP_TIMER_STAMP_DIR`, listed in the host-file inventory) and never any
 other stamp file or the folder.
 
 The purge also deletes TurboPanel's own nftables tables by exact name
-(`TP_NFT_TABLES`: `inet turbopanel_ingress_guard`, `turbopanel_build` and
-`turbopanel_php`), listed in the firewall inventory and removed by
-`tp_remove_nft_tables` after the units are gone. It never flushes the ruleset
-or touches any other table; a missing `nft` is a skip. A role, host script or
+(`TP_NFT_TABLES`: `inet turbopanel_ingress_guard`, `turbopanel_build`,
+`turbopanel_php`, `turbopanel_tunnel` and `turbopanel_apps`), listed in the
+firewall inventory and removed by `tp_remove_nft_tables` after the units are
+gone. It never flushes the ruleset or touches any other table; a missing `nft` is a skip. A role, host script or
 daemon code that loads a new table must add its name to `TP_NFT_TABLES`;
 `scripts/purge-coverage.test.ts` fails otherwise. The iptables-nft tables
 that Docker and the host firewall share (the Docker note above) are a
@@ -126,7 +126,8 @@ left over while a container cgroup still held them. The summary's unit diff
 also skips names `tp_unit_present` already treats as gone. Once Docker Engine was purged (`TP_DOCKER_ENGINE_GONE`)
 the final inventory skips Docker, so the `<id>-in` containers removed with it
 are not reported. Anything else still on disk stays a failure. When the Docker daemon is not answering at the final check, the pre-purge container and network lists are carried forward only if the removal step itself was skipped (`TP_DOCKER_LEFT`); a daemon that is gone after a removal that ran holds nothing, so it is never a false failure. The purge also
-removes `/var/cache/turbopanel` (the Docker gate's cache, in `TP_OWNED_TREES`;
+removes `/run/turbopanel-phpfpm` (the php-fpm masters' pidfile and socket tree, in `TP_OWNED_TREES`),
+`/var/cache/turbopanel` (the Docker gate's cache, in `TP_OWNED_TREES`;
 the hosting Caddy's and the gate's state folders sit inside `/var/lib/turbopanel`),
 `/etc/tmpfiles.d/turbopanel-hosting-caddy.conf`, and the `tpgatebuild` group
 (`TP_OTHER_GROUPS`, matched by exact name because its gid is outside the
@@ -296,7 +297,7 @@ rail's signed manifests protect what the script then installs.
 installed through that overlay receive `TURBOPANEL_DL_BASE=<origin>/downloads/daemon`
 (persisted in `daemon.env`) and must **never** fall back to the public rail.
 A configured `TURBOPANEL_DL_BASE` that is not https is refused
-(`InsecureOverlayBaseError`); only an absent base selects the public rail. `trunk` has no built-in location (the per-merge CDN drop and the `dl.trbp.nl` host left the rail with it): it is only the channel name this overlay catalog uses, and a host without an overlay that still follows it is refused with `preflight_manifest` and told to pick canary, rc or release.
+(`InsecureOverlayBaseError`); only an absent base selects the public rail. `trunk` has no built-in location (the per-merge CDN drop and its download host left the rail with it): it is only the channel name this overlay catalog uses, and a host without an overlay that still follows it is refused with `preflight_manifest` and told to pick canary, rc or release.
 Catalog URLs in `dist/channels.json` / `dist/manifest.json` are relative so the
 same files work behind LAN HTTPS on `:8443` and a Cloudflare tunnel.
 `run.sh --insecure-tls` still only relaxes the platform-CA instance legs;
@@ -353,6 +354,10 @@ apt call in `run.sh` goes through `tp_apt_get`, which runs apt under
 `Unable to lock directory`: up to 60 tries 5 s apart, and never past 15
 minutes in all. Any other failure returns at once.
 
+## Installer screen (mockup)
+
+`scripts/lib/installer-screen.sh` is a reusable POSIX sh layer for a quiet installer screen: a one-line header (`TurboPanel`, version, mode, no logo mark), a 32-cell progress bar under it (solid `█` blocks on a dim `░` track, brand blue, green when done, red on a failed area; it fills by finished areas and shrinks on narrow screens, `#`/`-` without Unicode, redrawn in place and never printed in plain output) with `n/total` and the current area name, one green check row per finished area with a short dim fact, and the current area with a spinner and up to three detail lines that fill top-down; no timers or box, and pending areas are not shown. The finish keeps the header and a full bar, collapses the check rows to one short row (`✓ 8 steps done`) and prints `Ready in <time>` (`Enrolled in <time>` in daemon mode), the URLs or server and panel names, warnings and the log path; a failure turns the current row into a red cross, keeps its detail lines and adds the reason, the log path and one thing to try. Installer output names no vendor or third-party product (no database, cache, queue, proxy, runtime or tool names): area titles are plain action phrases (`Installing TurboPanel database`), detail lines name roles (`database`, `roles`, `cache`, `message queue`), and errors and hints follow the same rule; the host's own OS name and TurboPanel's own names and versions are fine, and a test fails if a vendor name shows up on screen or in a frame. Plain output without a TTY, with `NO_COLOR` or with `TERM=dumb`. It is a mockup: `run.sh` does not source it yet. API: `screen_init <version> <channel> <mode> <log> <area>...`, `screen_area_start`, `screen_sub <text> [<value>]`, `screen_run`, `screen_area_done [fact]`, `screen_area_fail <reason> [<next step>]`, `screen_summary <prefix>`, `screen_summary_item <value> <note>`, `screen_summary_warn`, `screen_finish`. Try it with `sh scripts/installer-screen-demo.sh --mode panel` (`--mode daemon`, `--fail-at <n>`). Rules: POSIX only (tested under dash and busybox ash, no `tput`), ASCII text in plain mode, every real command's output goes to the log file, and the cursor is always restored on exit, error, INT, TERM and HUP. Brand colors come from the UI design system (`#3366cc`, `#3dd68c`). Tests: `scripts/installer-screen.test.ts`; `UPDATE_FRAMES=1` rewrites `scripts/installer-screen-frames/`.
+
 ## Scope Summary (Former Root Index Entry)
 
 | Subsystem | Read before editing | Covers |
@@ -372,3 +377,10 @@ in CI, and checked when it is present. A path that is not a repo file (a
 command run elsewhere, an installed path) goes in `ALLOWLIST` in the script
 with a reason. It is part of `deno task verify:static` and the `verify.yml`
 job.
+
+`scripts/image-build-cgroup-proof.sh` is a root-only canary check, run by hand on
+a managed host with Docker: it runs `tp-host image-build-slice`, builds a
+CPU-burning throwaway image with the same `--cgroup-parent` the daemon passes,
+and proves the build step lands in `turbopanel-imagebuild.slice` and its CPU time
+stays within the quota. `purge.sh` stops that slice with the other TurboPanel
+slices; it is a runtime-only unit, so there is no file to remove.

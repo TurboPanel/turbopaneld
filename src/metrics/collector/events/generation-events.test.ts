@@ -1,18 +1,13 @@
 import { assertEquals } from "@std/assert";
 import { CounterBaselineTracker } from "../baseline.ts";
 import { GenerationEventCollector } from "./generation-events.ts";
-import { setTopologyGenerationOptional } from "../../topology/generation.ts";
 import type { EventDetectContext } from "./types.ts";
-import type { TopologySnapshot } from "../../../contracts/topology-types.ts";
+import type { CollectedTopology } from "../../topology/topology.ts";
 
 const test = Deno.test.bind(Deno);
 
-function snapshot(
-  generation: number,
-  bootGeneration: number,
-): TopologySnapshot {
+function snapshot(bootGeneration: number): CollectedTopology {
   return {
-    generation,
     bootGeneration,
     networks: [],
     filesystems: [],
@@ -35,7 +30,7 @@ function snapshot(
 function ctx(overrides: Partial<EventDetectContext> = {}): EventDetectContext {
   return {
     nowMs: 1_000,
-    snapshot: snapshot(1, 1),
+    snapshot: snapshot(1),
     tracker: new CounterBaselineTracker(),
     bootGeneration: 1,
     seconds: 60,
@@ -55,62 +50,25 @@ function ctx(overrides: Partial<EventDetectContext> = {}): EventDetectContext {
 
 test("GenerationEventCollector: first tick establishes the baseline, no fabricated event", () => {
   const collector = new GenerationEventCollector();
-  assertEquals(collector.detect(ctx({ snapshot: snapshot(1, 1) })), []);
-});
-
-test("GenerationEventCollector: a topology generation bump fires topology_generation_changed", () => {
-  const collector = new GenerationEventCollector();
-  collector.detect(ctx({ snapshot: snapshot(1, 1) }));
-  const events = collector.detect(
-    ctx({ snapshot: snapshot(2, 1), nowMs: 2_000 }),
-  );
-  assertEquals(events.length, 1);
-  assertEquals(events[0].kind, "topology_generation_changed");
-  assertEquals(events[0].payload, { from: 1, to: 2 });
+  assertEquals(collector.detect(ctx({ snapshot: snapshot(1) })), []);
 });
 
 test("GenerationEventCollector: a boot generation bump fires boot_generation_changed", () => {
   const collector = new GenerationEventCollector();
-  collector.detect(ctx({ snapshot: snapshot(1, 1) }));
+  collector.detect(ctx({ snapshot: snapshot(1) }));
   const events = collector.detect(
-    ctx({ snapshot: snapshot(1, 2), nowMs: 2_000 }),
+    ctx({ snapshot: snapshot(2), nowMs: 2_000 }),
   );
   assertEquals(events.length, 1);
   assertEquals(events[0].kind, "boot_generation_changed");
   assertEquals(events[0].severity, "warning");
 });
 
-test("GenerationEventCollector: unchanged generations fire nothing", () => {
+test("GenerationEventCollector: an unchanged boot generation fires nothing", () => {
   const collector = new GenerationEventCollector();
-  collector.detect(ctx({ snapshot: snapshot(4, 2) }));
+  collector.detect(ctx({ snapshot: snapshot(2) }));
   const events = collector.detect(
-    ctx({ snapshot: snapshot(4, 2), nowMs: 2_000 }),
+    ctx({ snapshot: snapshot(2), nowMs: 2_000 }),
   );
   assertEquals(events, []);
-});
-
-test("GenerationEventCollector: no topology event while the control plane does not need generations", () => {
-  const collector = new GenerationEventCollector();
-  setTopologyGenerationOptional(true);
-  try {
-    collector.detect(ctx({ snapshot: snapshot(1, 1) }));
-    assertEquals(
-      collector.detect(ctx({ snapshot: snapshot(2, 1), nowMs: 2_000 })),
-      [],
-    );
-    // The boot event is unaffected.
-    const events = collector.detect(
-      ctx({ snapshot: snapshot(2, 2), nowMs: 3_000 }),
-    );
-    assertEquals(events.map((event) => event.kind), [
-      "boot_generation_changed",
-    ]);
-  } finally {
-    setTopologyGenerationOptional(false);
-  }
-  // The baseline kept moving, so switching back fabricates nothing.
-  assertEquals(
-    collector.detect(ctx({ snapshot: snapshot(2, 2), nowMs: 4_000 })),
-    [],
-  );
 });

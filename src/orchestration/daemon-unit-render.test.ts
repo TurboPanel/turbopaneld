@@ -123,6 +123,12 @@ const BASE_VARS = {
   turbopanel_daemon_js: "/opt/turbopanel/bin/turbopaneld.js",
   turbopanel_install_root: "/opt/turbopanel",
   daemon_log_dir: "/var/log/turbopanel",
+  // The daemon-launch role's defaults (the gate role's values are pinned equal
+  // by docker-gate-role.test.ts).
+  turbopanel_docker_gate_run_dir: "/run/turbopanel-gate",
+  turbopanel_docker_gate_build_dir: "/run/turbopanel-gate/build",
+  turbopanel_docker_gate_service: "turbopanel-docker-gate.service",
+  turbopanel_docker_gate_wait_seconds: 60,
 };
 
 type Variant = {
@@ -241,12 +247,13 @@ for (const variant of VARIANTS) {
       const expectedOrder = variant.afterInstance
         ? "network-online.target turbopanel-instance.service"
         : "network-online.target";
-      // docker.service is ordering only: stop before Docker at shutdown.
+      // docker.service is ordering only: stop before Docker at shutdown. The
+      // gate (a managed host) is ordered the same way, never Wants=.
       assertEquals(
         only(unit, "Unit", "After"),
         expectedOrder.replace(
           "network-online.target",
-          "network-online.target docker.service",
+          "network-online.target docker.service turbopanel-docker-gate.service",
         ),
       );
       assertEquals(only(unit, "Unit", "Wants"), expectedOrder);
@@ -293,3 +300,90 @@ for (const variant of VARIANTS) {
     },
   });
 }
+
+const DOCKER_ENV_NAMES = [
+  "DOCKER_HOST",
+  "TURBOPANEL_DOCKER_SOCKET",
+  "TURBOPANEL_DOCKER_BUILD_SOCKET",
+];
+
+function dockerEnv(unit: Unit): string[] {
+  return (unit.get("Service")?.get("Environment") ?? []).filter((line) =>
+    DOCKER_ENV_NAMES.some((name) => line.startsWith(`${name}=`))
+  );
+}
+
+test({
+  name:
+    "a managed host's daemon unit routes Docker through the gate, after the env file, and waits for the socket",
+  ignore: !JINJA_PYTHON,
+  fn: async () => {
+    const rendered = await render(
+      {
+        ...BASE_VARS,
+        turbopanel_daemon_exec_mode: "native",
+        turbopanel_after_instance_service: false,
+      },
+      [DAEMON_UNIT],
+    );
+    const text = rendered[DAEMON_UNIT];
+    const unit = parseUnit(text);
+    assertEquals(dockerEnv(unit), [
+      "DOCKER_HOST=unix:///run/turbopanel-gate/docker.sock",
+      "TURBOPANEL_DOCKER_SOCKET=/run/turbopanel-gate/docker.sock",
+      "TURBOPANEL_DOCKER_BUILD_SOCKET=/run/turbopanel-gate/build/docker.sock",
+    ]);
+    // A later Environment= wins over an earlier EnvironmentFile=: an old
+    // daemon.env line can never point Docker back at the engine's socket.
+    assert(
+      text.indexOf("EnvironmentFile=") <
+        text.indexOf("Environment=DOCKER_HOST="),
+    );
+    const pre = unit.get("Service")?.get("ExecStartPre") ?? [];
+    assertEquals(
+      pre.at(-1),
+      "/bin/sh /opt/turbopanel/share/orchestration/scripts/wait-docker-gate.sh turbopanel-docker-gate.service /run/turbopanel-gate/docker.sock 60",
+    );
+    // The wait runs after the run dir and lock guard, before the daemon.
+    assert(pre[0].endsWith("/scripts/ensure-single-daemon.sh"));
+    // Root, failure ignored: the daemon always starts without the docker group,
+    // so a host converged from an already-grouped process does not keep it.
+    const drop = pre.findIndex((l) => l.includes("gpasswd"));
+    assertEquals(
+      pre[drop],
+      `+-/usr/bin/gpasswd -d ${BASE_VARS.turbopanel_user} docker`,
+    );
+    assert(drop > 0 && drop < pre.length - 1);
+    // Ordering only: a site-only host has no gate unit to want.
+    assertEquals(
+      only(unit, "Unit", "Wants").includes("docker-gate"),
+      false,
+    );
+  },
+});
+
+test({
+  name:
+    "a co-located dev host's daemon unit keeps the engine's own socket: no gate env, no gate ordering, no wait",
+  ignore: !JINJA_PYTHON,
+  fn: async () => {
+    const rendered = await render(
+      {
+        ...BASE_VARS,
+        turbopanel_dev_user: "dev",
+        turbopanel_daemon_exec_mode: "native",
+        turbopanel_after_instance_service: false,
+      },
+      [DAEMON_UNIT],
+    );
+    const text = rendered[DAEMON_UNIT];
+    const unit = parseUnit(text);
+    assertEquals(dockerEnv(unit), []);
+    assertEquals(
+      only(unit, "Unit", "After"),
+      "network-online.target docker.service",
+    );
+    assertEquals(text.includes("wait-docker-gate"), false);
+    assertEquals(text.includes("gpasswd"), false);
+  },
+});

@@ -6,6 +6,8 @@ import {
 } from "@std/assert";
 import {
   allocateMetricsPort,
+  CONNECTOR_GRACE_PERIOD_SECONDS,
+  CONNECTOR_STOP_TIMEOUT_SECONDS,
   isTunnelId,
   mapConnectorStatus,
   otherSlot,
@@ -28,12 +30,12 @@ import {
 const test = Deno.test.bind(Deno);
 
 const ID = "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d";
-const BIN = "/opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared";
+const BIN = "/opt/turbopanel/vendor/cloudflared/2026.11.2/cloudflared";
 
-test("a tunnel id is a lower-case UUID or one of the two legacy names", () => {
+test("a tunnel id is a lower-case UUID or instance", () => {
   assert(isTunnelId(ID));
   assert(isTunnelId("instance"));
-  assert(isTunnelId("default"));
+  assert(!isTunnelId("default"));
 });
 
 test("an id that could become a path or a unit name is refused", () => {
@@ -79,9 +81,16 @@ test("the unit is its own service with the token in a file, never on the command
   assertStringIncludes(text, `EnvironmentFile=${envFile}\n`);
   assertStringIncludes(
     text,
-    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 run\n`,
+    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 --grace-period 30s run\n`,
   );
   assertStringIncludes(text, "Restart=always\nRestartSec=5\n");
+  // A graceful stop: systemd signals the program, which drains for the grace
+  // period; the stop timeout sits a little above it.
+  assertStringIncludes(
+    text,
+    "KillSignal=SIGTERM\nKillMode=mixed\nTimeoutStopSec=45\n",
+  );
+  assert(CONNECTOR_STOP_TIMEOUT_SECONDS > CONNECTOR_GRACE_PERIOD_SECONDS);
   assertStringIncludes(text, "DynamicUser=yes\n");
   assertStringIncludes(text, "NoNewPrivileges=yes\n");
   assertStringIncludes(text, "CapabilityBoundingSet=\n");
@@ -134,7 +143,7 @@ test("a record round-trips and a damaged one is ignored", () => {
   const record = {
     id: ID,
     port: 20310,
-    version: "2026.10.7",
+    version: "2026.11.2",
     tokenDigest: "ab",
     slot: "a" as const,
   };
@@ -212,7 +221,7 @@ test("the connector command line keeps the order the pinned program accepts", ()
   // to `tunnel` (before `run`). The old order made the program print its usage
   // and exit, so no connector ever ran.
   assertEquals(exec, [
-    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 run`,
+    `ExecStart=${BIN} --no-autoupdate tunnel --metrics 127.0.0.1:20301 --grace-period 30s run`,
   ]);
 });
 

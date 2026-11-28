@@ -18,6 +18,8 @@ import type {
 import { logWarn, sanitizeForLog } from "../../util/logger.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import {
+  endConnections,
+  endSessionsWhenRightsChange,
   grantableDatabases,
   grantBackupPrivileges,
   grantDatabasePrivileges,
@@ -71,6 +73,7 @@ import {
   revokePlainDatabaseGrantSql,
   revokeRowsSql,
   showReplicaStatusSql,
+  snapshotGrantsSql,
   startReplicaSql,
   versionSql,
 } from "./mariadb-sql.ts";
@@ -476,28 +479,49 @@ async function applyOneCredential(
 
   // A login the site owner manages by hand keeps its account and password
   // but never has its grants written or reset here.
-  await grantDatabasePrivileges({
-    databases: grantableDatabases(credential),
-    privileges: credential.privileges ?? [],
-    username: credential.username,
-    hosts: ctx.clientSourceHosts ?? [],
-    grantSql: grantDatabaseSql,
-    revokePlainSql: revokePlainDatabaseGrantSql,
-    run: (sql) => runMariadb(ctx, sql),
-  });
-  if (panelManagesGrants(credential)) {
-    await revokeUnlistedGrants({
+  const writeGrants = async (): Promise<boolean> => {
+    let ended = false;
+    await grantDatabasePrivileges({
+      databases: grantableDatabases(credential),
+      privileges: credential.privileges ?? [],
       username: credential.username,
-      listed: grantableDatabases(credential),
-      listRowsSql: listGrantRowsSql,
-      revokeRowsSql,
+      hosts: ctx.clientSourceHosts ?? [],
+      grantSql: grantDatabaseSql,
+      revokePlainSql: revokePlainDatabaseGrantSql,
+      run: (sql) => runMariadb(ctx, sql),
+    });
+    if (panelManagesGrants(credential)) {
+      await revokeUnlistedGrants({
+        username: credential.username,
+        listed: grantableDatabases(credential),
+        listRowsSql: listGrantRowsSql,
+        revokeRowsSql,
+        listConnectionsSql,
+        sessionEnds: ctx.sessionEnds,
+        ended: () => {
+          ended = true;
+        },
+        query: (sql) => runMariadbQuery(ctx, sql),
+        run: (sql) => runMariadb(ctx, sql),
+      });
+    }
+    await runMariadb(ctx, "FLUSH PRIVILEGES;");
+    return ended;
+  };
+  if (panelManagesGrants(credential)) {
+    // Open (pooled) connections keep the rights they opened with, so a login
+    // whose rights changed has them ended.
+    await endSessionsWhenRightsChange({
+      username: credential.username,
+      snapshotSql: snapshotGrantsSql,
       listConnectionsSql,
       sessionEnds: ctx.sessionEnds,
       query: (sql) => runMariadbQuery(ctx, sql),
       run: (sql) => runMariadb(ctx, sql),
-    });
+    }, writeGrants);
+  } else {
+    await writeGrants();
   }
-  await runMariadb(ctx, "FLUSH PRIVILEGES;");
 }
 
 /**
@@ -1060,6 +1084,15 @@ export const mariadbManagedEngineRuntime: ManagedEngineRuntime = {
         query: (sql) => runMariadbQuery(ctx, sql),
         run: (sql) => runMariadb(ctx, sql),
         dropAccountSql,
+      });
+      // DROP USER leaves the account's open sessions (the proxy's pooled ones
+      // too) running with their old rights, and a login made again under the
+      // same name would meet them.
+      await endConnections({
+        username,
+        listConnectionsSql,
+        query: (sql) => runMariadbQuery(ctx, sql),
+        run: (sql) => runMariadb(ctx, sql),
       });
       dropped.push(username);
     });

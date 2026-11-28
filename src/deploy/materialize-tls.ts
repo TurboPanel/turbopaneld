@@ -3,6 +3,7 @@ import {
   type EnvironmentDeployPayload,
   type EnvironmentDeployTlsMaterial,
   hostingServedNames,
+  hostingTlsForName,
   hostingWwwRedirects,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -72,19 +73,27 @@ export async function materializeTlsCertificates(
   return written;
 }
 
-/** Map hostname → tlsId from a deploy payload (last write wins if duplicates). */
+/**
+ * Map hostname → tlsId from a deploy payload (last write wins if duplicates).
+ * A name with a `nameTls` entry takes that entry's choice; a `www` redirect
+ * name without one follows the name it sends visitors to (`hosting-name-tls-v1`).
+ */
 export function hostnameTlsMap(
   payload: EnvironmentDeployPayload,
 ): Map<string, string> {
   const map = new Map<string, string>();
   for (const hosting of payload.hostings) {
-    if (!hosting.tlsId || hosting.tlsMode === "acme") continue;
-    // Served names and `www` redirect names all sit under the same pinned pair.
+    // Served names and `www` redirect names sit under the hosting's pinned
+    // pair unless a `nameTls` entry (their own, or their target's) says else.
     const names = [
       ...hostingServedNames(hosting),
       ...hostingWwwRedirects(hosting).map((redirect) => redirect.from),
     ];
-    for (const hostname of names) map.set(hostname, hosting.tlsId);
+    for (const hostname of names) {
+      const { tlsId, tlsMode } = hostingTlsForName(hosting, hostname);
+      if (!tlsId || tlsMode === "acme") continue;
+      map.set(hostname, tlsId);
+    }
   }
   return map;
 }

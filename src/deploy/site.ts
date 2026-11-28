@@ -43,7 +43,7 @@
  */
 
 import { dirname, join } from "@std/path";
-import { hostSudoArgs } from "../permissions/host-sudo.ts";
+import { hostHelperDir, hostSudoArgs } from "../permissions/host-sudo.ts";
 import { logInfo, logWarn } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
 import { runLocalPlaybook } from "../orchestration/ansible.ts";
@@ -68,7 +68,11 @@ import {
   isAllowedExtension,
   unsupportedPhpSeriesMessage,
 } from "../runtime/registry.ts";
-import { principalHomePath, serviceTree } from "../paths/layout.ts";
+import {
+  PHP_FPM_RUN_DIR,
+  principalHomePath,
+  serviceTree,
+} from "../paths/layout.ts";
 import type { EnvironmentDeploySite } from "../contracts/commands-contracts.ts";
 import {
   currentReleaseDirExists,
@@ -1010,7 +1014,7 @@ export function phpFpmPoolId(
 }
 
 /**
- * `<runDir>/php/<series>/<poolId>.sock`.
+ * `<PHP_FPM_RUN_DIR>/<series>/<poolId>.sock`.
  *
  * Series-scoped because a php-fpm master is one binary: co-installed series run
  * as separate `turbopanel-php-fpm@<series>` instances, each owning its own pool
@@ -1019,14 +1023,12 @@ export function phpFpmPoolId(
  * change-detection notices and reloads only that engine.
  */
 export function phpFpmSocketPath(
-  layout: LayoutPaths,
   series: string,
   environmentId: string,
   composeServiceName: string,
 ): string {
   return join(
-    layout.runDir,
-    "php",
+    PHP_FPM_RUN_DIR,
     series,
     `${phpFpmPoolId(environmentId, composeServiceName)}.sock`,
   );
@@ -1494,7 +1496,7 @@ const PHP_SITE_KEY_RE = /^[0-9a-f]{64}$/;
  * (vhost lines first, then folder ones), so the unset of `TP_SITE_KEY` must
  * come before the line that sets this site's own key.
  */
-function apacheWallLines(siteKey: string | null): string[] {
+export function apacheWallLines(siteKey: string | null): string[] {
   return [
     '  ProxyFCGISetEnvIf "true" !PHP_VALUE',
     '  ProxyFCGISetEnvIf "true" !PHP_ADMIN_VALUE',
@@ -3579,7 +3581,6 @@ async function applySitePhpBackend(
     };
   }
   const socket = phpFpmSocketPath(
-    layout,
     series,
     environmentId,
     site.composeServiceName,
@@ -3682,7 +3683,7 @@ function sitePhpRuntimeFiles(
     group: principalUnixGroupName(user),
     home,
     configDir: layout.configDir,
-    libDir: layout.libDir,
+    libDir: hostHelperDir(layout),
     runtimesDir: layout.runtimesDir,
     webAccount: SITE_PHP_WEB_ACCOUNT[site.engine],
   };

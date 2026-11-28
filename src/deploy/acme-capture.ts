@@ -27,7 +27,7 @@ const RETRYABLE_CLIENT_STATUSES: ReadonlySet<number> = new Set([
 export type CertificateCaptureOutcome = "done" | "retry";
 
 export type CertificateCaptureDeps = {
-  /** True once the attached control plane lists `tls-capture-v1`. */
+  /** True once the control plane client can take the report. */
   supported: () => boolean;
   /** `POST /api/daemon/v1/tls/issued`. */
   report: (

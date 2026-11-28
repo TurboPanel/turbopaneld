@@ -293,6 +293,11 @@ export const BUILD_TOGGLE_PLAYBOOK = join(
   "playbooks",
   "instance-build-toggle.yml",
 );
+export const UI_EXPORT_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "ui-export.yml",
+);
 export const INSTANCE_CERTS_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
@@ -302,6 +307,12 @@ export const SET_HOSTNAME_PLAYBOOK = join(
   ORCHESTRATION_DIR,
   "playbooks",
   "set-hostname.yml",
+);
+/** Installs `cifs-utils` (mount.cifs) for SMB network share volumes. */
+export const SMB_TOOLS_PLAYBOOK = join(
+  ORCHESTRATION_DIR,
+  "playbooks",
+  "smb-tools-setup.yml",
 );
 export const TIME_SYNC_APPLY_PLAYBOOK = join(
   ORCHESTRATION_DIR,
@@ -462,19 +473,19 @@ export function uvDownloadUrl(asset: string, version = UV_VERSION): string {
 }
 
 /** Pinned cloudflared release. */
-export const CLOUDFLARED_VERSION = "2026.10.7";
+export const CLOUDFLARED_VERSION = "2026.11.2";
 
 /**
  * SHA-256 of the raw Linux binary per asset, for {@link CLOUDFLARED_VERSION}.
- * Source: the "SHA256 Checksums" list in the 2026.10.7 release notes
- * (github.com/cloudflare/cloudflared/releases/tag/2026.10.7), which also equals
+ * Source: the "SHA256 Checksums" list in the 2026.11.2 release notes
+ * (github.com/cloudflare/cloudflared/releases/tag/2026.11.2), which also equals
  * the digest GitHub reports for each asset. Bump with the version.
  */
 export const CLOUDFLARED_SHA256: Readonly<Record<string, string>> = {
   "cloudflared-linux-amd64":
-    "1f99fb518b83dec2ba8d870a7cc991d82a77e6196295a3d2754ba17ab9f91872",
+    "56f13335143ec0e22772963290683a84a04114a35ec64cbc794a4d39ff9bb8cf",
   "cloudflared-linux-arm64":
-    "3df43aedc9ff291d1735b5cb576cb97e0b157488796db2e32b28aecabb445775",
+    "04a7b7f08bce85d56b26ffe1fdbfbb21a074495a363d16f0783c40e25b5c5281",
 };
 
 export function cloudflaredDir(version = CLOUDFLARED_VERSION): string {

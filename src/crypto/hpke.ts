@@ -5,7 +5,8 @@ import { decodeBase64Url, encodeBase64Url } from "@std/encoding/base64url";
 /**
  * HPKE (RFC 9180) base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
  * ChaCha20-Poly1305: the format the control plane seals secrets in. The
- * daemon only opens envelopes; `aad` is its own server id. The suite is built
+ * daemon only opens envelopes; `aad` is its own server id; `info` is set only by callers that bind the
+ * envelope to one use (the web terminal's session key). The suite is built
  * on first use, never at module load. The control plane carries the matching
  * helper (`src/lib/panel-identity/hpke.ts`); keep the two in step.
  */
@@ -46,6 +47,7 @@ export async function sealToRecipient(
   kid: string,
   aad: string,
   plaintext: Uint8Array,
+  info?: string,
 ): Promise<HpkeEnvelope> {
   if (recipientPublicRaw.length !== X25519_KEY_BYTES) {
     throw new TypeError("recipient public key must be 32 bytes");
@@ -54,7 +56,12 @@ export async function sealToRecipient(
     recipientPublicRaw as BufferSource,
   );
   const sealed = await suite().seal(
-    { recipientPublicKey },
+    {
+      recipientPublicKey,
+      ...(info === undefined
+        ? {}
+        : { info: textEncoder.encode(info) as BufferSource }),
+    },
     plaintext as BufferSource,
     textEncoder.encode(aad) as BufferSource,
   );
@@ -71,6 +78,7 @@ export async function openFromSender(
   recipientPrivateRaw: Uint8Array,
   aad: string,
   envelope: HpkeEnvelope,
+  info?: string,
 ): Promise<Uint8Array> {
   if (recipientPrivateRaw.length !== X25519_KEY_BYTES) {
     throw new TypeError("recipient private key must be 32 bytes");
@@ -82,6 +90,9 @@ export async function openFromSender(
     {
       recipientKey,
       enc: decodeBase64Url(envelope.enc) as BufferSource,
+      ...(info === undefined
+        ? {}
+        : { info: textEncoder.encode(info) as BufferSource }),
     },
     decodeBase64Url(envelope.ct) as BufferSource,
     textEncoder.encode(aad) as BufferSource,

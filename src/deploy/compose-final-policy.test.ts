@@ -181,7 +181,7 @@ test("custom bridge options on a network are refused without approval", () => {
 
 test("the shared Traefik only reads containers the daemon marked as routed", () => {
   const compose = traefikCompose("net", ["172.18.0.1"]);
-  if (!compose.includes("com.turbopanel.system.routed")) {
+  if (!compose.includes("io.turbopanel.system.routed")) {
     throw new TypeError("shared Traefik has no provider constraint");
   }
 });
@@ -214,7 +214,7 @@ test("the reserved host port refusal names who reserves them and lists the ports
   assertThrows(
     () => assertComposePolicy(doc, {}),
     Error,
-    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 18080-18999, 19100-19799",
+    "reserved host ports: 80, 443, 2019, 2029, 2039, 6070, 7080-7081, 7443, 9443, 18080-18999, 19100-19799",
   );
 });
 
@@ -365,5 +365,59 @@ test("a helper entry with no matching publish is refused, even for an approved d
     () => assertComposePolicy(helperDocument([]), { helperReach: [HELPER] }),
     Error,
     "127.0.0.1:18200:7700",
+  );
+});
+
+const PROJECT = "0192a8f4-3c1e-7a52-9b0d-4e6f1a2b3c4d";
+const namespace = { project: PROJECT, owned: ["st-volume-1"] };
+const volumeFindings = (volumes: Record<string, unknown>, approved: boolean) =>
+  collectComposePolicyFindings({ services: {}, volumes }, {
+    volumeNamespace: namespace,
+    hostLevelApproved: approved,
+  });
+
+test("a volume outside the project's namespace is refused, approved or not", () => {
+  for (const approved of [false, true]) {
+    for (
+      const volumes of [
+        { x: { external: true, name: "managed_0192_data" } },
+        { x: { name: "managed_0192_data" } },
+        { x: { external: true } },
+        { managed_0192_data: { external: true } },
+        { x: { name: `${PROJECT}x_data` } },
+        { x: { name: "other-project_data" } },
+      ]
+    ) {
+      assertEquals(
+        volumeFindings(volumes, approved).length,
+        1,
+        JSON.stringify(volumes),
+      );
+    }
+  }
+});
+
+test("a volume in the project's own prefix or this deploy's storage is accepted", () => {
+  for (const approved of [false, true]) {
+    assertEquals(
+      volumeFindings({
+        data: {},
+        plain: null,
+        named: { name: `${PROJECT}_named` },
+        resolved: { name: `${PROJECT}_resolved` },
+        storage: { name: "st-volume-1", external: true },
+      }, approved),
+      [],
+    );
+  }
+});
+
+test("without a namespace the volume names are not judged", () => {
+  assertEquals(
+    collectComposePolicyFindings({
+      services: {},
+      volumes: { x: { external: true, name: "managed_0192_data" } },
+    }, {}),
+    [],
   );
 });

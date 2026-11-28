@@ -105,3 +105,16 @@ test("the Apache config hides dotfiles and editor backups from an opt-in listing
     "IndexIgnore .??* *~ *#",
   );
 });
+
+test("the main config reads no .htaccess above a site's document root", () => {
+  const conf = Deno.readTextFileSync(TEMPLATE);
+  const root = /<Directory "\/">([\s\S]*?)<\/Directory>/.exec(conf);
+  assert(root, "a <Directory /> section");
+  assertStringIncludes(root[1], "AllowOverride None");
+  assertEquals(/AllowOverrideList/.test(root[1]), false);
+  // The vhost sections come after the main file, so their own list wins.
+  assertEquals(
+    conf.indexOf('<Directory "/">') < conf.indexOf("IncludeOptional"),
+    true,
+  );
+});

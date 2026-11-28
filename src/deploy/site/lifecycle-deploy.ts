@@ -26,6 +26,7 @@ import type {
 } from "../../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../../paths/layout.ts";
 import { serviceTree } from "../../paths/layout.ts";
+import { hostHelperDir } from "../../permissions/host-sudo.ts";
 import { forEachSequential } from "../../util/sequential.ts";
 import { markPostDeployPassed } from "./post-deploy-marker.ts";
 import {
@@ -41,10 +42,13 @@ import {
   type SiteRelease,
 } from "../site.ts";
 import { siteRunContext } from "./lifecycle-context.ts";
+import { syncPhpSharedSiteRecords } from "./php-patch-restart.ts";
+import { sitePhpRuntimeMode } from "./php-runtime.ts";
 import {
   postDeployBeforeTrafficFailure,
   PostDeployFailedAfterSwitchError,
   type PostDeployIo,
+  type PostDeployRunResult,
   type PostDeployUnitOpts,
   removePostDeployUnits,
   runPostDeployUnit,
@@ -60,6 +64,8 @@ import {
 export type SiteLifecycleIo = {
   run: RunFn;
   onLine: (stream: "stdout" | "stderr", line: string) => void;
+  /** The log sink's redaction, so a failing run's tail is redacted before it is cut. */
+  redact: (text: string) => string;
   sleep?: (ms: number) => Promise<void>;
   systemdUnitDir?: string;
 };
@@ -186,6 +192,7 @@ function postDeployJobs(
       binding,
       opts: {
         layout: deploy.layout,
+        helperDir: hostHelperDir(deploy.layout),
         username: context.username,
         workingDirectory: release.releaseDir,
         environmentFile: context.environmentFile,
@@ -208,6 +215,7 @@ function postDeployIo(io: SiteLifecycleIo): PostDeployIo {
   return {
     run: io.run,
     onLine: io.onLine,
+    redact: io.redact,
     ...(io.sleep === undefined ? {} : { sleep: io.sleep }),
     ...(io.systemdUnitDir === undefined
       ? {}
@@ -216,7 +224,10 @@ function postDeployIo(io: SiteLifecycleIo): PostDeployIo {
 }
 
 /** Say what runs, run it, and report whether it passed. */
-function runJob(io: SiteLifecycleIo, job: PostDeployJob): Promise<boolean> {
+function runJob(
+  io: SiteLifecycleIo,
+  job: PostDeployJob,
+): Promise<PostDeployRunResult> {
   io.onLine(
     "stdout",
     `running post-deploy commands for ${job.site.composeServiceName} in release ${job.release.releaseId}`,
@@ -246,22 +257,25 @@ export async function runBeforeTrafficPostDeploy(
 ): Promise<void> {
   const jobs = postDeployJobs(deploy, "before-traffic");
   await forEachSequential(jobs, async (job) => {
-    const ok = await runJob(io, job);
-    if (!ok) {
-      throw postDeployBeforeTrafficFailure(job.site.composeServiceName);
+    const result = await runJob(io, job);
+    if (!result.ok) {
+      throw postDeployBeforeTrafficFailure(
+        job.site.composeServiceName,
+        result.failure,
+      );
     }
   });
-  await forEachSequential(
-    jobs.filter((job) => job.release.heldCurrent === true),
-    async (job) => {
-      await swap(job);
-      io.onLine(
-        "stdout",
-        `switched ${job.site.composeServiceName} to release ${job.release.releaseId}`,
-      );
-    },
-  );
+  // Every site says it: a held site switches here, one that was published at
+  // once (a first deploy) already serves the release.
+  await forEachSequential(jobs, async (job) => {
+    if (job.release.heldCurrent === true) await swap(job);
+    io.onLine("stdout", switchedLine(job));
+  });
   await forEachSequential(jobs, (job) => markPassed(deploy, job));
+}
+
+function switchedLine(job: PostDeployJob): string {
+  return `switched ${job.site.composeServiceName} to release ${job.release.releaseId}`;
 }
 
 /** Remember that a job's commands passed, so a re-send of that release does not skip or repeat them wrongly. */
@@ -284,12 +298,15 @@ export async function runAfterSwitchPostDeploy(
   await forEachSequential(
     postDeployJobs(deploy, "after-switch"),
     async (job) => {
-      const ok = await runJob(io, job);
-      if (!ok) {
+      // The site apply that switched traffic has run by now.
+      io.onLine("stdout", switchedLine(job));
+      const result = await runJob(io, job);
+      if (!result.ok) {
         throw new PostDeployFailedAfterSwitchError({
           composeServiceName: job.site.composeServiceName,
           failedReleaseId: job.release.releaseId,
           previousReleaseId: job.release.previousReleaseId,
+          failure: result.failure,
         });
       }
       await markPassed(deploy, job);
@@ -315,6 +332,7 @@ export function workerSpecs(deploy: SiteLifecycleDeploy): WorkerApplySpec[] {
     ) continue;
     specs.push({
       layout: deploy.layout,
+      helperDir: hostHelperDir(deploy.layout),
       composeServiceName: site.composeServiceName,
       username: context.username,
       workingDirectory: context.workingDirectory,
@@ -342,6 +360,12 @@ export async function applyDeployWorkers(
   io: SiteLifecycleIo,
 ): Promise<string[]> {
   const warnings: string[] = [];
+  // The PHP patch pass restarts these sites' workers after a package update.
+  await syncPhpSharedSiteRecords(
+    deploy.layout,
+    deploy.environmentId,
+    sharedPoolPhpSites(deploy),
+  );
   try {
     await removePostDeployUnits(
       postDeployIo(io),
@@ -365,11 +389,35 @@ export async function applyDeployWorkers(
   return warnings;
 }
 
+/**
+ * The environment's PHP sites that keep the shared php-fpm master (no per-site
+ * runtime), with their series: what the PHP patch pass restarts the workers of.
+ */
+export function sharedPoolPhpSites(
+  deploy: Pick<SiteLifecycleDeploy, "environmentId" | "sites">,
+): Array<{ composeServiceName: string; series: string }> {
+  const found: Array<{ composeServiceName: string; series: string }> = [];
+  for (const site of deploy.sites) {
+    try {
+      const series = resolveSitePhpSeries(site);
+      if (
+        series !== undefined &&
+        sitePhpRuntimeMode(site, deploy.environmentId) === null
+      ) found.push({ composeServiceName: site.composeServiceName, series });
+    } catch {
+      // A site the deploy refused has no pool to track.
+    }
+  }
+  return found;
+}
+
 /** Remove an environment's workers and post-deploy units (stop). */
 export async function removeEnvironmentSiteLifecycle(
   io: Pick<SiteLifecycleIo, "run" | "systemdUnitDir" | "onLine">,
   environmentId: string,
 ): Promise<void> {
-  await removeEnvironmentWorkers(workerIo(io), environmentId);
-  await removePostDeployUnits(postDeployIo(io), environmentId, []);
+  // Removing prints no command output, so nothing here needs redacting.
+  const full = { ...io, redact: (text: string) => text };
+  await removeEnvironmentWorkers(workerIo(full), environmentId);
+  await removePostDeployUnits(postDeployIo(full), environmentId, []);
 }

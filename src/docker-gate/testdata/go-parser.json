@@ -387,6 +387,97 @@
       "formErr": false
     },
     {
+      "name": "absolute-form with a query",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {
+        "all": [
+          "true"
+        ]
+      },
+      "formErr": false
+    },
+    {
+      "name": "absolute-form with traversal",
+      "ok": true,
+      "method": "GET",
+      "path": "/v1.43/../containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form with an encoded traversal",
+      "ok": true,
+      "method": "GET",
+      "path": "/v1.43/../containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form without a path",
+      "ok": true,
+      "method": "GET",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form with userinfo",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form https",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form with a fragment",
+      "ok": true,
+      "method": "GET",
+      "path": "/containers/json#x",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
+      "name": "absolute-form with a path in the authority",
+      "ok": true,
+      "method": "GET",
+      "path": "/x/containers/json",
+      "bodyLen": 0,
+      "chunked": false,
+      "leftover": 0,
+      "form": {},
+      "formErr": false
+    },
+    {
       "name": "asterisk target",
       "ok": true,
       "method": "OPTIONS",

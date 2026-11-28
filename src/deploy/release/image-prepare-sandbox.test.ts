@@ -13,14 +13,22 @@ import {
 } from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import type { DockerCliResult } from "../docker-cli.ts";
-import type { BuildWork, SandboxedBuildParams } from "./build-sandbox.ts";
+import {
+  type BuildWork,
+  imageBuildCgroup,
+  type SandboxedBuildParams,
+} from "./build-sandbox.ts";
 import {
   IMAGE_PLAN_MAX_BYTES,
   imagePrepareCommand,
   prepareImagePlanInSandbox,
   takePlan,
 } from "./image-prepare-sandbox.ts";
-import { readPlanVersion, runImageBuildBuild } from "./image-build.ts";
+import {
+  imageBuildLimitsNotice,
+  readPlanVersion,
+  runImageBuildBuild,
+} from "./image-build.ts";
 import { UnsafeTreeError } from "./safe-copy.ts";
 
 /**
@@ -188,11 +196,13 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     await Deno.writeTextFile(tool, fakeTool(capture), { mode: 0o750 });
     const seen: SandboxedBuildParams[] = [];
     const docker: string[][] = [];
+    const removed: string[] = [];
+    const lines: string[] = [];
     let daemonRan = 0;
     const scratchDir = join(root, "scratch");
     const result = await runImageBuildBuild({
       build: {
-        kind: "railpack",
+        kind: "image",
         installCommand: "npm ci",
         env: {
           FOO: "bar",
@@ -213,6 +223,7 @@ test("an image build on a managed host prepares in the sandbox with the build's 
         frontendDigest: DIGEST,
       },
       sandbox: { work, cwd: "source", run: runnerSeam(seen) },
+      onOutput: (_stream, line) => lines.push(line),
     }, {
       runTool: () => {
         daemonRan += 1;
@@ -228,6 +239,12 @@ test("an image build on a managed host prepares in the sandbox with the build's 
         );
       },
       inspectImage: () => Promise.resolve("sha256:image"),
+      ensureImageBuildSlice: (id) =>
+        Promise.resolve({ cgroup: imageBuildCgroup(id), cores: 2 }),
+      removeImageBuildSlice: (id?: string) => {
+        removed.push(id ?? "");
+        return Promise.resolve();
+      },
     });
     assertEquals(daemonRan, 0);
     assertEquals(seen.length, 1);
@@ -249,6 +266,100 @@ test("an image build on a managed host prepares in the sandbox with the build's 
     assert(plan.startsWith(scratchDir), plan);
     assertEquals((await Deno.readTextFile(plan)).trim(), PLAN);
     assertEquals(build.at(-1), work.checkoutDir);
+    // The build's own slice is the cgroup parent, with its core count in the
+    // log, and it is removed when the build ends.
+    assertEquals(
+      build[build.indexOf("--cgroup-parent") + 1],
+      imageBuildCgroup(work.buildId),
+    );
+    assert(lines.includes(imageBuildLimitsNotice(2)), lines.join("\n"));
+    assertEquals(removed, [work.buildId]);
+  });
+});
+
+test("a failed or cancelled image build still removes the build's slice, and a slice that cannot be made only warns and builds without --cgroup-parent", async () => {
+  await withWork(async ({ root, work, capture }) => {
+    const tool = join(root, "vendor-tool");
+    await Deno.writeTextFile(tool, fakeTool(capture), { mode: 0o750 });
+    const removed: string[] = [];
+    const docker: string[][] = [];
+    const lines: string[] = [];
+    const build = (
+      failBuildx: boolean,
+      slice: () => Promise<{ cgroup: string; cores: number }>,
+      signal?: AbortSignal,
+    ) =>
+      runImageBuildBuild({
+        build: { kind: "image", installCommand: "npm ci", env: {} },
+        workingDir: work.checkoutDir,
+        scratchDir: join(root, "scratch"),
+        cacheKey: "p1",
+        imageTag: "turbopanel-app/web:r1",
+        tools: {
+          planner: tool,
+          frontendLayoutDir: "/x",
+          frontendDigest: DIGEST,
+        },
+        sandbox: { work, cwd: "source", run: runnerSeam([]) },
+        onOutput: (_stream, line) => lines.push(line),
+        ...(signal === undefined ? {} : { signal }),
+      }, {
+        runDocker: (args) => {
+          docker.push(args);
+          return Promise.resolve(
+            failBuildx && args[0] === "buildx" && args[1] === "build"
+              ? { success: false, code: 1, stdout: "", stderr: "boom" }
+              : args[0] === "image" && args[1] === "inspect" &&
+                  args.at(-1) !== "{{.Id}}"
+              ? ok("sha256:frontend")
+              : ok(
+                args[0] === "buildx" && args[1] === "version" ? "v0.37" : "",
+              ),
+          );
+        },
+        inspectImage: () => Promise.resolve("sha256:image"),
+        ensureImageBuildSlice: slice,
+        removeImageBuildSlice: (id?: string) => {
+          removed.push(id ?? "");
+          return Promise.resolve();
+        },
+      });
+    const buildxRuns = () =>
+      docker.filter((args) => args[0] === "buildx" && args[1] === "build");
+    const made = () =>
+      Promise.resolve({ cgroup: imageBuildCgroup(work.buildId), cores: 1 });
+    await assertRejects(() => build(true, made));
+    assertEquals(removed, [work.buildId]);
+    assertEquals(buildxRuns().length, 1);
+    assert(buildxRuns()[0]?.includes("--cgroup-parent"));
+
+    // A slice that cannot be made: a warning, no --cgroup-parent, the build
+    // still runs and still cleans up.
+    lines.length = 0;
+    const result = await build(
+      false,
+      () => Promise.reject(new Error("no cpu controller")),
+    );
+    assertEquals(result.imageTag, "turbopanel-app/web:r1");
+    assertEquals(buildxRuns().length, 2);
+    assertEquals(buildxRuns()[1]?.includes("--cgroup-parent"), false);
+    assert(
+      lines.some((line) => line.includes("could not set up the build's CPU")),
+      lines.join("\n"),
+    );
+    assertEquals(removed, [work.buildId, work.buildId]);
+
+    // Cancelled while the slice is being made: the build stops before docker
+    // builds anything, and the slice is still removed.
+    const controller = new AbortController();
+    await assertRejects(() =>
+      build(false, () => {
+        controller.abort();
+        return Promise.reject(new Error("no slice"));
+      }, controller.signal)
+    );
+    assertEquals(buildxRuns().length, 2);
+    assertEquals(removed, [work.buildId, work.buildId, work.buildId]);
   });
 });
 

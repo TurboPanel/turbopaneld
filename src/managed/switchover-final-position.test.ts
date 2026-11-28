@@ -146,7 +146,7 @@ test("a clean stop reports the final position and records which switchover it wa
       recordedAt: "2026-10-22T00:00:00.000Z",
     });
     assertEquals(fake.calls.length, 1);
-    assert(fake.calls[0].includes("pg_data:/var/lib/postgresql"));
+    assert(fake.calls[0].includes("pg_data:/var/lib/postgresql:rw"));
     assert(fake.calls[0].includes("LC_ALL=C"));
   });
 });

@@ -333,3 +333,19 @@ export async function verifyEnvelopedFrame(
   for (const field of ENVELOPE_FIELDS) delete message[field];
   return { ok: true, value: message };
 }
+
+/**
+ * The bytes of a binary WebSocket message, or null for text. Terminal frames
+ * (`src/shell/frames.ts`) are binary and are the one exemption from the signed
+ * envelope: each authenticates under its own session's AES-GCM key, which only
+ * a signed `shell-open` can install, and anything that does not is dropped
+ * without closing the socket. Text frames are never exempt: an unsigned one
+ * still closes the session with 4403.
+ */
+export function binaryFrameBytes(data: unknown): Uint8Array | null {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  return null;
+}

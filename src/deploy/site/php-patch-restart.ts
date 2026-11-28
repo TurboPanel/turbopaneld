@@ -26,6 +26,7 @@ import type { RunFn } from "../ensure-principal.ts";
 import { runHostCommand, systemctl } from "../systemd-unit-set.ts";
 import {
   type PhpPatchRestartError,
+  type PhpPatchSite,
   setPhpPatchSnapshot,
 } from "../../host/php-patch-cache.ts";
 import { SYSTEMD_UNIT_DIR } from "../native/unit.ts";
@@ -50,6 +51,24 @@ export type PhpRuntimeRecord = {
   version?: string;
 };
 
+/**
+ * What a restart needs to know about one site on the shared php-fpm master (a
+ * site with no per-site runtime): the pool runs in the master, so only the
+ * site's workers are its own to restart.
+ */
+export type PhpSharedSiteRecord = {
+  environmentId: string;
+  composeServiceName: string;
+  series: string;
+  /** The installed patch version when last seen (`8.4.27`). */
+  version?: string;
+};
+
+const RUNTIME_MODES: ReadonlySet<string> = new Set([
+  "fastcgi",
+  "fpm",
+  "lsphp-detached",
+]);
 const SERIES_RE = /^\d{1,3}\.\d{1,3}$/;
 const RECORD_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ENVIRONMENT_ID_RE = /^[A-Za-z0-9_-]+$/;
@@ -68,12 +87,153 @@ export function phpRuntimeRecordsDir(
   return join(layout.stateDir, "sites", ".php-runtimes");
 }
 
+export function phpSharedSiteRecordsDir(
+  layout: Pick<LayoutPaths, "stateDir">,
+): string {
+  return join(layout.stateDir, "sites", ".php-shared-sites");
+}
+
+const SERVICE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+function sharedKey(record: PhpSharedSiteRecord): string {
+  return `${record.environmentId}/${record.composeServiceName}`;
+}
+
+function sharedRecordFile(record: PhpSharedSiteRecord): string {
+  // An environment id has no dot and a service name may, so the first dot
+  // always splits the two (a dash could not: both names may contain one).
+  return `${record.environmentId}.${record.composeServiceName}.json`;
+}
+
+function sharedRecordPath(
+  layout: Pick<LayoutPaths, "stateDir">,
+  record: PhpSharedSiteRecord,
+): string {
+  return join(phpSharedSiteRecordsDir(layout), sharedRecordFile(record));
+}
+
+function phpRuntimeRecordPath(
+  layout: Pick<LayoutPaths, "stateDir">,
+  id: string,
+): string {
+  return join(phpRuntimeRecordsDir(layout), `${id}.json`);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSharedRecord(value: unknown): value is PhpSharedSiteRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const r = value as Record<string, unknown>;
+  return typeof r.environmentId === "string" &&
+    ENVIRONMENT_ID_RE.test(r.environmentId) &&
+    typeof r.composeServiceName === "string" &&
+    SERVICE_NAME_RE.test(r.composeServiceName) &&
+    typeof r.series === "string" && SERIES_RE.test(r.series) &&
+    (r.version === undefined ||
+      (typeof r.version === "string" && VERSION_RE.test(r.version)));
+}
+
+/** Every shared-pool site record, sorted by environment and service. */
+export async function readPhpSharedSiteRecords(
+  layout: Pick<LayoutPaths, "stateDir">,
+): Promise<PhpSharedSiteRecord[]> {
+  const dir = phpSharedSiteRecordsDir(layout);
+  const records: PhpSharedSiteRecord[] = [];
+  let names: string[];
+  try {
+    names = (await Array.fromAsync(Deno.readDir(dir)))
+      .filter((entry) => entry.isFile && entry.name.endsWith(".json"))
+      .map((entry) => entry.name);
+  } catch {
+    return [];
+  }
+  await forEachSequential(names, async (name) => {
+    try {
+      const parsed: unknown = JSON.parse(
+        await Deno.readTextFile(join(dir, name)),
+      );
+      if (isSharedRecord(parsed)) records.push(parsed);
+    } catch {
+      // A broken record is ignored; the next deploy writes it again.
+    }
+  });
+  return records.toSorted((a, b) => sharedKey(a).localeCompare(sharedKey(b)));
+}
+
+/** Write (or replace) one shared-pool site's record. */
+export async function writePhpSharedSiteRecord(
+  layout: Pick<LayoutPaths, "stateDir">,
+  record: PhpSharedSiteRecord,
+): Promise<void> {
+  const dir = phpSharedSiteRecordsDir(layout);
+  await Deno.mkdir(dir, { recursive: true, mode: 0o700 });
+  await writePrivateFileAtomic(
+    dir,
+    sharedRecordFile(record),
+    `${JSON.stringify(record)}\n`,
+  );
+}
+
+/**
+ * Make an environment's shared-pool site records match its sites after a
+ * deploy: a site that kept the shared master gets one (its known version is
+ * kept), a site that no longer does loses it. Never throws: a missing record
+ * only means the site's workers are not restarted after a PHP update until the
+ * next deploy.
+ */
+export async function syncPhpSharedSiteRecords(
+  layout: Pick<LayoutPaths, "stateDir">,
+  environmentId: string,
+  sites: ReadonlyArray<{ composeServiceName: string; series: string }>,
+): Promise<void> {
+  try {
+    const existing = (await readPhpSharedSiteRecords(layout)).filter((r) =>
+      r.environmentId === environmentId
+    );
+    const wanted = new Set(sites.map((s) => s.composeServiceName));
+    await forEachSequential(existing, async (record) => {
+      if (wanted.has(record.composeServiceName)) return;
+      await Deno.remove(
+        join(phpSharedSiteRecordsDir(layout), sharedRecordFile(record)),
+      ).catch((err) => {
+        if (!(err instanceof Deno.errors.NotFound)) throw err;
+      });
+    });
+    await forEachSequential(sites, async (site) => {
+      const previous = existing.find((r) =>
+        r.composeServiceName === site.composeServiceName
+      );
+      await writePhpSharedSiteRecord(layout, {
+        environmentId,
+        composeServiceName: site.composeServiceName,
+        series: site.series,
+        // A moved series runs a different build: forget the old version.
+        ...(previous?.series === site.series && previous.version !== undefined
+          ? { version: previous.version }
+          : {}),
+      });
+    });
+  } catch (err) {
+    logWarn(
+      "deploy",
+      `PHP shared-pool site records not updated: ${describe(err)}`,
+    );
+  }
+}
+
 function isRecord(value: unknown): value is PhpRuntimeRecord {
   if (typeof value !== "object" || value === null) return false;
   const r = value as Record<string, unknown>;
   return typeof r.id === "string" && RECORD_ID_RE.test(r.id) &&
     typeof r.series === "string" && SERIES_RE.test(r.series) &&
-    typeof r.mode === "string" &&
+    typeof r.mode === "string" && RUNTIME_MODES.has(r.mode) &&
     typeof r.environmentId === "string" &&
     ENVIRONMENT_ID_RE.test(r.environmentId) &&
     typeof r.composeServiceName === "string" &&
@@ -315,7 +475,9 @@ async function passBody(io: PhpPatchIo): Promise<PhpPatchPassResult> {
   resumePending = false;
   const versions = readPhpPackageVersions(await io.readStatus());
   const records = await readPhpRuntimeRecords(io.layout);
+  const sharedRecords = await readPhpSharedSiteRecords(io.layout);
   const outdated = new Set<string>();
+  const sharedOutdated = new Set<string>();
   let stopped = false;
 
   await forEachSequential(
@@ -335,12 +497,38 @@ async function passBody(io: PhpPatchIo): Promise<PhpPatchPassResult> {
         if (isStale(start, changeMs)) outdated.add(record.id);
         if (failedMarks.get(record.id) === changeMs) return;
         if (isStale(start, changeMs)) stale.push(record);
-        const workers = await staleWorkersOf(io, record, changeMs);
+        const workers = await staleWorkersOf(
+          io,
+          record.environmentId,
+          record.composeServiceName,
+          changeMs,
+        );
         if (workers.length > 0) staleWorkers.push({ record, workers });
       });
       const master = `turbopanel-php-fpm@${series}.service`;
       const masterStale = isStale(await unitStart(io, master), changeMs);
-      if (stale.length === 0 && staleWorkers.length === 0 && !masterStale) {
+      // Shared-pool sites: their pools run in the master, their workers are
+      // their own. A site is behind while either is on the old build.
+      const sharedMine = sharedRecords.filter((r) => r.series === series);
+      const sharedWorkers: Array<
+        { record: PhpSharedSiteRecord; workers: InstalledWorker[] }
+      > = [];
+      await forEachSequential(sharedMine, async (shared) => {
+        const workers = await staleWorkersOf(
+          io,
+          shared.environmentId,
+          shared.composeServiceName,
+          changeMs,
+        );
+        if (workers.length > 0) sharedWorkers.push({ record: shared, workers });
+        if (masterStale || workers.length > 0) {
+          sharedOutdated.add(sharedKey(shared));
+        }
+      });
+      if (
+        stale.length === 0 && staleWorkers.length === 0 && !masterStale &&
+        sharedWorkers.length === 0
+      ) {
         return;
       }
       // Wait out the package run: a pass during it would restart onto a
@@ -364,11 +552,37 @@ async function passBody(io: PhpPatchIo): Promise<PhpPatchPassResult> {
           stopped = true;
           return;
         }
-        await restartWorkers(io, staleWorkers);
+        await restartWorkers(
+          io,
+          staleWorkers.map(({ record, workers }) => ({
+            environmentId: record.environmentId,
+            workers,
+          })),
+        );
+        let masterRestarted = !masterStale;
         if (masterStale) {
           const restart = await systemctl(io.run, ["restart", master]);
+          masterRestarted = restart.success;
           if (!restart.success) {
             logWarn("deploy", `${master} did not restart: ${restart.stderr}`);
+          }
+        }
+        // Shared-pool workers last, after the master, one site at a time.
+        const behind = await restartWorkers(
+          io,
+          sharedWorkers.map(({ record, workers }) => ({
+            environmentId: record.environmentId,
+            workers,
+          })),
+        );
+        const sharedBehind = new Set(
+          sharedWorkers.filter((_, k) => behind[k] === true).map((entry) =>
+            sharedKey(entry.record)
+          ),
+        );
+        for (const shared of sharedMine) {
+          if (masterRestarted && !sharedBehind.has(sharedKey(shared))) {
+            sharedOutdated.delete(sharedKey(shared));
           }
         }
       } finally {
@@ -377,7 +591,14 @@ async function passBody(io: PhpPatchIo): Promise<PhpPatchPassResult> {
     },
   );
 
-  await refreshSnapshot(io, versions, records, outdated);
+  await refreshSnapshot(
+    io,
+    versions,
+    records,
+    outdated,
+    sharedRecords,
+    sharedOutdated,
+  );
   return result;
 }
 
@@ -451,13 +672,14 @@ export function workerIoOf(io: PhpPatchIo) {
 /** The site's workers that started before the change. */
 async function staleWorkersOf(
   io: PhpPatchIo,
-  record: PhpRuntimeRecord,
+  environmentId: string,
+  composeServiceName: string,
   changeMs: number,
 ): Promise<InstalledWorker[]> {
   const installed = await listInstalledWorkers(
     workerIoOf(io),
-    record.environmentId,
-    record.composeServiceName,
+    environmentId,
+    composeServiceName,
   );
   const stale: InstalledWorker[] = [];
   await forEachSequential(installed, async (worker) => {
@@ -467,15 +689,19 @@ async function staleWorkersOf(
   return stale;
 }
 
-/** Restart the stale workers, one site at a time under its environment's lock, gracefully. */
+/**
+ * Restart the stale workers, one site at a time under its environment's lock,
+ * gracefully. Returns, per group, whether a worker did not stay running.
+ */
 async function restartWorkers(
   io: PhpPatchIo,
   groups: ReadonlyArray<
-    { record: PhpRuntimeRecord; workers: InstalledWorker[] }
+    { environmentId: string; workers: InstalledWorker[] }
   >,
-): Promise<void> {
-  await forEachSequential(groups, async ({ record, workers }) => {
-    await withKeyedLock(environmentLockKey(record.environmentId), async () => {
+): Promise<boolean[]> {
+  const notRunning: boolean[] = [];
+  await forEachSequential(groups, async ({ environmentId, workers }) => {
+    await withKeyedLock(environmentLockKey(environmentId), async () => {
       const failed = await restartInstalledWorkers(workerIoOf(io), workers);
       for (const label of failed) {
         logWarn(
@@ -483,8 +709,10 @@ async function restartWorkers(
           `worker ${label} did not stay running after the PHP restart`,
         );
       }
+      notRunning.push(failed.length > 0);
     });
   });
+  return notRunning;
 }
 
 async function refreshSnapshot(
@@ -492,6 +720,8 @@ async function refreshSnapshot(
   versions: Record<string, string>,
   records: readonly PhpRuntimeRecord[],
   outdated: ReadonlySet<string>,
+  sharedRecords: readonly PhpSharedSiteRecord[],
+  sharedOutdated: ReadonlySet<string>,
 ): Promise<void> {
   // A failed mark belongs to one package change; a newer change retries.
   for (const record of records) {
@@ -501,29 +731,90 @@ async function refreshSnapshot(
     }
   }
   // A runtime that is not behind a package change runs the installed version.
+  // A stop or a deploy can delete a record while the pass runs; the rewrite
+  // happens under the environment's lock and only for a record still there,
+  // and a record that is gone leaves the snapshot too.
+  const gone = new Set<string>();
   await forEachSequential(records, async (record) => {
+    if (!await fileExists(phpRuntimeRecordPath(io.layout, record.id))) {
+      gone.add(`r:${record.id}`);
+      return;
+    }
     const current = versions[record.series];
     if (
       current !== undefined && !outdated.has(record.id) &&
       record.version !== current
     ) {
       record.version = current;
-      await writePhpRuntimeRecord(io.layout, record).catch((err) =>
+      await withKeyedLock(
+        environmentLockKey(record.environmentId),
+        async () => {
+          if (!await fileExists(phpRuntimeRecordPath(io.layout, record.id))) {
+            gone.add(`r:${record.id}`);
+            return;
+          }
+          await writePhpRuntimeRecord(io.layout, record);
+        },
+      ).catch((err) =>
         logWarn("deploy", `PHP runtime record not updated: ${describe(err)}`)
       );
     }
   });
-  const sites = records.slice(0, PHP_PATCH_SITE_CAP).map((record) => ({
+  // Same for a shared-pool site: not behind means it runs the installed build.
+  await forEachSequential(sharedRecords, async (record) => {
+    if (!await fileExists(sharedRecordPath(io.layout, record))) {
+      gone.add(`s:${sharedKey(record)}`);
+      return;
+    }
+    const current = versions[record.series];
+    if (
+      current !== undefined && !sharedOutdated.has(sharedKey(record)) &&
+      record.version !== current
+    ) {
+      record.version = current;
+      await withKeyedLock(
+        environmentLockKey(record.environmentId),
+        async () => {
+          if (!await fileExists(sharedRecordPath(io.layout, record))) {
+            gone.add(`s:${sharedKey(record)}`);
+            return;
+          }
+          await writePhpSharedSiteRecord(io.layout, record);
+        },
+      ).catch((err) =>
+        logWarn(
+          "deploy",
+          `PHP shared-pool site record not updated: ${describe(err)}`,
+        )
+      );
+    }
+  });
+  const dedicated: PhpPatchSite[] = records.filter((r) =>
+    !gone.has(`r:${r.id}`)
+  ).map((record) => ({
     environmentId: record.environmentId,
     composeServiceName: record.composeServiceName,
     series: record.series,
     ...(record.version === undefined ? {} : { version: record.version }),
     ...(outdated.has(record.id) ? { outdated: true as const } : {}),
-  })).sort((a, b) =>
+  }));
+  const shared: PhpPatchSite[] = sharedRecords.filter((r) =>
+    !gone.has(`s:${sharedKey(r)}`)
+  ).map((record) => ({
+    environmentId: record.environmentId,
+    composeServiceName: record.composeServiceName,
+    series: record.series,
+    ...(record.version === undefined ? {} : { version: record.version }),
+    ...(sharedOutdated.has(sharedKey(record))
+      ? { outdated: true as const }
+      : {}),
+    shared: true as const,
+  }));
+  const sites = [...dedicated, ...shared].sort((a, b) =>
     `${a.environmentId}/${a.composeServiceName}`.localeCompare(
       `${b.environmentId}/${b.composeServiceName}`,
     )
-  );
+  ).slice(0, PHP_PATCH_SITE_CAP);
   // The error stays on the server page until every failed site is cleared
   // (a deploy of it, or a newer package change).
   const restartError = failedMarks.size > 0 ? lastError : undefined;

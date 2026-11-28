@@ -43,7 +43,7 @@ const test = Deno.test.bind(Deno);
 const HERE = dirname(fromFileUrl(import.meta.url));
 const GOLDENS = join(HERE, "testdata", "config-goldens");
 const TLS_DIR = "/etc/turbopanel/tls";
-const FPM_SOCKET = "/run/turbopanel/php/8.4/tp-env-phpapp.sock";
+const FPM_SOCKET = "/run/turbopanel-phpfpm/8.4/tp-env-phpapp.sock";
 /** Fixed fixtures for the Apache site key and per-site error log. */
 const SITE_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

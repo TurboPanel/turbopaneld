@@ -2,12 +2,14 @@ import { assertEquals } from "@std/assert";
 import { setActiveInstallPresenter } from "../orchestration/install-presenter-context.ts";
 import { InstallPresenter } from "../orchestration/install-presenter.ts";
 import {
+  errorText,
   logDebug,
   logError,
   logInfo,
   logWarn,
   sanitizeForLog,
   stripLogInjection,
+  stripTerminalControlsKeepBreaks,
   writeLogLineOrDrop,
 } from "./logger.ts";
 
@@ -19,8 +21,30 @@ import {
  */
 const test = Deno.test.bind(Deno);
 
+test("stripTerminalControlsKeepBreaks keeps line breaks and strips escapes", () => {
+  assertEquals(
+    stripTerminalControlsKeepBreaks("a\r\nb\rc\td\x1b[31me\x07f\n"),
+    "a\nb\nc\tde_f\n",
+  );
+});
+
 test("stripLogInjection replaces control whitespace", () => {
   assertEquals(stripLogInjection("a\nb\rc\td"), "a_b_c_d");
+});
+
+test("errorText renders errors, primitives, objects and the unserializable", () => {
+  assertEquals(errorText(new Error("boom\nline")), "boom\nline");
+  assertEquals(errorText("plain"), "plain");
+  assertEquals(errorText(42), "42");
+  assertEquals(errorText(false), "false");
+  assertEquals(errorText(10n), "10");
+  assertEquals(errorText(null), "null");
+  assertEquals(errorText(undefined), "undefined");
+  assertEquals(errorText({ a: 1 }), String.raw`{"a":1}`);
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  assertEquals(errorText(circular), "[unserializable]");
+  assertEquals(errorText(Symbol("x")), "[unserializable]");
 });
 
 test("sanitizeForLog covers primitives, errors, and objects", () => {

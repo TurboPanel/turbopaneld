@@ -81,7 +81,6 @@ async function withEnv(
 
 const applyDeps = {
   ensureDocker: () => Promise.resolve(),
-  runHostPrep: () => Promise.resolve(),
   runDocker: quietDocker,
 };
 
@@ -316,6 +315,7 @@ test("a destroyed member is not listed as a member to watch", async () => {
       role: "primary",
       containerName: "c1",
       replicaPeerCount: 1,
+      peerCount: 1,
       updatedAt: new Date().toISOString(),
     });
     assertEquals((await listManagedHaMembers(layout)).length, 1);

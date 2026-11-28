@@ -27,3 +27,30 @@ turbopanel_ui_mode: static
 turbopanel_ui_dist_dir: /opt/turbopanel/share/ui
 turbopanel_ui_artifact_url: ""
 force_build: false
+
+# Development export (a dev user is set, the UI comes from source): the export
+# is built in development mode (`expo export --dev`) so development-only
+# tooling such as the React Query devtools is in the bundle. It replaces the
+# Expo dev server (2-4 GiB of RAM) on a small dev guest, so the build itself is
+# bounded to fit a 4 GiB guest next to the rest of the stack:
+#   - two bundler workers (each is a Node process of a few hundred MiB; the
+#     default is one per CPU, which can exceed 4 GiB on a many-core host);
+#   - a 1536 MiB old-space cap on the main Node process, enough for the web
+#     bundle graph, low enough that a runaway build fails instead of swapping.
+# Bundle splitting is off (EXPO_NO_BUNDLE_SPLITTING): a development export names
+# every async chunk after the hash of empty content, so same-named route chunks
+# overwrite each other and the browser fails with an unknown module. The export
+# is one entry script and the build fails if any other script appears.
+# Raise both limits on a larger guest. Production exports ignore these.
+turbopanel_ui_export_dev: "{{ turbopanel_dev_user | default('') | length > 0 }}"
+turbopanel_ui_export_max_workers: 2
+turbopanel_ui_export_node_heap_mb: 1536
+# Source paths (relative to the UI checkout) newer than the published export
+# make it stale. A development export also watches the lockfile, the package
+# manifest and the bundler config, which change what is in the bundle.
+turbopanel_ui_export_sources: "src app.json babel.config.cjs tsconfig.json"
+turbopanel_ui_export_dev_sources: "{{ turbopanel_ui_export_sources }} app.config.ts metro.config.js global.css package.json pnpm-lock.yaml assets public"
+# Written beside the exported files (inside the published directory, so it is
+# replaced with them) by a development export only; a production export never
+# has it. Its text is the export mode, so a switch between the two is detected.
+turbopanel_ui_export_marker: "{{ turbopanel_ui_dist_dir }}/.turbopanel-export-mode"

@@ -16,9 +16,21 @@ import {
 import { reinstallFirewallForwardingIfEnabled } from "../firewall/apply.ts";
 import { recoverInterruptedRestores } from "../backups/copy-restore.ts";
 import { syncAccountWallQuietly } from "../deploy/account-wall.ts";
+import {
+  buildSandboxEnabled,
+  removeImageBuildSlice,
+} from "../deploy/release/build-sandbox.ts";
 import { runPrivileged } from "../deploy/release/release-layout.ts";
 import { reconcileSitePhpRuntimesAtBoot } from "../deploy/site/php-runtime-apply.ts";
 import { armPhpPatchRestarts } from "../deploy/site/php-patch-restart.ts";
+import {
+  hostApacheWallsRepairIo,
+  repairApacheWalls,
+} from "../deploy/site/apache-walls-repair.ts";
+import {
+  checkPhpRunTree,
+  hostPhpRunTreeCheckIo,
+} from "../deploy/site/php-run-tree-check.ts";
 import { logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { reportLiveReleaseLinks } from "../deploy/release/live-release-scan.ts";
@@ -27,6 +39,7 @@ import {
   guardHostingCaddySites,
 } from "../deploy/ingress.ts";
 import { runDocker } from "../deploy/docker-cli.ts";
+import { scopeManagedPublicListenersAtBoot } from "../managed/firewall-boot.ts";
 import { applyBootHold, BootHoldLocalRetry } from "../managed/boot-hold.ts";
 import { DemotedMemberGuard } from "../managed/demoted-guard.ts";
 import { ManagedEngineExitGuard } from "../managed/engine-exit-guard.ts";
@@ -128,8 +141,12 @@ export type DaemonRunIo = {
   scanLiveReleases?: () => Promise<void>;
   /** Set aside hosting Caddy snippets it cannot load; defaults to {@link guardHostingSites}. */
   guardHostingCaddySites?: () => Promise<void>;
+  /** Close published public managed ports at start; defaults to {@link scopeManagedPublicListenersAtStart}. */
+  scopeManagedPublicListeners?: () => Promise<unknown>;
   /** Hold HA primaries after an unclean host restart; defaults to {@link applyManagedBootHoldAtStart}. */
   applyManagedBootHold?: () => Promise<void>;
+  /** Remove image-build slices a crashed run left; defaults to {@link sweepImageBuildSlicesAtStart}. */
+  sweepImageBuildSlices?: () => Promise<void>;
   /** Stamp a clean shutdown for the next start; defaults to {@link markCleanShutdown}. */
   markCleanShutdown?: () => Promise<void>;
   /** Boot-time ProxySQL frontend repair; defaults to {@link repairProxySqlFrontendAtBoot}. */
@@ -148,6 +165,16 @@ export type DaemonRunIo = {
   syncAccountWall?: () => Promise<void>;
   /** Start the PHP patch restarts (the boot pass and the watch). */
   armPhpPatchRestarts?: () => void;
+  /**
+   * The one-time Apache walls repair for a host that took a daemon update
+   * (once per daemon version); runs in the background.
+   */
+  repairApacheWalls?: () => Promise<unknown>;
+  /**
+   * The read-only warning for a host whose PHP sockets did not move to the
+   * root-owned run tree; runs in the background, before the walls.
+   */
+  checkPhpRunTree?: () => Promise<unknown>;
   /** Start containers a restore stopped before the daemon died. */
   recoverInterruptedRestores?: () => Promise<unknown>;
   shouldEnableDockerIntegration?: () => boolean;
@@ -289,6 +316,15 @@ async function maybeAttachDocker(
   dockerMonitor.subscribeReachability((reachable) => {
     if (!reachable) return;
     void reinstallForwardingJumps();
+    // Docker may have rebuilt DOCKER-USER without our jump.
+    void (io.scopeManagedPublicListeners ??
+      scopeManagedPublicListenersAtStart)().catch((err) => {
+        (io.logWarn ?? logWarn)(
+          "managed",
+          "re-scoping public managed listeners after Docker returned failed:",
+          sanitizeForLog(err),
+        );
+      });
     // Docker may have recreated its bridges while it was away.
     void syncWall(io);
     void (io.healManagedStacks ?? healManagedStacksAfterDockerReturn)()
@@ -412,6 +448,22 @@ export async function applyManagedBootHoldAtStart(
   }
 }
 
+/** Close the public managed listeners on disk (`managed/firewall-boot.ts`). */
+export async function scopeManagedPublicListenersAtStart(): Promise<void> {
+  await scopeManagedPublicListenersAtBoot(
+    resolveLayout(Deno.env.toObject()),
+  );
+}
+
+/**
+ * Remove the per-build image-build slices a crashed daemon left behind. Only
+ * where builds are sandboxed (a managed host); a development install has none.
+ */
+export async function sweepImageBuildSlicesAtStart(): Promise<void> {
+  if (!await buildSandboxEnabled()) return;
+  await removeImageBuildSlice();
+}
+
 /** Test seam: drop timers started by {@link applyManagedBootHoldAtStart}. */
 export function stopManagedRuntimeGuardsForTests(): void {
   bootHoldRetry?.stop();
@@ -457,6 +509,9 @@ function scheduleBootRetry(
 ): void {
   if ((io.shouldSkipOrchestration ?? shouldSkipOrchestration)()) return;
   markRuntimeUnverified();
+  // The converge that moves PHP to the root-owned run tree did not finish, so
+  // say so now instead of only after a retry works.
+  void runRunTreeCheck(io);
   const attempt = async () =>
     (await (io.bootstrapOrchestration ?? bootstrapOrchestrationTools)()) &&
     (await (io.runBootConverge ?? runBootConverge)());
@@ -495,6 +550,19 @@ async function syncWall(io: DaemonRunIo): Promise<void> {
  * background checks. Runs before the connection on an enrolled host, and after
  * the boot converge on a new one.
  */
+/** The read-only PHP run tree warning; never rejects. */
+function runRunTreeCheck(io: DaemonRunIo): Promise<void> {
+  return (io.checkPhpRunTree ??
+    (() => checkPhpRunTree(hostPhpRunTreeCheckIo(resolveLayout()))))()
+    .then(() => undefined, (err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "PHP run tree check failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
+}
+
 async function afterOrchestration(
   io: DaemonRunIo,
   reinstallForwardingJumps: () => Promise<void>,
@@ -516,6 +584,20 @@ async function afterOrchestration(
   // After the runtimes are back: restart what still runs a PHP build older
   // than the installed one, in the background, and keep watching.
   (io.armPhpPatchRestarts ?? (() => armPhpPatchRestarts(resolveLayout())))();
+  // Also in the background: warn when the converge left PHP on the old socket
+  // folder (read-only), then add the Apache walls once per daemon version.
+  runRunTreeCheck(io)
+    .then(() =>
+      (io.repairApacheWalls ??
+        (() => repairApacheWalls(hostApacheWallsRepairIo(resolveLayout()))))()
+    )
+    .catch((err) => {
+      (io.logWarn ?? logWarn)(
+        "deploy",
+        "Apache walls repair failed:",
+        err instanceof Error ? err.message : String(err),
+      );
+    });
   (io.recoverInterruptedRestores ?? (() => recoverInterruptedRestores()))()
     .catch((err) => {
       (io.logWarn ?? logWarn)(
@@ -607,6 +689,17 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
 
   info("daemon", "starting up");
 
+  // First of all, before the control plane and before Docker is waited for: a
+  // reboot clears the iptables rules while Docker republishes managed ports.
+  await bestEffort(
+    io.logWarn ?? logWarn,
+    "boot firewall scoping",
+    async () => {
+      await (io.scopeManagedPublicListeners ??
+        scopeManagedPublicListenersAtStart)();
+    },
+  );
+
   // Before any orchestration step: tp-host and lib/tp-php-loopback are root
   // helpers an earlier converge installed, and orchestration may not be ready
   // for a long while (or ever, on this start).
@@ -617,6 +710,13 @@ export async function runDaemon(io: DaemonRunIo = {}): Promise<void> {
     io.logWarn ?? logWarn,
     "boot hold check",
     io.applyManagedBootHold ?? applyManagedBootHoldAtStart,
+  );
+
+  // No image build is running yet, so any image-build slice is a leftover.
+  await bestEffort(
+    io.logWarn ?? logWarn,
+    "image build slice sweep",
+    io.sweepImageBuildSlices ?? sweepImageBuildSlicesAtStart,
   );
 
   const abort = new AbortController();

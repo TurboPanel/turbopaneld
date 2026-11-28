@@ -15,12 +15,14 @@ import type {
   TunnelRoutesResult,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
-import { errorText, logInfo } from "../util/logger.ts";
+import { errorText, logInfo, logWarn } from "../util/logger.ts";
 import type { DecryptSecretsFn } from "./materialize-tls.ts";
 import { grantHostingCaddyRead } from "./ensure-hosting-caddy.ts";
+import { HOSTING_FALLBACK_SITE } from "./instance-acme-http01.ts";
 import {
   activateHostingSites,
   enableHostingCaddy,
+  plannedFallbackForSites,
   validateHostingCaddyCandidate,
   withHostingSitesLock,
 } from "./ingress.ts";
@@ -30,7 +32,6 @@ import {
   tunnelPeerPaths,
 } from "./tunnel-caddy.ts";
 import {
-  clearTunnelGeneration,
   isStaleTunnelGeneration,
   type OwnSiteFile,
   peerMaterialId,
@@ -42,6 +43,10 @@ import {
   type TunnelState,
   writeTunnelState,
 } from "./tunnel-state.ts";
+import {
+  type PeerClientAuthPlan,
+  planPeerClientAuth,
+} from "./tunnel-peer-cert.ts";
 
 export type ApplyTunnelRoutesDeps = {
   decryptSecrets: DecryptSecretsFn;
@@ -61,45 +66,83 @@ async function exists(path: string): Promise<boolean> {
   return await Deno.stat(path).then(() => true, () => false);
 }
 
+/**
+ * Whether the private key is needed at all: the peer-facing site presents it
+ * (a table with peer addresses), and a forward block presents it as a client
+ * key. A server that only carries a tunnel, with no peer addresses and no
+ * forwarded name, never uses it, so it is not written there.
+ */
+function peerKeyNeeded(
+  table: Pick<TunnelState, "peerAddresses" | "routes" | "presentCertificate">,
+): boolean {
+  return table.peerAddresses.length > 0 ||
+    (table.presentCertificate === true &&
+      table.routes.some((route) => !route.local));
+}
+
+/**
+ * The folder holds what the table needs: the certificate and the trust bundle
+ * always, the private key when {@link peerKeyNeeded}. With `exact`, a key the
+ * table does not need counts as not present (it is dropped after the table is
+ * in place, see {@link dropUnusedKey}).
+ */
 async function peerFilesPresent(
   hostingDir: string,
   id: string,
+  withKey: boolean,
+  exact = false,
 ): Promise<boolean> {
   const paths = tunnelPeerPaths(hostingDir, id);
-  const found = await Promise.all([
+  const [certificate, key, trust] = await Promise.all([
     exists(paths.certificate),
     exists(paths.key),
     exists(paths.trust),
   ]);
-  return found.every(Boolean);
+  return certificate && trust && (exact ? key === withKey : key || !withKey);
 }
 
 /**
- * Write the certificate, the unsealed key and the trust bundle into
- * `hosting/peer/<id>/` through a sibling folder renamed into place. Returns
- * true when the folder was made by this call. Mode 0640: the hosting Caddy
- * account reads it through the folder's access list, like the site files.
+ * Remove a key the table in place no longer uses. Only after the swap: until
+ * then the running Caddy and a failed table still point at it.
+ */
+async function dropUnusedKey(hostingDir: string, id: string): Promise<void> {
+  await Deno.remove(tunnelPeerPaths(hostingDir, id).key).catch(() => {});
+}
+
+/**
+ * Write the certificate, the trust bundle and, when the table uses it, the
+ * unsealed key into `hosting/peer/<id>/` through a sibling folder renamed into
+ * place. Returns true when the folder was made by this call. The certificate
+ * and trust bundle are 0640 (public, read by the hosting Caddy account through
+ * the folder's access list, like the site files). The key is created 0600 and
+ * the hosting grant (`grantHostingCaddyRead`) then gives it the Caddy entry
+ * and empties its group entry, so only the daemon account and the hosting
+ * Caddy account read it.
  */
 async function ensurePeerMaterial(
   hostingDir: string,
   id: string,
   material: TunnelPeerMaterial,
   decryptSecrets: DecryptSecretsFn,
+  withKey: boolean,
 ): Promise<boolean> {
-  if (await peerFilesPresent(hostingDir, id)) return false;
-  const [key] = await decryptSecrets([material.privateKeyEnvelope]);
-  if (typeof key !== "string" || key.length === 0) {
-    throw new Error("could not unseal the peer certificate key");
+  if (await peerFilesPresent(hostingDir, id, withKey)) return false;
+  let key: string | null | undefined;
+  if (withKey) {
+    [key] = await decryptSecrets([material.privateKeyEnvelope]);
+    if (typeof key !== "string" || key.length === 0) {
+      throw new Error("could not unseal the peer certificate key");
+    }
   }
   const paths = tunnelPeerPaths(hostingDir, id);
   const staging = `${paths.dir}.tpnew`;
   await Deno.remove(staging, { recursive: true }).catch(() => {});
   await Deno.mkdir(staging, { recursive: true, mode: 0o750 });
-  const write = (name: string, text: string) =>
-    Deno.writeTextFile(join(staging, name), text, { mode: 0o640 });
-  await write("leaf.pem", material.certificatePem);
-  await write("leaf.key", key);
-  await write("ca.pem", material.caCertPem);
+  const write = (name: string, text: string, mode: number) =>
+    Deno.writeTextFile(join(staging, name), text, { mode });
+  await write("leaf.pem", material.certificatePem, 0o640);
+  if (typeof key === "string") await write("leaf.key", key, 0o600);
+  await write("ca.pem", material.caCertPem, 0o640);
   await Deno.remove(paths.dir, { recursive: true }).catch(() => {});
   await Deno.rename(staging, paths.dir);
   return true;
@@ -150,11 +193,16 @@ async function unchangedResult(
   ) return undefined;
   const same = await renderStoredTunnelFile(hostingDir, sitesDir, prior);
   const filesOk = prior.peerId === undefined ||
-    await peerFilesPresent(hostingDir, prior.peerId);
+    await peerFilesPresent(
+      hostingDir,
+      prior.peerId,
+      peerKeyNeeded(prior),
+      true,
+    );
   if (!filesOk || (live ?? "") !== same.contents) return undefined;
   // A site deployed since (or written by an older daemon) may hold other peers.
   if ((await plannedRelocks(sitesDir, prior)).length > 0) return undefined;
-  await settleGeneration(hostingDir, payload.generation);
+  await tryRecordTunnelGeneration(hostingDir, payload.generation);
   return {
     hash: payload.hash,
     applied: false,
@@ -176,7 +224,7 @@ async function judgeTunnelSet(
   relocks: readonly OwnSiteFile[],
   grantRead: (hostingDir: string) => Promise<void>,
 ): Promise<void> {
-  const judge = (sites: readonly OwnSiteFile[]) =>
+  const judge = async (sites: readonly OwnSiteFile[]) =>
     validateHostingCaddyCandidate(
       layout,
       paths.hostingDir,
@@ -184,7 +232,7 @@ async function judgeTunnelSet(
       TUNNEL_SITE_FILE,
       contents,
       grantRead,
-      { sites },
+      { sites, fallback: await relockedFallback(paths.sitesDir, sites) },
     );
   try {
     await judge(relocks);
@@ -199,6 +247,25 @@ async function judgeTunnelSet(
       }: ${errorText(err)}`,
     );
   }
+}
+
+/**
+ * The catch-all file when the relocked sites change an address (a bound
+ * site gains this server's addresses), so no bound address is left without
+ * one; `undefined` when it stays as it is.
+ */
+async function relockedFallback(
+  sitesDir: string,
+  relocks: readonly OwnSiteFile[],
+): Promise<string | undefined> {
+  if (relocks.length === 0) return undefined;
+  const planned = await plannedFallbackForSites(
+    sitesDir,
+    new Map(relocks.map((site) => [site.file, site.contents])),
+  );
+  if (planned === undefined) return undefined;
+  const live = await readTextIfPresent(join(sitesDir, HOSTING_FALLBACK_SITE));
+  return planned === live ? undefined : planned;
 }
 
 /**
@@ -220,12 +287,17 @@ async function swapTunnelFile(
   if (tunnelSame && relocks.length === 0) return;
   await judgeTunnelSet(layout, paths, contents, relocks, grantRead);
   if (contents !== "") await enableHostingCaddy();
+  const fallback = await relockedFallback(paths.sitesDir, relocks);
   await activateHostingSites([
     ...(tunnelSame ? [] : [{ live: paths.livePath, contents }]),
     ...relocks.map((site) => ({
       live: join(paths.sitesDir, site.file),
       contents: site.contents,
     })),
+    ...(fallback === undefined ? [] : [{
+      live: join(paths.sitesDir, HOSTING_FALLBACK_SITE),
+      contents: fallback,
+    }]),
   ]);
   // Caddy no longer loads anything from it (the empty file loaded).
   if (!tunnelSame && contents === "") {
@@ -233,19 +305,10 @@ async function swapTunnelFile(
   }
 }
 
-/** After a table is in place: keep its generation, or forget the record when it has none. */
-function settleGeneration(
-  hostingDir: string,
-  generation: number | undefined,
-): Promise<void> {
-  return generation === undefined
-    ? clearTunnelGeneration(hostingDir)
-    : tryRecordTunnelGeneration(hostingDir, generation);
-}
-
 function tunnelStateFor(
   payload: TunnelRoutesPayload,
   peerId: string | undefined,
+  plan: PeerClientAuthPlan,
 ): TunnelState {
   return {
     hash: payload.hash,
@@ -255,10 +318,17 @@ function tunnelStateFor(
       ? { listenAddresses: payload.listenAddresses }
       : {}),
     ...(peerId === undefined ? {} : { peerId }),
+    ...(peerId !== undefined && plan.clientAuth
+      ? { clientAuth: plan.clientAuth }
+      : {}),
+    ...(peerId !== undefined && plan.clientAuth && plan.warnings.length > 0
+      ? { clientAuthDowngraded: true }
+      : {}),
+    ...(peerId !== undefined && plan.presentCertificate
+      ? { presentCertificate: true }
+      : {}),
     ...(payload.inbound ? { inbound: payload.inbound } : {}),
-    ...(payload.generation === undefined
-      ? {}
-      : { generation: payload.generation }),
+    generation: payload.generation,
   };
 }
 
@@ -310,14 +380,19 @@ async function applyTunnelRoutesLocked(
   const peerId = material
     ? await peerMaterialId(material.certificatePem, material.caCertPem)
     : undefined;
+  const plan = planPeerClientAuth(
+    payload.peerClientAuth,
+    material?.certificatePem,
+  );
+  const state = tunnelStateFor(payload, peerId, plan);
   const createdMaterial = material !== undefined &&
     await ensurePeerMaterial(
       hostingDir,
       peerId!,
       material,
       deps.decryptSecrets,
+      peerKeyNeeded(state),
     );
-  const state = tunnelStateFor(payload, peerId);
 
   try {
     const rendered = await renderStoredTunnelFile(hostingDir, sitesDir, state);
@@ -333,8 +408,15 @@ async function applyTunnelRoutesLocked(
     await (empty
       ? removeTunnelState(hostingDir)
       : writeTunnelState(hostingDir, state));
-    await settleGeneration(hostingDir, payload.generation);
+    await tryRecordTunnelGeneration(hostingDir, payload.generation);
     await prunePeerMaterial(hostingDir, peerId);
+    if (peerId !== undefined && !peerKeyNeeded(state)) {
+      await dropUnusedKey(hostingDir, peerId);
+    }
+    // Logged, not returned: a warning makes the control plane send the table again.
+    for (const warning of [...plan.warnings, ...rendered.warnings]) {
+      logWarn("tunnels", warning);
+    }
     logInfo(
       "tunnels",
       `tunnel forwarding now holds ${rendered.forwarded.length} name(s), ${rendered.dropped.length} served here; ${relocks.length} site file(s) took new tunnel peers`,

@@ -1,0 +1,163 @@
+{
+  "description": "Web terminal frame vectors (AES-256-GCM). Shared by the daemon, the control plane and the UI; regenerate only with the daemon's frames.ts.",
+  "keyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "sid": "6f1a2b3c-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+  "limits": {
+    "maxPlaintextBytes": 65536,
+    "headerBytes": 26,
+    "tagBytes": 16
+  },
+  "frames": [
+    {
+      "dir": 0,
+      "ctr": 0,
+      "plaintextHex": "016563686f2068690a",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2"
+    },
+    {
+      "dir": 0,
+      "ctr": 1,
+      "plaintextHex": "0200780028",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b00000000000000000117d6c7fc6c0a0add9793edc900e8fdc85dd7bbee58"
+    },
+    {
+      "dir": 0,
+      "ctr": 2,
+      "plaintextHex": "0300008000",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b000000000000000002ca712efdb46bd18b879286c8b07d7f7f1b928e94eb"
+    },
+    {
+      "dir": 0,
+      "ctr": 3,
+      "plaintextHex": "0404",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b00000000000000000309205666d6e84f55e5c47437edd91db38adf"
+    },
+    {
+      "dir": 1,
+      "ctr": 0,
+      "plaintextHex": "0168690d0a",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b010000000000000000455ea4a7067c510bac25adb2e27f136ed53066bf65"
+    },
+    {
+      "dir": 1,
+      "ctr": 1,
+      "plaintextHex": "05ffffffff",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b010000000000000001aee83b3131a562f42e2f78a161af62e8a43c4bbd6d"
+    },
+    {
+      "dir": 1,
+      "ctr": 2,
+      "plaintextHex": "06636c6f73657320696e2036302073",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b010000000000000002d6cb38946820912776c393a0e37abd93332b94520a6eac02fa7aec3d957e03"
+    },
+    {
+      "dir": 1,
+      "ctr": 3,
+      "plaintextHex": "0401",
+      "frameHex": "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0100000000000000032bf1145feefe1b96ed1482f497dac7d1db85"
+    }
+  ],
+  "sequences": [
+    {
+      "name": "in order",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b00000000000000000117d6c7fc6c0a0add9793edc900e8fdc85dd7bbee58",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b000000000000000002ca712efdb46bd18b879286c8b07d7f7f1b928e94eb",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b00000000000000000309205666d6e84f55e5c47437edd91db38adf"
+      ],
+      "expect": [
+        "016563686f2068690a",
+        "0200780028",
+        "0300008000",
+        "0404"
+      ]
+    },
+    {
+      "name": "tampered tag then the genuine frame (counter did not move)",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b00000000000000000117d6c7fc6c0a0add9793edc900e8fdc85dd7bbee59",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b00000000000000000117d6c7fc6c0a0add9793edc900e8fdc85dd7bbee58"
+      ],
+      "expect": [
+        "016563686f2068690a",
+        "tag",
+        "0200780028"
+      ]
+    },
+    {
+      "name": "counter gap",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b000000000000000002ca712efdb46bd18b879286c8b07d7f7f1b928e94eb"
+      ],
+      "expect": [
+        "016563686f2068690a",
+        "counter"
+      ]
+    },
+    {
+      "name": "replayed counter",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2",
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2"
+      ],
+      "expect": [
+        "016563686f2068690a",
+        "counter"
+      ]
+    },
+    {
+      "name": "wrong direction",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b010000000000000000455ea4a7067c510bac25adb2e27f136ed53066bf65"
+      ],
+      "expect": [
+        "direction"
+      ]
+    },
+    {
+      "name": "wrong version",
+      "dir": 0,
+      "frames": [
+        "026f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2"
+      ],
+      "expect": [
+        "version"
+      ]
+    },
+    {
+      "name": "another session",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4c5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6da0cebd402defd40e21280b9364879b8e565f2d4f2"
+      ],
+      "expect": [
+        "sid"
+      ]
+    },
+    {
+      "name": "too short",
+      "dir": 0,
+      "frames": [
+        "016f1a2b3c4d5e4f608a7b9c0d1e2f3a4b0000000000000000000fd9d6b6"
+      ],
+      "expect": [
+        "malformed"
+      ]
+    }
+  ],
+  "hpke": {
+    "note": "keySealed = base64url(enc(32) || ct(48)); HPKE base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, ChaCha20-Poly1305; aad = serverId (UTF-8); info = 'turbopanel shell key v1' + sid (UTF-8, lower case). The opened plaintext is the 32-byte key (keyHex).",
+    "serverId": "9d6e5f4a-3b2c-4d1e-8f0a-1b2c3d4e5f60",
+    "recipientPrivateB64u": "sEiBW_5T3hXU73ys8unR9Uu4r_JCGgd0Ui2Kpd5U3Zo",
+    "recipientPublicB64u": "9QK7LEUk_1ajD1JsGygr2Ivds7W_dQCuoA_abrsofHM",
+    "keySealed": "Hk3AQzNx1Sm-RfPnOtT1vUfhJLyBlVNZPlW8YZvHogCr16eAxFCRBBr78cwqGkPNVfYMseygU47V0v3Qkpz4rd1qCnzZLUryH_X8HY5E2-E"
+  }
+}

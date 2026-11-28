@@ -78,6 +78,7 @@ function basePayload(
       {
         managedId: MANAGED_ID,
         engine: "postgres",
+        family: "pgsql",
         protocolPort: 5432,
         writerHostgroup: 0,
         readerHostgroup: 1,
@@ -96,6 +97,7 @@ function basePayload(
         ],
       },
     ],
+    monitor: { username: "tp_monitor", password: "tpdaemon.v1.mon-secret" },
   };
   if (bindAddresses.length > 0) payload.bindAddresses = bindAddresses;
   return payload;
@@ -145,7 +147,7 @@ function runningProxySqlPsStdout(): string {
     State: "running",
     Labels: {
       "turbopanel.role": "ingress",
-      "com.turbopanel.system.component": "managed-ingress",
+      "io.turbopanel.system.component": "managed-ingress",
     },
   });
 }
@@ -805,7 +807,8 @@ test({
           },
         );
         assertEquals(result.appliedUsers, []);
-        assertEquals(decryptCalls, 1);
+        // The TLS private key and the monitor credential; no user passwords.
+        assertEquals(decryptCalls, 2);
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");
@@ -1601,8 +1604,10 @@ test({
       Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
       Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
       try {
+        const first = basePayload();
+        first.managedNetwork = "turbopanel-managed";
         await handleManagedIngressReconcile(
-          basePayload(),
+          first,
           new Date().toISOString(),
           {
             runDocker: fakeRun(),
@@ -1713,6 +1718,40 @@ test({
         const cnf = await Deno.readTextFile(proxysqlConfigPath(layout));
         assertStringIncludes(cnf, "6432");
         assertStringIncludes(cnf, "6033");
+      } finally {
+        Deno.env.delete("TURBOPANEL_STATE_DIR");
+        Deno.env.delete("TURBOPANEL_CONFIG_DIR");
+      }
+    });
+  },
+});
+
+test({
+  name:
+    "handleManagedIngressReconcile rejects a payload without the monitor credential",
+  permissions: { env: true, read: true, write: true, run: false },
+  fn: async () => {
+    await withTempLayout(async (fixture) => {
+      await seedFixture(fixture);
+      Deno.env.set("TURBOPANEL_STATE_DIR", fixture.dirs.stateDir);
+      Deno.env.set("TURBOPANEL_CONFIG_DIR", fixture.dirs.configDir);
+      try {
+        const payload = basePayload();
+        delete payload.monitor;
+        await assertRejects(
+          () =>
+            handleManagedIngressReconcile(
+              payload,
+              new Date().toISOString(),
+              {
+                runDocker: fakeRun(),
+                decryptSecrets: decryptSecretsEcho,
+                ensureDocker: () => Promise.resolve(),
+              },
+            ),
+          Error,
+          "requires the control-plane monitor credential",
+        );
       } finally {
         Deno.env.delete("TURBOPANEL_STATE_DIR");
         Deno.env.delete("TURBOPANEL_CONFIG_DIR");

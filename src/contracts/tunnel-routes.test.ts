@@ -16,6 +16,7 @@ const test = Deno.test.bind(Deno);
 const CERT = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
 const GOOD = {
   hash: "a".repeat(64),
+  generation: 1,
   routes: [{
     hostname: "app.example.com",
     local: false,
@@ -37,8 +38,41 @@ const GOOD = {
 
 test("server.tunnel.routes parses a table and an empty table", () => {
   assertEquals(parseTunnelRoutesPayload(GOOD), GOOD);
-  const empty = { hash: "b".repeat(64), routes: [], peerAddresses: [] };
+  const empty = {
+    hash: "b".repeat(64),
+    routes: [],
+    peerAddresses: [],
+    generation: 1,
+  };
   assertEquals(parseTunnelRoutesPayload(empty), empty);
+});
+
+test("server.tunnel.routes parses an upstream source address, and refuses a bad one", () => {
+  const withSource = (localAddress: unknown) => ({
+    ...GOOD,
+    routes: [{
+      ...GOOD.routes[0],
+      upstreams: [{ ...GOOD.routes[0].upstreams[0], localAddress }],
+    }],
+  });
+  const parsed = parseTunnelRoutesPayload(withSource("10.0.0.7"));
+  assertEquals(parsed.routes[0].upstreams[0].localAddress, "10.0.0.7");
+  assertEquals(
+    parseTunnelRoutesPayload(withSource("fd00::7")).routes[0].upstreams[0]
+      .localAddress,
+    "fd00::7",
+  );
+  // Absent stays absent.
+  assertEquals(
+    "localAddress" in parseTunnelRoutesPayload(GOOD).routes[0].upstreams[0],
+    false,
+  );
+  for (const bad of ["10.0.0.0/24", "not-an-address", 7, null, ""]) {
+    assertThrows(
+      () => parseTunnelRoutesPayload(withSource(bad)),
+      TypeError,
+    );
+  }
 });
 
 test("server.tunnel.routes refuses bad tables", () => {
@@ -72,6 +106,7 @@ test("server.tunnel.routes parses inbound names, with or without peers, and alon
     hash: "c".repeat(64),
     routes: [],
     peerAddresses: [],
+    generation: 1,
     inbound: [{ hostname: "solo.example.com", peers: [] }],
   };
   assertEquals(parseTunnelRoutesPayload(alone), alone);
@@ -157,7 +192,11 @@ function deploy(hosting: Record<string, unknown>) {
 test("hostings[].tunnel is optional, checked, and never combined with acme on a locked name", () => {
   const plain = parseEnvironmentDeployPayload(deploy({}));
   assertEquals(plain.hostings[0]?.tunnel, undefined);
-  const tunnel = { hostnames: ["app.example.com"], peers: ["10.0.0.5"] };
+  const tunnel = {
+    hostnames: ["app.example.com"],
+    peers: ["10.0.0.5"],
+    generation: 1,
+  };
   assertEquals(
     parseEnvironmentDeployPayload(deploy({ tunnel })).hostings[0]?.tunnel,
     tunnel,
@@ -174,6 +213,25 @@ test("hostings[].tunnel is optional, checked, and never combined with acme on a 
     tunnel: { ...tunnel, openHostnames: ["app.example.com"] },
     tlsMode: "acme",
   }));
+});
+
+test("hostings[].tunnel without generation is refused, and one with it passes", () => {
+  const tunnel = {
+    hostnames: ["app.example.com"],
+    peers: ["192.0.2.10"],
+    generation: 3,
+  };
+  assertEquals(
+    parseEnvironmentDeployPayload(deploy({ tunnel })).hostings[0]?.tunnel
+      ?.generation,
+    3,
+  );
+  const { generation: _generation, ...noGeneration } = tunnel;
+  assertThrows(
+    () => parseEnvironmentDeployPayload(deploy({ tunnel: noGeneration })),
+    TypeError,
+    "Invalid hostings[].tunnel generation",
+  );
 });
 
 test("server.tunnel.routes: material, peers and size limits", () => {
@@ -296,19 +354,24 @@ test("server.tunnel.routes: a carrier-only server may send no peer addresses", (
   assertEquals(parsed.peerAddresses, []);
 });
 
-test("a tunnel generation is optional and must be a non-negative safe integer", () => {
+test("a tunnel generation is required and must be a non-negative safe integer", () => {
   assertEquals(
     parseTunnelRoutesPayload({ ...GOOD, generation: 0 }).generation,
     0,
   );
-  assertEquals(parseTunnelRoutesPayload(GOOD).generation, undefined);
+  const { generation: _omitted, ...noGeneration } = GOOD;
+  assertThrows(() => parseTunnelRoutesPayload(noGeneration), TypeError);
   for (const generation of [-1, 1.5, "3", null, Number.MAX_SAFE_INTEGER + 1]) {
     assertThrows(
       () => parseTunnelRoutesPayload({ ...GOOD, generation }),
       TypeError,
     );
   }
-  const tunnel = { hostnames: ["app.example.com"], peers: ["10.0.0.5"] };
+  const tunnel = {
+    hostnames: ["app.example.com"],
+    peers: ["10.0.0.5"],
+    generation: 1,
+  };
   assertEquals(
     parseEnvironmentDeployPayload(
       deploy({ tunnel: { ...tunnel, generation: 12 } }),
@@ -322,4 +385,21 @@ test("a tunnel generation is optional and must be a non-negative safe integer", 
       ),
     TypeError,
   );
+});
+
+test("server.tunnel.routes parses peerClientAuth and refuses other values", () => {
+  for (const mode of ["verify", "require"] as const) {
+    const payload = { ...GOOD, peerClientAuth: mode };
+    assertEquals(parseTunnelRoutesPayload(payload), payload);
+  }
+  assertEquals(
+    "peerClientAuth" in parseTunnelRoutesPayload(GOOD),
+    false,
+  );
+  for (const value of ["off", "", true, null, 1]) {
+    assertThrows(
+      () => parseTunnelRoutesPayload({ ...GOOD, peerClientAuth: value }),
+      TypeError,
+    );
+  }
 });

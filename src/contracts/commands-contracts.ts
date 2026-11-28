@@ -14,6 +14,7 @@ import {
   MAX_HELPER_REACH_PER_DEPLOY,
   MIN_CACHE_MEMORY_MB,
 } from "../deploy/cache/limits.ts";
+import { type BuildLimits, parseBuildLimits } from "./build-limits.ts";
 import { ConfigValueError, safeEnvName, safeUrlPath } from "./config-values.ts";
 import {
   type FolderRefParts,
@@ -841,6 +842,18 @@ export type EnvironmentDeployHostingWeb = {
   php?: EnvironmentDeployHostingPhp;
 };
 
+/** One name's certificate choice inside a hosting row (`hosting-name-tls-v1`). */
+export type EnvironmentDeployHostingNameTls = {
+  /**
+   * One of the row's served names (`hostingServedNames`) or a name its `www`
+   * mode only redirects (`hostingWwwRedirects`), which can carry its own choice.
+   */
+  hostname: string;
+  /** A certificate in the deploy's `tlsMaterial`; absent = none pinned. */
+  tlsId?: string;
+  tlsMode?: "internal" | "acme";
+};
+
 export type EnvironmentDeployHosting = {
   hostingId: string;
   serviceId: string;
@@ -856,6 +869,14 @@ export type EnvironmentDeployHosting = {
    * the `tls` directive so Caddy's own ACME client issues on :80/:443.
    */
   tlsMode?: "internal" | "pinned" | "acme";
+  /**
+   * Per-name certificate choice (feature `hosting-name-tls-v1`). Each entry
+   * replaces the hosting-level `tlsId` / `tlsMode` for that name, served or a
+   * `www` redirect name. A redirect name with no entry of its own follows the
+   * entry of the name it sends visitors to; other names keep the hosting
+   * level. Absent = every name uses the hosting level, as before.
+   */
+  nameTls?: EnvironmentDeployHostingNameTls[];
   proxy?: EnvironmentDeployHostingProxy;
   /**
    * Resolved Caddy `bind` address for this hosting (public pinned IP, datacenter
@@ -1327,11 +1348,10 @@ export type EnvironmentDeploySite = {
  * runtime compose as `services.<name>.image`. `outputDirectory` is meaningless
  * for `image` and is ignored rather than rejected, so a stale value left by
  * a mode switch still parses. `kind: 'static'` is reserved for the
- * site release phase and is not produced today. The old value of
- * `image` is still accepted and means the same thing.
+ * site release phase and is not produced today.
  */
 export type EnvironmentDeploySourceBuild = {
-  kind: "native" | "static" | "image" | "railpack";
+  kind: "native" | "static" | "image";
   /**
    * Package manager for a `kind: 'native'` node-app install. Omitted means
    * auto-detect from the lockfile after checkout. An explicit
@@ -1488,16 +1508,42 @@ export type EnvironmentDeployNativeAppVariable = {
  */
 export type EnvironmentDeploySourceCredentialKind = "token" | "ssh_key";
 
+/**
+ * The repository a Git Compose project's Base was read from, checked out on the
+ * server so the compose file's relative paths (`build: ./vpn`, `./conf:/etc/x`,
+ * `env_file: ./app.env`) resolve against real files.
+ *
+ * Distinct from {@link EnvironmentDeploySource}: that row builds one service's
+ * release from `x-turbopanel.source`; this one carries the whole project tree
+ * the compose file came from. The daemon checks `commitSha` out into
+ * `<deploymentDir>/repo` before anything builds or starts and runs Compose with
+ * the folder of `composePath` as its project directory. Gated by the
+ * `compose-checkout-v1` wire feature.
+ */
+export type EnvironmentDeployComposeCheckout = {
+  sourceId: string;
+  /** Informational, as on {@link EnvironmentDeploySource}. */
+  provider: "github" | "gitlab" | "git";
+  cloneUrl: string;
+  ref: string;
+  /** The resolved commit the compose file was read from. */
+  commitSha: string;
+  /** Repo-relative path of the compose file (`deploy/compose.yaml`). */
+  composePath: string;
+  credential?: string;
+  credentialKind?: EnvironmentDeploySourceCredentialKind;
+  credentialUsername?: string;
+};
+
 export type EnvironmentDeploySource = {
   sourceId: string;
   composeServiceName: string;
   /**
    * Release-tree directory segment for this sourced service: the environment's
    * TurboPanel `service.id`. Hosting, native units, cron, and stop reclaim all
-   * use this value; older daemons ignore the field and fall back to the compose
-   * key when it is absent.
+   * use this value.
    */
-  releaseServiceId?: string;
+  releaseServiceId: string;
   /**
    * Which control-plane provider resolved this entry. Informational only — the
    * daemon never branches on it; `cloneUrl`, `credential`, and `credentialKind`
@@ -1525,8 +1571,8 @@ export type EnvironmentDeploySource = {
   /**
    * How `credential` reaches git: an HTTPS `token` through the private askpass
    * helper, or an `ssh_key` private key materialized as a temporary identity
-   * file for an `ssh://…` / `git@host:path` clone. Absent means `token` — a
-   * pre-`credentialKind` payload keeps its old behavior.
+   * file for an `ssh://…` / `git@host:path` clone. Required whenever
+   * `credential` is present.
    */
   credentialKind?: EnvironmentDeploySourceCredentialKind;
   /**
@@ -1539,6 +1585,13 @@ export type EnvironmentDeploySource = {
    */
   credentialUsername?: string;
   releaseId: string;
+  /**
+   * The most CPU cores and memory this entry's build may use: the smallest limit set
+   * among the organization, the server and this service
+   * (`build-limits-v1`), in full. Absent: the defaults (half the server's
+   * cores; its RAM less 1 GiB).
+   */
+  buildLimits?: BuildLimits;
   /**
    * Promote an **already-published** release instead of building a new one.
    *
@@ -1696,6 +1749,38 @@ export type EnvironmentDeployHostAccess = {
    * daemon then refuses such a context. Internal hosts are refused either way.
    */
   remoteBuildSourcesApproved?: boolean;
+  /**
+   * True only when the control plane allows this server's projects to mount
+   * SMB network shares (`cifs` / `smb3` volumes). Absent reads as `false`; the
+   * daemon then refuses such a volume like any other network filesystem.
+   * Requires the `network-shares-v1` wire feature.
+   */
+  allowNetworkShares?: boolean;
+  /**
+   * One entry per SMB share volume that needs a login. Each key names an entry
+   * of `variableMaterial` (sealed, looked up as
+   * `${composeServiceName ?? ""}::${key}`); the daemon adds them as
+   * `username=`, `password=` and `domain=` to the volume's mount options in
+   * the compose it runs, so no secret ever sits in the compose text the
+   * control plane sends. Values may not contain a comma or a line break.
+   * Requires the `network-shares-v1` wire feature.
+   */
+  networkShareCredentials?: EnvironmentDeployNetworkShareCredential[];
+};
+
+export type EnvironmentDeployNetworkShareCredential = {
+  /** Top-level Compose volume name the credentials belong to. */
+  volume: string;
+  /** `variableMaterial` key holding the share password. */
+  passwordKey: string;
+  /** `variableMaterial` key holding the user name, when it is sealed too. */
+  usernameKey?: string;
+  /** Plain (not secret) user name, when no `usernameKey` is given. */
+  username?: string;
+  /** Plain (not secret) domain or workgroup. */
+  domain?: string;
+  /** Service of the material entries; absent or null for project-level ones. */
+  composeServiceName?: string | null;
 };
 
 export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
@@ -1725,6 +1810,19 @@ export type EnvironmentDeployPayload = EnvironmentDeployHostAccess & {
    * carrying `x-turbopanel.source`.
    */
   sourceMaterial?: EnvironmentDeploySource[];
+  /**
+   * The repository a Git Compose project's compose file came from, to check out
+   * before the build and start (see {@link EnvironmentDeployComposeCheckout}).
+   * Absent for a project whose compose is not read from a repository.
+   */
+  composeCheckout?: EnvironmentDeployComposeCheckout;
+  /**
+   * The most CPU cores and memory the project-wide Compose build may use: the
+   * smallest of the organization, server and every service's limits
+   * (`build-limits-v1`). Source entries carry their own, in full. Absent: the
+   * defaults (half the server's cores; its RAM less 1 GiB).
+   */
+  buildLimits?: BuildLimits;
   /**
    * Per-service Traefik projects for services that publish at least one
    * `tcp`/`udp` port. HTTP hostings never appear here.
@@ -1883,9 +1981,9 @@ export type EnvironmentDeployContainer = {
   role: "service" | "ingress" | "turbopanel";
 };
 
-/** True for the image-build kind, under its new value and the old one. */
+/** True for the image-build kind. */
 export function isImageBuildKind(kind: string): boolean {
-  return kind === "image" || kind === "railpack";
+  return kind === "image";
 }
 
 /**
@@ -2750,10 +2848,9 @@ export type ProxySqlClusterPayload = {
   protocolPort: number;
   /**
    * Protocol module this cluster is served by. Explicit because a configurable
-   * port no longer identifies the family; absent payloads fall back to the
-   * engine name.
+   * port no longer identifies the family.
    */
-  family?: ManagedIngressFamilyPayload;
+  family: ManagedIngressFamilyPayload;
   writerHostgroup: number;
   readerHostgroup: number;
   backends: ProxySqlBackendPayload[];
@@ -2800,9 +2897,9 @@ export type ManagedIngressReconcilePayload = {
   clusters: ProxySqlClusterPayload[];
   /**
    * This server's ProxySQL backend monitor credential (control-plane minted,
-   * per server; password is a `tpdaemon.…` envelope). When present the daemon
-   * uses it for the ProxySQL monitor globals and rewrites host `monitor.cnf`;
-   * absent means fall back to the host-seeded `monitor.cnf`.
+   * per server; password is a `tpdaemon.…` envelope). Required except on
+   * teardown: the daemon uses it for the ProxySQL monitor globals and rewrites
+   * host `monitor.cnf`, and refuses a reconcile without it.
    */
   monitor?: { username: string; password: string };
   /**
@@ -3100,6 +3197,39 @@ export function hostingWwwRedirects(
     const redirect = hostingWwwNames(hostname, hosting.www)?.redirect;
     return redirect ? [redirect] : [];
   });
+}
+
+/**
+ * The certificate settings one name of a hosting uses: its own `nameTls` entry
+ * when it has one; else, for a `www` redirect name, the entry of the served name
+ * it sends visitors to; else the hosting level. A hosting with no `nameTls`
+ * always answers with its own `tlsId` and `tlsMode`, exactly as before the
+ * field existed.
+ */
+export function hostingTlsForName(
+  hosting: Pick<
+    EnvironmentDeployHosting,
+    "hostnames" | "www" | "tlsId" | "tlsMode" | "nameTls"
+  >,
+  hostname: string,
+): {
+  tlsId: string | null | undefined;
+  tlsMode: EnvironmentDeployHosting["tlsMode"];
+} {
+  const entries = hosting.nameTls;
+  if (entries !== undefined && entries.length > 0) {
+    const target = hostingWwwRedirects(hosting).find((redirect) =>
+      redirect.from === hostname
+    )?.to;
+    const entry = entries.find((item) => item.hostname === hostname) ??
+      (target === undefined
+        ? undefined
+        : entries.find((item) => item.hostname === target));
+    if (entry !== undefined) {
+      return { tlsId: entry.tlsId ?? null, tlsMode: entry.tlsMode };
+    }
+  }
+  return { tlsId: hosting.tlsId, tlsMode: hosting.tlsMode };
 }
 
 /** Must stay in sync with the instance canonical version in src/contracts/commands/hostname.ts */
@@ -4663,23 +4793,70 @@ function parseHostingTlsMode(
   return value as EnvironmentDeployHosting["tlsMode"];
 }
 
-/**
- * An older control plane sends `wwwRedirect: true` ("send the other spelling
- * to the name as written"). Honour it as the mode that keeps the first typed
- * name the site rather than dropping the redirect without a word.
- */
-function parseLegacyHostingWwwRedirect(
-  value: unknown,
-  hostnames: unknown,
-): EnvironmentDeployHosting["www"] {
-  if (value === undefined || value === false) return undefined;
-  if (value !== true) {
-    throw new TypeError("hostings[].wwwRedirect must be a boolean");
+const NAME_TLS_MODES = new Set(["internal", "acme"]);
+const MAX_NAME_TLS_ENTRIES = 1000;
+
+function parseNameTlsEntry(
+  item: unknown,
+  served: ReadonlySet<string>,
+): EnvironmentDeployHostingNameTls {
+  if (!isRecord(item)) {
+    throw new TypeError("hostings[].nameTls entries must be objects");
   }
-  const first = Array.isArray(hostnames) ? hostnames[0] : undefined;
-  return typeof first === "string" && first.startsWith(WWW_PREFIX)
-    ? "root-to-www"
-    : "www-to-root";
+  const hostname = item.hostname;
+  if (typeof hostname !== "string" || !served.has(hostname)) {
+    throw new TypeError(
+      "hostings[].nameTls hostname must be one of the row's served or www redirect names",
+    );
+  }
+  const tlsId = item.tlsId;
+  if (tlsId !== undefined && (typeof tlsId !== "string" || tlsId === "")) {
+    throw new TypeError("hostings[].nameTls tlsId must be a non-empty string");
+  }
+  const tlsMode = item.tlsMode;
+  if (
+    tlsMode !== undefined &&
+    (typeof tlsMode !== "string" || !NAME_TLS_MODES.has(tlsMode))
+  ) {
+    throw new TypeError("hostings[].nameTls tlsMode must be internal or acme");
+  }
+  if (tlsMode === "acme" && tlsId !== undefined) {
+    throw new TypeError(
+      "hostings[].nameTls cannot pin a certificate on an acme name",
+    );
+  }
+  return {
+    hostname,
+    ...(tlsId === undefined ? {} : { tlsId }),
+    ...(tlsMode === undefined
+      ? {}
+      : { tlsMode: tlsMode as EnvironmentDeployHostingNameTls["tlsMode"] }),
+  };
+}
+
+function parseHostingNameTls(
+  value: unknown,
+  hostnames: string[],
+  www: EnvironmentDeployHosting["www"],
+): EnvironmentDeployHostingNameTls[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_NAME_TLS_ENTRIES) {
+    throw new TypeError("hostings[].nameTls must be an array");
+  }
+  const served = new Set([
+    ...hostingServedNames({ hostnames, www }),
+    ...hostingWwwRedirects({ hostnames, www }).map((redirect) => redirect.from),
+  ]);
+  const seen = new Set<string>();
+  const entries = value.map((item) => {
+    const entry = parseNameTlsEntry(item, served);
+    if (seen.has(entry.hostname)) {
+      throw new TypeError("hostings[].nameTls names a hostname twice");
+    }
+    seen.add(entry.hostname);
+    return entry;
+  });
+  return entries.length > 0 ? entries : undefined;
 }
 
 function parseHostingWww(
@@ -4808,9 +4985,14 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const bindAddress = parseHostingBindAddress(value.bindAddress);
   const hostnames = parseHostingHostnames(value.hostnames);
   const tunnel = parseHostingTunnel(value.tunnel, hostnames);
+  const www = parseHostingWww(value.www);
+  const nameTls = parseHostingNameTls(value.nameTls, hostnames, www);
   if (
-    tunnel && tlsMode === "acme" &&
-    tunnel.hostnames.some((name) => !tunnel.openHostnames?.includes(name))
+    tunnel?.hostnames.some((name) =>
+      !tunnel.openHostnames?.includes(name) &&
+      hostingTlsForName({ hostnames, www, tlsId, tlsMode, nameTls }, name)
+          .tlsMode === "acme"
+    )
   ) {
     throw new TypeError(
       "Invalid hostings[].tunnel: tlsMode acme needs every tunnel name open",
@@ -4819,9 +5001,6 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
   const protocol = parseHostingProtocol(value.protocol);
   const ports = parseHostingPorts(value.ports);
   const web = parseHostingWeb(value.web);
-  const www = value.www === undefined
-    ? parseLegacyHostingWwwRedirect(value.wwwRedirect, value.hostnames)
-    : parseHostingWww(value.www);
 
   return {
     hostingId: parseNonEmptyString(value, "hostingId"),
@@ -4832,6 +5011,7 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(targetPort === undefined ? {} : { targetPort }),
     ...(tlsId === undefined ? {} : { tlsId }),
     ...(tlsMode === undefined ? {} : { tlsMode }),
+    ...(nameTls === undefined ? {} : { nameTls }),
     ...(proxy === undefined ? {} : { proxy }),
     ...(bindAddress === undefined ? {} : { bindAddress }),
     ...(tunnel === undefined ? {} : { tunnel }),
@@ -4840,6 +5020,23 @@ function parseHosting(value: unknown): EnvironmentDeployHosting {
     ...(web === undefined ? {} : { web }),
     ...(www === undefined ? {} : { www }),
   };
+}
+
+/** Every certificate a `nameTls` entry pins must ride in the same deploy's `tlsMaterial`. */
+function assertNameTlsPinsInMaterial(
+  hostings: readonly EnvironmentDeployHosting[],
+  material: readonly EnvironmentDeployTlsMaterial[] | undefined,
+): void {
+  const known = new Set((material ?? []).map((entry) => entry.tlsId));
+  for (const hosting of hostings) {
+    for (const entry of hosting.nameTls ?? []) {
+      if (entry.tlsId !== undefined && !known.has(entry.tlsId)) {
+        throw new TypeError(
+          "hostings[].nameTls tlsId is not in tlsMaterial",
+        );
+      }
+    }
+  }
 }
 
 function parseTlsMaterial(value: unknown): EnvironmentDeployTlsMaterial {
@@ -6496,9 +6693,7 @@ const SOURCE_RELEASE_ID_RE = /^[0-9A-Za-z][0-9A-Za-z_-]{0,63}$/;
 const SOURCE_REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
 
 const SOURCE_PROVIDERS = new Set(["github", "gitlab", "git"]);
-// The old spelling of `image` is still accepted while the control plane sends
-// it.
-const SOURCE_BUILD_KINDS = new Set(["native", "static", "image", "railpack"]);
+const SOURCE_BUILD_KINDS = new Set(["native", "static", "image"]);
 
 /** Cap mirrors compose `SOURCE_COMMAND_MAX_LENGTH`. */
 const MAX_SOURCE_COMMAND_CHARS = 1000;
@@ -6530,9 +6725,13 @@ function isSafeSourceSubdirectory(value: unknown): value is string {
 function isCredentialFreeCloneUrl(value: string): boolean {
   if (value.startsWith("https://") || value.startsWith("ssh://")) {
     const authority = value.slice(value.indexOf("://") + 3).split("/")[0] ?? "";
-    return !authority.includes("@");
+    // A host git could hand to ssh as an option (`-oProxyCommand=…`) is refused.
+    return !authority.includes("@") && !authority.startsWith("-");
   }
-  return /^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/.test(value);
+  // Neither the user nor the host may start with `-`: ssh would read it as an option.
+  return /^[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9.][A-Za-z0-9.-]*:/.test(
+    value,
+  );
 }
 
 function parseSourceBuildCommand(
@@ -6671,8 +6870,9 @@ function parseSourceCredential(value: unknown): string | undefined {
 /** Which of the two credential lanes this entry travels on. */
 function parseSourceCredentialKind(
   value: unknown,
+  hasCredential: boolean,
 ): EnvironmentDeploySource["credentialKind"] {
-  if (value === undefined) return undefined;
+  if (value === undefined && !hasCredential) return undefined;
   if (value !== "token" && value !== "ssh_key") {
     throw new TypeError("Invalid sourceMaterial credentialKind");
   }
@@ -6688,8 +6888,7 @@ function parseSourceCredentialUsername(value: unknown): string | undefined {
   return value;
 }
 
-function parseOptionalReleaseServiceId(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
+function parseReleaseServiceId(value: unknown): string {
   if (typeof value !== "string" || !NATIVE_APP_SERVICE_ID_RE.test(value)) {
     throw new TypeError("Invalid sourceMaterial releaseServiceId");
   }
@@ -6724,6 +6923,77 @@ function parseRollbackToReleaseId(value: unknown): string | undefined {
   return value;
 }
 
+/** Repo-relative path of the compose file: safe, no `..`, not absolute. */
+function parseComposeCheckoutPath(value: unknown): string {
+  if (
+    typeof value !== "string" || value.length === 0 || value.length > 512 ||
+    value.startsWith("/") || /[\\\0\s]/.test(value) ||
+    value.split("/").some((part) =>
+      part === ".." || part === "" || part === "."
+    )
+  ) {
+    throw new TypeError("Invalid composeCheckout composePath");
+  }
+  return value;
+}
+
+/**
+ * `composeCheckout`. Shares the credential rules with `sourceMaterial[]`, so a
+ * refusal from those helpers is renamed to say which field it was in.
+ */
+function parseComposeCheckout(
+  value: unknown,
+): EnvironmentDeployComposeCheckout | undefined {
+  try {
+    return parseComposeCheckoutFields(value);
+  } catch (err) {
+    if (err instanceof TypeError) {
+      throw new TypeError(
+        err.message.replace("sourceMaterial", "composeCheckout"),
+      );
+    }
+    throw err;
+  }
+}
+
+function parseComposeCheckoutFields(
+  value: unknown,
+): EnvironmentDeployComposeCheckout | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new TypeError("Invalid composeCheckout");
+  if (
+    typeof value.provider !== "string" || !SOURCE_PROVIDERS.has(value.provider)
+  ) {
+    throw new TypeError("Invalid composeCheckout provider");
+  }
+  const cloneUrl = parseNonEmptyString(value, "cloneUrl");
+  if (
+    cloneUrl.length > MAX_SOURCE_CLONE_URL_CHARS ||
+    /\s/.test(cloneUrl) ||
+    !isCredentialFreeCloneUrl(cloneUrl)
+  ) {
+    throw new TypeError("Invalid composeCheckout cloneUrl");
+  }
+  if (!isValidSourceRef(value.ref) || !isValidSourceRef(value.commitSha)) {
+    throw new TypeError("Invalid composeCheckout ref/commitSha");
+  }
+  const credential = parseSourceCredential(value.credential);
+  return definedFields({
+    sourceId: parseNonEmptyString(value, "sourceId"),
+    provider: value.provider as EnvironmentDeployComposeCheckout["provider"],
+    cloneUrl,
+    ref: value.ref,
+    commitSha: value.commitSha,
+    composePath: parseComposeCheckoutPath(value.composePath),
+    credential,
+    credentialKind: parseSourceCredentialKind(
+      value.credentialKind,
+      credential !== undefined,
+    ),
+    credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
+  });
+}
+
 function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
   if (!isRecord(value)) {
     throw new TypeError("Invalid sourceMaterial entry");
@@ -6748,13 +7018,11 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
   if (!SOURCE_RELEASE_ID_RE.test(releaseId)) {
     throw new TypeError("Invalid sourceMaterial releaseId");
   }
-  const releaseServiceId = parseOptionalReleaseServiceId(
-    value.releaseServiceId,
-  );
+  const credential = parseSourceCredential(value.credential);
   return definedFields({
     sourceId: parseNonEmptyString(value, "sourceId"),
     composeServiceName: parseNonEmptyString(value, "composeServiceName"),
-    ...(releaseServiceId === undefined ? {} : { releaseServiceId }),
+    releaseServiceId: parseReleaseServiceId(value.releaseServiceId),
     provider: value.provider as EnvironmentDeploySource["provider"],
     cloneUrl,
     ref: value.ref,
@@ -6768,11 +7036,18 @@ function parseDeploySourceEntry(value: unknown): EnvironmentDeploySource {
     // commit caption is not worth refusing to ship a build over.
     commitMessage: parseCommitMetadataField(value.commitMessage),
     commitAuthor: parseCommitMetadataField(value.commitAuthor),
-    credential: parseSourceCredential(value.credential),
-    credentialKind: parseSourceCredentialKind(value.credentialKind),
+    credential,
+    credentialKind: parseSourceCredentialKind(
+      value.credentialKind,
+      credential !== undefined,
+    ),
     credentialUsername: parseSourceCredentialUsername(value.credentialUsername),
     rollbackToReleaseId: parseRollbackToReleaseId(value.rollbackToReleaseId),
     principal: parseSitePrincipal(value.principal) ?? undefined,
+    buildLimits: parseBuildLimits(
+      value.buildLimits,
+      "sourceMaterial buildLimits",
+    ),
   });
 }
 
@@ -6786,6 +7061,51 @@ function parseOptionalMaterialArray<T>(
     throw new TypeError(`${fieldName} must be an array`);
   }
   return value.map(parseEntry);
+}
+
+function parseNetworkShareCredential(
+  value: unknown,
+): EnvironmentDeployNetworkShareCredential {
+  if (!isRecord(value)) {
+    throw new TypeError(
+      "Invalid environment deploy networkShareCredentials entry",
+    );
+  }
+  const text = (field: string): string | undefined => {
+    const raw = value[field];
+    if (raw === undefined) return undefined;
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 256) {
+      throw new TypeError(
+        `networkShareCredentials ${field} must be a short string`,
+      );
+    }
+    return raw;
+  };
+  const service = value.composeServiceName;
+  if (
+    service !== undefined && service !== null && typeof service !== "string"
+  ) {
+    throw new TypeError(
+      "networkShareCredentials composeServiceName must be a string or null",
+    );
+  }
+  const entry: EnvironmentDeployNetworkShareCredential = {
+    volume: parseNonEmptyString(value, "volume"),
+    passwordKey: parseNonEmptyString(value, "passwordKey"),
+  };
+  const usernameKey = text("usernameKey");
+  const username = text("username");
+  const domain = text("domain");
+  if (usernameKey !== undefined && username !== undefined) {
+    throw new TypeError(
+      "networkShareCredentials takes usernameKey or username, not both",
+    );
+  }
+  if (usernameKey !== undefined) entry.usernameKey = usernameKey;
+  if (username !== undefined) entry.username = username;
+  if (domain !== undefined) entry.domain = domain;
+  if (service !== undefined) entry.composeServiceName = service;
+  return entry;
 }
 
 function parseOptionalBoolean(
@@ -7351,17 +7671,6 @@ export function parseEnvironmentDeployPayload(
     throw new TypeError("hostings must be an array");
   }
 
-  // `traditionalWebSites` was renamed to `sites`. Unknown keys are otherwise
-  // ignored here, so an old control plane would parse **zero** sites: stale
-  // vhosts would keep serving on loopback while hosting Caddy, finding no
-  // loopback entry, routed the hostname to Traefik — a 502 with the old content
-  // still live, and a deploy that reported success. Fail the command instead.
-  if (value.traditionalWebSites !== undefined) {
-    throw new TypeError(
-      "traditionalWebSites was renamed to sites; upgrade the control plane",
-    );
-  }
-
   const managedNetworkServices = parseManagedNetworkServices(
     value.managedNetworkServices,
   );
@@ -7376,6 +7685,13 @@ export function parseEnvironmentDeployPayload(
     parseDeploySourceEntry,
   );
   assertUniqueSourceReleaseServiceIds(sourceMaterial);
+  const parsedHostings = hostings.map(parseHosting);
+  const tlsMaterial = parseOptionalMaterialArray(
+    value.tlsMaterial,
+    "tlsMaterial",
+    parseTlsMaterial,
+  );
+  assertNameTlsPinsInMaterial(parsedHostings, tlsMaterial);
 
   return {
     environmentId: parseNonEmptyString(value, "environmentId"),
@@ -7383,7 +7699,7 @@ export function parseEnvironmentDeployPayload(
     organizationId: parseNonEmptyString(value, "organizationId"),
     projectName: parseNonEmptyString(value, "projectName"),
     composeFiles: parseEnvironmentDeployComposeFiles(value.composeFiles),
-    hostings: hostings.map(parseHosting),
+    hostings: parsedHostings,
     ...definedProps({
       sites: parseOptionalMaterialArray(
         value.sites,
@@ -7392,6 +7708,7 @@ export function parseEnvironmentDeployPayload(
       ),
       nativeAppServices: parseNativeAppServices(value.nativeAppServices),
       sourceMaterial,
+      composeCheckout: parseComposeCheckout(value.composeCheckout),
       ingressServices: parseOptionalMaterialArray(
         value.ingressServices,
         "ingressServices",
@@ -7415,6 +7732,7 @@ export function parseEnvironmentDeployPayload(
         managedNetworkServices,
       ),
       noCache: parseOptionalBoolean(value.noCache, "noCache"),
+      buildLimits: parseBuildLimits(value.buildLimits),
       hostingsOnly: parseOptionalBoolean(value.hostingsOnly, "hostingsOnly"),
       hideWebServerNames: parseOptionalBoolean(
         value.hideWebServerNames,
@@ -7438,11 +7756,16 @@ export function parseEnvironmentDeployPayload(
         value.remoteBuildSourcesApproved,
         "remoteBuildSourcesApproved",
       ),
-      tlsMaterial: parseOptionalMaterialArray(
-        value.tlsMaterial,
-        "tlsMaterial",
-        parseTlsMaterial,
+      allowNetworkShares: parseOptionalBoolean(
+        value.allowNetworkShares,
+        "allowNetworkShares",
       ),
+      networkShareCredentials: parseOptionalMaterialArray(
+        value.networkShareCredentials,
+        "networkShareCredentials",
+        parseNetworkShareCredential,
+      ),
+      tlsMaterial,
       variableMaterial: parseOptionalMaterialArray(
         value.variableMaterial,
         "variableMaterial",
@@ -7572,6 +7895,24 @@ function parseFolderRemoval(value: unknown): FolderRemoval {
 /** The fixed certificate name of the hop between servers. Same on both sides. */
 export const TUNNEL_PEER_TLS_NAME = "tp-peer.internal";
 
+/**
+ * The port of the peer-facing server on each server (table with
+ * `peerClientAuth`): senders dial it and the control plane's firewall rule
+ * opens it to the exact peer addresses. Not 7443 (Traefik, loopback). Same on
+ * both sides.
+ */
+export const TUNNEL_PEER_PORT = 9443;
+
+function parseTunnelPeerClientAuth(
+  value: unknown,
+  where: string,
+): TunnelPeerClientAuth {
+  if (value !== "verify" && value !== "require") {
+    throw new TypeError(`Invalid ${where} peerClientAuth`);
+  }
+  return value;
+}
+
 const MAX_TUNNEL_HOSTNAMES = 256;
 const MAX_TUNNEL_ADDRESSES = 64;
 const MAX_TUNNEL_ROUTES = 2000;
@@ -7646,20 +7987,15 @@ export type EnvironmentDeployHostingTunnel = {
   /**
    * Generation of the organization tunnel table these peers were taken from
    * (feature `tunnel-table-generation-v1`). A daemon that already applied a
-   * higher generation keeps its stored peers. Absent = as before.
+   * higher generation keeps its stored peers.
    *
-   * The control plane sends `max(previous + 1, current Unix time in milliseconds)`, so the counter survives a restore or reset;
-   * a table with no generation clears the daemon's record.
+   * The control plane sends `max(previous + 1, current Unix time in milliseconds)`, so the counter survives a restore or reset.
    */
-  generation?: number;
+  generation: number;
 };
 
-/** A table generation: a non-negative safe integer, or `undefined` when absent. */
-function parseTunnelGeneration(
-  value: unknown,
-  label: string,
-): number | undefined {
-  if (value === undefined) return undefined;
+/** A table generation: a non-negative safe integer. */
+function parseTunnelGeneration(value: unknown, label: string): number {
   if (
     typeof value !== "number" || !Number.isSafeInteger(value) || value < 0
   ) {
@@ -7691,6 +8027,10 @@ function parseHostingTunnel(
       1,
       MAX_TUNNEL_ADDRESSES,
     ),
+    generation: parseTunnelGeneration(
+      value.generation,
+      "hostings[].tunnel generation",
+    ),
   };
   if (value.openHostnames !== undefined) {
     const open = parseTunnelHostnameList(
@@ -7711,11 +8051,6 @@ function parseHostingTunnel(
       MAX_TUNNEL_ADDRESSES,
     );
   }
-  const generation = parseTunnelGeneration(
-    value.generation,
-    "hostings[].tunnel generation",
-  );
-  if (generation !== undefined) tunnel.generation = generation;
   return tunnel;
 }
 
@@ -7726,6 +8061,12 @@ export type TunnelRouteUpstream = {
   addresses: string[];
   /** Port of the server's web server on those addresses. Default 443. */
   port?: number;
+  /**
+   * This server's own address to send from when it dials this server: the one
+   * the receiver's allowlist names for this pair. A bare address. Absent = the
+   * kernel picks the source address.
+   */
+  localAddress?: string;
 };
 
 export type TunnelRoute = {
@@ -7740,6 +8081,15 @@ export type TunnelRoute = {
   /** Servers that run the site. At least one unless `local` is true. */
   upstreams: TunnelRouteUpstream[];
 };
+
+/**
+ * What the receiving side of the peer hop does about client certificates
+ * (feature `tunnel-peer-mtls-v1`). Absent = it asks for none (as before).
+ * `verify` checks a client certificate against the organization's CA when one
+ * is shown and lets a peer without one through; `require` also refuses a peer
+ * that shows none.
+ */
+export type TunnelPeerClientAuth = "verify" | "require";
 
 /** A leaf of the organization's CA for the peer hop; the key is sealed for this daemon. */
 export type TunnelPeerMaterial = {
@@ -7776,6 +8126,8 @@ export type TunnelRoutesPayload = {
   listenAddresses?: string[];
   /** Required when `routes` or `peerAddresses` is not empty. */
   peerMaterial?: TunnelPeerMaterial;
+  /** Client certificate policy of the peer-facing site (`tunnel-peer-mtls-v1`). */
+  peerClientAuth?: TunnelPeerClientAuth;
   /**
    * Every tunnel name whose site runs here, with who may forward it. Absent
    * (an older control plane) = the locks stay as the last deploy wrote them.
@@ -7784,10 +8136,9 @@ export type TunnelRoutesPayload = {
   /**
    * Monotonic per organization tunnel table (one counter for the whole table,
    * not per tunnel; `tunnel-table-generation-v1`). A table lower than the last
-   * applied generation is ignored; equal or higher applies. Absent = applied
-   * as before.
+   * applied generation is ignored; equal or higher applies.
    */
-  generation?: number;
+  generation: number;
 };
 
 /** Must stay in sync with the instance `server.tunnel.routes` shape. */
@@ -7826,6 +8177,15 @@ function parseTunnelUpstream(value: unknown): TunnelRouteUpstream {
       throw new TypeError("Invalid server.tunnel.routes upstream port");
     }
     upstream.port = value.port;
+  }
+  if (value.localAddress !== undefined) {
+    const [localAddress] = parseTunnelAddressList(
+      [value.localAddress],
+      "server.tunnel.routes upstream localAddress",
+      1,
+      1,
+    );
+    upstream.localAddress = localAddress;
   }
   return upstream;
 }
@@ -7922,6 +8282,33 @@ function parseTunnelInboundList(value: unknown): TunnelInbound[] {
   return inbound;
 }
 
+/** The optional fields of `server.tunnel.routes`, parsed onto `payload`. */
+function readTunnelRoutesOptionals(
+  value: Record<string, unknown>,
+  payload: TunnelRoutesPayload,
+): void {
+  if (value.listenAddresses !== undefined) {
+    payload.listenAddresses = parseTunnelAddressList(
+      value.listenAddresses,
+      "server.tunnel.routes listenAddresses",
+      1,
+      MAX_TUNNEL_ADDRESSES,
+    );
+  }
+  if (value.peerMaterial !== undefined) {
+    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
+  }
+  if (value.peerClientAuth !== undefined) {
+    payload.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.routes",
+    );
+  }
+  if (value.inbound !== undefined) {
+    payload.inbound = parseTunnelInboundList(value.inbound);
+  }
+}
+
 /** Parse `server.tunnel.routes`. */
 export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
   if (!isRecord(value)) {
@@ -7952,26 +8339,12 @@ export function parseTunnelRoutesPayload(value: unknown): TunnelRoutesPayload {
     hash: value.hash,
     routes,
     peerAddresses,
+    generation: parseTunnelGeneration(
+      value.generation,
+      "server.tunnel.routes generation",
+    ),
   };
-  if (value.listenAddresses !== undefined) {
-    payload.listenAddresses = parseTunnelAddressList(
-      value.listenAddresses,
-      "server.tunnel.routes listenAddresses",
-      1,
-      MAX_TUNNEL_ADDRESSES,
-    );
-  }
-  if (value.peerMaterial !== undefined) {
-    payload.peerMaterial = parseTunnelPeerMaterial(value.peerMaterial);
-  }
-  if (value.inbound !== undefined) {
-    payload.inbound = parseTunnelInboundList(value.inbound);
-  }
-  const generation = parseTunnelGeneration(
-    value.generation,
-    "server.tunnel.routes generation",
-  );
-  if (generation !== undefined) payload.generation = generation;
+  readTunnelRoutesOptionals(value, payload);
   if (
     (routes.length > 0 || peerAddresses.length > 0) && !payload.peerMaterial
   ) {
@@ -8107,7 +8480,7 @@ export function parseTunnelConnectorsResult(
 
 /** Must stay in sync with the instance `server.tunnel.status` shape. */
 export type TunnelStatusConnector = {
-  /** A lower-case UUID, or `instance` / `default` for the instance's own tunnel. */
+  /** A lower-case UUID, or `instance` for the instance's own tunnel. */
   tunnelId: string;
   status: "not-installed" | "connected" | "connecting" | "stopped" | "failed";
   /** Connector program version the carrying unit runs. */
@@ -8133,6 +8506,16 @@ export type TunnelStatusResult = {
   /** The connector version this daemon is pinned to and moves every tunnel to. */
   pinnedVersion: string;
   connectors: TunnelStatusConnector[];
+  /** What the hop between servers does about client certificates here (feature `tunnel-peer-mtls-v1`); absent = nothing is checked. */
+  peerClientAuth?: TunnelPeerClientAuth;
+  /** True when `require` was asked for and `verify` is in force because this server's certificate cannot be shown. */
+  peerClientAuthDowngraded?: true;
+  /** True when the last load of the nftables lock on the connectors' metrics ports (20300-20899) in this agent run succeeded. A load is not a live check: a ruleset flushed afterwards still reads true until the next load (at connector install, and hourly while a tunnel exists). Absent = no load tried yet in this run (older agents never send it). */
+  statusPortsLocked?: boolean;
+  /** Why the last load failed: one plain line of at most 200 characters, only with `statusPortsLocked: false`. */
+  statusPortsLockReason?: string;
+  /** ISO time of that load, so a panel can show how old the fact is; only with `statusPortsLocked`. */
+  statusPortsLockCheckedAt?: string;
 };
 
 const TUNNEL_STATUS_VALUES = new Set([
@@ -8164,8 +8547,7 @@ export function parseTunnelStatusPayload(
 function parseTunnelStatusConnector(value: unknown): TunnelStatusConnector {
   if (
     !isRecord(value) || typeof value.tunnelId !== "string" ||
-    !(value.tunnelId === "instance" || value.tunnelId === "default" ||
-      TUNNEL_UUID_RE.test(value.tunnelId)) ||
+    !(value.tunnelId === "instance" || TUNNEL_UUID_RE.test(value.tunnelId)) ||
     typeof value.status !== "string" ||
     !TUNNEL_STATUS_VALUES.has(value.status) ||
     !isTunnelConnectorVersion(value.version) ||
@@ -8232,6 +8614,55 @@ function withTunnelStatusFacts(
   return connector;
 }
 
+type TunnelStatusLockFact = Pick<
+  TunnelStatusResult,
+  "statusPortsLocked" | "statusPortsLockReason" | "statusPortsLockCheckedAt"
+>;
+
+const MAX_TUNNEL_STATUS_LOCK_REASON = 200;
+// deno-lint-ignore no-control-regex -- one plain line: no control characters at all
+const TUNNEL_STATUS_LOCK_REASON_RE = /^[^\u0000-\u001f\u007f-\u009f]+$/;
+
+/** The optional lock fact: a reason only with `false`, one plain line; a time only with a fact. */
+function parseTunnelStatusLockFact(
+  value: Record<string, unknown>,
+): TunnelStatusLockFact | null {
+  const locked = value.statusPortsLocked;
+  const reason = value.statusPortsLockReason;
+  const at = value.statusPortsLockCheckedAt;
+  if (locked === undefined) {
+    if (reason !== undefined || at !== undefined) {
+      throw new TypeError("Invalid server.tunnel.status lock fact");
+    }
+    return null;
+  }
+  if (typeof locked !== "boolean") {
+    throw new TypeError("Invalid server.tunnel.status statusPortsLocked");
+  }
+  const fact: TunnelStatusLockFact = {
+    statusPortsLocked: locked,
+  };
+  if (reason !== undefined) {
+    if (
+      locked || typeof reason !== "string" ||
+      reason.length > MAX_TUNNEL_STATUS_LOCK_REASON ||
+      !TUNNEL_STATUS_LOCK_REASON_RE.test(reason)
+    ) {
+      throw new TypeError("Invalid server.tunnel.status statusPortsLockReason");
+    }
+    fact.statusPortsLockReason = reason;
+  }
+  if (at !== undefined) {
+    if (typeof at !== "string" || !TUNNEL_ISO_TIMESTAMP_RE.test(at)) {
+      throw new TypeError(
+        "Invalid server.tunnel.status statusPortsLockCheckedAt",
+      );
+    }
+    fact.statusPortsLockCheckedAt = at;
+  }
+  return fact;
+}
+
 export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
   if (
     !isRecord(value) || !isTunnelConnectorVersion(value.pinnedVersion) ||
@@ -8240,10 +8671,27 @@ export function parseTunnelStatusResult(value: unknown): TunnelStatusResult {
   ) {
     throw new TypeError("Invalid server.tunnel.status result");
   }
-  return {
+  const result: TunnelStatusResult = {
     pinnedVersion: value.pinnedVersion,
     connectors: value.connectors.map(parseTunnelStatusConnector),
   };
+  if (value.peerClientAuth !== undefined) {
+    result.peerClientAuth = parseTunnelPeerClientAuth(
+      value.peerClientAuth,
+      "server.tunnel.status",
+    );
+  }
+  if (value.peerClientAuthDowngraded !== undefined) {
+    if (value.peerClientAuthDowngraded !== true) {
+      throw new TypeError(
+        "Invalid server.tunnel.status peerClientAuthDowngraded",
+      );
+    }
+    result.peerClientAuthDowngraded = true;
+  }
+  const lockFact = parseTunnelStatusLockFact(value);
+  if (lockFact) Object.assign(result, lockFact);
+  return result;
 }
 
 /** One `retirePrincipals` entry (`environment.stop` and `server.principals.reconcile`). */
@@ -11256,7 +11704,7 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
       "Invalid managed.ingress.reconcile cluster requireTls",
     );
   }
-  if (value.family !== undefined && !isManagedIngressFamily(value.family)) {
+  if (!isManagedIngressFamily(value.family)) {
     throw new TypeError("Invalid managed.ingress.reconcile cluster family");
   }
   if (
@@ -11271,12 +11719,12 @@ function parseProxySqlClusterPayload(value: unknown): ProxySqlClusterPayload {
     managedId: value.managedId,
     engine: value.engine,
     protocolPort: value.protocolPort,
+    family: value.family,
     writerHostgroup: value.writerHostgroup,
     readerHostgroup: value.readerHostgroup,
     backends: value.backends.map(parseProxySqlBackendPayload),
     users: value.users.map(parseProxySqlUserPayload),
   };
-  if (value.family !== undefined) cluster.family = value.family;
   if (value.engineVersion !== undefined) {
     cluster.engineVersion = value.engineVersion;
   }

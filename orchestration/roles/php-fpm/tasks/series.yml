@@ -87,15 +87,16 @@
     - php-fpm.log
     - php-error.log
 
-# Group `tp`, not `tpapache`: per-site sockets in here are owned by whichever
-# engine consumes them (tpcaddysite / tpnginx / tpapache), so a directory
-# grouped to one engine would stop the others traversing to their own socket.
+# Root-owned (in a root-owned parent), group `tp`, not `tpapache`: per-site
+# sockets in here are owned by whichever engine consumes them (tpcaddysite /
+# tpnginx / tpapache), so a directory grouped to one engine would stop the
+# others traversing to their own socket.
 # Keep in step with `ExecStartPre` in the unit template.
 - name: Ensure PHP runtime directory ({{ php_fpm_series_item }})
   ansible.builtin.file:
-    path: "{{ turbopanel_run_dir }}/php/{{ php_fpm_series_item }}"
+    path: "{{ php_fpm_run_dir }}/{{ php_fpm_series_item }}"
     state: directory
-    owner: "{{ php_fpm_service_user }}"
+    owner: root
     group: "{{ turbopanel_group }}"
     mode: "0750"
 

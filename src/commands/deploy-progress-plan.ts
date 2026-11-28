@@ -13,6 +13,9 @@
 import { join } from "@std/path";
 import {
   type EnvironmentDeployPayload,
+  hostingServedNames,
+  hostingTlsForName,
+  hostingWwwRedirects,
   isImageBuildKind,
 } from "../contracts/commands-contracts.ts";
 import type { LayoutPaths } from "../paths/layout.ts";
@@ -227,9 +230,25 @@ export async function probeDeployPresence(
 export function automaticCertificateHostnames(
   payload: Pick<EnvironmentDeployPayload, "hostings">,
 ): string[] {
-  const names = (payload.hostings ?? [])
-    .filter((hosting) => hosting.tlsMode === "acme")
-    .flatMap((hosting) => hosting.hostnames);
+  const names = (payload.hostings ?? []).flatMap((hosting) => {
+    if (hosting.nameTls === undefined) {
+      return hosting.tlsMode === "acme" ? hosting.hostnames : [];
+    }
+    return [
+      ...hostingServedNames(hosting).filter((name) =>
+        hostingTlsForName(hosting, name).tlsMode === "acme"
+      ),
+      // A redirect-only name joins the list only when its own entry asks
+      // for an automatic certificate. Redirects that merely inherit acme are
+      // left out on purpose, to match a row without nameTls.
+      ...hostingWwwRedirects(hosting).map((redirect) => redirect.from).filter(
+        (name) =>
+          hosting.nameTls?.some((entry) =>
+            entry.hostname === name && entry.tlsMode === "acme"
+          ),
+      ),
+    ];
+  });
   return [...new Set(names)].sort((a, b) => a.localeCompare(b));
 }
 

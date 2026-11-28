@@ -11,7 +11,7 @@ const OLD = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88";
 const NEW = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
 const CHANGE = { name: "docker", expected: [OLD], got: NEW };
 
-async function setup(options: { supports: boolean; open: boolean }) {
+async function setup(options: { open: boolean }) {
   const dir = await Deno.makeTempDir({ prefix: "tp-repo-key-reporter-" });
   const path = join(dir, "spool", "repo-key-reports.json");
   const ledger = new RepoKeyLedger(path);
@@ -23,7 +23,6 @@ async function setup(options: { supports: boolean; open: boolean }) {
       sent.push(message);
       return true;
     },
-    peerSupportsReport: () => state.supports,
     ledger: () => ledger,
     nowMs: () => Date.parse("2026-10-31T12:00:00.000Z"),
   });
@@ -32,7 +31,6 @@ async function setup(options: { supports: boolean; open: boolean }) {
 
 test("a pending change goes out once, as one frame, then stays reported", async () => {
   const { dir, ledger, sent, reporter } = await setup({
-    supports: true,
     open: true,
   });
   await ledger.record(CHANGE);
@@ -53,25 +51,8 @@ test("a pending change goes out once, as one frame, then stays reported", async 
   await Deno.remove(dir, { recursive: true });
 });
 
-test("a control plane without the feature gets nothing and the change is kept", async () => {
-  const { dir, ledger, sent, state, reporter } = await setup({
-    supports: false,
-    open: true,
-  });
-  await ledger.record(CHANGE);
-  await reporter.flush();
-  assertEquals(sent, []);
-  assertEquals((await ledger.pending()).length, 1);
-
-  state.supports = true;
-  await reporter.flush();
-  assertEquals(sent.length, 1);
-  await Deno.remove(dir, { recursive: true });
-});
-
 test("a socket that is not open does not mark the change as sent", async () => {
   const { dir, ledger, sent, state, reporter } = await setup({
-    supports: true,
     open: false,
   });
   await ledger.record(CHANGE);
@@ -88,7 +69,6 @@ test("a socket that is not open does not mark the change as sent", async () => {
 
 test("attach sends what was waiting and what is recorded later, detach stops", async () => {
   const { dir, ledger, sent, reporter } = await setup({
-    supports: true,
     open: true,
   });
   await ledger.record(CHANGE);

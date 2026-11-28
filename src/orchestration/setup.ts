@@ -242,7 +242,6 @@ export interface RunInstallerOptions {
   instanceUrl?: string;
   start: boolean;
   instanceCa?: string;
-  tunnelToken?: string;
   varsFile?: string;
   /** Which shipped installer to run; defaults to the daemon's. */
   playbook?: InstallerPlaybook;
@@ -254,7 +253,7 @@ const INSTALLER_STEP_LABELS: Record<
 > = {
   "daemon-install.yml": {
     running: "Running daemon provisioning…",
-    done: "TurboPanel daemon provisioning complete",
+    done: "TurboPanel daemon installed on this host",
   },
   "instance-install.yml": {
     running: "Setting up the control plane on this host…",
@@ -305,9 +304,6 @@ async function createInstallerVarsFile(
   if (opts.instanceCa) {
     assertInstanceCaFile(opts.instanceCa);
     lines.push(`turbopanel_instance_ca: ${opts.instanceCa}`);
-  }
-  if (opts.tunnelToken?.trim()) {
-    lines.push(`turbopanel_tunnel_token: ${opts.tunnelToken.trim()}`);
   }
   await Deno.writeTextFile(varsFile, `${lines.join("\n")}\n`);
   return varsFile;

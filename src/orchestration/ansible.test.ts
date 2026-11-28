@@ -1,8 +1,10 @@
 import { join } from "@std/path";
 import { assert, assertEquals } from "@std/assert";
 import {
+  buildBuildToggleExtraArgs,
   buildDockerSetupExtraArgs,
   buildTimeSyncApplyExtraArgs,
+  buildUiExportExtraArgs,
   devOwnershipPlaybookExtraArgs,
   galaxyBootstrapRunContext,
   mergeTimeSyncApplyWithHostState,
@@ -1351,6 +1353,57 @@ test(
   },
 );
 
+test("build-toggle passes the optional-service converge options through", () => {
+  const args = buildBuildToggleExtraArgs(
+    { uiMode: "static", instanceRunMode: "source", forceBuild: true },
+    {
+      TURBOPANEL_DEV_CONVERGE_OPTIONS: JSON.stringify({
+        optionalServices: { redis_setup: true },
+      }),
+    },
+  );
+  assert(args.includes('{"turbopanel_optional_redis_setup":true}'));
+  assert(args.includes("force_build=true"));
+  const bare = buildBuildToggleExtraArgs(
+    { uiMode: "dev", instanceRunMode: "source" },
+    {},
+  );
+  assertEquals(bare.some((a) => a.startsWith("turbopanel_optional_")), false);
+});
+
+test("ui-export extra args carry the ui mode and the force flag", () => {
+  const forced = buildUiExportExtraArgs(
+    { forceBuild: true },
+    { TURBOPANEL_UI_MODE: "static" },
+  );
+  assert(forced.includes("turbopanel_ui_mode=static"));
+  assert(forced.includes("force_build=true"));
+  const plain = buildUiExportExtraArgs({}, {});
+  assert(plain.includes("turbopanel_ui_mode=dev"));
+  assert(plain.includes("force_build=false"));
+});
+
+test("ui-build exports in development mode only when a dev user is set", async () => {
+  const defaults = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/ui-build/defaults/main.yml"),
+  );
+  assert(/turbopanel_ui_export_dev:/.test(defaults), "dev export switch");
+  assert(/turbopanel_ui_export_max_workers:/.test(defaults), "bounded workers");
+  assert(/turbopanel_ui_export_node_heap_mb:/.test(defaults), "heap cap");
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/ui-build/tasks/main.yml"),
+  );
+  assert(/--dev/.test(tasks), "dev export passes --dev");
+  assert(
+    /EXPO_NO_BUNDLE_SPLITTING/.test(tasks),
+    "dev export turns bundle splitting off (chunk names collide in --dev)",
+  );
+  assert(
+    /! -name 'entry-\*\.js'/.test(tasks),
+    "dev export fails when a split chunk appears",
+  );
+});
+
 test("mergeTimeSyncApplyWithHostState preserves host NTP when command omits it", () => {
   const merged = mergeTimeSyncApplyWithHostState(
     { timezone: "America/Chicago" },
@@ -1589,10 +1642,6 @@ test("site apply playbooks vendor engines (never apt nginx/apache2)", async () =
   // Additive install: a deploy that declares 8.4 must not stop 8.3, so the old
   // "disable every other series" task must stay gone.
   assertEquals(phpFpmTasks.includes("php8.3-fpm"), false);
-  assertEquals(
-    phpFpmTasks.includes("Remove obsolete single-series php-fpm layout"),
-    true,
-  );
 
   // The site Caddy is a distinct identity from tpcaddy (9993, control plane)
   // and from the root edge Caddy that owns public :80/:443.
@@ -2083,76 +2132,6 @@ test("instance-certs apply never passes a platform CA rotate flag", async () => 
   );
 });
 
-test("instance-launch migrates a legacy control-plane certificate before the file-backed site", async () => {
-  const tasks = await Deno.readTextFile(
-    join(CHECKOUT_ORCHESTRATION_DIR, "roles/instance-launch/tasks/main.yml"),
-  );
-  const resolveAt = tasks.indexOf("resolve-hostnames.yml");
-  const migrateAt = tasks.indexOf(
-    "Migrate validated legacy control-plane Let's Encrypt certificates",
-  );
-  const renderAt = tasks.indexOf("Render the Caddy site config");
-  assertEquals(resolveAt >= 0 && migrateAt > resolveAt, true);
-  assertEquals(renderAt > migrateAt, true);
-  assertMatch(
-    tasks,
-    /turbopanel_legacy_acme_certificate_root: "\{\{ turbopanel_caddy_runtime_dir \}\}\/share\/caddy\/certificates"/,
-    "legacy certificate root is the old control-plane Caddy store",
-  );
-  const resolve = await Deno.readTextFile(
-    join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/instance-certs/tasks/resolve-hostnames.yml",
-    ),
-  );
-  assertMatch(
-    resolve,
-    /turbopanel_public_hostname[\s\S]*'lets-encrypt' if \(turbopanel_tls_mode/,
-    "the deprecated single-hostname alias is a Let's Encrypt name",
-  );
-  const leFiles = await Deno.readTextFile(
-    join(
-      CHECKOUT_ORCHESTRATION_DIR,
-      "roles/instance-certs/tasks/letsencrypt-files.yml",
-    ),
-  );
-  const copyAt = leFiles.indexOf(
-    "Migrate validated legacy control-plane certificates",
-  );
-  const statAt = leFiles.indexOf("Stat Let's Encrypt certificates");
-  const hardenAt = leFiles.indexOf(
-    "Harden Let's Encrypt keys for the control-plane Caddy user",
-  );
-  assertEquals(copyAt >= 0 && statAt > copyAt && hardenAt > statAt, true);
-  assertMatch(
-    leFiles,
-    /caddy\/\.local\/share\/caddy\/certificates/,
-    "legacy certificates live under the old control-plane data directory",
-  );
-  assertMatch(
-    leFiles,
-    /openssl", "x509"/,
-    "legacy leaves are parsed with openssl x509",
-  );
-  assertMatch(
-    leFiles,
-    /openssl", "pkey"/,
-    "legacy keys are checked with openssl pkey",
-  );
-  assertMatch(
-    leFiles,
-    /letsencrypt-\$\{LE_HOST\}\.crt/,
-    "migrated leaves use the letsencrypt-<host> names",
-  );
-  assertMatch(leFiles, /-m 0640/, "migrated certificates are mode 0640");
-  assertMatch(leFiles, /-m 0600/, "migrated keys are mode 0600");
-  assertMatch(
-    leFiles,
-    /_le_sites/,
-    "migration covers every Let's Encrypt hostname, including the synthesized alias",
-  );
-});
-
 test("stripe-listen role is unit-only, gated on its optional var, and never re-templates stripe.env", async () => {
   const tasks = await Deno.readTextFile(
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/stripe-listen/tasks/main.yml"),
@@ -2369,6 +2348,23 @@ test("docker-backed optional roles gate readiness and stop disabled containers",
   }
 });
 
+test("redis-insight keeps the dev-owned data volume owner with nocopy, production mount unchanged", async () => {
+  const tasks = await Deno.readTextFile(
+    join(CHECKOUT_ORCHESTRATION_DIR, "roles/redis-insight/tasks/main.yml"),
+  );
+  assert(
+    tasks.includes(
+      `"{{ redis_insight_volume_name }}:/data:rw{{ ',nocopy' if (turbopanel_dev_user | default('') | length > 0) else '' }}"`,
+    ),
+    "data mount gains nocopy only when a dev user is set",
+  );
+  const chown = tasks.indexOf(
+    "Give the redis-insight data volume to the container user",
+  );
+  const create = tasks.indexOf("Create and start redis-insight container");
+  assert(chown > 0 && chown < create, "volume chown runs before creation");
+});
+
 test("docker role merges daemon.json address pools and live-restore, skipping the restart on a co-located instance host", async () => {
   const roleDir = join(CHECKOUT_ORCHESTRATION_DIR, "roles/docker");
   const main = await Deno.readTextFile(join(roleDir, "tasks/main.yml"));
@@ -2582,11 +2578,6 @@ test(
       launchDefaults.includes("turbopanel_mailer_binary"),
       false,
       "no separate mailer binary path — email is in-process",
-    );
-    assertMatch(
-      launchTasks,
-      /Remove retired mailer systemd unit/,
-      "converge removes the retired turbopanel-mailer unit on older hosts",
     );
     assertEquals(
       launchTasks.includes("turbopanel-mailer.service.j2"),
@@ -2874,6 +2865,10 @@ test("the pre-update snapshot keeps the root secret out of the archive that sits
   assert(
     tar.includes("--exclude=etc/turbopanel/instance/runtime.dev-vars"),
     "runtime.dev-vars (carries TURBOPANEL_SECRETS) is excluded",
+  );
+  assert(
+    tar.includes("--exclude=etc/turbopanel/instance/runtime.secrets.env"),
+    "runtime.secrets.env (database and queue passwords) is excluded",
   );
   // The exclusions must come before the path they filter.
   assert(

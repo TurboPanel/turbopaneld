@@ -40,8 +40,13 @@ none of that yields a pinned Deno the hook falls back to
 `src/testing/AGENTS.md`). Resolution is memoized across the four guards, and
 `tp_precommit_deno_exec` propagates the exit status, so a failing guard aborts
 the commit. Typecheck and the suites stay deferred to `deno task verify` / CI.
-Set `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt **and** the guards (secret scan
-still runs; CI still gates all of them). The dev console’s daemon install
-(`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
+On a Vagrant or Incus host (`TURBOPANEL_DEV_ENV` in
+`<repos folder>/.turbopanel-dev-mode`, found from the git common dir so a
+worktree works too) the hook runs the secret scan only, prints one line saying
+so, and neither resolves nor installs Deno: the host needs no Deno, and the
+guest (which has no mode file) and CI run everything. A Direct machine is
+unchanged. Set `TURBOPANEL_SKIP_HOOK_TESTS=1` to skip fmt **and** the guards
+(secret scan still runs; CI still gates all of them). The dev console’s daemon
+install (`cloneOrUpdateRepo` in `../dev/src/lib/platform-install.ts`) sets
 `core.hooksPath=.githooks` after a successful clone or update when
 `.githooks/pre-commit` exists. Production `scripts/run.sh` never wires hooks.

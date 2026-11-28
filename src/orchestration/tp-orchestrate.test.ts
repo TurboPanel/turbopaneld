@@ -1,4 +1,9 @@
-import { assert, assertEquals, assertStringIncludes } from "@std/assert";
+import {
+  assert,
+  assertEquals,
+  assertNotEquals,
+  assertStringIncludes,
+} from "@std/assert";
 import { dirname, fromFileUrl, join } from "@std/path";
 import {
   tpOrchestratePlaybookAllowlist,
@@ -426,7 +431,7 @@ async function runUpdateVerb(
 
 const PUBLIC_PIN = "host=https://panel.example.com\ndl_base=\ninstance_ca=\n";
 const OVERLAY_PIN =
-  "host=https://huey.lan:8443\ndl_base=https://huey.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
+  "host=https://server-a.example.lan:8443\ndl_base=https://server-a.example.lan:8443/downloads\ninstance_ca=/etc/turbopanel/instance-ca.pem\n";
 
 for (
   const [channel, host] of [
@@ -670,16 +675,23 @@ test("tp-orchestrate update pins a signed release only off an overlay, which wou
 });
 
 test("tp-orchestrate update uses the pinned overlay host with the pinned Platform CA, never -k", async () => {
+  // A path no host has, so a machine with the real Platform CA installed
+  // (such as the dev VM) still sees the file as missing.
+  const absentCaPin = OVERLAY_PIN.replace(
+    "/etc/turbopanel/instance-ca.pem",
+    "/etc/turbopanel/test-absent-ca.pem",
+  );
+  assertNotEquals(absentCaPin, OVERLAY_PIN);
   const result = await runUpdateVerb(
     [
       "--license-stdin",
       "--host",
-      "https://huey.lan:8443",
+      "https://server-a.example.lan:8443",
       "--dl-base",
-      "https://huey.lan:8443/downloads",
+      "https://server-a.example.lan:8443/downloads",
       "--no-start",
     ],
-    OVERLAY_PIN,
+    absentCaPin,
   );
   // The pinned CA file does not exist on this test host: fail closed.
   assertEquals(result.status, 1);
@@ -732,8 +744,8 @@ test("tp-orchestrate update refuses traversal and other packages' rails as the d
   for (
     const url of [
       // the retired CDN host is off the rail for every channel
-      "https://dl.trbp.nl/channels/trunk/manifest.json",
-      "https://dl.trbp.nl/channels/release/manifest.json",
+      "https://dl.example.net/channels/trunk/manifest.json",
+      "https://dl.example.net/channels/release/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/../../../../attacker/repo/releases/download/v1/manifest.json",
       "https://github.com/TurboPanel/turbopaneld/releases/download/%2e%2e/%2e%2e/attacker/manifest.json",
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.0/manifest.json",
@@ -812,7 +824,7 @@ test("tp-orchestrate update-instance forwards a UI pin and refuses other rails",
   for (
     const refused of [
       "https://github.com/TurboPanel/turbopanel/releases/download/v0.1.1/manifest.json",
-      "https://dl.trbp.nl/channels/release/manifest.json",
+      "https://dl.example.net/channels/release/manifest.json",
     ]
   ) {
     const denied = await runUpdateVerb(
@@ -873,7 +885,7 @@ test("tp-orchestrate update-instance refuses trunk, missing flags, and daemon en
         "--channel",
         "release",
         "--manifest-url",
-        "https://dl.trbp.nl/channels/release/manifest.json",
+        "https://dl.example.net/channels/release/manifest.json",
         "--no-start",
       ],
       "not a TurboPanel release rail",
@@ -975,7 +987,7 @@ const migrateTest = JINJA_PYTHON === undefined && !RENDER_REQUIRED
   : test;
 
 const MIGRATE_TEST_NAME =
-  "migrate reads the instance unit URL, not runtime.env or a caller URL";
+  "migrate reads the instance secrets file URL, not the unit, runtime.env or a caller URL";
 
 migrateTest(MIGRATE_TEST_NAME, async () => {
   assert(
@@ -990,13 +1002,21 @@ migrateTest(MIGRATE_TEST_NAME, async () => {
   const root = await Deno.makeTempDir({ prefix: "tp-migrate-" });
   const envPath = join(root, "runtime.env");
   const unitPath = join(root, "turbopanel-instance.service");
+  const secretsPath = join(root, "runtime.secrets.env");
   const binPath = join(root, "turbopanel");
   const templates = join(
     here,
     "../../orchestration/roles/instance-launch/templates",
   );
   const render = await new Deno.Command(JINJA_PYTHON, {
-    args: ["-c", RENDER_MANAGED_INSTANCE, templates, envPath, unitPath],
+    args: [
+      "-c",
+      RENDER_MANAGED_INSTANCE,
+      templates,
+      envPath,
+      unitPath,
+      secretsPath,
+    ],
     stdout: "piped",
     stderr: "piped",
   }).output();
@@ -1008,9 +1028,15 @@ migrateTest(MIGRATE_TEST_NAME, async () => {
   const runtimeEnv = await Deno.readTextFile(envPath);
   const unit = await Deno.readTextFile(unitPath);
   assertEquals(runtimeEnv.includes("TURBOPANEL_DATABASE_URL"), false);
+  assertEquals(unit.includes("s3cret-db"), false);
+  assertEquals(unit.includes("TURBOPANEL_DATABASE_URL"), false);
   assertStringIncludes(
     unit,
-    "Environment=TURBOPANEL_DATABASE_URL=postgresql://turbopanel:s3cret-db@/turbopanel?host=/run/turbopanel/postgres",
+    "EnvironmentFile=/etc/turbopanel/instance/runtime.secrets.env",
+  );
+  assertStringIncludes(
+    await Deno.readTextFile(secretsPath),
+    "TURBOPANEL_DATABASE_URL=postgresql://turbopanel:s3cret-db@/turbopanel?host=/run/turbopanel/postgres",
   );
   await Deno.writeTextFile(
     binPath,
@@ -1030,8 +1056,8 @@ migrateTest(MIGRATE_TEST_NAME, async () => {
     "tp_die() { printf 'tp-orchestrate: %s\\n' \"$1\" >&2; exit 1; }",
     fn
       .replaceAll(
-        "/etc/systemd/system/turbopanel-instance.service",
-        unitPath,
+        "/etc/turbopanel/instance/runtime.secrets.env",
+        secretsPath,
       )
       .replaceAll("/opt/turbopanel/bin/turbopanel", binPath),
     'tp_verb_migrate "$@"',
@@ -1070,7 +1096,7 @@ const RENDER_MANAGED_INSTANCE = `
 import sys
 from pathlib import Path
 import jinja2
-templates, env_path, unit_path = sys.argv[1:]
+templates, env_path, unit_path, secrets_path = sys.argv[1:]
 def as_bool(value):
     if isinstance(value, bool):
         return value
@@ -1110,6 +1136,7 @@ managed = {
     "turbopanel_run_dir": "/run/turbopanel",
     "turbopanel_instance_runtime_env": "/etc/turbopanel/instance/runtime.env",
     "turbopanel_instance_runtime_dev_vars": "/etc/turbopanel/instance/runtime.dev-vars",
+    "turbopanel_instance_runtime_secrets": "/etc/turbopanel/instance/runtime.secrets.env",
     "instance_log_dir": "/var/log/turbopanel/instance",
     "turbopanel_duckdb_lib_dir": "/opt/turbopanel/lib",
     "turbopanel_instance_binary": "/opt/turbopanel/bin/turbopanel",
@@ -1121,6 +1148,7 @@ env_text = env.from_string((root / "instance-deno.env.j2").read_text()).render(m
 unit_text = env.from_string((root / "turbopanel-instance.service.j2").read_text()).render(managed)
 Path(env_path).write_text(env_text)
 Path(unit_path).write_text(unit_text)
+Path(secrets_path).write_text(env.from_string((root / "instance-runtime-secrets.env.j2").read_text()).render(managed))
 `;
 
 // --- control-plane hosts: update-colocated and the pin-less fallback -------

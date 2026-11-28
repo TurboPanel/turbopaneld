@@ -58,6 +58,7 @@ function payload(
     sourceMaterial: [{
       sourceId: "src-1",
       composeServiceName: "web",
+      releaseServiceId: SERVICE_ID,
       provider: "github",
       cloneUrl: "https://github.com/example/repo.git",
       ref: "main",

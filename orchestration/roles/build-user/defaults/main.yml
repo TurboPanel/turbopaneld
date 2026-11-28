@@ -2,18 +2,15 @@
 # Sandboxed builds (`tp-host build-run`) run as a throwaway user systemd
 # creates for each build (DynamicUser=yes) inside the site owner's own
 # resource group, so this role creates no account. It keeps the root-owned
-# tree tp-host checks on every run and retires what the shared build account
-# needed.
+# tree tp-host checks on every run.
 # Root of the build sandbox. tp-host checks this exact layout on every run:
 # the root root:tp 0710, work/ root:tp 1770 (tp creates work/<id>, the sticky
 # bit stops it swapping one out once the build owns it), caches/ root:root 0700
 # (per site owner and project caches, created by tp-host).
 build_root: /var/lib/turbopanel-build
 turbopanel_group: tp
-# The shared build account every build used to run as, retired 2026-10-06.
-# Its uid/gid stay reserved in the 9980-9999 service band
+# The uid/gid of the shared build account every build used to run as (retired
+# 2026-10-06) stay reserved in the 9980-9999 service band
 # (src/orchestration/service-accounts.test.ts) so nothing reuses an id an old
 # file may still carry.
-build_retired_user: tpbuild
 build_retired_uid: 9994
-build_retired_slice: tpbuild.slice

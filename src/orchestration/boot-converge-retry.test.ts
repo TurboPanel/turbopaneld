@@ -1,5 +1,9 @@
 import { assertEquals } from "@std/assert";
-import { resetBootConvergeForTests } from "./boot-converge-gate.ts";
+import {
+  bootConvergeSettled,
+  resetBootConvergeForTests,
+  withCommandRunning,
+} from "./boot-converge-gate.ts";
 import {
   abortableSleep,
   BOOT_CONVERGE_RETRY_DELAYS_MS,
@@ -153,4 +157,36 @@ test("a retry that works after shutdown began does not run the recovery steps", 
   });
   assertEquals(ok, false);
   assertEquals(recovered, 0);
+});
+
+test("a retry waits for a command already running, and holds new ones meanwhile", async () => {
+  resetBootConvergeForTests();
+  resetRuntimeVerificationForTests();
+  let release = () => {};
+  const command = withCommandRunning(() =>
+    new Promise<void>((resolve) => {
+      release = resolve;
+    })
+  );
+  const order: string[] = [];
+  const retry = retryBootConverge({
+    attempt: () => {
+      order.push("converge");
+      return Promise.resolve(true);
+    },
+    onRecovered: () => Promise.resolve(),
+    signal: new AbortController().signal,
+    sleep: () => Promise.resolve(),
+    log: () => {},
+    delaysMs: [1],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assertEquals(order, [], "the converge has not started");
+  // The gate is already closed: a command arriving now waits for the converge.
+  const late = bootConvergeSettled().then(() => order.push("late command"));
+  release();
+  await command;
+  await retry;
+  await late;
+  assertEquals(order, ["converge", "late command"]);
 });

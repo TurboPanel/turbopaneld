@@ -31,6 +31,12 @@ turbopanel_config_dir: /etc/turbopanel
 # Secret-bearing runtime env lives under the config dir — never in the git checkout.
 turbopanel_instance_runtime_env: "{{ turbopanel_config_dir }}/instance/runtime.env"
 turbopanel_instance_runtime_dev_vars: "{{ turbopanel_config_dir }}/instance/runtime.dev-vars"
+# Database and queue passwords for the instance unit. root-only (0600): systemd
+# reads it as root before it drops to the instance user, so the values never
+# appear in the unit text, `systemctl cat` or the journal.
+turbopanel_instance_runtime_secrets: "{{ turbopanel_config_dir }}/instance/runtime.secrets.env"
+# Drizzle Studio gets only the database URL, in its own root-only file.
+turbopanel_dbstudio_secrets: "{{ turbopanel_config_dir }}/instance/dbstudio.secrets.env"
 # Opt-in via extra-var; ordinary converges must never rotate the instance secret keyring.
 turbopanel_instance_secret_rotate: false
 # Opt-in off-host root-secret backup; empty (default) skips it entirely. Set
@@ -105,6 +111,11 @@ drizzle_studio_port: 4983
 # "static" serves the exported web build from {{ turbopanel_ui_dist_dir }}.
 # Production default is static; co-located converge passes -e turbopanel_ui_mode=dev.
 turbopanel_ui_mode: static
+# Drizzle Studio is a development service: any development install (dev user
+# set) has it, whichever way the UI is served; its optional switch
+# (turbopanel_optional_dbstudio) then decides whether it runs. A dev UI mode
+# without a dev user keeps it too, as before.
+turbopanel_dbstudio_host: "{{ (turbopanel_dev_user | default('') | length > 0) or turbopanel_ui_mode == 'dev' }}"
 # Deprecated single-hostname alias. The listener set no longer follows this
 # switch: :8443 is the only TCP port, and turbopanel_hostnames decides
 # per-name tls. When hostnames is empty, resolve-hostnames.yml synthesizes
@@ -224,9 +235,6 @@ rabbitmq_user: turbopanel
 redis_socket_path: /run/turbopanel/redis.sock
 # Server metrics on by default; set false to opt out.
 turbopanel_server_metrics_retention_days: 90
-# Retired separate mailer unit name — kept only so converge can stop/remove
-# an older host's turbopanel-mailer.service after email moved in-process.
-mailer_service_name: turbopanel-mailer
 mailpit_web_port: 8025
 mailpit_smtp_port: 1025
 dbstudio_service_name: turbopanel-dbstudio

@@ -42,7 +42,7 @@ function unitFor(
   return renderTunnelUnit({
     id,
     binary: host.path(
-      "opt/turbopanel/vendor/cloudflared/2026.10.7/cloudflared",
+      "opt/turbopanel/vendor/cloudflared/2026.11.2/cloudflared",
     ),
     port,
     envFile: host.path(`${COPY_DIR}/${id}.env`),
@@ -88,9 +88,9 @@ async function stageToken(host: Host, text: string, id = ID) {
   await Deno.writeTextFile(host.path(`${STAGE_DIR}/${id}.env`), text);
 }
 
-test("the unit the daemon renders is accepted, for an id and for the two legacy names", async () => {
+test("the unit the daemon renders is accepted, for an id and for the instance tunnel", async () => {
   await withHost(async (host) => {
-    for (const id of [ID, "instance", "default"]) {
+    for (const id of [ID, "instance"]) {
       const result = await installUnit(host, unitName(id), unitFor(host, id));
       assertEquals(result.code, 0, result.stderr);
     }
@@ -101,7 +101,7 @@ test("the unit the daemon renders is accepted, for an id and for the two legacy 
 
 test("the second unit of a tunnel (a connector update) is accepted under its own name only", async () => {
   await withHost(async (host) => {
-    for (const id of [ID, "instance", "default"]) {
+    for (const id of [ID, "instance"]) {
       const result = await installUnit(
         host,
         unitName(id, "b"),
@@ -188,21 +188,34 @@ test("every one-line change to the unit is refused", async () => {
       [
         "the old argument order",
         good.replace(
-          "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20300 run",
+          "cloudflared --no-autoupdate tunnel --metrics 127.0.0.1:20300 --grace-period 30s run",
           "cloudflared tunnel run --no-autoupdate --metrics 127.0.0.1:20300",
         ),
       ],
       [
         "the flags before the subcommand",
         good.replace(
-          "tunnel --metrics 127.0.0.1:20300 run",
+          "tunnel --metrics 127.0.0.1:20300 --grace-period 30s run",
           "--metrics 127.0.0.1:20300 tunnel run",
         ),
       ],
+      [
+        "no grace period",
+        good.replace(" --grace-period 30s", ""),
+      ],
+      [
+        "another grace period",
+        good.replace("--grace-period 30s", "--grace-period 5m"),
+      ],
+      ["no kill mode", good.replace("KillMode=mixed\n", "")],
+      [
+        "a short stop timeout",
+        good.replace("TimeoutStopSec=45", "TimeoutStopSec=1"),
+      ],
       ["no run word", good.replace(" run\n", "\n")],
       ["an argument after run", good.replace(" run\n", " run --token abc\n")],
-      ["a version with a path in it", good.replace("/2026.10.7/", "/../x/")],
-      ["an empty version", good.replace("/2026.10.7/", "//")],
+      ["a version with a path in it", good.replace("/2026.11.2/", "/../x/")],
+      ["an empty version", good.replace("/2026.11.2/", "//")],
     );
     for (const [label, text] of changes) {
       try {
@@ -319,9 +332,9 @@ test("tunnel-env-install copies a checked token into a root-only folder", async 
   });
 });
 
-test("tunnel-env-install and tunnel-env-remove accept the legacy names", async () => {
+test("tunnel-env-install and tunnel-env-remove accept the instance tunnel", async () => {
   await withHost(async (host) => {
-    for (const id of ["default", "instance"]) {
+    for (const id of ["instance"]) {
       await stageToken(host, renderTunnelEnvFile(TOKEN), id);
       assertEquals((await host.run(["tunnel-env-install", id])).code, 0);
       const copy = host.path(`${COPY_DIR}/${id}.env`);
@@ -450,6 +463,20 @@ test("tunnel-env-remove deletes only that tunnel's copy, and is fine with nothin
       [`${OTHER_ID}.env`],
     );
     assertEquals((await host.run(["tunnel-env-remove", ID])).code, 0);
+  });
+});
+
+test("tunnel-env-present says whether that tunnel's copy is there", async () => {
+  await withHost(async (host) => {
+    const said = async (id: string) =>
+      (await host.run(["tunnel-env-present", id])).stdout.trim();
+    assertEquals(await said(ID), "absent");
+    await stageToken(host, renderTunnelEnvFile(TOKEN));
+    assertEquals((await host.run(["tunnel-env-install", ID])).code, 0);
+    assertEquals(await said(ID), "present");
+    assertEquals(await said(OTHER_ID), "absent");
+    await refused(host, ["tunnel-env-present", "../x"]);
+    await refused(host, ["tunnel-env-present"]);
   });
 });
 

@@ -98,7 +98,7 @@ test("readReleaseManifest rejects a wrong version or empty required fields", asy
   });
 });
 
-test("readReleaseManifest accepts optional native and railpack fields", async () => {
+test("readReleaseManifest accepts optional native and image-build fields", async () => {
   await withReleaseDir(async (releaseDir) => {
     const full: ReleaseManifestV1 = {
       ...BASE,
@@ -189,58 +189,7 @@ test("readReleaseManifest keeps a recorded runtime and rejects an unknown one", 
   });
 });
 
-test("readReleaseManifest maps the old version field names to the new ones", async () => {
-  await withReleaseDir(async (releaseDir) => {
-    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
-      recursive: true,
-    });
-    await Deno.writeTextFile(
-      releaseManifestPath(releaseDir),
-      JSON.stringify({
-        ...BASE,
-        imageTag: "tp-svc-1:rel-1",
-        railpackFrontendVersion: "0.8.0",
-        railpackPlanVersion: "1",
-      }),
-    );
-    assertEquals(await readReleaseManifest(releaseDir), {
-      ...BASE,
-      imageTag: "tp-svc-1:rel-1",
-      builderFrontendVersion: "0.8.0",
-      builderPlanVersion: "1",
-    });
-    await Deno.writeTextFile(
-      releaseManifestPath(releaseDir),
-      JSON.stringify({ ...BASE, railpackPlanVersion: 1 }),
-    );
-    assertEquals(await readReleaseManifest(releaseDir), null);
-  });
-});
-
-test("readReleaseManifest keeps the new version names when both sets are present", async () => {
-  await withReleaseDir(async (releaseDir) => {
-    await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
-      recursive: true,
-    });
-    await Deno.writeTextFile(
-      releaseManifestPath(releaseDir),
-      JSON.stringify({
-        ...BASE,
-        railpackFrontendVersion: "old-f",
-        railpackPlanVersion: "old-p",
-        builderFrontendVersion: "new-f",
-        builderPlanVersion: "new-p",
-      }),
-    );
-    assertEquals(await readReleaseManifest(releaseDir), {
-      ...BASE,
-      builderFrontendVersion: "new-f",
-      builderPlanVersion: "new-p",
-    });
-  });
-});
-
-test("readReleaseManifest rejects non-string railpack version fields", async () => {
+test("readReleaseManifest rejects non-string version fields", async () => {
   await withReleaseDir(async (releaseDir) => {
     await Deno.mkdir(join(releaseDir, RELEASE_METADATA_DIRNAME), {
       recursive: true,

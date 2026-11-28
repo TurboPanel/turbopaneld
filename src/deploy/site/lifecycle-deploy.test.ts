@@ -9,6 +9,7 @@ import {
   type SystemdHostCall,
 } from "../../testing/systemd-host.ts";
 import { resolveDaemonReleasePaths } from "../release/release-layout.ts";
+import { readPhpSharedSiteRecords } from "./php-patch-restart.ts";
 import { postDeployPassed } from "./post-deploy-marker.ts";
 import type { AppliedRelease } from "../release/apply-source-releases.ts";
 import type { SiteRelease } from "../site.ts";
@@ -19,6 +20,7 @@ import {
   removeEnvironmentSiteLifecycle,
   runAfterSwitchPostDeploy,
   runBeforeTrafficPostDeploy,
+  sharedPoolPhpSites,
   siteHeldForPostDeploy,
   type SiteLifecycleDeploy,
   type SiteLifecycleIo,
@@ -121,6 +123,7 @@ function lifecycleIo(host: SystemdHost, lines: string[] = []): SiteLifecycleIo {
   return {
     run: host.run,
     onLine: (_stream, line) => lines.push(line),
+    redact: (text) => text,
     sleep: () => Promise.resolve(),
     systemdUnitDir: host.unitDir,
   };
@@ -401,12 +404,17 @@ test("a site that goes before traffic never moves current when its release was n
   const host = await makeSystemdHost(answers());
   try {
     const swapped: string[] = [];
+    const lines: string[] = [];
     const plan = deploy(host, [site({ postDeploy: COMMANDS })], [release()]);
-    await runBeforeTrafficPostDeploy(plan, lifecycleIo(host), (job) => {
+    await runBeforeTrafficPostDeploy(plan, lifecycleIo(host, lines), (job) => {
       swapped.push(job.release.releaseId);
       return Promise.resolve();
     });
     assertEquals(swapped, []);
+    assert(
+      lines.some((line) => line.startsWith("switched web to release")),
+      lines.join("\n"),
+    );
   } finally {
     await host.cleanup();
   }
@@ -426,11 +434,14 @@ test("an after-switch run that fails carries both release ids, and the deploy st
     );
     const failure = error as PostDeployFailedAfterSwitchError;
     assertEquals(failure.code, POST_DEPLOY_FAILED_AFTER_SWITCH);
-    assertEquals(failure.details, {
-      composeServiceName: "web",
-      failedReleaseId: "rel2",
-      previousReleaseId: "rel1",
-    });
+    assertEquals(failure.details.composeServiceName, "web");
+    assertEquals(failure.details.failedReleaseId, "rel2");
+    assertEquals(failure.details.previousReleaseId, "rel1");
+    assert(
+      failure.message.startsWith("post_deploy_failed_after_switch: "),
+      failure.message,
+    );
+    assert(failure.message.includes("rel2"), failure.message);
   } finally {
     await host.cleanup();
   }
@@ -555,6 +566,56 @@ test("stopping an environment removes its workers and its command units", async 
     );
     await removeEnvironmentSiteLifecycle(lifecycleIo(host), "env1");
     assertEquals(await Array.fromAsync(Deno.readDir(host.unitDir)), []);
+  } finally {
+    await host.cleanup();
+  }
+});
+
+test("sites that keep the shared php-fpm master are the ones tracked for the patch pass", () => {
+  const plan = {
+    environmentId: "env1",
+    sites: [
+      site({ composeServiceName: "caddy", engine: "caddy" }),
+      site({
+        composeServiceName: "plain",
+        engine: "nginx",
+        php: { version: "8.3" },
+      }),
+      site({
+        composeServiceName: "own",
+        engine: "nginx",
+        php: { version: "8.4", mode: "fastcgi" },
+      }),
+      site({ composeServiceName: "apache" }),
+      site({ composeServiceName: "static", engine: "caddy", php: undefined }),
+    ],
+  } as unknown as SiteLifecycleDeploy;
+  assertEquals(sharedPoolPhpSites(plan), [
+    { composeServiceName: "caddy", series: "8.4" },
+    { composeServiceName: "plain", series: "8.3" },
+  ]);
+});
+
+test("a deploy records its shared-pool sites and a later deploy drops the ones that left", async () => {
+  const host = await makeSystemdHost(answers());
+  try {
+    const caddy = site({ composeServiceName: "caddy", engine: "caddy" });
+    await applyDeployWorkers(deploy(host, [caddy], []), lifecycleIo(host));
+    const layout = { stateDir: host.layout.stateDir };
+    assertEquals(
+      (await readPhpSharedSiteRecords(layout)).map((r) => [
+        r.composeServiceName,
+        r.series,
+      ]),
+      [["caddy", "8.4"]],
+    );
+    await applyDeployWorkers(
+      deploy(host, [
+        site({ composeServiceName: "caddy", engine: "caddy", php: undefined }),
+      ], []),
+      lifecycleIo(host),
+    );
+    assertEquals(await readPhpSharedSiteRecords(layout), []);
   } finally {
     await host.cleanup();
   }

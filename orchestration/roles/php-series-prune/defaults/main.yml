@@ -7,4 +7,4 @@ php_series_prune: []
 turbopanel_vendor_dir: "{{ turbopanel_install_root | default('/opt/turbopanel') }}/vendor"  # noqa: var-naming[no-role-prefix]
 turbopanel_config_dir: "/etc/turbopanel"  # noqa: var-naming[no-role-prefix]
 turbopanel_log_dir: "/var/log/turbopanel"  # noqa: var-naming[no-role-prefix]
-turbopanel_run_dir: "/run/turbopanel"  # noqa: var-naming[no-role-prefix]
+php_fpm_run_dir: "/run/turbopanel-phpfpm"  # root-owned; keep in step with the php-fpm role

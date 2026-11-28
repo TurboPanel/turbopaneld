@@ -93,18 +93,21 @@ test("the recipe the script applies is the one the daemon names", async () => {
       ]);
       assertEquals(result.code, 0, result.stderr);
       const release = host.path(`${SERVICE}/releases/${RELEASE_ID}`);
-      const [recipe] = platformLayoutLinks(layout);
-      assert(recipe);
-      assertEquals(
-        await Deno.readLink(join(release, recipe.path)),
-        recipe.text,
-      );
-      // Every folder the recipe names exists in shared/, 0750.
-      for (const folder of recipe.sharedFolders) {
+      const recipes = platformLayoutLinks(layout);
+      assert(recipes.length > 0);
+      for (const recipe of recipes) {
         assertEquals(
-          await mode(host.path(`${SERVICE}/shared/${folder}`)),
-          0o750,
+          await Deno.readLink(join(release, recipe.path)),
+          recipe.text,
+          recipe.path,
         );
+        // Every folder the recipe names exists in shared/, 0750.
+        for (const folder of recipe.sharedFolders) {
+          assertEquals(
+            await mode(host.path(`${SERVICE}/shared/${folder}`)),
+            0o750,
+          );
+        }
       }
     });
   }
@@ -127,7 +130,12 @@ test("a Laravel release shares storage only; bootstrap/cache stays in the releas
       "shared/storage",
     );
     assertEquals(await exists(join(release, "storage/app/keep.txt")), false);
-    // Only storage is a link.
+    // The public disk's link sits beside it.
+    assertEquals(
+      await Deno.readLink(join(release, "public/storage")),
+      "../shared/storage/app/public",
+    );
+    // Only storage and public/storage are links.
     for (const path of ["bootstrap", "bootstrap/cache", "public"]) {
       assertEquals((await Deno.lstat(join(release, path))).isSymlink, false);
     }
@@ -155,6 +163,177 @@ test("a Laravel release shares storage only; bootstrap/cache stays in the releas
       await Deno.readLink(host.path(`${SERVICE}/current`)),
       `releases/${RELEASE_ID}`,
     );
+  });
+});
+
+/** A release leaf with the Laravel markers, ready for a shipped public/storage. */
+async function laravelLeaf(host: Host): Promise<string> {
+  const leaf = await openLeaf(host);
+  await write(join(leaf, "artisan"));
+  await write(join(leaf, "bootstrap/app.php"));
+  await write(join(leaf, "public/index.php"));
+  return leaf;
+}
+
+async function publishLaravel(host: Host) {
+  return await host.run(["publish", ...SIX, "layout=laravel"]);
+}
+
+test("a shipped public/storage folder is replaced by the link into shared, and shared/storage/app/public is the owner's 0750", async () => {
+  await withHost(async (host) => {
+    const leaf = await laravelLeaf(host);
+    await write(join(leaf, "public/storage/.gitignore"), "*\n");
+    await write(join(leaf, "public/storage/sub/old.png"));
+    const result = await publishLaravel(host);
+    assertEquals(result.code, 0, result.stderr);
+    const link = join(
+      host.path(`${SERVICE}/releases/${RELEASE_ID}`),
+      "public/storage",
+    );
+    assertEquals(
+      await Deno.readLink(link),
+      "../shared/storage/app/public",
+    );
+    // It resolves, through the release's shared link, to the owner's folder.
+    assertEquals(
+      await Deno.realPath(link),
+      await Deno.realPath(host.path(`${SERVICE}/shared/storage/app/public`)),
+    );
+    const folder = host.path(`${SERVICE}/shared/storage/app/public`);
+    assertEquals(await mode(folder), 0o750);
+    // As the owner, never root: the folder is made under the caller's id in
+    // test mode, and nothing in it came from the release.
+    assertEquals(
+      (await Deno.stat(folder)).uid,
+      (await Deno.stat(host.path(`${SERVICE}/shared`))).uid,
+    );
+    assertEquals(await exists(join(folder, "sub/old.png")), false);
+    assertEquals(
+      result.stdout.split("\n").some((line) =>
+        line.includes("[chown]") && line.includes("[root:alice]") &&
+        line.includes("[./public/storage]")
+      ),
+      true,
+    );
+  });
+});
+
+test("a shipped public/storage file, or a link inside the folder, is replaced and never followed", async () => {
+  await withHost(async (host) => {
+    const leaf = await laravelLeaf(host);
+    await write(join(leaf, "public/storage"));
+    const result = await publishLaravel(host);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(
+      await Deno.readLink(
+        join(host.path(`${SERVICE}/releases/${RELEASE_ID}`), "public/storage"),
+      ),
+      "../shared/storage/app/public",
+    );
+  });
+  // Nested: relative links inside the shipped folder, one up to the release's
+  // shared name and one climbing out; the outside folder keeps its file.
+  await withHost(async (host) => {
+    const leaf = await laravelLeaf(host);
+    const outside = host.path("outside");
+    await write(join(outside, "keep.txt"));
+    await Deno.mkdir(join(leaf, "public/storage/deep"), { recursive: true });
+    await Deno.symlink("../../shared", join(leaf, "public/storage/to-shared"));
+    await Deno.symlink(
+      "../../../../../../outside",
+      join(leaf, "public/storage/deep/out"),
+    );
+    const result = await publishLaravel(host);
+    assertEquals(result.code, 0, result.stderr);
+    const release = host.path(`${SERVICE}/releases/${RELEASE_ID}`);
+    assertEquals(
+      await Deno.readLink(join(release, "public/storage")),
+      "../shared/storage/app/public",
+    );
+    assertEquals(await exists(join(outside, "keep.txt")), true);
+  });
+});
+
+test("a shipped public/storage that is a link is replaced when relative, and refused when absolute (to /etc)", async () => {
+  // Relative, into shared: the platform's link takes its place.
+  await withHost(async (host) => {
+    const leaf = await laravelLeaf(host);
+    await Deno.symlink("../shared", join(leaf, "public/storage"));
+    const result = await publishLaravel(host);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(
+      await Deno.readLink(
+        join(host.path(`${SERVICE}/releases/${RELEASE_ID}`), "public/storage"),
+      ),
+      "../shared/storage/app/public",
+    );
+  });
+  // Relative, out of the release.
+  await withHost(async (host) => {
+    const leaf = await laravelLeaf(host);
+    await write(host.path("outside/keep.txt"));
+    await Deno.symlink(
+      "../../../../../../outside",
+      join(leaf, "public/storage"),
+    );
+    const result = await publishLaravel(host);
+    assertEquals(result.code, 0, result.stderr);
+    assertEquals(await exists(host.path("outside/keep.txt")), true);
+  });
+  // Absolute: the seal's own rule stands, and nothing is placed.
+  await withHost(async (host) => {
+    const leaf = await laravelLeaf(host);
+    await Deno.symlink("/etc", join(leaf, "public/storage"));
+    const result = await publishLaravel(host);
+    assertEquals(result.code === 0, false);
+    assertStringIncludes(result.stderr, "absolute symlink");
+    assertEquals(
+      await exists(host.path(`${SERVICE}/releases/${RELEASE_ID}`)),
+      false,
+    );
+  });
+});
+
+test("a link through public/storage, or a link of its own into shared, is still refused", async () => {
+  for (
+    const [target, file] of [
+      ["storage/x", "public/via"],
+      ["../public/storage", "public/again"],
+      ["../shared/storage/app/public", "public/second"],
+      ["../shared/storage/app/public", "storage-copy"],
+    ] as const
+  ) {
+    await withHost(async (host) => {
+      const leaf = await laravelLeaf(host);
+      await Deno.symlink(target, join(leaf, file));
+      const result = await publishLaravel(host);
+      assertEquals(result.code === 0, false, `${file} -> ${target}`);
+      assertEquals(
+        await exists(host.path(`${SERVICE}/releases/${RELEASE_ID}`)),
+        false,
+      );
+    });
+  }
+});
+
+test("public that is a link, or a file, is refused rather than followed", async () => {
+  await withHost(async (host) => {
+    const leaf = await openLeaf(host);
+    await write(join(leaf, "artisan"));
+    await Deno.mkdir(join(leaf, "elsewhere"));
+    await Deno.symlink("elsewhere", join(leaf, "public"));
+    const result = await publishLaravel(host);
+    assertEquals(result.code === 0, false);
+    assertStringIncludes(result.stderr, "public is a link");
+    assertEquals(await exists(join(leaf, "elsewhere/storage")), false);
+  });
+  await withHost(async (host) => {
+    const leaf = await openLeaf(host);
+    await write(join(leaf, "artisan"));
+    await write(join(leaf, "public"));
+    const result = await publishLaravel(host);
+    assertEquals(result.code === 0, false);
+    assertStringIncludes(result.stderr, "public is not a folder");
   });
 });
 

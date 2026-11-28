@@ -11,7 +11,16 @@ import {
   runDocker as defaultRunDocker,
   type RunDockerOptions,
 } from "../deploy/docker-cli.ts";
-import { sanitizeForLog } from "../util/logger.ts";
+import { truncateLogTail } from "../logs/truncate.ts";
+import {
+  type MutableTranscriptRedactor,
+  redactCommandSummary,
+  sharedSecretRedactor,
+} from "../logs/redactor.ts";
+import {
+  sanitizeForLog,
+  stripTerminalControlsKeepBreaks,
+} from "../util/logger.ts";
 import { managedComposeProject, SAFE_MANAGED_ID_RE } from "./engine-paths.ts";
 
 type RunDockerFn = (
@@ -21,7 +30,6 @@ type RunDockerFn = (
 
 const DEFAULT_TAIL = 200;
 const MAX_TAIL = 2_000;
-const MAX_LOG_BYTES = 256 * 1024;
 
 export type CollectManagedLogsOptions = {
   tail?: number;
@@ -29,12 +37,13 @@ export type CollectManagedLogsOptions = {
 
 /**
  * `docker compose -p <project> logs --no-color --tail <N>`, truncated to a
- * hard byte cap.
+ * UTF-8 byte cap after redaction.
  */
 export async function collectManagedLogs(
   managedId: string,
   options?: CollectManagedLogsOptions,
   run: RunDockerFn = defaultRunDocker,
+  redactor: MutableTranscriptRedactor = sharedSecretRedactor(),
 ): Promise<string> {
   if (!SAFE_MANAGED_ID_RE.test(managedId)) {
     throw new Error("managedId contains unsupported characters");
@@ -61,7 +70,11 @@ export async function collectManagedLogs(
     );
   }
 
-  const text = result.stdout;
-  if (text.length <= MAX_LOG_BYTES) return text;
-  return text.slice(text.length - MAX_LOG_BYTES);
+  // Same pipeline as container tails: redact the whole text (line breaks
+  // survive), strip terminal controls, then cut to the UTF-8 byte cap.
+  return truncateLogTail(
+    stripTerminalControlsKeepBreaks(
+      redactCommandSummary(result.stdout, redactor.secrets()),
+    ),
+  );
 }

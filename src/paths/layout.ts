@@ -70,6 +70,17 @@ export type BackupKind = keyof typeof BACKUP_KIND_DIRNAMES;
  */
 export const BUILD_SIBLING_DIR = "/var/lib/turbopanel-build";
 export const PROD_RUN_DIR_DEFAULT = "/run/turbopanel";
+
+/**
+ * The shared php-fpm masters' pidfile and pool-socket tree
+ * (`<dir>/<series>/{php-fpm.pid,<poolId>.sock}`). A sibling of
+ * {@link PROD_RUN_DIR_DEFAULT} on purpose: that folder belongs to the daemon
+ * account, which could rename a folder inside it, while the masters run as
+ * root and write the pidfile and chown each socket by path. Here `/run` is
+ * root's, so nothing the daemon owns sits above these paths. Fixed (no env
+ * override) because tp-host pins the pool `listen` path to it.
+ */
+export const PHP_FPM_RUN_DIR = "/run/turbopanel-phpfpm";
 export const PROD_DAEMON_ROOT_DEFAULT = join(PROD_LIB_DIR_DEFAULT, "daemon");
 /** Production Ansible assets ship under share/orchestration in release installs. */
 export const PROD_ORCHESTRATION_DIR_DEFAULT = join(
@@ -583,6 +594,8 @@ export const DAEMON_STATE_LEAVES: readonly DaemonLeaf[] = [
   // Release records and release build scratch (release-layout.ts).
   { name: "release-records", mode: "0750" },
   { name: "release-build", mode: "0700" },
+  // Scratch clone of a Git Compose project's repository, before it is placed in the deployment (deploy/compose-checkout.ts).
+  { name: "compose-checkout-scratch", mode: "0700" },
   // One small record per asset folder: its owner, scope, kind and slug as first created (asset-folders.ts).
   { name: "folders", mode: "0750" },
   // Scratch HOME and temp for the daemon's `ansible-playbook --version` probe.
@@ -746,10 +759,12 @@ export const ROLE_MADE_FOLDERS: readonly RoleMadeFolder[] = [
 ];
 
 /**
- * Folders directly under `/run`, one per unit (a unit's `RuntimeDirectory=`).
- * They stay at the top of `/run` on purpose: the folder is created and removed
- * with the unit, and the short path keeps a socket inside the 108-byte limit.
- * Each is tmpfs, so nothing here survives a reboot.
+ * Folders directly under `/run`, one per unit. Most are a unit's
+ * `RuntimeDirectory=`; `turbopanel-phpfpm` is not: the php-fpm unit template
+ * creates it with `ExecStartPre`, root-owned, because several series share it.
+ * They stay at the top of `/run` on purpose: only root can rename one, and the
+ * short path keeps a socket inside the 108-byte limit. Each is tmpfs, so
+ * nothing here survives a reboot.
  */
 export const RUN_FOLDER_UNITS: readonly string[] = [
   "turbopanel-nginx",
@@ -757,6 +772,7 @@ export const RUN_FOLDER_UNITS: readonly string[] = [
   "turbopanel-hosting-caddy",
   "turbopanel-site-caddy",
   "turbopanel-gate",
+  "turbopanel-phpfpm",
   "turbopanel-php-<runtimeId>",
   "turbopanel-build-<buildId>",
   "tpbuild",

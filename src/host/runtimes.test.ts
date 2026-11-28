@@ -276,6 +276,12 @@ test("php patch fields are present only when the cache holds them, and only for 
       series: "8.4",
       version: "8.4.27",
       outdated: true,
+    }, {
+      environmentId: "env1",
+      composeServiceName: "pooled",
+      series: "8.4",
+      version: "8.4.27",
+      shared: true,
     }],
     restartError: {
       series: "8.4",
@@ -284,7 +290,8 @@ test("php patch fields are present only when the cache holds them, and only for 
     },
   });
   assertEquals(fields.versions, { "8.3": "8.3.30", "8.4": "8.4.27" });
-  assertEquals(fields.sites?.length, 1);
+  assertEquals(fields.sites?.length, 2);
+  assertEquals(fields.sites?.[1]?.shared, true);
   assertEquals(fields.restartError?.message, "web did not answer");
 });
 

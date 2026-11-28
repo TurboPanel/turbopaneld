@@ -166,7 +166,7 @@ async function withRealPostgres(
       },
     });
   } finally {
-    await docker(["rm", "-f", name]);
+    await docker(["rm", "-f", "-v", name]);
   }
 }
 

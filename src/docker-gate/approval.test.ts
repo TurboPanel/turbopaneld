@@ -3,6 +3,7 @@ import {
   APPROVABLE_RULES,
   APPROVAL_CLOCK_SKEW_SEC,
   approvalBodyDigest,
+  approvalTokenOf,
   canonicalJson,
   importApprovalKeys,
   MAX_APPROVAL_TTL_SEC,
@@ -10,6 +11,11 @@ import {
   splitApproved,
   verifyApproval,
 } from "../../orchestration/roles/docker-gate/files/approval.ts";
+import {
+  DEFAULT_POLICY_CONFIG,
+  evaluateRequest,
+  type Violation,
+} from "../../orchestration/roles/docker-gate/files/policy.ts";
 import {
   generateKeys,
   payloadFor,
@@ -278,11 +284,60 @@ test("an approval relaxes only the rules its features name", async () => {
   ]);
 });
 
+test("a host-paths approval leaves an unresolvable bind in remaining", async () => {
+  const keys = await generateKeys();
+  const trusted = await importApprovalKeys(keys.rawB64);
+  const result = await verifyApproval(
+    await signToken(keys, payloadFor(NOW, { features: ["host-paths"] })),
+    trusted,
+    PROJECT,
+    TEST_BODY_DIGEST,
+    TEST_CONTAINER_NAME,
+    NOW,
+  );
+  assert(result.ok);
+  const bindFindings = async (
+    source: string,
+    resolve: (path: string) => Promise<string>,
+  ): Promise<Violation[]> =>
+    (await evaluateRequest(
+      {
+        method: "POST",
+        path: "/containers/create",
+        query: new URLSearchParams(),
+        body: { HostConfig: { Binds: [`${source}:/x`] } },
+      },
+      DEFAULT_POLICY_CONFIG,
+      resolve,
+      () => true,
+    )).filter((v) => v.rule.startsWith("bind-"));
+  const resolvable = await bindFindings(
+    "/opt/x/data",
+    (path) => Promise.resolve(path),
+  );
+  assertEquals(resolvable.map((v) => v.rule), ["bind-outside-roots"]);
+  const loop = await bindFindings(
+    "/opt/x/loop",
+    () => Promise.reject(new Error("too many levels of symbolic links")),
+  );
+  assertEquals(loop.map((v) => v.rule), ["bind-unresolvable"]);
+  const { remaining, approved } = splitApproved(
+    [...resolvable, ...loop],
+    result.payload,
+  );
+  assertEquals(approved.map((v) => v.rule), ["bind-outside-roots"]);
+  assertEquals(remaining.map((v) => v.rule), ["bind-unresolvable"]);
+});
+
 test("the approvable set never includes the unconditional rules", () => {
   for (
     const rule of [
       "bind-host-root",
       "bind-forbidden-path",
+      "bind-state-dir",
+      "bind-unresolvable",
+      "volume-bind-state-dir",
+      "volume-bind-unresolvable",
       "bind-noncanonical-path",
       "userns-mode-host",
       "volumes-from",
@@ -319,7 +374,7 @@ test("a token binds one create body: any other body, or a v1 token, is refused",
   );
   // The token rides in the body's own label; the digest ignores it.
   const withToken = structuredClone(body);
-  Object.assign(withToken.Labels, { "com.turbopanel.approval": token });
+  Object.assign(withToken.Labels, { "io.turbopanel.approval": token });
   assertEquals(await approvalBodyDigest(withToken), digest);
   for (
     const other of [
@@ -453,4 +508,12 @@ test("a token for one container name is refused for another, or for none", async
     ),
     "malformed",
   );
+});
+
+test("approvalTokenOf reads only the io.turbopanel approval label", () => {
+  assertEquals(approvalTokenOf({}), undefined);
+  assertEquals(approvalTokenOf({ "io.turbopanel.approval": "t" }), {
+    token: "t",
+  });
+  assertEquals(approvalTokenOf({ "com.turbopanel.approval": "t" }), undefined);
 });

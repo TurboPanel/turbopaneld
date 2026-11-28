@@ -255,7 +255,7 @@ jobs:
           && github.event_name == 'pull_request'
           && github.base_ref != 'staging'
           && github.base_ref != 'live'
-        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -371,6 +371,16 @@ jobs:
         env:
           TURBOPANEL_REQUIRE_SIBLING: "1"
         run: deno task check:contract-drift
+
+      # The checker above compares the two snapshots with each other; this
+      # test also compares the committed snapshot with both checkouts' live
+      # field types, so a field added without a snapshot update goes red here
+      # instead of waiting for someone to run the suite beside a sibling.
+      - name: Check the snapshot against both checkouts' live field types
+        working-directory: turbopaneld
+        env:
+          TURBOPANEL_REQUIRE_SIBLING: "1"
+        run: deno task test:contract-drift
 
   # The one context the trunk ruleset will require: green only when every
   # PR-time job above succeeded. Every need runs unconditionally, so a

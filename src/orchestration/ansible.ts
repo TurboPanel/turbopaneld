@@ -20,8 +20,10 @@ import {
   writeDevConvergeStamp,
 } from "./converge-stamp.ts";
 import {
+  DEV_CONVERGE_OPTIONS_ENV,
   type DevConvergeOptions,
   devConvergeOptionsExtraArgs,
+  parseDevConvergeOptions,
   resolveDevConvergeOptions,
 } from "./dev-converge-options.ts";
 import {
@@ -67,8 +69,10 @@ import {
   REDIS_PLAYBOOK,
   REQUIREMENTS_FILE,
   SET_HOSTNAME_PLAYBOOK,
+  SMB_TOOLS_PLAYBOOK,
   SOCKET_DIRS_PLAYBOOK,
   TIME_SYNC_APPLY_PLAYBOOK,
+  UI_EXPORT_PLAYBOOK,
   UV_BIN,
   VENV_BIN_DIR,
   VENV_DIR,
@@ -98,11 +102,28 @@ export async function ansiblePlaybookWorks(): Promise<boolean> {
 
 export async function ansibleLintWorks(): Promise<boolean> {
   if (!(await fileExists(ANSIBLE_LINT_BIN))) return false;
-  const result = await run(ANSIBLE_LINT_BIN, ["--version"], {
-    stream: false,
-    env: ansibleProbeEnv(),
-  });
-  return result.success;
+  // ansible-lint keeps a project cache (`.ansible/` with `.lock`,
+  // `collections/`, `roles/`) in its project directory, which it finds from
+  // the working directory (the filesystem root when nothing marks a project),
+  // whatever HOME and ANSIBLE_HOME say. The installer starts from `/`, which
+  // left `/.ansible` on a fresh host. Always use a private throwaway folder
+  // (0700, removed afterwards): this also runs as root, and a root-owned
+  // cache inside the tp-owned state leaf would break the daemon's own probe.
+  const scratch = await Deno.makeTempDir({ prefix: "turbopanel-lint-probe-" });
+  try {
+    const result = await run(
+      ANSIBLE_LINT_BIN,
+      ["--project-dir", scratch, "--version"],
+      { stream: false, cwd: scratch, env: ansibleProbeEnv() },
+    );
+    return result.success;
+  } finally {
+    try {
+      await Deno.remove(scratch, { recursive: true });
+    } catch {
+      // Best effort: never let cleanup mask the probe result.
+    }
+  }
 }
 
 /** Point the stable `current` symlink at the active ansible venv directory. */
@@ -446,6 +467,29 @@ export async function runSetHostname(
   return { summary: collector.build() };
 }
 
+/** Install `cifs-utils` so the host can mount SMB share volumes. */
+export async function runSmbToolsSetup(
+  onEvent?: AnsibleEventHandler,
+): Promise<void> {
+  logInfo("orchestration", "running smb-tools-setup playbook");
+  const collector = new AnsibleRunSummaryCollector();
+  const eventHandler: AnsibleEventHandler = (event) => {
+    collector.handleEvent(event);
+    onEvent?.(event);
+  };
+  try {
+    await runLocalPlaybook(SMB_TOOLS_PLAYBOOK, [], eventHandler);
+  } catch {
+    const summary = collector.build({ runFailed: true });
+    throw new Error(
+      summary.length > 0
+        ? `smb-tools-setup playbook failed: ${summary}`
+        : "smb-tools-setup playbook failed",
+    );
+  }
+  logInfo("orchestration", "smb-tools-setup complete");
+}
+
 export type TimeSyncApplyOpts = {
   timezone?: string;
   ntpServers?: string[];
@@ -639,6 +683,9 @@ export function buildBuildToggleExtraArgs(
     forceBuild?: boolean;
   },
   env: Record<string, string | undefined> = Deno.env.toObject(),
+  options: DevConvergeOptions = parseDevConvergeOptions(
+    env[DEV_CONVERGE_OPTIONS_ENV],
+  ),
 ): string[] {
   const instanceRuntime = env.TURBOPANEL_INSTANCE_RUNTIME === "workers"
     ? "workers"
@@ -655,6 +702,11 @@ export function buildBuildToggleExtraArgs(
     `force_build=${opts.forceBuild ?? false}`,
     "-e",
     `force_compile=${opts.forceBuild ?? false}`,
+    // The toggle re-templates the instance units, so it needs the same
+    // optional-service switches the converge passes; without them each
+    // `turbopanel_optional_*` falls back to its role default and a toggle
+    // would stop services the developer switched on.
+    ...devConvergeOptionsExtraArgs(options),
   ];
 }
 
@@ -669,7 +721,7 @@ export async function runBuildToggle(
   },
   onEvent?: AnsibleEventHandler,
 ): Promise<void> {
-  const args = buildBuildToggleExtraArgs(opts);
+  const args = buildBuildToggleExtraArgs(opts, Deno.env.toObject());
 
   logInfo(
     "orchestration",
@@ -677,6 +729,48 @@ export async function runBuildToggle(
   );
   await runLocalPlaybook(BUILD_TOGGLE_PLAYBOOK, args, onEvent);
   logInfo("orchestration", "instance-build-toggle complete");
+}
+
+/** `-e` key=value extra-vars for ui-export. */
+export function buildUiExportExtraArgs(
+  opts: { forceBuild?: boolean } = {},
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): string[] {
+  const uiMode = env.TURBOPANEL_UI_MODE === "static" ? "static" : "dev";
+  return [
+    ...devOwnershipPlaybookExtraArgs(env),
+    "-e",
+    `turbopanel_ui_mode=${uiMode}`,
+    "-e",
+    `force_build=${opts.forceBuild ?? false}`,
+  ];
+}
+
+/**
+ * Refresh the static UI export alone (the `ui-build` role: development mode on
+ * a development host). A no-op when the UI mode is not static. Run through
+ * Ansible so the build runs as the dev user and publishes under the install
+ * tree; nothing here runs pnpm itself.
+ */
+export async function runUiExport(
+  opts: { forceBuild?: boolean } = {},
+  onEvent?: AnsibleEventHandler,
+  onRawLine?: (stream: AnsibleRawLineStream, line: string) => void,
+): Promise<void> {
+  const args = buildUiExportExtraArgs(opts);
+  logInfo(
+    "orchestration",
+    `running ui-export playbook (force=${opts.forceBuild ?? false})`,
+  );
+  await runLocalPlaybook(
+    UI_EXPORT_PLAYBOOK,
+    args,
+    onEvent,
+    undefined,
+    onRawLine !== undefined,
+    onRawLine,
+  );
+  logInfo("orchestration", "ui-export complete");
 }
 
 /**
@@ -723,7 +817,7 @@ export function buildDockerSetupExtraArgs(opts: DockerSetupOpts): string[] {
 }
 
 /**
- * Install Docker and ensure turbopanel/dev users are in the docker group.
+ * Install Docker (co-located dev users join the docker group; a managed host reaches Docker through the gate).
  * When `opts` is omitted the org Docker addressing is resolved from the
  * descriptor the daemon session persisted, so an on-demand install
  * (`ensureDocker`) lands with the right `default-address-pools` too.

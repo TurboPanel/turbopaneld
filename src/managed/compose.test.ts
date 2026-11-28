@@ -4,7 +4,6 @@ import { parse } from "yaml";
 import type { ManagedApplyPayload } from "../contracts/commands-contracts.ts";
 import {
   assertPublicPrivateListenerTls,
-  composeUsesRootPasswordInterpolation,
   MANAGED_ENGINE_LABEL,
   MANAGED_ROOT_PASSWORD_VAR,
   normalizeManagedCompose,
@@ -94,6 +93,29 @@ test("normalizeManagedCompose pins the data volume name against project prefixin
   const volumes = doc.volumes as Record<string, unknown>;
   const pgdata = volumes.pgdata as Record<string, unknown>;
   assertEquals(pgdata?.name, "pgdata");
+});
+
+test("normalizeManagedCompose appends a missing data volume mount with an explicit rw mode", () => {
+  const payload = basePayload();
+  payload.composeYaml = [
+    "services:",
+    "  postgres:",
+    "    image: postgres:18-alpine",
+    "    environment:",
+    `      POSTGRES_PASSWORD: \${${MANAGED_ROOT_PASSWORD_VAR}}`,
+    "    volumes:",
+    "      - ./config:/etc/postgresql:ro",
+    "volumes:",
+    "  pgdata:",
+  ].join("\n");
+  const doc = parseNormalized(payload);
+  const services = doc.services as Record<string, Record<string, unknown>>;
+  const mounts = Object.values(services)[0].volumes as string[];
+  assertEquals(mounts.includes("pgdata:/var/lib/postgresql:rw"), true);
+  assertEquals(
+    mounts.some((m) => /^pgdata:/.test(m) && !/:(ro|rw)$/.test(m)),
+    false,
+  );
 });
 
 test("normalizeManagedCompose rewrites nested config/tls mounts that Docker cannot start", () => {
@@ -635,13 +657,4 @@ test("normalizeManagedCompose covers the mysql and mariadb root password keys", 
     assertEquals(env[`${key}_FILE`], "/run/secrets/tp_root_password");
     assertEquals(env["KEEP"], "1");
   }
-});
-
-test("normalizeManagedCompose legacy option keeps the env form byte-for-byte", () => {
-  const { composeYaml } = normalizeManagedCompose(basePayload(), {
-    legacyRootPasswordEnv: true,
-  });
-  const env = serviceOf(composeYaml).environment as Record<string, string>;
-  assertEquals(env["POSTGRES_PASSWORD"], `\${${MANAGED_ROOT_PASSWORD_VAR}}`);
-  assertEquals(composeUsesRootPasswordInterpolation(composeYaml), true);
 });

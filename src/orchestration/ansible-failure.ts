@@ -76,8 +76,18 @@ function failingHost(
     all[0];
 }
 
-function isIgnored(host: AnsibleHostResult | undefined): boolean {
-  return host?.ignore_errors === true || host?._ansible_ignore_errors === true;
+/**
+ * Whether the task was told to ignore its errors. Ansible hands that to the
+ * callback as an argument of the failed event; depending on the version the
+ * JSONL line carries it on the event itself or on the host result (as
+ * `ignore_errors` or the older `_ansible_ignore_errors`), so all three count.
+ */
+function isIgnored(
+  event: AnsibleTaskResultEvent,
+  host: AnsibleHostResult | undefined,
+): boolean {
+  return (event as { ignore_errors?: unknown }).ignore_errors === true ||
+    host?.ignore_errors === true || host?._ansible_ignore_errors === true;
 }
 
 /**
@@ -89,7 +99,7 @@ export function ansibleFailureLine(
   event: AnsibleTaskResultEvent,
 ): string | null {
   const host = failingHost(event.hosts ?? {});
-  if (isIgnored(host)) return null;
+  if (isIgnored(event, host)) return null;
   const detail = (host ? hostDetail(host, true) : null) ?? "unknown error";
   const taskName = event.task?.name ?? "task";
   return clipKeepingEnd(redactUrlSecrets(`${taskName}: ${detail}`));

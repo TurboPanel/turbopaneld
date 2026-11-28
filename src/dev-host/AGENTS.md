@@ -36,7 +36,8 @@ and an action is answered `not_development`.
   `.config/` / `.local/` / `.cache/` are shown and never block.
 - Migration always runs with a backup first: `pnpm migrate` in the control
   plane checkout with `TURBOPANEL_DATABASE_URL` read from the
-  `turbopanel-instance` unit (its `Environment=`, then its environment files)
+  `turbopanel-instance` unit (its `Environment=`, then its environment files;
+  the root-only passwords file is read through `sudo -n cat`)
   and `TURBOPANEL_MIGRATE_BACKUP_COMMAND` set to a `pg_dump -Fc` inside the
   `turbopanel-database` container written to `dev-updates/backups/` (newest 5
   kept). The control plane's migrate script runs that command only when
@@ -56,6 +57,14 @@ and an action is answered `not_development`.
   daemon last, only after the job is written `done` and the lock removed.
   Every restart is `sudo -n systemctl restart --no-block` through
   `hostSudoArgs`.
+- When the host serves the static UI (`TURBOPANEL_UI_MODE=static`), the
+  `install` step also refreshes the UI export through `runUiExport`
+  (`ui-export.yml`, the `ui-build` role as the dev user; no pnpm from
+  TypeScript). The Expo dev server is not running there, so nothing else would
+  pick up new source. The export is folded into `install` on purpose: step
+  names are a `dev-host-v1` wire contract that the control plane, the developer
+  console and the web interface label, so a new name would reach them
+  unlabelled. Add a step only together with those repositories.
 - Restart Only runs the three restart steps and no git command.
 - A merge that adds migrations reaches the dev database by itself (owner
   decision 2026-11-05, which narrows "nothing pulls on its own" to this one

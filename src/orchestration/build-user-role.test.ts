@@ -49,9 +49,10 @@ test("build-user defaults pin tp-host's layout and the retired account", async (
     join(ROLE, "defaults/main.yml"),
   );
   assertEquals(defaults.build_root, "/var/lib/turbopanel-build");
-  assertEquals(defaults.build_retired_user, "tpbuild");
   assertEquals(defaults.build_retired_uid, 9994);
-  assertEquals(defaults.build_retired_slice, "tpbuild.slice");
+  for (const gone of ["build_retired_user", "build_retired_slice"]) {
+    assertEquals(gone in defaults, false, `${gone} is gone`);
+  }
   for (
     const gone of ["build_user", "build_group", "build_uid", "build_slice"]
   ) {
@@ -59,16 +60,10 @@ test("build-user defaults pin tp-host's layout and the retired account", async (
   }
 });
 
-test("the role creates no account and removes the shared build account", async () => {
+test("the role creates or removes no account", async () => {
   const tasks = await roleTasks();
-  const users = tasksUsing(tasks, "user").map((task) =>
-    moduleArgs(task, "user")
-  );
-  const groups = tasksUsing(tasks, "group").map((task) =>
-    moduleArgs(task, "group")
-  );
-  assertEquals(users, [{ name: "{{ build_retired_user }}", state: "absent" }]);
-  assertEquals(groups, [{ name: "{{ build_retired_user }}", state: "absent" }]);
+  assertEquals(tasksUsing(tasks, "user"), []);
+  assertEquals(tasksUsing(tasks, "group"), []);
 });
 
 test("the build tree matches what tp-host build-run checks", async () => {
@@ -99,19 +94,12 @@ test("the build tree matches what tp-host build-run checks", async () => {
   }
 });
 
-test("the role removes the retired shared cache and tpbuild.slice", async () => {
+test("the role removes nothing and renders no template", async () => {
   const tasks = await roleTasks();
   const removed = tasksUsing(tasks, "file")
-    .map((task) => ({ task, args: moduleArgs(task, "file") }))
-    .filter(({ args }) => args.state === "absent");
-  assertEquals(removed.map(({ args }) => args.path), [
-    "{{ build_root }}/cache",
-    "/etc/systemd/system/{{ build_retired_slice }}",
-  ]);
-  assertEquals(
-    removed[1].task.notify,
-    "Reload systemd for the build slice",
-  );
+    .map((task) => moduleArgs(task, "file"))
+    .filter((args) => args.state === "absent");
+  assertEquals(removed, []);
   assertEquals(tasksUsing(tasks, "template"), []);
   const templates = await Array.fromAsync(
     Deno.readDir(join(ROLE, "templates")),

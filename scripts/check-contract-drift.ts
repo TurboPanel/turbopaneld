@@ -15,7 +15,7 @@
  * control plane's, and each side is checked against the other repository's
  * trunk (never another pull request's branch). So the rule is one-way:
  *
- *   - lists and maps (DAEMON_WIRE_FEATURES, DAEMON_FEATURE_MIN_VERSIONS,
+ *   - lists and maps (DAEMON_WIRE_FEATURES,
  *     INSTANCE_FEATURE_MIN_VERSIONS, UPDATE_CHANNELS, the ServerReportedIp
  *     field names) and the field snapshot: every control plane entry must be
  *     in the daemon's, unchanged. The daemon may have more (a daemon-only
@@ -870,30 +870,17 @@ function parseType(text: string): TypeAst {
 
 function collectTypeAliases(source: string): Map<string, string> {
   const aliases = new Map<string, string>();
-  let i = 0;
-  while (i < source.length) {
-    const trivia = skipTrivia(source, i);
-    if (trivia > i) {
-      i = trivia;
-      continue;
-    }
-    const ch = source[i];
-    if (ch === "'" || ch === '"' || ch === "`") {
-      i = skipQuoted(source, i);
-      continue;
-    }
-    if (source.startsWith("export type ", i) && boundaryBefore(source, i)) {
-      i = captureAlias(source, i + "export type ".length, aliases);
-      continue;
-    }
-    i += 1;
+  // Only a declaration at the start of a line counts. Scanning every
+  // character for quotes broke on a regex literal such as /[`'"]/, which
+  // swallowed every alias declared after it.
+  const declaration = /^export type /gm;
+  let match = declaration.exec(source);
+  while (match) {
+    const next = captureAlias(source, match.index + match[0].length, aliases);
+    declaration.lastIndex = Math.max(next, declaration.lastIndex);
+    match = declaration.exec(source);
   }
   return aliases;
-}
-
-function boundaryBefore(source: string, i: number): boolean {
-  if (i === 0) return true;
-  return !isWordChar(source[i - 1] ?? "");
 }
 
 function captureAlias(
@@ -975,6 +962,10 @@ function resolveAliasRef(
 ): TypeAst {
   const body = aliases.get(name);
   if (!body || seen.has(name)) return { kind: "ref", name, args: [] };
+  // `(typeof CODES)[number]` is derived from a runtime value the parser cannot
+  // read, and the control plane keeps such an alias in another file, so both
+  // sides must pin the alias name rather than a half-parsed expansion.
+  if (/^\(?\s*typeof\b/.test(body)) return { kind: "ref", name, args: [] };
   const next = new Set(seen);
   next.add(name);
   return resolveAst(parseType(body), aliases, next);
@@ -1211,7 +1202,7 @@ export function snapshotDataDrift(left: string, right: string): string | null {
 type SnapshotPin = {
   instance?: unknown;
   daemon?: unknown;
-  fields?: { name: string; required?: boolean }[];
+  fields?: { name: string; required?: boolean; type?: string }[];
 };
 
 /**
@@ -1243,8 +1234,13 @@ function typePinDrift(
     if (!found) {
       return `${typeName}.${field.name} is pinned on the control plane but not here; merge the daemon change first`;
     }
+    // An older pin spelled the same type differently (`string[]` for
+    // `Array<string>`, an unsorted union); that is not drift.
+    const sameType = typeof field.type === "string" &&
+      typeof found.type === "string" &&
+      relateFieldTypes(found.type, field.type) === "same";
     const differs = firstDataDifference(
-      field,
+      sameType ? { ...field, type: found.type } : field,
       found,
       `$.${typeName}.fields.${field.name}`,
     );
@@ -1444,7 +1440,6 @@ async function checkExpandOnly(tp: string, td: string): Promise<void> {
   if (floors) fail(floors);
   for (
     const name of [
-      "DAEMON_FEATURE_MIN_VERSIONS",
       "INSTANCE_FEATURE_MIN_VERSIONS",
     ]
   ) {

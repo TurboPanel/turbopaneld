@@ -161,7 +161,14 @@ test("checkoutRelease fetches and checks out when the branch tip drifted", async
       runGit: run,
     });
     assertEquals(result.commitSha, SHA);
-    assertEquals(calls[2]?.args, ["fetch", "--depth", "1", "origin", SHA]);
+    assertEquals(calls[2]?.args, [
+      "fetch",
+      "--depth",
+      "1",
+      "--",
+      "origin",
+      SHA,
+    ]);
     assertEquals(calls[3]?.args, ["checkout", "--detach", "FETCH_HEAD"]);
   } finally {
     await Deno.remove(scratchDir, { recursive: true });
@@ -435,6 +442,35 @@ test("checkoutRelease keeps the payload sha when pinned rev-parse fails", async 
       runGit: run,
     });
     assertEquals(result.commitSha, SHA);
+  } finally {
+    await Deno.remove(scratchDir, { recursive: true });
+  }
+});
+
+test("checkoutRelease fails when rev-parse fails and the payload value is not a commit id", async () => {
+  const scratchDir = await Deno.makeTempDir({
+    prefix: "tp-checkout-revparse-bad-",
+  });
+  try {
+    const { run } = scriptedGit([
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: OTHER_SHA, stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: true, stdout: "", stderr: "" }),
+      () => ({ success: false, stdout: "", stderr: "ambiguous" }),
+    ]);
+    await assertRejects(
+      () =>
+        checkoutRelease({
+          cloneUrl: "https://example.com/o/r.git",
+          ref: "main",
+          commitSha: "main",
+          scratchDir,
+          runGit: run,
+        }),
+      Error,
+      "git could not resolve the checked-out commit",
+    );
   } finally {
     await Deno.remove(scratchDir, { recursive: true });
   }

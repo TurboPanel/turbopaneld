@@ -64,7 +64,7 @@ function withoutComment(line: string): string {
 }
 
 /** Braces opened minus closed on one line, outside quotes and comments. */
-function braceBalance(line: string): number {
+export function braceBalance(line: string): number {
   const text = withoutComment(line);
   let quote: string | null = null;
   let balance = 0;

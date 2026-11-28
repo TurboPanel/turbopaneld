@@ -1,0 +1,13 @@
+
+  TurboPanel  1.8.2 · control plane
+  ████████████████████████████████  8/8
+
+  ✓ 8 steps done
+
+  Ready in 1m 12s
+
+  → https://192.0.2.10:8443   public
+  → https://10.0.0.5:8443     private
+
+  ! port 8443 is open to the internet
+  log  install.log

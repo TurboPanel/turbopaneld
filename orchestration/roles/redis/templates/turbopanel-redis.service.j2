@@ -1,6 +1,9 @@
 [Unit]
 Description=TurboPanel Redis
 After=network.target
+# Never give up retrying: the default start limit (5 starts in 10 s) left this
+# unit failed after a burst of quick failures until someone logged in.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -9,6 +12,8 @@ Group={{ redis_primary_group }}
 ExecStart={{ turbopanel_vendor_dir }}/redis/current/bin/redis-server {{ turbopanel_config_dir }}/redis/redis.conf
 Restart=always
 RestartSec=2
+RestartSteps=10
+RestartMaxDelaySec=120
 
 [Install]
 WantedBy=multi-user.target

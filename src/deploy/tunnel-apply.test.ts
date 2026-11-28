@@ -12,6 +12,10 @@ import {
   rewriteHostingCaddySites,
   setIngressHostCommandForTest,
 } from "./ingress.ts";
+import {
+  SERVER_AND_CLIENT_CERT,
+  SERVER_ONLY_CERT,
+} from "../testing/tunnel-peer-certs.ts";
 import { applyTunnelRoutes } from "./tunnel-apply.ts";
 import { TUNNEL_SITE_FILE, tunnelPeerPaths } from "./tunnel-caddy.ts";
 import {
@@ -96,11 +100,17 @@ function fakeHost(
           stderr: `unrecognized directive in ${entry.name}`,
         });
       }
-      const own = new Set(
-        [...text.matchAll(/^(?:http:\/\/)?([a-z0-9.-]+) \{$/gm)].map((m) =>
-          m[1]!
-        ),
-      );
+      // A name is ambiguous per listen address, as in Caddy.
+      const own = new Set<string>();
+      for (
+        const m of text.matchAll(
+          /^(?:http:\/\/)?([a-z0-9.-]+) \{\n(?: {2}bind (.+)\n)?/gm,
+        )
+      ) {
+        for (const address of (m[2] ?? "").split(" ")) {
+          own.add(`${m[1]!}@${address}`);
+        }
+      }
       for (const host of own) {
         if (seen.has(host)) {
           return Promise.resolve({
@@ -135,6 +145,7 @@ function table(
       privateKeyEnvelope: "tpdaemon.AAAA",
       caCertPem: CERT,
     },
+    generation: 1,
     ...overrides,
   };
 }
@@ -207,11 +218,78 @@ test("a table writes the forward file, the peer material and the stored table, t
     assertEquals(state?.hash, HASH_1);
     const paths = tunnelPeerPaths(hostingDir, state!.peerId!);
     assertStringIncludes(await Deno.readTextFile(paths.key), "KEY");
-    assertEquals((await Deno.stat(paths.key)).mode! & 0o777, 0o640);
+    assertEquals((await Deno.stat(paths.key)).mode! & 0o777, 0o600);
+    assertEquals((await Deno.stat(paths.certificate)).mode! & 0o777, 0o640);
+    assertEquals((await Deno.stat(paths.trust)).mode! & 0o777, 0o640);
     assertStringIncludes(file, paths.trust);
     const validateAt = calls.findIndex((a) => a.includes("validate"));
     const reloadAt = calls.findIndex((a) => a.includes("reload"));
     assert(validateAt >= 0 && reloadAt > validateAt);
+  });
+});
+
+test("a server that only carries a tunnel gets no private key, and one left from an earlier table is removed", async () => {
+  await withHost(async ({ layout, hostingDir }) => {
+    let unsealed = 0;
+    const deps = {
+      decryptSecrets: (envelopes: string[]) => {
+        unsealed++;
+        return decrypt(envelopes);
+      },
+      grantRead: noGrant,
+    };
+    // No peer sends here and nothing is forwarded: the key is never needed.
+    const only = table({
+      routes: [],
+      peerAddresses: [],
+      inbound: [{ hostname: "app.example.com", peers: [] }],
+    });
+    await applyTunnelRoutes(layout, only, deps);
+    const id = (await readTunnelState(hostingDir))!.peerId!;
+    const paths = tunnelPeerPaths(hostingDir, id);
+    assertEquals(unsealed, 0);
+    assertEquals(await exists(paths.key), false);
+    assertEquals(await exists(paths.certificate), true);
+    assertEquals(await exists(paths.trust), true);
+
+    // A table that carries peers needs it; the same folder is made again with it.
+    await applyTunnelRoutes(layout, table({ hash: HASH_2 }), deps);
+    assertEquals(unsealed, 1);
+    assertEquals(await exists(paths.key), true);
+
+    // Back to a table that never uses it: the key is gone from the disk.
+    await applyTunnelRoutes(layout, { ...only, hash: HASH_1 }, deps);
+    assertEquals(await exists(paths.key), false);
+    assertEquals(await exists(paths.certificate), true);
+  });
+});
+
+test("a refused table that no longer needs the key leaves the key the live file points at", async () => {
+  await withHost(async ({ layout, hostingDir, refuse }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(layout, table(), deps);
+    const id = (await readTunnelState(hostingDir))!.peerId!;
+    const paths = tunnelPeerPaths(hostingDir, id);
+    refuse.tunnel = true;
+    // Same material, but no peer sends here any more: the key is not needed.
+    await assertRejects(() =>
+      applyTunnelRoutes(
+        layout,
+        table({ hash: HASH_2, peerAddresses: [] }),
+        deps,
+      )
+    );
+    assertEquals((await readTunnelState(hostingDir))!.hash, HASH_1);
+    assertEquals(await exists(paths.key), true);
+    // Once Caddy accepts the table, the key goes.
+    refuse.tunnel = false;
+    await applyTunnelRoutes(
+      layout,
+      table({ hash: HASH_2, peerAddresses: [] }),
+      deps,
+    );
+    assertEquals(await exists(paths.key), false);
+    assertEquals(await exists(paths.certificate), true);
   });
 });
 
@@ -400,7 +478,7 @@ test("an empty table removes the file, the stored table and the peer material", 
     await applyTunnelRoutes(layout, table(), deps);
     const result = await applyTunnelRoutes(
       layout,
-      { hash: HASH_2, routes: [], peerAddresses: [] },
+      { hash: HASH_2, routes: [], peerAddresses: [], generation: 1 },
       deps,
     );
     assertEquals(result.applied, true);
@@ -415,7 +493,7 @@ test("an empty table on a host that never had one touches nothing", async () => 
   await withHost(async ({ layout, calls }) => {
     const result = await applyTunnelRoutes(
       layout,
-      { hash: HASH_1, routes: [], peerAddresses: [] },
+      { hash: HASH_1, routes: [], peerAddresses: [], generation: 1 },
       { decryptSecrets: decrypt, grantRead: noGrant },
     );
     assertEquals(result.applied, true);
@@ -578,6 +656,7 @@ test("a removed carrier is shut out, and a table naming only the site's own name
         hash: HASH_2,
         routes: [],
         peerAddresses: [],
+        generation: 1,
         inbound: [{ hostname: "site.example.com", peers: [] }],
       },
       deps,
@@ -677,6 +756,7 @@ test("a refusal caused by a relocked site file names that file and changes nothi
             hash: HASH_2,
             routes: [],
             peerAddresses: [],
+            generation: 1,
             inbound: [{ hostname: "site.example.com", peers: ["10.0.0.6"] }],
           },
           { decryptSecrets: decrypt, grantRead: noGrant },
@@ -876,33 +956,6 @@ test("a table older than the one applied is ignored, an equal or newer one appli
   });
 });
 
-test("a table without a generation applies as before and clears the record", async () => {
-  await withHost(async ({ layout, hostingDir }) => {
-    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
-    await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_1, TWO_PEERS, 9),
-      deps,
-    );
-    const result = await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_2, ["10.0.0.5"]),
-      deps,
-    );
-    assertEquals(result.applied, true);
-    assertEquals((await readTunnelState(hostingDir))?.hash, HASH_2);
-    assertEquals(await readTunnelGeneration(hostingDir), undefined);
-    // A reset counter starts below the old record and is accepted again.
-    const reset = await applyTunnelRoutes(
-      layout,
-      generationTable(HASH_1, TWO_PEERS, 3),
-      deps,
-    );
-    assertEquals(reset.applied, true);
-    assertEquals(await readTunnelGeneration(hostingDir), 3);
-  });
-});
-
 test("the applied generation outlives a reload and an emptied table", async () => {
   await withHost(async ({ layout, hostingDir }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };
@@ -991,7 +1044,7 @@ test("a deploy older than the applied table takes the table's peers, and its gen
 });
 
 test("the highest generation of a deploy's hostings is used, and a record only goes up", async () => {
-  assertEquals(deployTunnelGeneration([{}, { tunnel: {} }]), undefined);
+  assertEquals(deployTunnelGeneration([{}]), undefined);
   assertEquals(
     deployTunnelGeneration([
       { tunnel: { generation: 3 } },
@@ -1002,7 +1055,6 @@ test("the highest generation of a deploy's hostings is used, and a record only g
   );
   const dir = await Deno.makeTempDir({ prefix: "tp-tunnel-gen-" });
   try {
-    await recordTunnelGeneration(dir, undefined);
     assertEquals(await readTunnelGeneration(dir), undefined);
     await recordTunnelGeneration(dir, 4);
     await recordTunnelGeneration(dir, 2);
@@ -1117,22 +1169,184 @@ test("the same table resent with a higher generation raises the record", async (
   });
 });
 
-test("an identical table with no generation after a counter reset leaves nothing stuck", async () => {
-  await withHost(async ({ layout, hostingDir }) => {
+test("a certificate fit for client use is shown by forward blocks and a require request is kept", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const result = await applyTunnelRoutes(
+      layout,
+      table({
+        peerClientAuth: "require",
+        peerMaterial: {
+          certificatePem: SERVER_AND_CLIENT_CERT,
+          privateKeyEnvelope: "tpdaemon.AAAA",
+          caCertPem: CERT,
+        },
+      }),
+      { decryptSecrets: decrypt, grantRead: noGrant },
+    );
+    assertEquals(result.warnings, []);
+    const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
+    const state = await readTunnelState(hostingDir);
+    const paths = tunnelPeerPaths(hostingDir, state!.peerId!);
+    assertEquals(state?.clientAuth, "require");
+    assertEquals(state?.presentCertificate, true);
+    assertStringIncludes(
+      file,
+      `tls_client_auth ${paths.certificate} ${paths.key}`,
+    );
+    assertStringIncludes(file, "mode require_and_verify");
+    assertStringIncludes(file, `trust_pool file ${paths.trust}`);
+  });
+});
+
+test("a require request falls back to verify, without a warning in the result, when the certificate is server-only", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
+    const result = await applyTunnelRoutes(
+      layout,
+      table({
+        peerClientAuth: "require",
+        peerMaterial: {
+          certificatePem: SERVER_ONLY_CERT,
+          privateKeyEnvelope: "tpdaemon.AAAA",
+          caCertPem: CERT,
+        },
+      }),
+      { decryptSecrets: decrypt, grantRead: noGrant },
+    );
+    // A warning would make the control plane send the table again and again.
+    assertEquals(result.warnings, []);
+    const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
+    assertEquals(file.includes("tls_client_auth"), false);
+    assertStringIncludes(file, "mode verify_if_given");
+    assertEquals((await readTunnelState(hostingDir))?.clientAuth, "verify");
+  });
+});
+
+test("a downgraded require is stored, and with a dedicated peer port a site lock admits no peer address", async () => {
+  await withHost(async ({ layout, sitesDir, hostingDir }) => {
     const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await rewriteHostingCaddySites(
+      layout,
+      lockedSite("env-1", "site.example.com", ["10.0.0.5"]),
+      undefined,
+      noGrant,
+    );
+    const peers = ["10.0.0.5", "10.0.0.6"];
     await applyTunnelRoutes(
       layout,
-      generationTable(HASH_1, TWO_PEERS, 9),
+      table({
+        routes: [],
+        peerAddresses: peers,
+        inbound: [{ hostname: "site.example.com", peers }],
+        peerClientAuth: "require",
+        peerMaterial: {
+          certificatePem: SERVER_ONLY_CERT,
+          privateKeyEnvelope: "tpdaemon.AAAA",
+          caCertPem: CERT,
+        },
+      }),
       deps,
     );
-    await applyTunnelRoutes(layout, generationTable(HASH_1, TWO_PEERS), deps);
-    assertEquals(await readTunnelGeneration(hostingDir), undefined);
-    assertEquals((await readTunnelState(hostingDir))?.generation, undefined);
-    const reset = await applyTunnelRoutes(
+    const state = await readTunnelState(hostingDir);
+    assertEquals(state?.clientAuth, "verify");
+    assertEquals(state?.clientAuthDowngraded, true);
+    const site = await Deno.readTextFile(join(sitesDir, "env-1.caddy"));
+    assertStringIncludes(site, `${LOCK_LINE}\n`);
+    assertEquals(site.includes("10.0.0.5"), false);
+    assertEquals(site.includes("10.0.0.6"), false);
+  });
+});
+
+test("a table with no peerClientAuth renders as before, whatever the certificate allows", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    await applyTunnelRoutes(layout, table(), {
+      decryptSecrets: decrypt,
+      grantRead: noGrant,
+    });
+    const file = await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE));
+    assertEquals(file.includes("client_auth"), false);
+    assertEquals(file.includes("tls_client_auth"), false);
+  });
+});
+
+/** A site on 127.0.0.1, so the catch-all has an address to repeat names on. */
+async function bindSite(sitesDir: string): Promise<void> {
+  await Deno.mkdir(sitesDir, { recursive: true });
+  await Deno.writeTextFile(
+    join(sitesDir, "env-b.caddy"),
+    "b.example.com {\n  bind 127.0.0.1\n}\n",
+  );
+}
+
+const readFallback = (sitesDir: string) =>
+  Deno.readTextFile(join(sitesDir, "00-fallback.caddy"));
+
+test("a name that moves here is repeated from its own site, not from the forward block it had", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    await applyTunnelRoutes(layout, table(), {
+      decryptSecrets: decrypt,
+      grantRead: noGrant,
+    });
+    assertStringIncludes(
+      await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE)),
+      "10.0.0.5:",
+    );
+    await bindSite(sitesDir);
+    await rewriteHostingCaddySites(
       layout,
-      generationTable(HASH_2, ["10.0.0.5"], 3),
-      deps,
+      envPayload("env-1", "app.example.com"),
+      undefined,
+      noGrant,
     );
-    assertEquals(reset.applied, true);
+    const fallback = await readFallback(sitesDir);
+    assertStringIncludes(fallback, "app.example.com {\n  bind 127.0.0.1\n");
+    assertEquals(fallback.includes("10.0.0.5:"), false);
+  });
+});
+
+test("a name that leaves is repeated from the forward block the deploy writes", async () => {
+  await withHost(async ({ layout, sitesDir }) => {
+    const deps = { decryptSecrets: decrypt, grantRead: noGrant };
+    await applyTunnelRoutes(layout, table(), deps);
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    await bindSite(sitesDir);
+    assertEquals(
+      (await readFallback(sitesDir)).includes("10.0.0.5:"),
+      false,
+    );
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "other.example.com"),
+      undefined,
+      noGrant,
+    );
+    const fallback = await readFallback(sitesDir);
+    assertStringIncludes(fallback, "app.example.com {\n  bind 127.0.0.1\n");
+    assertStringIncludes(fallback, "10.0.0.5:");
+  });
+});
+
+test("a forward file set aside for the deploy leaves no stale forward block in the catch-all", async () => {
+  await withHost(async ({ layout, sitesDir, refuse }) => {
+    await applyTunnelRoutes(layout, table(), {
+      decryptSecrets: decrypt,
+      grantRead: noGrant,
+    });
+    await bindSite(sitesDir);
+    refuse.tunnel = true;
+    await rewriteHostingCaddySites(
+      layout,
+      envPayload("env-1", "app.example.com"),
+      undefined,
+      noGrant,
+    );
+    assertEquals(await Deno.readTextFile(join(sitesDir, TUNNEL_SITE_FILE)), "");
+    const fallback = await readFallback(sitesDir);
+    assertStringIncludes(fallback, "app.example.com {\n  bind 127.0.0.1\n");
+    assertEquals(fallback.includes("10.0.0.5:"), false);
   });
 });

@@ -6,15 +6,20 @@
 #
 # It proves four things and exits non-zero if any fails:
 #   1. the gate service is active, its socket is root:tp 0660 in a root-owned
-#      directory, and the daemon account can open it but is still in `docker`;
+#      directory, the daemon account can open it, and is NOT in `docker`;
 #   2. real Docker traffic flows through it unchanged: run, exec -i, logs,
 #      events, and a Compose deploy;
 #   3. the strict profile would refuse the root-equivalent shapes (privileged,
 #      a host-root bind, the Docker socket, host networking, an added
 #      capability): each is LOGGED as docker-gate.would-deny, and each still
 #      runs (observe mode refuses nothing);
-#   4. nothing routes through the gate by default: the daemon's environment has
-#      no DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET.
+#   4. the daemon's own env file does not pin DOCKER_HOST (the unit sets it).
+#
+# Sections 2 onward prove the observe-mode behaviour: they expect every probe
+# to run. On an enforcing host (the default) the script runs section 1 and
+# then section 1b instead, which proves a blocked create is refused with the
+# gate's 403 (and journaled as docker-gate.denied) and exits; set the gate to
+# observe to run the rest.
 #
 # Stage 2 adds: the ownership observation (a container nothing stamped is
 # logged as unowned-container when stopped through the gate), a rejected signed
@@ -117,7 +122,7 @@ start_route_app() {
   _app_net=$3
   docker run -d --name "$_app_name" --network "$_app_net" \
     --label traefik.enable=true \
-    --label com.turbopanel.system.routed=true \
+    --label io.turbopanel.system.routed=true \
     --label "traefik.docker.network=$_app_net" \
     --label "traefik.http.routers.$_app_name.rule=Host(\`$_app_host\`)" \
     --label "traefik.http.routers.$_app_name.entrypoints=web" \
@@ -161,12 +166,35 @@ if [[ "$_mode" == "root:$DAEMON_ACCOUNT 660" ]]; then pass "socket is $_mode"; e
 _dir=$(stat -c "$STAT_FMT" "$GATE_DIR" 2>/dev/null)
 if [[ "$_dir" == "root:$DAEMON_ACCOUNT 750" ]]; then pass "socket directory is $_dir"; else fail "socket directory is '$_dir', want root:$DAEMON_ACCOUNT 750"; fi
 check "daemon account can use Docker through the gate" gate_docker version
-check "daemon account is still in the docker group (stage 1 changes nothing)" sh -c "id -nG $DAEMON_ACCOUNT | tr ' ' '\n' | grep -qx docker"
+check "daemon account is not in the docker group (stage 5)" sh -c "! id -nG $DAEMON_ACCOUNT | tr ' ' '\n' | grep -qx docker"
 GATE_MAIN=/opt/turbopanel/lib/docker-gate/main.ts
 if [[ "$(stat -c %U "$GATE_MAIN" 2>/dev/null)" == root ]] && ! sudo -n -u "$DAEMON_ACCOUNT" test -w "$GATE_MAIN"; then
   pass "gate source is root-owned and not writable by the daemon"
 else
   fail "gate source is root-owned and not writable by the daemon"
+fi
+
+# The gate's mode comes from its unit (the same source the service reads).
+GATE_MODE=$(systemctl show -p Environment --value "$GATE_UNIT" 2>/dev/null | tr ' ' '\n' | sed -n 's/^TP_DOCKER_GATE_MODE=//p' | head -1)
+if [[ "$GATE_MODE" == enforce ]]; then
+  echo "== 1b. enforce mode: a blocked create is refused with the gate's 403"
+  # The refusal is the gate's own (403 before the engine is reached), not an
+  # engine error: use the raw API so the status is visible.
+  _body='{"Image":"'"$IMAGE"'","HostConfig":{"Privileged":true,"NetworkMode":"none"}}'
+  _code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Content-Type: application/json' -d "$_body" --unix-socket "$GATE_SOCKET" "localhost/containers/create?name=tpgate-proof-denied")
+  if [[ "$_code" == 403 ]]; then pass "a privileged create answered 403"; else fail "a privileged create answered '$_code', want 403"; fi
+  if gate_docker inspect tpgate-proof-denied >/dev/null 2>&1; then fail "the refused container exists"; gate_docker rm -f -v tpgate-proof-denied >/dev/null 2>&1; else pass "the refused container was never created"; fi
+  if gate_docker run --rm --network none -v /run/turbopanel:/x:ro "$IMAGE" true >/dev/null 2>&1; then fail "a tenant bind under /run was allowed"; else pass "a tenant bind under /run is refused"; fi
+  sleep 1
+  _log=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null)
+  if printf '%s\n' "$_log" | grep -q '"event":"docker-gate.denied"'; then pass "journal has docker-gate.denied lines"; else fail "journal has no docker-gate.denied line"; fi
+  echo "NOTE  enforce mode: the observe-mode sections (2 onward) run shapes the gate now refuses; set the gate to observe to run them"
+  if [[ "$FAILED" -ne 0 ]]; then
+    echo "RESULT: $FAILED check(s) failed"
+    exit 1
+  fi
+  echo "RESULT: all checks passed"
+  exit 0
 fi
 
 echo "== 2. ordinary traffic through the gate"
@@ -212,7 +240,7 @@ if gate_docker run --rm --network none --cap-add SYS_ADMIN "$IMAGE" true >/dev/n
 gate_docker run -d --name tpgate-proof-human --network none "$IMAGE" sleep 120 >/dev/null 2>&1
 if gate_docker stop -t 1 tpgate-proof-human >/dev/null 2>&1; then pass "stop of an unlabeled container ran (observe)"; else fail "stop of an unlabeled container did not run"; fi
 gate_docker rm -f tpgate-proof-human >/dev/null 2>&1
-if gate_docker run --rm --privileged --network none --label com.turbopanel.approval=v2.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
+if gate_docker run --rm --privileged --network none --label io.turbopanel.approval=v2.bm90LWEtdG9rZW4.bm90LWEtc2lnbmF0dXJl "$IMAGE" true >/dev/null 2>&1; then pass "privileged with a bogus approval ran (observe)"; else fail "privileged with a bogus approval did not run"; fi
 
 sleep 1
 _log=$(journalctl -u "$GATE_UNIT" --since "$SINCE" --no-pager -o cat 2>/dev/null)
@@ -226,9 +254,9 @@ if printf '%s\n' "$_log" | grep '"event":"docker-gate.approval"' | grep -q '"res
 if printf '%s\n' "$_log" | grep -q 'bm90LWEtdG9rZW4'; then fail "an approval token reached the journal"; else pass "approval token is never logged"; fi
 if printf '%s\n' "$_log" | grep -q '"level":"error"'; then fail "the gate logged an error (see below)"; printf '%s\n' "$_log" | grep '"level":"error"' | head -5; else pass "no error-level gate log lines"; fi
 
-echo "== 4. nothing routes through the gate by default"
+echo "== 4. the env file does not pin the Docker socket (the unit does)"
 if grep -Eq '^(export )?(DOCKER_HOST|TURBOPANEL_DOCKER_SOCKET)=' "$DAEMON_ENV" 2>/dev/null; then
-  echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (an opt-in canary flip, not the default)"
+  echo "NOTE  $DAEMON_ENV sets DOCKER_HOST / TURBOPANEL_DOCKER_SOCKET (the unit sets these; the env file should not)"
 else
   pass "$DAEMON_ENV sets neither DOCKER_HOST nor TURBOPANEL_DOCKER_SOCKET"
 fi
@@ -283,7 +311,7 @@ if docker ps --format '{{.Image}}' | grep -q 'docker-socket-proxy'; then PROXY_R
 if [[ -f "$INGRESS_SWITCH" ]]; then
   if docker ps -q | xargs -r docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' | grep -q "$RO_DIR"; then pass "a Traefik mounts $RO_DIR (switch on)"; else fail "switch on but no container mounts $RO_DIR (deploy once to re-render ingress)"; fi
   if [[ "$PROXY_RUNNING" == true ]]; then echo "NOTE  the socket-proxy is still running: a TCP/UDP service Traefik rendered before the switch still uses it (redeploy that service)"; else pass "no socket-proxy container is running"; fi
-  SHARED_TRAEFIK=$(docker ps -q --filter label=com.turbopanel.system.component=hosting-ingress | sed -n 1p)
+  SHARED_TRAEFIK=$(docker ps -q --filter label=io.turbopanel.system.component=hosting-ingress | sed -n 1p)
   if [[ -n "$SHARED_TRAEFIK" ]] && docker inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$SHARED_TRAEFIK" | grep -q "$RO_DIR"; then
     SHARED_NET=$(docker inspect --format '{{range $net, $cfg := .NetworkSettings.Networks}}{{$net}} {{end}}' "$SHARED_TRAEFIK" | awk '{print $1}')
   else

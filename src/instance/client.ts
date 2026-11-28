@@ -46,6 +46,7 @@ import {
   readPanelIdentityPin,
 } from "./panel-identity-pin.ts";
 import {
+  binaryFrameBytes,
   type PanelSigningKey,
   pinAccepts,
   type SessionBinding,
@@ -111,18 +112,15 @@ import {
   signPinReport,
 } from "../crypto/keys.ts";
 import { readMachineKey } from "../host/machine-key.ts";
-import {
-  setTopologyGenerationOptional,
-  setTopologySizesNegotiated,
-  sizesFeaturesNegotiated,
-  topologyGenerationOptional,
-} from "../metrics/topology/generation.ts";
 import { DaemonApiClient, DaemonApiError } from "./api-client.ts";
 import {
   createPanelSealKeySource,
   type PanelIdentityFetch,
   parsePanelIdentity,
 } from "./panel-identity-cache.ts";
+import { openDockerExec } from "../shell/docker-exec.ts";
+import { openShellKey } from "../shell/key.ts";
+import { type ShellReport, ShellSessionMux } from "../shell/mux.ts";
 import {
   createSealingContext,
   createSealingRegistration,
@@ -216,9 +214,11 @@ import {
   writeActiveUpgradeContext,
 } from "./update-active-context.ts";
 import {
+  clearUpdateSkip,
   handleSelfUpdateAttachOutcome,
   readUpdateGuardArmed,
   readUpdateRollback,
+  readUpdateSkip,
 } from "./update-guard.ts";
 import { UpdateProgressReporter } from "./update-progress-reporter.ts";
 import {
@@ -235,6 +235,12 @@ import {
 } from "./pg-standby-sampler.ts";
 import { ManagedHealthReporter } from "./managed-health-reporter.ts";
 import { RepoKeyReporter } from "./repo-key-reporter.ts";
+import {
+  beginUpdateDrain,
+  endUpdateDrain,
+  runningCommandCount,
+  waitForCommandsToDrain,
+} from "../orchestration/boot-converge-gate.ts";
 import { repoKeyLedgerFor } from "../orchestration/repo-key-changes.ts";
 import {
   FabricPeerReporter,
@@ -248,34 +254,21 @@ import { AcmeIssueHandler } from "./acme-issue-handler.ts";
 import { ProofForwardHandler } from "./acme-proof-forward-handler.ts";
 import { createCertificateCapture } from "../deploy/acme-capture.ts";
 import { InstanceAcmeRenewalScheduler } from "./instance-acme-renew.ts";
-import { DAEMON_VERSION } from "../version.ts";
 import {
-  BACKUP_S3_COPY_FEATURE,
-  DEV_HOST_FEATURE,
-  FABRIC_PEER_REPORT_FEATURE,
-  HOST_CAPACITY_FEATURE,
-  MANAGED_HA_BOOT_HOLD_FEATURE,
-  MANAGED_HA_PROBE_FEATURE,
-  MANAGED_HEALTH_REPORT_FEATURE,
-  REPO_KEY_REPORT_FEATURE,
-  resolveDaemonCapabilities,
   SIGNED_HA_EVENTS_FEATURE,
   SIGNED_REPORTS_FEATURE,
-  TLS_CAPTURE_FEATURE,
-  TOPOLOGY_GENERATION_OPTIONAL_FEATURE,
 } from "./version-wire.ts";
-import {
-  TopologyReporter,
-  topologyReportForWire,
-} from "./topology-reporter.ts";
+import { TopologyReporter } from "./topology-reporter.ts";
 import { answerDevHostAction, type DevHostPort } from "../dev-host/wire.ts";
 import { deployCancels } from "../deploy/deploy-cancel.ts";
-import type { TopologySnapshot } from "../contracts/topology-types.ts";
+import type { CollectedTopology } from "../metrics/topology/topology.ts";
 import type {
   CommandRecoveryReport,
+  CommandStateReport,
   DaemonMessage,
   DevHostActionMessage,
   InstanceHostnameWireEntry,
+  ShellOpenMessage,
   UpdateProgressStage,
 } from "../contracts/cell-messages.ts";
 
@@ -326,22 +319,13 @@ export type CommandPorts = {
   handleCommandDispatch?: CommandDispatchHandler;
   handleFabricPathProbe?: FabricPathProbeHandler;
   handleDrivetempEnable?: DrivetempEnableHandler;
+  /** Runs when a session attaches: delivers unconfirmed command outcomes. */
+  handleSessionAttach?: (ws: WebSocket) => Promise<void>;
   /**
-   * Runs when a session attaches: delivers held command outcomes. `peer`
-   * answers whether the control plane advertised a feature.
+   * A session socket opened (before its attach frame): send unconfirmed
+   * results on it without clearing anything.
    */
-  handleSessionAttach?: (
-    ws: WebSocket,
-    peer: { supports(feature: string): boolean },
-  ) => Promise<void>;
-  /**
-   * A session socket opened (before its attach frame): send held results on
-   * it without clearing anything.
-   */
-  handleSessionOpen?: (
-    ws: WebSocket,
-    peer: { supports(feature: string): boolean; known(): boolean },
-  ) => void;
+  handleSessionOpen?: (ws: WebSocket) => void;
   /** The control plane stored a command's outcome (`command-outcome-ack`). */
   handleCommandOutcomeAck?: (id: string) => Promise<void>;
   /**
@@ -355,6 +339,12 @@ export type CommandPorts = {
   ) => boolean;
   /** Running and unconfirmed command ids for `hello` / `heartbeat`. */
   commandReport?: () => CommandRecoveryReport | undefined;
+  /** What this process remembers about commands, for `hello` (`command-recovery-v2`). */
+  commandState?: () => CommandStateReport | undefined;
+  /** True when no command runs and no outcome waits for its ack (connection recycle). */
+  commandsQuiet?: () => boolean;
+  /** Runs before a socket opens: read the command journal so the first hello is complete. */
+  prepareSession?: () => Promise<void>;
   /** Hear every 60 s `tp0` peer reading (`fabric-peers-report`). */
   subscribeFabricPeers?: FabricPeerSubscribe;
 };
@@ -391,7 +381,7 @@ export interface InstanceClientOptions {
   /** When set, enables host metrics on the daemon WebSocket. */
   metricsCollectorFactory?: () => MetricsCollector;
   /** When set, enables `topology-report` emission on the daemon WebSocket (see `TopologyReporter`). */
-  collectTopologyFn?: () => Promise<TopologySnapshot>;
+  collectTopologyFn?: () => Promise<CollectedTopology>;
   /**
    * Checkout-sync unpack implementation. Production compile never supplies this;
    * source `main.ts` registers it via `enableCheckoutDevSync`.
@@ -463,6 +453,8 @@ export function normalizeReconnectDelayMs(reconnectDelayMs?: number): number {
 export const STABLE_SESSION_MS = 5_000;
 /** Delay after sending update-result before restarting, so the instance can persist it. */
 export const UPDATE_RESULT_HANDOFF_DELAY_MS = 2_000;
+/** Longest an update waits for running deploys, builds and other commands before installing anyway. Kept well inside the control plane's 15 minute step window, which restarts at the stage reported before the wait. */
+export const UPDATE_DRAIN_CAP_MS = 10 * 60_000;
 /** Co-located install wait: poll readiness on a fixed cadence before first connect. */
 const INSTALL_READINESS_POLL_MS = 5_000;
 /** After a prior session, wait for the instance to come back after systemd restart. */
@@ -646,6 +638,8 @@ export class InstanceClient {
   #tokenKeyId: string | undefined;
   /** The daemon key (enrolled key id + private JWK) that signs requests and the attach proof. */
   #daemonSigningKey: { keyId: string; privateJwk: JsonWebKey } | undefined;
+  #sealingContext: ReturnType<typeof createSealingContext> | undefined;
+  #shellMux: ShellSessionMux | undefined;
   #sealingRegistration: ReturnType<typeof createSealingRegistration> | null =
     null;
   #forceEnrollPending = false;
@@ -725,7 +719,7 @@ export class InstanceClient {
    */
   #liveLeases: LiveLeaseManager | undefined;
   readonly #metricsCollectorFactory?: () => MetricsCollector;
-  readonly #collectTopologyFn?: () => Promise<TopologySnapshot>;
+  readonly #collectTopologyFn?: () => Promise<CollectedTopology>;
   /** Created lazily once `#collectTopologyFn` is set; lives across reconnects (unlike `#liveLeases`). */
   #topologyReporter: TopologyReporter | undefined;
   readonly #applyDevSyncTarball?: DevSyncApplyFn;
@@ -822,9 +816,7 @@ export class InstanceClient {
     this.#updateProgress.setContext({
       progressId,
       upgradeId: options.upgradeId,
-      canSend: () =>
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN,
+      canSend: () => ws.readyState === WebSocket.OPEN,
       send: (message) => {
         if (ws.readyState !== WebSocket.OPEN) return false;
         ws.send(JSON.stringify(message));
@@ -852,21 +844,10 @@ export class InstanceClient {
     this.#updateProgress.reportStage(unit ?? "daemon", stage, rest);
   }
 
-  /** What the command outbox may ask about the attached control plane. */
-  #commandPeer(): { supports(feature: string): boolean; known(): boolean } {
-    return {
-      supports: (feature) => this.instanceSupports(feature),
-      known: () => this.#peerFeaturesKnown,
-    };
-  }
-
   async #afterAttachVersion(ws: WebSocket): Promise<void> {
     const sessionAttach = commandPorts.handleSessionAttach;
     if (sessionAttach) {
-      this.#runSocketHandler(
-        "session-attach",
-        sessionAttach(ws, this.#commandPeer()),
-      );
+      this.#runSocketHandler("session-attach", sessionAttach(ws));
     }
     const pending = this.#pendingInstanceUpdateResult;
     if (pending && ws.readyState === WebSocket.OPEN) {
@@ -874,9 +855,7 @@ export class InstanceClient {
       ws.send(JSON.stringify({ ...pending, at: new Date().toISOString() }));
     }
     this.#updateProgress.setContext({
-      canSend: () =>
-        this.instanceSupports("update-progress-v1") &&
-        ws.readyState === WebSocket.OPEN,
+      canSend: () => ws.readyState === WebSocket.OPEN,
       send: (message) => {
         if (ws.readyState !== WebSocket.OPEN) return false;
         ws.send(JSON.stringify(message));
@@ -1014,8 +993,6 @@ export class InstanceClient {
     this.#peerFeaturesKnown = true;
     if (!Array.isArray(features)) {
       this.#peerFeatures = [];
-      setTopologySizesNegotiated(false);
-      setTopologyGenerationOptional(false);
       this.#releaseHeldReports();
       return;
     }
@@ -1024,13 +1001,6 @@ export class InstanceClient {
       if (typeof entry === "string") accepted.push(entry);
     }
     this.#peerFeatures = accepted;
-    setTopologySizesNegotiated(sizesFeaturesNegotiated(accepted));
-    setTopologyGenerationOptional(
-      accepted.includes(TOPOLOGY_GENERATION_OPTIONAL_FEATURE),
-    );
-    // A change kept for an older control plane goes out once this one lists the feature.
-    void this.#repoKeyReporter?.flush();
-    this.#devHost?.peerFeaturesChanged();
     this.#releaseHeldReports();
   }
 
@@ -2061,6 +2031,7 @@ export class InstanceClient {
       serverId,
       serverKeyId: keyFile.keyId,
     });
+    this.#sealingContext = sealing;
     this.#sealingRegistration = createSealingRegistration({
       register: () =>
         registerSealingKey({
@@ -2088,8 +2059,8 @@ export class InstanceClient {
       panelSealKey: () => panelSealKeys.get(),
       signRequest: (request) =>
         this.#signRequestWithDaemonKey(daemonSigningKey, request),
-      onPlaintextSecretsAnswer: () =>
-        this.#sealingRegistration?.afterPlaintextAnswer() ??
+      onSealingKeyRequired: () =>
+        this.#sealingRegistration?.afterKeyRequired() ??
           Promise.resolve(false),
       ...this.#apiClientHooks(),
     });
@@ -2187,7 +2158,70 @@ export class InstanceClient {
 
     const jwt = await this.#tokenManager!.getToken();
     await this.#sealingRegistration?.atConnect();
+    await commandPorts.prepareSession?.().catch(() => undefined);
     await this.#openDaemonWebSocket(jwt, identity.serverId);
+  }
+
+  /** The terminal multiplexer, made on first use; its keys come from the current sealing key. */
+  #shell(): ShellSessionMux {
+    this.#shellMux ??= new ShellSessionMux({
+      openKey: async (keySealed, sid) => {
+        const sealing = this.#sealingContext;
+        const serverId = this.#tokenServerId;
+        if (!sealing || !serverId) throw new Error("sealing key unavailable");
+        const { privateRaw } = await sealing.key();
+        return await openShellKey(privateRaw, serverId, sid, keySealed);
+      },
+      openContainer: (request) => openDockerExec(request),
+      sendBinary: (frame) => this.#sendShellBinary(frame),
+      sendReport: (report) => this.#sendShellReport(report),
+      bufferedAmount: () => this.#ws?.bufferedAmount ?? 0,
+    });
+    return this.#shellMux;
+  }
+
+  /**
+   * Only a verified signed session may open a terminal: the session key is
+   * sealed with HPKE base mode, which does not say who sealed it, so the
+   * signature on the frame that carries it is what makes it the control
+   * plane's.
+   */
+  #openShell(message: ShellOpenMessage): void {
+    if (!this.#signedSession?.verified) {
+      logWarn("shell", "refused shell-open: the session is not signed");
+      this.#shell().reject(message, "unverified");
+      return;
+    }
+    this.#shell().open(message).catch((err) =>
+      logWarn("shell", "shell-open failed:", sanitizeForLog(err))
+    );
+  }
+
+  /** `shell-open` and `shell-kill`; true when the message was one of them. */
+  #handleShellMessage(message: DaemonMessage): boolean {
+    if (message.type === "shell-open") {
+      this.#openShell(message);
+      return true;
+    }
+    if (message.type === "shell-kill") {
+      this.#shell().kill(message);
+      return true;
+    }
+    return false;
+  }
+
+  #sendShellBinary(frame: Uint8Array): boolean {
+    const ws = this.#ws;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
+    ws.send(frame as BufferSource);
+    return true;
+  }
+
+  #sendShellReport(report: ShellReport): boolean {
+    const ws = this.#ws;
+    if (ws?.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify(report));
+    return true;
   }
 
   /** Presence, observers, reporters and the after-connect pulls, for one session. */
@@ -2197,6 +2231,7 @@ export class InstanceClient {
     panelPin?: SignedPinReport,
   ): void {
     this.#idlePresence?.attach(ws, { attachProof, panelPin });
+    this.#shellMux?.flushReports();
     this.#ensureHaObserver();
     this.#haObserver?.attach();
     this.#ensurePgProbeObserver();
@@ -2219,14 +2254,16 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupports: () => this.instanceSupports(DEV_HOST_FEATURE),
     });
     this.#ensureBackupReporter().attach();
     this.#ensureBackupCopier().start();
     this.#ensureBackupCopyReporter().attach();
     this.#ensureAcmeObserver();
     this.#ensureProofForward();
-    this.#ensureAcmeIssue();
+    this.#runSocketHandler(
+      "acme-dns sweep",
+      this.#ensureAcmeIssue().sweepRestartedDnsOrders(),
+    );
     this.#acmeObserver?.attach();
     this.#instanceAcmeRenewal?.flush();
     this.#metricsScheduler?.attach((sample) =>
@@ -2237,7 +2274,7 @@ export class InstanceClient {
       ws.send(JSON.stringify(
         {
           type: "topology-report",
-          ...topologyReportForWire(report, topologyGenerationOptional()),
+          ...report,
         } satisfies DaemonMessage,
       ));
     });
@@ -2312,6 +2349,7 @@ export class InstanceClient {
       })
       : null;
     const ws = this.#newWebSocket(jwt, upgradeSignature);
+    ws.binaryType = "arraybuffer";
     this.#ws = ws;
     let sessionRegistered = false;
     this.#ensureIdlePresence(serverId);
@@ -2391,7 +2429,7 @@ export class InstanceClient {
           if (this.#ws !== ws) return;
           this.#startSessionWork(ws, attachProof, panelPin);
           this.#applySignedHello(hello);
-          commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+          commandPorts.handleSessionOpen?.(ws);
         },
         onFrame: (json) => this.#dispatchRawMessage(json, ws),
         onPong: () => this.#dispatchRawMessage(UNSIGNED_PONG, ws),
@@ -2417,6 +2455,13 @@ export class InstanceClient {
       // frames; only the current socket may drive the daemon.
       if (this.#ws !== ws) return;
       this.#idlePresence?.noteInboundActivity();
+      // Terminal frames are binary and authenticate under their session key,
+      // not the signed envelope; text frames stay on the signed path below.
+      const binary = binaryFrameBytes(event.data);
+      if (binary) {
+        if (!signed || signed.verified) this.#shellMux?.handleBinary(binary);
+        return;
+      }
       const raw = typeof event.data === "string"
         ? event.data
         : String(event.data);
@@ -2456,10 +2501,10 @@ export class InstanceClient {
       }
       if (this.#ws !== undefined && this.#ws !== ws) return;
       this.#ws = undefined;
+      // Terminal sessions live on this socket and end with it.
+      this.#shellMux?.onSocketLost();
       this.#peerFeatures = [];
       this.#peerFeaturesKnown = false;
-      setTopologySizesNegotiated(false);
-      setTopologyGenerationOptional(false);
       this.#idlePresence?.detach();
       this.#haObserver?.detach();
       this.#pgProbeObserver?.detach();
@@ -2490,7 +2535,7 @@ export class InstanceClient {
     // never wait on one frame that may be lost with the upgrade. Nothing is
     // cleared until the attach frame says the control plane confirms results
     // (or it confirms one); a repeat send is harmless.
-    if (!signed) commandPorts.handleSessionOpen?.(ws, this.#commandPeer());
+    if (!signed) commandPorts.handleSessionOpen?.(ws);
 
     const closeEvent = await new Promise<CloseEvent>((resolve) => {
       ws.addEventListener("close", (event) => resolve(event as CloseEvent), {
@@ -2541,7 +2586,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsProbe: () => this.instanceSupports(MANAGED_HA_PROBE_FEATURE),
     });
   }
 
@@ -2553,10 +2597,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerBootHoldSupport: () =>
-        this.#peerFeaturesKnown
-          ? this.instanceSupports(MANAGED_HA_BOOT_HOLD_FEATURE)
-          : undefined,
     });
   }
 
@@ -2567,8 +2607,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () =>
-        this.instanceSupports(MANAGED_HEALTH_REPORT_FEATURE),
     });
     return this.#managedHealthReporter;
   }
@@ -2580,7 +2618,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () => this.instanceSupports(REPO_KEY_REPORT_FEATURE),
       ledger: () => repoKeyLedgerFor(),
     });
     return this.#repoKeyReporter;
@@ -2593,8 +2630,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupportsReport: () =>
-        this.instanceSupports(FABRIC_PEER_REPORT_FEATURE),
       subscribe: () => commandPorts.subscribeFabricPeers,
     });
     return this.#fabricPeerReporter;
@@ -2631,7 +2666,6 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
-      peerSupports: () => this.instanceSupports(BACKUP_S3_COPY_FEATURE),
     });
     return this.#backupCopyReporter;
   }
@@ -2665,6 +2699,11 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
         return true;
       },
+      sendDns: (message) => {
+        if (!this.#ws || this.#ws.readyState !== WebSocket.OPEN) return false;
+        this.#ws.send(JSON.stringify(message));
+        return true;
+      },
       report: (input) => {
         const api = this.#apiClient;
         if (api === undefined) {
@@ -2673,7 +2712,6 @@ export class InstanceClient {
         return api.reportIssuedCertificate(input);
       },
     });
-    this.#runSocketHandler("acme-issue sweep", this.#acmeIssue.start());
     return this.#acmeIssue;
   }
 
@@ -2685,9 +2723,7 @@ export class InstanceClient {
         this.#ws.send(JSON.stringify(message));
       },
       capture: createCertificateCapture({
-        supported: () =>
-          this.#apiClient !== undefined &&
-          this.instanceSupports(TLS_CAPTURE_FEATURE),
+        supported: () => this.#apiClient !== undefined,
         report: (input) => {
           const api = this.#apiClient;
           if (api === undefined) {
@@ -2737,10 +2773,10 @@ export class InstanceClient {
       onStaleConnection: () => this.#closeActiveSocket(),
       // Daemon-side max-lifetime backstop (mirrors instance MAX_WS_CONNECTION_AGE_MS).
       onMaxAge: () => this.#closeActiveSocket(),
-      hostCapacityFlag: () => this.instanceSupports(HOST_CAPACITY_FEATURE),
       // Running and unconfirmed commands ride on hello / heartbeat.
       commandReport: () => commandPorts.commandReport?.(),
-      peerSupports: (feature) => this.instanceSupports(feature),
+      commandState: () => commandPorts.commandState?.(),
+      commandsQuiet: () => commandPorts.commandsQuiet?.() ?? true,
     });
   }
 
@@ -2752,10 +2788,6 @@ export class InstanceClient {
       existingServerId: this.#metricsSchedulerServerId,
       serverId,
       collectorFactory: this.#metricsCollectorFactory,
-      schedulerOptions: {
-        durabilityFlag: () => this.instanceSupports("metrics-v8"),
-        sizesFlag: () => this.instanceSupports("metrics-v8-sizes"),
-      },
     });
     this.#metricsScheduler = rebound.scheduler;
     this.#metricsSchedulerServerId = rebound.serverId;
@@ -2849,6 +2881,7 @@ export class InstanceClient {
     // The control plane answers the daemon's wire ping with `{type:"pong"}`
     // (a Workers auto-response); it carries nothing to act on.
     if ((message as { type?: unknown }).type === "pong") return;
+    if (this.#handleShellMessage(message)) return;
     if (message.type === "dev-host-action") {
       void this.#answerDevHostActionAsync(message, ws);
       return;
@@ -3034,6 +3067,9 @@ export class InstanceClient {
           "acme-issue-request",
           this.#ensureAcmeIssue().handleRequest(message),
         );
+        return true;
+      case "acme-dns-published":
+        this.#ensureAcmeIssue().handleDnsPublished(message);
         return true;
       case "acme-proof-forward":
         this.#runSocketHandler(
@@ -3237,37 +3273,40 @@ export class InstanceClient {
 
   /**
    * The plaintext tunnel token: opened from `tokenEnvelope` through the same
-   * `/secrets/decrypt` path every deploy secret uses, or the legacy `token`
-   * from an older control plane. An envelope that cannot be opened fails the
-   * request rather than tearing the tunnel down.
+   * `/secrets/decrypt` path every deploy secret uses. An envelope that cannot
+   * be opened fails the request rather than tearing the tunnel down. An empty
+   * `token` with no envelope is the teardown; any other plaintext token is
+   * refused.
    */
   async #resolveTunnelToken(
     message: Extract<DaemonMessage, { type: "tunnel-token" }>,
   ): Promise<string> {
-    if (message.tokenEnvelope !== undefined) {
-      const [plaintext] = await this.#openSealedSecrets([
-        message.tokenEnvelope,
-      ]);
-      if (typeof plaintext !== "string") {
-        throw new TypeError("tunnel token envelope could not be opened");
-      }
-      return plaintext;
+    if (message.tokenEnvelope === undefined) {
+      if (message.token === "") return "";
+      throw new TypeError("tunnel-token carries no token envelope");
     }
-    if (typeof message.token !== "string") {
-      throw new TypeError("tunnel-token carries no token");
+    const [plaintext] = await this.#openSealedSecrets([message.tokenEnvelope]);
+    if (typeof plaintext !== "string") {
+      throw new TypeError("tunnel token envelope could not be opened");
     }
-    return message.token;
+    return plaintext;
   }
 
   /**
    * Replace every `keyEnvelope` with the opened `keyPem`, in one
-   * `/secrets/decrypt` call. Entries from an older control plane already
-   * carry `keyPem` and pass through.
+   * `/secrets/decrypt` call. An entry that carries a plaintext `keyPem` is
+   * refused.
    */
   async #openHostnameKeys(
     hostnames: InstanceHostnameWireEntry[],
   ): Promise<InstanceHostnameWireEntry[]> {
     const sealed = hostnames.filter((entry) => entry.keyEnvelope !== undefined);
+    const plain = hostnames.find((entry) => entry.keyPem !== undefined);
+    if (plain) {
+      throw new TypeError(
+        `certificate key for ${plain.host} arrived unsealed and was refused`,
+      );
+    }
     if (sealed.length === 0) return hostnames;
     const opened = await this.#openSealedSecrets(
       sealed.map((entry) => entry.keyEnvelope as string),
@@ -3314,28 +3353,14 @@ export class InstanceClient {
       return;
     }
     try {
-      const capable = resolveDaemonCapabilities(DAEMON_VERSION)[
-        "instance-cert-sources-per-hostname"
-      ] === true;
-      const hostnames = capable && message.hostnames
-        ? await this.#openHostnameKeys(message.hostnames)
-        : null;
-      if (!hostnames) {
-        logInfo(
-          "public-urls",
-          "instance-cert-sources: public-urls-update degrading to the flat urls list",
-        );
+      if (!Array.isArray(message.hostnames)) {
+        throw new TypeError("public-urls-update carried no hostnames");
       }
-      await clientTestHooks.applyPublicUrls(
-        hostnames ?? message.urls.map((host) => ({
-          host,
-          source: "platform-ca" as const,
-        })),
-        {
-          ...(hostnames ? { instanceAcme: message.instanceAcme } : {}),
-          ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
-        },
-      );
+      const hostnames = await this.#openHostnameKeys(message.hostnames);
+      await clientTestHooks.applyPublicUrls(hostnames, {
+        instanceAcme: message.instanceAcme,
+        ...(message.edgeTrust ? { edgeTrust: message.edgeTrust } : {}),
+      });
       ok = true;
       await this.#instanceAcmeRenewal?.check();
     } catch (err) {
@@ -3428,6 +3453,40 @@ export class InstanceClient {
     }
   }
 
+  /**
+   * Installing a build stops the daemon, which would kill a deploy or build
+   * half-way. Stop taking new commands (they are refused whole), then wait for
+   * the running ones, up to the cap; a command still running at the cap is
+   * logged and the update goes ahead. The gate reopens when the update fails
+   * or does not restart the daemon (`endUpdateDrain` in `#applyUpdate`).
+   */
+  async #drainCommandsForUpdate(upgradeId?: string): Promise<void> {
+    beginUpdateDrain();
+    const waiting = runningCommandCount();
+    if (waiting > 0) {
+      // The control plane re-sends a step that reports nothing for 5 minutes,
+      // so say why the install has not started.
+      this.#reportUpdateStage("preparing", {
+        upgradeId,
+        detail: `waiting for ${waiting} running command(s) to finish`,
+      });
+      logInfo(
+        "update",
+        `waiting for ${waiting} running command(s) before installing`,
+      );
+    }
+    const left = await waitForCommandsToDrain(
+      clientTestHooks.updateDrainCapMs,
+      clientTestHooks.updateDrainSleep,
+    );
+    if (left > 0) {
+      logWarn(
+        "update",
+        `${left} command(s) still running after the wait; installing anyway`,
+      );
+    }
+  }
+
   async #reconcileToLatestUpdate(
     config: UpdateChannelConfig,
     options: {
@@ -3447,6 +3506,8 @@ export class InstanceClient {
       );
       return false;
     }
+
+    await this.#drainCommandsForUpdate(options.upgradeId);
 
     if (this.#isColocatedSocketMode()) {
       // The daemon on a self-hosted control-plane host: refresh it in socket
@@ -3600,10 +3661,7 @@ export class InstanceClient {
   ): void {
     const upgradeId = message.upgradeId?.trim() || undefined;
     const error = "preflight_in_progress: update already in progress";
-    if (
-      this.instanceSupports("update-progress-v1") &&
-      ws.readyState === WebSocket.OPEN
-    ) {
+    if (ws.readyState === WebSocket.OPEN) {
       const progress: DaemonMessage = {
         type: "update-progress",
         id: message.id,
@@ -3677,6 +3735,14 @@ export class InstanceClient {
           `signed manifest commit ${verified.commit} does not match targetCommit ${targetCommit}`,
         );
       }
+      const skipped = await readUpdateSkip();
+      if (skipped?.commit.trim() === verified.commit) {
+        throw new UpdatePreflightError(
+          "update_skipped_after_rollback",
+          `build ${verified.commit} was rolled back automatically (${skipped.reason}); the host needs attention before it is tried again`,
+        );
+      }
+      if (skipped) await clearUpdateSkip();
       await this.#wireUpdateProgress(ws, message.id, {
         upgradeId,
         targetCommit: verified.commit,
@@ -3713,24 +3779,68 @@ export class InstanceClient {
       logError("update", "failed:", sanitizeForLog(error));
     }
 
+    let restarting = false;
+    try {
+      restarting = await this.#finishUpdate(ws, message.id, {
+        ok,
+        shouldRestart,
+        error,
+        errorCode,
+        upgradeId,
+      });
+    } finally {
+      // Whatever went wrong, a daemon that stays up takes commands and
+      // updates again; only a successful install keeps the gate shut until
+      // the restart.
+      if (!restarting) endUpdateDrain();
+      this.#updateInstallInProgress = false;
+    }
+  }
+
+  /**
+   * Restart when a build was installed, then report the result. True when the
+   * daemon restarted for the new build (the command gate then stays shut).
+   */
+  async #finishUpdate(
+    ws: WebSocket,
+    id: string,
+    state: {
+      ok: boolean;
+      shouldRestart: boolean;
+      error?: string;
+      errorCode?: string;
+      upgradeId?: string;
+    },
+  ): Promise<boolean> {
+    let { ok, error, errorCode } = state;
+    const { shouldRestart, upgradeId } = state;
     if (ok && shouldRestart) {
-      const restartError = await this.#restartAfterUpdate(upgradeId);
+      const restartError = await this.#restartAfterUpdateSafely(upgradeId);
       if (restartError) {
         ok = false;
         error = restartError;
         errorCode = "restart_failed";
       }
-    } else if (ok && !shouldRestart) {
+    } else if (ok) {
       this.#reportUpdateStage("done", { upgradeId });
     }
-
     await this.#updateProgress.flush();
-    if (!ok || !shouldRestart) {
-      await clearActiveUpgradeContext();
-    }
-    this.#sendUpdateResult(ws, message.id, ok, error, { errorCode, upgradeId });
+    if (!ok || !shouldRestart) await clearActiveUpgradeContext();
+    this.#sendUpdateResult(ws, id, ok, error, { errorCode, upgradeId });
+    return ok && shouldRestart;
+  }
 
-    this.#updateInstallInProgress = false;
+  /** `#restartAfterUpdate`, with a throw turned into the failure message. */
+  async #restartAfterUpdateSafely(
+    upgradeId: string | undefined,
+  ): Promise<string | undefined> {
+    try {
+      return await this.#restartAfterUpdate(upgradeId);
+    } catch (err) {
+      const message = describeUnknown(err);
+      logError("update", "restart threw:", sanitizeForLog(message));
+      return message;
+    }
   }
 
   /**
@@ -3801,10 +3911,7 @@ export class InstanceClient {
     const upgradeId = message.upgradeId?.trim() || undefined;
     const error =
       "preflight_in_progress: control-plane update already in progress";
-    if (
-      this.instanceSupports("update-progress-v1") &&
-      ws.readyState === WebSocket.OPEN
-    ) {
+    if (ws.readyState === WebSocket.OPEN) {
       const progress: DaemonMessage = {
         type: "update-progress",
         id: message.id,
@@ -4224,12 +4331,6 @@ export class InstanceClient {
       // Full replacement: the pushed object is the complete hardware profile.
       await writeHardwareProfile(message.overrides ?? {});
       ok = true;
-
-      // A pushed nicSlot*/hostingFilesystemId override can reassign a slot
-      // without changing any identity set — only the resolved SlotMapping
-      // reflects that (see `../metrics/topology/generation.ts`). Force a
-      // recompute now rather than waiting for the next scheduled tick.
-      void this.#topologyReporter?.reportNow();
 
       // A flip from false/unset to true is the only edge that should load
       // the module — every later push with drivetempEnabled already true is
@@ -4686,6 +4787,10 @@ type ClientTestHooks = {
   runDockerSetup: typeof runDockerSetup;
   /** Override UPDATE_RESULT_HANDOFF_DELAY_MS for host-free update tests. */
   updateResultHandoffDelayMs: number;
+  /** Longest an update waits for running commands before it goes ahead. */
+  updateDrainCapMs: number;
+  /** Pause used by that wait; tests pass a promise they settle themselves. */
+  updateDrainSleep: (ms: number) => Promise<void>;
 };
 
 let clientTestHooks: ClientTestHooks = {
@@ -4707,6 +4812,8 @@ let clientTestHooks: ClientTestHooks = {
   syncHostDockerNetworking,
   runDockerSetup,
   updateResultHandoffDelayMs: UPDATE_RESULT_HANDOFF_DELAY_MS,
+  updateDrainCapMs: UPDATE_DRAIN_CAP_MS,
+  updateDrainSleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
 /**

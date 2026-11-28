@@ -5,6 +5,7 @@ import {
   runCompileAll,
   runReleaseDevOverlay,
   stampBuildInfo,
+  withReleaseLock,
 } from "./release-dev-overlay.ts";
 import {
   ambientCheckoutIsGitRepo,
@@ -280,5 +281,65 @@ test("resolveOverlayGitShortSha defaults error and exit on git failure", async (
   } finally {
     console.error = originalError;
     Deno.exit = originalExit;
+  }
+});
+
+test("withReleaseLock holds the lock during the run and refuses a second taker", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/dist/.release-dev.lock`;
+    let nested: boolean | undefined;
+    let drain: Promise<void> | undefined;
+    const ran = await withReleaseLock(path, async () => {
+      nested = await withReleaseLock(path, () => Promise.resolve(), {
+        waitMs: 20,
+        onDrain: (d) => {
+          drain = d;
+        },
+      });
+    });
+    assertEquals(ran, true);
+    assertEquals(nested, false);
+    // Free again once the run is over, also after a failed run.
+    await assertRejects(
+      () => withReleaseLock(path, () => Promise.reject(new Error("boom"))),
+      Error,
+      "boom",
+    );
+    assertEquals(await withReleaseLock(path, () => Promise.resolve()), true);
+    // Let the refused taker's pending lock call finish and close its file.
+    await drain;
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+test("the lock is freed when the process leaves through exit(1)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const path = `${dir}/.release-dev.lock`;
+    const script = `${dir}/child.ts`;
+    const module = new URL("./release-dev-overlay.ts", import.meta.url).href;
+    const repoConfig = new URL("../deno.json", import.meta.url).pathname;
+    await Deno.writeTextFile(
+      script,
+      `import { withReleaseLock } from ${JSON.stringify(module)};
+await withReleaseLock(${JSON.stringify(path)}, () => {
+  Deno.exit(7);
+  return Promise.resolve();
+});
+`,
+    );
+    const child = await new Deno.Command(Deno.execPath(), {
+      // The repo config resolves the bare `@std/...` imports in the module.
+      args: ["run", "-A", `--config=${repoConfig}`, script],
+      stdout: "null",
+      stderr: "null",
+    }).output();
+    // 7 is the child's own exit code; a failed import would exit 1 instead.
+    assertEquals(child.code, 7);
+    assertEquals(await withReleaseLock(path, () => Promise.resolve()), true);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
   }
 });

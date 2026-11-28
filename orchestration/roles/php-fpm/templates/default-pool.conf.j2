@@ -3,7 +3,7 @@
 [default]
 user = {{ php_fpm_service_user }}
 group = {{ php_fpm_service_group }}
-listen = {{ turbopanel_run_dir }}/php/{{ php_fpm_series_item }}/default.sock
+listen = {{ php_fpm_run_dir }}/{{ php_fpm_series_item }}/default.sock
 listen.owner = {{ php_fpm_service_user }}
 listen.group = {{ php_fpm_service_group }}
 listen.mode = 0660

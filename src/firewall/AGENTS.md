@@ -26,10 +26,14 @@ page carries the build order; this is the `fw-daemon-reconcile` row.
   `--ctorigdst`; the chain opens with `RETURN`s for reply traffic and for
   anything that entered on `docker0`, `br-+`, `tp0`, so container egress is
   never restricted (`xt_conntrack` has no DNAT status match — `--ctstatus
-  DNAT` is nftables-only). Ends in an implicit `RETURN`: Docker keeps
-  governing what the panel did not restrict. `scope: published`. An `accept`
-  from named sources **narrows** (RETURN those, DROP the rest for that port);
-  an `accept` from `any` renders nothing.
+  DNAT` is nftables-only). Under `inputDefault: accept` it ends in an
+  implicit `RETURN`: Docker keeps governing what the panel did not restrict.
+  Under `inputDefault: drop` it ends in `-m conntrack --ctstate DNAT -j DROP`
+  (only connections Docker port-mapped; replies, container egress and the
+  fabric are RETURNed by the prefix). `scope: published`. An `accept` from
+  named sources **narrows** (RETURN those, DROP the rest for that port); an
+  `accept` from `any` renders nothing under accept, and an explicit `RETURN`
+  under drop so its port survives the final DROP.
 
 A separate native nftables table with `policy drop` on the forward hook was
 considered and rejected: it needs every legitimate forward path enumerated
@@ -151,3 +155,24 @@ apply does not rebuild it; a rule missing one source keeps the legacy chain.
 Proof: `../testing/firewall-fold-kernel-proof.ts` (container command in its
 header); the captured `iptables -S` is pinned by `fold.kernel.test.ts`. On a
 host it only happens once apply is on for that server.
+
+## One firewall lock, `-w` everywhere, unconfirmed never covers
+
+- `lock.ts` (`withFirewallLock`) serialises, inside the daemon, the ruleset
+  apply (`applyRenderedFirewall`), the confirm (`confirmPendingFirewall`, which
+  runs the fold), `removeFirewall`, the Docker re-hang and the legacy managed
+  installer (`../managed/firewall.ts`). It is not re-entrant: lock at the
+  exported entry points only, never from a function another locked entry calls.
+  The `turbopaneld firewall ...` CLI is a separate process and is not covered;
+  the coverage check therefore also re-reads the pending marker after reading
+  `TP-FWD`.
+- Every xtables call carries `-w <seconds>` (`XTABLES_LOCK_WAIT_SECONDS`,
+  `run.ts`), including the managed installer and the fabric code. Without it a
+  call that loses the lock to Docker fails: a flush that succeeds followed by an
+  append that does not leaves a chain open.
+- `isManagedListenerCovered` treats a pending marker, before or after the
+  `iptables -S` read, as not covered: unconfirmed rules may be rolled back, so
+  they never justify dropping the legacy chain.
+- Fabric (`TP-FORWARD`) is a separate chain that neither the fold nor the
+  managed installer reads, so its single-rule changes are not under this lock;
+  `-w` covers the xtables lock itself.

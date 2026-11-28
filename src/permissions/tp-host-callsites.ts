@@ -29,6 +29,7 @@ import {
   backupTimerContent,
   backupTimerPath,
 } from "../backups/units.ts";
+import { CLOUDFLARED_VERSION } from "../orchestration/assets.ts";
 import { cronTimerContent, cronTimerPath } from "../deploy/cron/unit.ts";
 import { postDeployUnitContent } from "../deploy/site/post-deploy.ts";
 import { workerUnitContent } from "../deploy/site/workers.ts";
@@ -134,7 +135,6 @@ const LAYOUT = resolveLayout({}, {
 });
 /** The vendored runtimes root on a managed host. */
 const VENDOR = LAYOUT.runtimesDir;
-const CADDY_BIN = `${P}${VENDOR}/caddy/2.11.4/caddy`;
 const NGINX_CONF = `${CONF}/nginx/sites/svc1.conf`;
 const FABRIC_DIR = `${STATE}/network`;
 const WG_CONF = `${P}/etc/wireguard/tp0.conf`;
@@ -179,7 +179,7 @@ const TUNNEL_UNIT_B = tunnelUnitName(TUNNEL_ID, "b");
 const TUNNEL_TOKEN = "dGVzdA".repeat(8);
 const TUNNEL_UNIT_TEXT = renderTunnelUnit({
   id: TUNNEL_ID,
-  binary: `${VENDOR}/cloudflared/2026.10.7/cloudflared`,
+  binary: `${VENDOR}/cloudflared/${CLOUDFLARED_VERSION}/cloudflared`,
   port: 20300,
   envFile: tunnelEnvPath({ configDir: "/etc/turbopanel" }, TUNNEL_ID),
 });
@@ -285,6 +285,8 @@ const WORKER_TEXT = workerUnitContent({
 
 // One per-site PHP runtime of alice's, as `php-runtime.ts` renders it.
 const PHP_APPLY = "src/deploy/site/php-runtime-apply.ts|";
+const WALLS = "src/deploy/site/apache-walls-repair.ts|";
+const RUN_TREE = "src/deploy/site/php-run-tree-check.ts|";
 const PHP_ID = "shop-0a1b2c3d4e5f-fcgi84";
 const PHP_FPM_ID = "shop-0a1b2c3d4e5f-fpm84";
 const PHP_UNIT = `turbopanel-php-${PHP_ID}`;
@@ -501,6 +503,42 @@ const SITES: CallSite[] = [
   tpHost(`${PHP_APPLY}sudo(io,["cat","--",join(dir,name)])`, {
     argv: ["cat", "--", `${CONF}/nginx/sites/tp-env1-www.conf`],
     setup: file(`${CONF}/nginx/sites/tp-env1-www.conf`),
+  }),
+  tpHost(`${WALLS}["-n",...args]`, {
+    argv: ["cat", "--", PHP_INI],
+    setup: file(PHP_INI),
+  }),
+  tpHost(`${WALLS}sudoText(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/apache/sites`],
+    setup: dir(`${CONF}/apache/sites`),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",file])`, {
+    argv: ["cat", "--", `${CONF}/apache/sites/tp-env1-www.conf`],
+    setup: file(`${CONF}/apache/sites/tp-env1-www.conf`),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",join(dir,"php.ini")])`, {
+    argv: ["cat", "--", PHP_INI],
+    setup: file(PHP_INI),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",join(dir,"php-fpm.conf")])`, {
+    argv: ["cat", "--", `${PHP_FPM_CONF_DIR}/php-fpm.conf`],
+    setup: file(`${PHP_FPM_CONF_DIR}/php-fpm.conf`),
+  }),
+  tpHost(`${WALLS}sudoText(io,["cat","--",guardPath])`, {
+    argv: ["cat", "--", `${PHP_CONF_DIR}/site-guard.php`],
+    setup: file(`${PHP_CONF_DIR}/site-guard.php`),
+  }),
+  tpHost(`${RUN_TREE}["-n",...args]`, {
+    argv: ["cat", "--", `${CONF}/php/8.4/pools/tp-env1-www.conf`],
+    setup: file(`${CONF}/php/8.4/pools/tp-env1-www.conf`),
+  }),
+  tpHost(`${RUN_TREE}sudoText(io,["ls","-A","--",dir])`, {
+    argv: ["ls", "-A", "--", `${CONF}/php/8.4/pools`],
+    setup: dir(`${CONF}/php/8.4/pools`),
+  }),
+  tpHost(`${RUN_TREE}sudoText(io,["cat","--",join(dir,name)])`, {
+    argv: ["cat", "--", `${CONF}/php/8.4/pools/tp-env1-www.conf`],
+    setup: file(`${CONF}/php/8.4/pools/tp-env1-www.conf`),
   }),
   tpHost(`${PHP_APPLY}sudo(io,["ls","-1","--",io.unitDir])`, {
     argv: ["ls", "-1", "--", UNITS],
@@ -830,12 +868,6 @@ const SITES: CallSite[] = [
     { argv: ["rm", "-f", "--", BACKUP_TIMER_STAMP] },
   ),
 
-  // --- hosting Caddy --------------------------------------------------------
-  tpHost(
-    'src/deploy/ensure-hosting-caddy.ts|["-n","chown","root",binPath]',
-    { argv: ["chown", "root", CADDY_BIN], setup: file(CADDY_BIN) },
-  ),
-
   // --- principals -----------------------------------------------------------
   tpHost('src/deploy/ensure-principal.ts|["-n","setfacl","-m","o::x",path]', {
     argv: ["setfacl", "-m", "o::x", `${P}/srv/users`],
@@ -884,17 +916,6 @@ const SITES: CallSite[] = [
       ],
       // The groupadd sample above runs first.
       setup: { groups: ["bob:x:15002:"] },
-    },
-  ),
-  tpHost(
-    'src/deploy/ensure-principal.ts|["-n","groupmod","-n",groupName,legacyName]',
-    {
-      argv: ["groupmod", "-n", "dave", "dave-grp"],
-      // A site owner from before the group took the owner's own name.
-      setup: {
-        groups: ["dave-grp:x:15004:"],
-        passwd: ["dave:x:15004:15004::{P}/srv/users/dave/home:/bin/bash"],
-      },
     },
   ),
   tpHost(
@@ -1047,16 +1068,6 @@ const SITES: CallSite[] = [
         `${P}/run/turbopanel/instance-acme.sock`,
       ],
       setup: { sockets: [`${P}/run/turbopanel/instance-acme.sock`] },
-    },
-  ),
-  tpHost(
-    'src/deploy/tenant-acme-issue.ts|["-n","systemctl","stop",unit]',
-    {
-      argv: [
-        "systemctl",
-        "stop",
-        "turbopanel-tenant-acme@3f9c1e52-a7b4-4d10-9e2b-6c0d5a8f1b77.service",
-      ],
     },
   ),
   tpHost(
@@ -1552,6 +1563,10 @@ const SITES: CallSite[] = [
     { argv: ["tunnel-env-remove", TUNNEL_ID] },
     { argv: ["tunnel-env-remove", "instance"] },
   ),
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","tunnel-env-present",id]',
+    { argv: ["tunnel-env-present", TUNNEL_ID] },
+  ),
   tpHost('src/tunnels/connector-service.ts|["-n","tunnel-loopback-sync"]', {
     argv: ["tunnel-loopback-sync"],
   }),
@@ -1559,6 +1574,27 @@ const SITES: CallSite[] = [
     'src/tunnels/connector-service.ts|["-n","rm","-f","--",tunnelUnitPath(id,undefined,slot)]',
     { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT}`] },
     { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT_B}`] },
+  ),
+  // A resend that cannot start a reinstalled unit removes it again, on either slot.
+  tpHost(
+    'src/tunnels/connector-service.ts|["-n","rm","-f","--",tunnelUnitPath(record.id,undefined,slot)]',
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT}`] },
+    { argv: ["rm", "-f", "--", `${UNITS}/${TUNNEL_UNIT_B}`] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["is-enabled",unit])',
+    { argv: ["systemctl", "is-enabled", TUNNEL_UNIT] },
+    { argv: ["systemctl", "is-enabled", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["restart",unit])',
+    { argv: ["systemctl", "restart", TUNNEL_UNIT] },
+    { argv: ["systemctl", "restart", TUNNEL_UNIT_B] },
+  ),
+  tpHost(
+    'src/tunnels/connector-service.ts|systemctl(io,["stop",unit])',
+    { argv: ["systemctl", "stop", TUNNEL_UNIT] },
+    { argv: ["systemctl", "stop", TUNNEL_UNIT_B] },
   ),
   tpHost(
     'src/tunnels/connector-service.ts|["-n","systemctl",...args]',
@@ -1638,12 +1674,47 @@ const SITES: CallSite[] = [
   // --- release promotion ----------------------------------------------------
   // tp-host builds every path from the ids; the staging leaf is the daemon's.
   tpHost(
-    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner],MANAGED',
+    'src/deploy/release/build-sandbox.ts|["-n","build-run",work.buildId,work.projectKey,work.owner,...(withLimits?[buildCoresArg(resolved),buildMemoryArg(resolved),buildSwapArg(resolved)]:[])],MANAGED',
     {
       argv: ["build-run", BUILD_ID, PROJECT_ID, "alice"],
       stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
       setup: BUILD_TREE,
     },
+    {
+      argv: [
+        "build-run",
+        BUILD_ID,
+        PROJECT_ID,
+        "alice",
+        "1.5",
+        "2147483648",
+        "on",
+      ],
+      stdin: "tp-build-spec 1\ncwd source\nrun dHJ1ZQ==\nend\n",
+      setup: BUILD_TREE,
+    },
+  ),
+  // The helper probe: a build id tp-host refuses on purpose (see KNOWN_BUGS
+  // below, where the refusal is the expected answer, not a bug).
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","build-run","-probe","-probe","tpbuild","-","-","-"],MANAGED',
+    {
+      argv: ["build-run", "-probe", "-probe", "tpbuild", "-", "-", "-"],
+      setup: BUILD_TREE,
+    },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice",buildId,cores],MANAGED',
+    { argv: ["image-build-slice", BUILD_ID, "-"] },
+    { argv: ["image-build-slice", BUILD_ID, "1.5"] },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice-remove"],MANAGED',
+    { argv: ["image-build-slice-remove"] },
+  ),
+  tpHost(
+    'src/deploy/release/build-sandbox.ts|["-n","image-build-slice-remove",buildId],MANAGED',
+    { argv: ["image-build-slice-remove", BUILD_ID] },
   ),
   tpHost(
     'src/deploy/release/build-sandbox.ts|["-n","build-return",work.buildId],MANAGED',
@@ -2410,6 +2481,12 @@ const SITES: CallSite[] = [
       stdin: "*filter\nCOMMIT\n",
     },
   ),
+  tpHost('src/managed/firewall.ts|["-n","iptables-restore",...args]', {
+    argv: ["iptables-restore", "-w", "5", "--noflush"],
+    stdin: `*filter\n:${MGD_CHAIN} - [0:0]\n-A ${MGD_CHAIN} ${
+      MGD_MATCH.join(" ")
+    } -j DROP\nCOMMIT\n`,
+  }),
   tpHost('src/managed/firewall.ts|["-n","iptables",...args]', {
     argv: [
       "iptables",
@@ -2523,6 +2600,10 @@ const SITES: CallSite[] = [
     { argv: ["systemctl", "restart", "--no-block", "turbopanel-ui"] },
     { argv: ["systemctl", "restart", "--no-block", "turbopanel-website"] },
     { argv: ["systemctl", "restart", "--no-block", "turbopaneld"] },
+  ),
+  notRoot(
+    'src/dev-host/units.ts|["-n","cat",path]',
+    "development host only: the dev account has full sudo and reads the root-only instance passwords file; tp-host's cat refuses that path class on purpose, and a managed host never runs the dev-host reader",
   ),
   tpHost(
     "src/instance/run-reconcile.ts|args",
@@ -2670,16 +2751,36 @@ const SITES: CallSite[] = [
     },
   ),
   tpHost('src/commands/fabric.ts|runHost("iptables",["-C",...checkArgs])', {
-    argv: ["iptables", "-C", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
+    argv: [
+      "iptables",
+      "-w",
+      "5",
+      "-C",
+      "TP-FORWARD",
+      "-i",
+      "tp0",
+      "-j",
+      "ACCEPT",
+    ],
   }),
   tpHost('src/commands/fabric.ts|runHost("iptables",["-D",...checkArgs])', {
-    argv: ["iptables", "-D", "DOCKER-USER", "-j", "TP-FORWARD"],
+    argv: ["iptables", "-w", "5", "-D", "DOCKER-USER", "-j", "TP-FORWARD"],
   }),
   tpHost('src/commands/fabric.ts|runHost("iptables",["-N",name])', {
-    argv: ["iptables", "-N", "TP-FORWARD"],
+    argv: ["iptables", "-w", "5", "-N", "TP-FORWARD"],
   }),
   tpHost('src/commands/fabric.ts|runHost("iptables",addArgs)', {
-    argv: ["iptables", "-A", "TP-FORWARD", "-i", "tp0", "-j", "ACCEPT"],
+    argv: [
+      "iptables",
+      "-w",
+      "5",
+      "-A",
+      "TP-FORWARD",
+      "-i",
+      "tp0",
+      "-j",
+      "ACCEPT",
+    ],
   }),
   tpHost(
     'src/commands/fabric.ts|runHost("sysctl",["-p",FABRIC_SYSCTL_DROPIN])',
@@ -2765,66 +2866,57 @@ const SITES: CallSite[] = [
   // TP-FORWARD hangs off DOCKER-USER, or off FORWARD on a host without Docker.
   tpHost(
     'src/commands/fabric.ts|runHost("iptables",["-S",DOCKER_USER_CHAIN])',
-    { argv: ["iptables", "-S", "DOCKER-USER"] },
+    { argv: ["iptables", "-w", "5", "-S", "DOCKER-USER"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-D",parent,"-j",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-D", "FORWARD", "-j", "TP-FORWARD"] },
+    { argv: ["iptables", "-w", "5", "-D", "FORWARD", "-j", "TP-FORWARD"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-F",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-F", "TP-FORWARD"] },
+    { argv: ["iptables", "-w", "5", "-F", "TP-FORWARD"] },
   ),
   tpHost(
     'src/commands/fabric.ts|runTeardownBestEffort("iptables",["-X",FABRIC_FORWARD_CHAIN],isMissingIptablesText)',
-    { argv: ["iptables", "-X", "TP-FORWARD"] },
+    { argv: ["iptables", "-w", "5", "-X", "TP-FORWARD"] },
   ),
 
   // Managed-database public listener scoping.
   tpHost(
     'src/managed/firewall.ts|removeBestEffort(["-D",MANAGED_PUBLIC_CHAIN,"-j",chain])',
     {
-      argv: ["iptables", "-D", "TP-MANAGED-PUB", "-j", MGD_CHAIN],
+      argv: ["iptables", "-w", "5", "-D", "TP-MANAGED-PUB", "-j", MGD_CHAIN],
     },
   ),
   tpHost('src/managed/firewall.ts|removeBestEffort(["-F",chain])', {
-    argv: ["iptables", "-F", MGD_CHAIN],
+    argv: ["iptables", "-w", "5", "-F", MGD_CHAIN],
   }),
   tpHost('src/managed/firewall.ts|removeBestEffort(["-X",chain])', {
-    argv: ["iptables", "-X", MGD_CHAIN],
+    argv: ["iptables", "-w", "5", "-X", MGD_CHAIN],
   }),
-  tpHost('src/managed/firewall.ts|runIptables(["-A",...rule])', {
-    argv: [
-      "iptables",
-      "-A",
-      MGD_CHAIN,
-      "-s",
-      "203.0.113.7",
-      ...MGD_MATCH,
-      "-j",
-      "ACCEPT",
-    ],
-  }),
-  tpHost(
-    'src/managed/firewall.ts|runIptables(["-A",chain,...match,"-j","DROP"])',
-    {
-      argv: ["iptables", "-A", MGD_CHAIN, ...MGD_MATCH, "-j", "DROP"],
-    },
-  ),
   tpHost('src/managed/firewall.ts|runIptables(["-C",...checkArgs])', {
-    argv: ["iptables", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
+    argv: ["iptables", "-w", "5", "-C", "DOCKER-USER", "-j", "TP-MANAGED-PUB"],
   }),
-  tpHost('src/managed/firewall.ts|runIptables(["-F",chain])', {
-    argv: ["iptables", "-F", MGD_CHAIN],
+  tpHost('src/managed/firewall.ts|runIptables(["-S",chain])', {
+    argv: ["iptables", "-w", "5", "-S", MGD_CHAIN],
   }),
   tpHost('src/managed/firewall.ts|runIptables(["-N",name])', {
-    argv: ["iptables", "-N", "TP-MANAGED-PUB"],
+    argv: ["iptables", "-w", "5", "-N", "TP-MANAGED-PUB"],
   }),
   tpHost("src/managed/firewall.ts|runIptables(addArgs)", {
-    argv: ["iptables", "-I", "DOCKER-USER", "1", "-j", "TP-MANAGED-PUB"],
+    argv: [
+      "iptables",
+      "-w",
+      "5",
+      "-I",
+      "DOCKER-USER",
+      "1",
+      "-j",
+      "TP-MANAGED-PUB",
+    ],
   }),
   tpHost("src/managed/firewall.ts|runIptables(args)", {
-    argv: ["iptables", "-X", MGD_CHAIN],
+    argv: ["iptables", "-w", "5", "-X", MGD_CHAIN],
   }),
 
   // Cron, scheduled-backup and native-app units.
@@ -2965,7 +3057,15 @@ export type KnownBug =
   | { why: string; refusal: string }
   | { why: string; pending: string };
 
-const KNOWN_BUGS: Record<string, KnownBug> = {};
+const KNOWN_BUGS: Record<string, KnownBug> = {
+  // Intended: the daemon asks the helper whether it takes limit arguments with a
+  // build id the helper refuses, so no unit ever starts.
+  'src/deploy/release/build-sandbox.ts|["-n","build-run","-probe","-probe","tpbuild","-","-","-"],MANAGED':
+    {
+      why: "the helper probe asks with a build id tp-host refuses on purpose",
+      refusal: "refusing build id",
+    },
+};
 
 export const CALL_SITES: readonly CallSite[] = SITES.map((site) =>
   KNOWN_BUGS[site.key] === undefined

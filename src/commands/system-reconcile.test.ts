@@ -496,8 +496,8 @@ test({
                       State: "running",
                       Labels: {
                         "turbopanel.role": "ingress",
-                        "com.turbopanel.system.component": "hosting-ingress",
-                        "com.turbopanel.service": SERVICE_ID,
+                        "io.turbopanel.system.component": "hosting-ingress",
+                        "io.turbopanel.service": SERVICE_ID,
                       },
                     }),
                     stderr: "",
@@ -1067,6 +1067,7 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
       {
         managedId: "33333333-3333-4333-8333-333333333333",
         engine: "postgres",
+        family: "pgsql",
         protocolPort: 5432,
         writerHostgroup: 0,
         readerHostgroup: 1,
@@ -1089,6 +1090,7 @@ async function reconcileWithTwoSegments(bindAddress?: string): Promise<void> {
       { name: SEGMENT_A, subnet: "10.90.1.0/24" },
       { name: SEGMENT_B, subnet: "10.90.2.0/24" },
     ],
+    monitor: { username: "tp_monitor", password: "tpdaemon.v1.mon-secret" },
   };
   if (bindAddress !== undefined) payload.bindAddresses = [bindAddress];
 

@@ -24,7 +24,7 @@
       "Entrypoint": null,
       "Labels": {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": "backup-copy"
+        "io.turbopanel.system.component": "backup-copy"
       },
       "HostConfig": {
         "Binds": null,
@@ -1682,7 +1682,7 @@
         "com.docker.compose.project.working_dir": "/etc/turbopanel/proxysql",
         "com.docker.compose.service": "proxysql",
         "com.docker.compose.version": "5.5.0",
-        "com.turbopanel.system.component": "managed-ingress",
+        "io.turbopanel.system.component": "managed-ingress",
         "turbopanel.role": "ingress"
       },
       "HostConfig": {
@@ -1825,7 +1825,7 @@
         "com.docker.compose.project.working_dir": "/etc/turbopanel/orchestrator",
         "com.docker.compose.service": "orchestrator",
         "com.docker.compose.version": "5.5.0",
-        "com.turbopanel.system.component": "managed-ha",
+        "io.turbopanel.system.component": "managed-ha",
         "turbopanel.role": "turbopanel"
       },
       "HostConfig": {
@@ -2100,7 +2100,7 @@
       ],
       "Labels": {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": "managed-files"
+        "io.turbopanel.system.component": "managed-files"
       },
       "HostConfig": {
         "Binds": [
@@ -2226,7 +2226,7 @@
       "Entrypoint": null,
       "Labels": {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": "backup-restore"
+        "io.turbopanel.system.component": "backup-restore"
       },
       "HostConfig": {
         "Binds": null,
@@ -2348,7 +2348,7 @@
       "Entrypoint": null,
       "Labels": {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": "volume-copy"
+        "io.turbopanel.system.component": "volume-copy"
       },
       "HostConfig": {
         "Binds": [
@@ -2560,7 +2560,7 @@
       }
     },
     "expect": [
-      "bind-outside-roots"
+      "bind-state-dir"
     ]
   },
   {
@@ -2591,7 +2591,7 @@
       ],
       "Labels": {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": "not-a-helper"
+        "io.turbopanel.system.component": "not-a-helper"
       },
       "HostConfig": {
         "Binds": [
@@ -2691,7 +2691,7 @@
       }
     },
     "expect": [
-      "bind-outside-roots"
+      "bind-state-dir"
     ]
   },
   {
@@ -2840,7 +2840,7 @@
       "Entrypoint": null,
       "Labels": {
         "turbopanel.role": "turbopanel",
-        "com.turbopanel.system.component": "backup-restore"
+        "io.turbopanel.system.component": "backup-restore"
       },
       "HostConfig": {
         "Binds": null,

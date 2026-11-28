@@ -310,6 +310,9 @@ function sleepDefault(ms: number): Promise<void> {
  */
 const ALLOCATED_PORT_MIN = 18_080;
 const ALLOCATED_PORT_MAX = 19_799;
+/** Managed private ports: bound on non-loopback addresses, never an app's. */
+const MANAGED_PRIVATE_PORT_MIN = 45_000;
+const MANAGED_PRIVATE_PORT_MAX = 45_999;
 const PORT_PICK_ATTEMPTS = 20;
 
 /** One loopback port free right now, as the kernel picks it. */
@@ -322,14 +325,33 @@ function freeLoopbackPort(): number {
   }
 }
 
-/** A free loopback port outside the control plane's band. */
+/**
+ * True when root's inbound port wall drops this port. Keep in step with
+ * `app_port_dropable` in `orchestration/scripts/tp-php-loopback`: any other
+ * port is skipped there with a warning, which would leave a check copy
+ * reachable from outside.
+ */
+function appPortDropable(port: number): boolean {
+  if (port >= 18_080 && port <= 18_999) return true;
+  if (port >= 19_100 && port <= 19_799) return true;
+  if (port < 32_768 || port > 60_999) return false;
+  if (port === 33_001 || port === 33_002) return false;
+  return port < MANAGED_PRIVATE_PORT_MIN || port > MANAGED_PRIVATE_PORT_MAX;
+}
+
+/**
+ * A free loopback port outside the control plane's band that root's inbound
+ * port wall (`lib/tp-php-loopback`) will drop. A port it would not drop fails
+ * closed: it is never used, and the pick is retried.
+ */
 export function pickPortDefault(pick: () => number = freeLoopbackPort): number {
   for (let attempt = 0; attempt < PORT_PICK_ATTEMPTS; attempt++) {
     const port = pick();
-    if (port < ALLOCATED_PORT_MIN || port > ALLOCATED_PORT_MAX) return port;
+    const inBand = port >= ALLOCATED_PORT_MIN && port <= ALLOCATED_PORT_MAX;
+    if (!inBand && appPortDropable(port)) return port;
   }
   throw new Error(
-    `the kernel offered only ports in ${ALLOCATED_PORT_MIN}-${ALLOCATED_PORT_MAX}`,
+    `no free port the host's inbound wall drops after ${PORT_PICK_ATTEMPTS} tries (32768-60999 except 33001, 33002 and ${MANAGED_PRIVATE_PORT_MIN}-${MANAGED_PRIVATE_PORT_MAX})`,
   );
 }
 

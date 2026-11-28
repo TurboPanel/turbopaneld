@@ -7,6 +7,8 @@
  * restarts). This names the actual cause, in the order that matters:
  *
  *   1. docker.service is not active — report its ActiveState/Result.
+ *   1b. The daemon routes through the Docker gate (`TURBOPANEL_DOCKER_SOCKET`):
+ *      the docker group plays no part, so name the gate service instead.
  *   2. The daemon user is not in the `docker` group at all.
  *   3. The user is in the group but this process started before it was added,
  *      so its supplementary groups are stale (a running process never gains
@@ -87,6 +89,7 @@ export function explainDockerUnreachable(input: {
   dockerGroup: { gid: number; members: string[] } | null;
   username: string;
   probeStderr: string;
+  gateSocket?: string;
 }): string {
   const { service, processGroups, dockerGroup, username, probeStderr } = input;
   if (service?.activeState && service.activeState !== "active") {
@@ -97,6 +100,12 @@ export function explainDockerUnreachable(input: {
       ? " — systemd stopped retrying after repeated restarts"
       : "";
     return `Docker service is not running (ActiveState=${service.activeState}${result})${lockout}; check \`journalctl -u docker\``;
+  }
+  if (input.gateSocket) {
+    const detail = firstLine(probeStderr);
+    return `Docker gate unreachable at ${input.gateSocket}${
+      detail ? `: ${detail}` : ""
+    }; check \`systemctl status turbopanel-docker-gate\``;
   }
   if (dockerGroup && username && !dockerGroup.members.includes(username)) {
     return `Docker Engine API unreachable: ${username} is not in the docker group`;
@@ -172,5 +181,15 @@ export async function diagnoseDockerUnreachable(
     dockerGroup: parseDockerGroup(groupText),
     username,
     probeStderr,
+    ...gateSocketField(),
   });
+}
+
+function gateSocketField(): { gateSocket?: string } {
+  try {
+    const socket = Deno.env.get("TURBOPANEL_DOCKER_SOCKET")?.trim();
+    return socket ? { gateSocket: socket } : {};
+  } catch {
+    return {};
+  }
 }

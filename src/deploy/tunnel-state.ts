@@ -8,6 +8,7 @@
 import { join } from "@std/path";
 import type {
   TunnelInbound,
+  TunnelPeerClientAuth,
   TunnelRoute,
 } from "../contracts/commands-contracts.ts";
 import { errorText, logWarn } from "../util/logger.ts";
@@ -20,6 +21,7 @@ import {
   relockSiteText,
 } from "./tunnel-lock.ts";
 import {
+  canonicalAddress,
   type RenderedTunnelFile,
   renderTunnelFile,
   TUNNEL_SITE_FILE,
@@ -35,7 +37,13 @@ export type TunnelState = {
   peerAddresses: string[];
   listenAddresses?: string[];
   peerId?: string;
-  /** Tunnel names that run here and who may forward them (absent from an older control plane). */
+  /** What the peer-facing site does about client certificates (absent = nothing). */
+  clientAuth?: TunnelPeerClientAuth;
+  /** `require` was asked for but this server's own certificate cannot be shown, so `verify` is in force. */
+  clientAuthDowngraded?: boolean;
+  /** The peer certificate allows client use, so forward blocks show it. */
+  presentCertificate?: boolean;
+  /** Tunnel names that run here and who may forward them. */
   inbound?: TunnelInbound[];
   /** Generation of the table this was applied from (`tunnel-table-generation-v1`). */
   generation?: number;
@@ -104,12 +112,11 @@ export async function readTunnelGeneration(
   return undefined;
 }
 
-/** Keep `generation` when it is higher than the one on record; `undefined` changes nothing. */
+/** Keep `generation` when it is higher than the one on record. */
 export async function recordTunnelGeneration(
   hostingDir: string,
-  generation: number | undefined,
+  generation: number,
 ): Promise<void> {
-  if (generation === undefined) return;
   const last = await readTunnelGeneration(hostingDir);
   if (last !== undefined && last >= generation) return;
   const path = join(hostingDir, TUNNEL_GENERATION_FILE);
@@ -123,7 +130,7 @@ export async function recordTunnelGeneration(
 /** Best effort: a record that cannot be written only costs the ordering guard. */
 export async function tryRecordTunnelGeneration(
   hostingDir: string,
-  generation: number | undefined,
+  generation: number,
 ): Promise<void> {
   try {
     await recordTunnelGeneration(hostingDir, generation);
@@ -133,11 +140,6 @@ export async function tryRecordTunnelGeneration(
       `tunnel table generation not recorded: ${errorText(err)}`,
     );
   }
-}
-
-/** Forget the high-water record (a table with no generation: the way back from a reset counter). */
-export async function clearTunnelGeneration(hostingDir: string): Promise<void> {
-  await Deno.remove(join(hostingDir, TUNNEL_GENERATION_FILE)).catch(() => {});
 }
 
 /** The highest generation known: the record, or the stored table's own after a crash between the two writes. */
@@ -152,15 +154,13 @@ export async function knownTunnelGeneration(
 }
 
 /**
- * Whether a table of `generation` is older than what was applied. Without a
- * generation on either side nothing is older.
+ * Whether a table of `generation` is older than what was applied.
  */
 export async function isStaleTunnelGeneration(
   hostingDir: string,
-  generation: number | undefined,
+  generation: number,
   state: TunnelState | undefined,
 ): Promise<boolean> {
-  if (generation === undefined) return false;
   const known = await knownTunnelGeneration(hostingDir, state);
   return known !== undefined && generation < known;
 }
@@ -183,7 +183,18 @@ export function tunnelInputs(
       ? { listenAddresses: state.listenAddresses }
       : {}),
     ...(material ? { material } : {}),
+    ...(state.clientAuth ? { clientAuth: state.clientAuth } : {}),
+    ...(state.presentCertificate ? { presentCertificate: true } : {}),
+    ...(state.inbound ? { inbound: state.inbound } : {}),
+    localAddresses: ownAddresses(),
   };
+}
+
+/** Every address on this host's interfaces, as Caddy would be asked to bind to. */
+function ownAddresses(): ReadonlySet<string> {
+  return new Set(
+    Deno.networkInterfaces().map((entry) => canonicalAddress(entry.address)),
+  );
 }
 
 /**
@@ -261,7 +272,11 @@ export async function plannedTunnelContents(
     own,
   );
   const live = await readTextIfPresent(join(sitesDir, TUNNEL_SITE_FILE));
-  return rendered.contents === (live ?? "") ? undefined : rendered.contents;
+  if (rendered.contents === (live ?? "")) return undefined;
+  // Logged, not returned, as in an apply; only when the file changes, so a
+  // site deploy that leaves it alone stays quiet.
+  for (const warning of rendered.warnings) logWarn("tunnels", warning);
+  return rendered.contents;
 }
 
 /** The first 16 hex characters of the digest of the certificate and the trust bundle. */
@@ -277,7 +292,7 @@ export async function peerMaterialId(
 
 /**
  * The highest tunnel `generation` among a deploy's hostings, or `undefined`
- * when none carries one (an older control plane).
+ * when none carries one (no tunnel hosting).
  */
 export function deployTunnelGeneration(
   hostings: readonly { tunnel?: { generation?: number } }[],
@@ -292,9 +307,15 @@ function relockWith(
   lockNames: ReadonlySet<string>,
 ): string {
   if (!state?.inbound) return contents;
+  // With the dedicated peer port, peers reach the sites over loopback and are
+  // checked there; no site admits a peer address on its own.
+  const peers = inboundPeers(state.inbound);
+  const loopbackOnly = state.clientAuth !== undefined
+    ? new Map([...peers.keys()].map((name) => [name, []]))
+    : peers;
   return relockSiteText(
     contents,
-    inboundPeers(state.inbound),
+    loopbackOnly,
     state.listenAddresses ?? [],
     lockNames,
   );

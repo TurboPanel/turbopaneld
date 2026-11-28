@@ -1,6 +1,6 @@
 #!/bin/sh
 # Diagnose TurboPanel hosting ingress on a daemon host (Caddy :80/:443 → loopback Traefik → containers).
-# Run on the target host (e.g. louie.lan): sudo sh scripts/diagnose-hosting-ingress.sh
+# Run on the target host (e.g. server-b.example.lan): sudo sh scripts/diagnose-hosting-ingress.sh
 
 set -eu
 

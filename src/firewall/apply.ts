@@ -44,6 +44,7 @@ import { join } from "@std/path";
 import { type LayoutPaths, resolveLayout } from "../paths/layout.ts";
 import { errorText, logInfo, logWarn, sanitizeForLog } from "../util/logger.ts";
 import { forEachSequential } from "../util/sequential.ts";
+import { withFirewallLock } from "./lock.ts";
 import {
   type ArmedPendingFirewall,
   armPendingFirewall,
@@ -304,11 +305,22 @@ export type FirewallApplyOutcome = {
  * become durable when `confirmPendingFirewall` promotes them, and the guard
  * restores the last confirmed rules when the window runs out first.
  */
-export async function applyRenderedFirewall(
+export function applyRenderedFirewall(
   rendered: RenderedFirewall,
   includeForward: Record<FirewallFamily, boolean>,
   probe: XtablesProbe,
   options: FirewallApplyOptions = {},
+): Promise<FirewallApplyOutcome> {
+  return withFirewallLock(() =>
+    applyRenderedLocked(rendered, includeForward, probe, options)
+  );
+}
+
+async function applyRenderedLocked(
+  rendered: RenderedFirewall,
+  includeForward: Record<FirewallFamily, boolean>,
+  probe: XtablesProbe,
+  options: FirewallApplyOptions,
 ): Promise<FirewallApplyOutcome> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
@@ -423,8 +435,14 @@ async function applyIpv6(
  * Best-effort throughout: a chain that is already gone is the desired state,
  * not an error. Also the `turbopaneld firewall off` break-glass.
  */
-export async function removeFirewall(
+export function removeFirewall(
   options: FirewallApplyOptions = {},
+): Promise<void> {
+  return withFirewallLock(() => removeFirewallLocked(options));
+}
+
+async function removeFirewallLocked(
+  options: FirewallApplyOptions,
 ): Promise<void> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());
@@ -508,8 +526,14 @@ export async function snapshotFirewallChains(
  * restores v6 at the deadline anyway. No document at all means the firewall
  * is not managed here, and nothing happens. Never throws.
  */
-export async function reinstallFirewallForwardingIfEnabled(
+export function reinstallFirewallForwardingIfEnabled(
   options: FirewallApplyOptions = {},
+): Promise<void> {
+  return withFirewallLock(() => reinstallLocked(options));
+}
+
+async function reinstallLocked(
+  options: FirewallApplyOptions,
 ): Promise<void> {
   const run = options.run ?? runFirewallHost;
   const layout = options.layout ?? resolveLayout(Deno.env.toObject());

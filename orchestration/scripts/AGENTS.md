@@ -4,6 +4,12 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
 
 ## Privileged Host Scripts
 
+- **wait-docker-gate.sh** — run by the `turbopaneld` unit's `ExecStartPre` on
+  managed hosts: waits (bounded) for the gate service to be active and its
+  socket to exist, so the daemon never starts Docker work before the gate. It
+  exits 0 when the gate unit is not installed or on timeout (Docker then fails
+  closed: there is no direct fallback).
+
 - **sudo** — `roles/turbopanel-user/templates/sudoers.j2` grants root exactly
   four commands: **`tp-host`** (`orchestration/scripts/tp-host`, installed
   `root:root 0755` at `<install>/lib/tp-host`), `tp-orchestrate`, and the two
@@ -35,9 +41,20 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
   (`tp_config_root_self_sealed` / `tp_self_sealed_ok`; anything else fails
   closed). Unprivileged tests can only exercise that rule lifted from the
   script, since it needs a directory owned by a uid other than the stand-in
-  root. Verbs
-  that use `INSTALL_ROOT` (`$_self_dir/..`: `lib/`, `vendor/lsphp`) still
-  assume the installed layout.
+  root. The
+  root helpers that sit beside tp-host in `orchestration/scripts`
+  (`tp-php-loopback`, `tp-tunnel-loopback`, `tp-build-loopback`,
+  `tp-build-runner`) are run, and named in unit `ExecStartPre=+` lines
+  (`tp_site_lifecycle_ok`, `tp_php_unit_ok`), from `HELPER_DIR`, which is
+  always tp-host's own directory: `<install>/lib` on a managed host, the
+  checkout's `orchestration/scripts` in development (where they are not copied
+  into `<install>/lib`). The daemon names the same folder in those lines
+  (`hostHelperDir` in `src/permissions/host-sudo.ts`: `layout.libDir` on a
+  managed install, the checkout's `orchestration/scripts` in development).
+  Nothing from the environment or the daemon chooses it,
+  and there is no fallback path. Other verbs that use `INSTALL_ROOT`
+  (`$_self_dir/..`: `lib/tp-backup-run`, `lib/panel-identity`, `vendor/`,
+  `share/`) still assume the installed layout.
   `host-sudo.test.ts` fails on any unwrapped `sudo -n <verb>` literal in `src/`.
   tp-host accepts only the argument shapes the daemon produces and:
   - confines paths to the trees TurboPanel owns (`/etc/turbopanel`,
@@ -68,7 +85,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     workers run as a site owner with its own group (`tp_principal_own_group`)
     or as one web server account (`ENGINE_USERS`) with the group of that
     name, and the socket belongs to one web server account, owner and group
-    the same; `listen` is exactly `<run>/php/<series>/<pool>.sock` (the
+    the same; `listen` is exactly `/run/turbopanel-phpfpm/<series>/<pool>.sock` (the
     pool file's own series) and `listen.mode` is `0660`, because the root
     master removes, binds and re-owns whatever path is named there. Never
     root, `tp`, another account's group, a system group (`disk`, `shadow`,
@@ -102,7 +119,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `turbopanel-deploycmd-*.service` or `turbopanel-worker-*@.service` (a site's
     post-deploy commands and workers) may carry the same file and, beyond the
     account checks, must carry (`tp_site_lifecycle_ok`) exactly one
-    `ExecStartPre=+<lib>/tp-php-loopback sync` (the only `+` prefix any tenant
+    `ExecStartPre=+<helper dir>/tp-php-loopback sync` (the only `+` prefix any tenant
     unit may have), `IPAddressDeny=` and `IPAddressAllow=` equal to
     `SITE_IP_DENY` / `SITE_IP_ALLOW` (the same strings the per-site PHP unit is
     pinned to) and `PrivateDevices=yes`; no other unit may carry these keys.
@@ -123,7 +140,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     way in `<config>/tunnel-env/` (`tunnel-env-install <id>` reads the daemon's
     staged `<state>/cloudflared/tunnels/<id>.env`, which must be exactly one
     `TUNNEL_TOKEN='<base64>'` line of at most 2048 characters; `tunnel-env-remove
-    <id>`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
+    <id>`; `tunnel-env-present <id>` prints `present` or `absent`; `tunnel-loopback-sync`, no arguments, runs `lib/tp-tunnel-loopback
     sync`, which lets only root and the daemon account reach the connector
     metrics band on loopback, see `src/tunnels/AGENTS.md`); a project's helper
     container ports work the same way in `<config>/reach-ports/<environment
@@ -213,8 +230,7 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     takes the same names and only a fresh group of the user's own name: in the
     band, nobody's primary group yet, no members. Residual risk accepted with
     the per-user group: polkit rules, PAM `access.conf` and sshd `Match Group`
-    lines that name a group are not scanned. `groupmod` only renames a site
-    owner's old `<name>-grp` primary group to `<name>`. It takes `chpasswd`
+    lines that name a group are not scanned. It takes `chpasswd`
     input only as one sha512-crypt line;
   - allows `systemctl` verbs on `turbopanel*` / `wg-quick@tp0` / `ssh(d)`
     units, fixed `journalctl`/`ss`/`sshd -t|-T`/`sysctl`/`ip`/`wg` shapes, and
@@ -233,8 +249,30 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     `$P/tp-test/ip-route-kernel`; for `tp0` routes, `tp0`'s own subnet is
     left out), so a route can never take over the LAN's subnet or `docker0`'s.
     A `del` skips that check so installed routes can still be removed.
+  - sets up one image build's CPU slice only through `image-build-slice
+    BUILD-ID [cores|-]` (the id is checked like `build-run`'s, cores is the
+    same number `build-run` takes and is validated the same way; nothing else
+    in argv). It makes `turbopanel-imagebuild-<id>.slice` (the id's dashes
+    become underscores: a dash is a hierarchy level in a unit name) below the
+    parent `turbopanel-imagebuild.slice`, with `systemctl set-property
+    --runtime ... CPUAccounting=yes CPUQuota=<N>%`: the parent is capped at the
+    host's cores, the child at the build's cores (default half the host's, and
+    never more than the host has), then `systemctl start`. It is idempotent,
+    outside test mode it checks the child's `cpu.max` and fails closed, and it
+    prints two lines: the child's cgroup path (what the daemon passes to
+    `docker buildx build --cgroup-parent`) and the core count it really set
+    (the host-clamped one, for the build log). Nothing here claims the image
+    build steps are capped: the pinned frontend ignores the cgroup parent
+    today (`scripts/image-build-cgroup-proof.sh`);
+  - removes them only through `image-build-slice-remove [BUILD-ID]`: stops the
+    build's slice and deletes the runtime drop-in `set-property --runtime`
+    left under `/run/systemd/system.control`; with no id it does that for every
+    build slice (the daemon's start-up sweep). A missing slice is not an error;
+    the parent's own properties are left to `purge.sh`. Both verbs are in
+    `TP_HOST_ONLY_VERBS`, so a `tp-host` older than the daemon fails image
+    builds (they ship together; fine before the first release);
   - starts tenant builds only through
-    `build-run <build-id> <project-id> <owner>` (ids `[a-z0-9-]{1,64}`; the
+    `build-run <build-id> <project-id> <owner> [cores [memory-bytes [swap]]]` (ids `[a-z0-9-]{1,64}`; the
     owner is the site owner's Linux user, an existing principal with a uid
     in 15001-60000 and a plain name with no `--`, never another `tp*` name,
     or `tpbuild` for a build nobody owns; checked again under the build lock;
@@ -265,8 +303,26 @@ Daemon repo context: `../../AGENTS.md`. Cross-repo `../<repo>/…` links are rel
     empty by `build-run` to prove nft works, then with the build's rules as the
     unit's first `ExecStartPre=+ … sync <id> <owner>`, which refuses unless
     its own cgroup is exactly the one systemd builds for that owner's build
-    slice; no `nft` or a load failure means the build does not start), 4G
-    memory, 200% CPU, 1800 s). The unit's second `ExecStartPre=+` is
+    slice; no `nft` or a load failure means the build does not start),
+    CPU and memory limits, 1800 s). The limits are the optional fourth and
+    fifth `build-run` arguments (cores, as `2` or `1.5`; memory, whole bytes;
+    `-` for unset), validated strictly (never trimmed): cores clamped to 1..the
+    host's cores (no value below 1, none with a leading zero), memory to
+    1 GiB..the host's RAM; unset means half the cores and the RAM less 1 GiB.
+    The host's figures come from
+    `nproc` and `/proc/meminfo`; only test mode reads `TP_TEST_CORES` /
+    `TP_TEST_MEM_KB`. The daemon sends the smallest limit set among the
+    organization, server and service (`src/deploy/release/build-limits.ts`);
+    a helper that predates them is found out BEFORE the build by a probe
+    (`build-run -probe -probe tpbuild - - -`: an old helper answers with its
+    argument-count message, a current one refuses the id; no unit starts) and
+    the build then runs once without the arguments; a build is never rerun
+    and its own output never decides this. The sixth argument is `on`, `off` or `-`:
+    swap stays off (`MemorySwapMax=0`) unless it says `on`, which sets
+    `MemorySwapMax` to the unit's own `MemoryMax` (swap up to the size of the
+    memory limit, never unlimited). The host's RAM is
+    read afresh at every build start (a ballooned virtual machine's total
+    changes), never cached. The unit's second `ExecStartPre=+` is
     `tp-host build-handover <id> <project> <owner>`: refused unless its cgroup
     is exactly that unit's, it reads the throwaway uid from the unit's
     `RuntimeDirectory=` (`/run/turbopanel-build-<id>`, created by systemd
@@ -445,12 +501,14 @@ a downloaded statement: `sudo tp-host panel-identity-write statement < key-set-N
 `publish` and `publish-keep` take an optional seventh word after the six-word
 form: `layout=laravel` or `layout=wordpress` (anything else is refused, and
 `publish-open` takes none). In the sealed leaf, before the link check
-(`tp_publish_layout`), the one recipe path (`tp_layout_recipe`: Laravel
-`storage` -> `shared/storage`, WordPress `wp-content/uploads` ->
-`../shared/uploads`) is replaced by its link, refusing a parent that is a link;
+(`tp_publish_layout`), each recipe path (`tp_layout_recipe`, one `PATH TEXT` line per link: Laravel
+`storage` -> `shared/storage` and `public/storage` ->
+`../shared/storage/app/public`, WordPress `wp-content/uploads` ->
+`../shared/uploads`) is replaced by its link (`tp_publish_layout_link`),
+refusing a parent that is a link or not a folder;
 for Laravel the real `bootstrap/cache` folder (when it is not a link) is made the
 site account's (`0750`, files `0640`), the only entry of the release that is not
-root's. `tp_publish_links` skips exactly that path with exactly that text
+root's. `tp_publish_links` skips exactly each of those paths with exactly its text
 (`find ... ! ( -path -lname )`), so a user link that goes through the recipe link
 still resolves under `shared/` and is refused. After the release is placed,
 `tp_layout_folders` makes the layout's folders in the service's `shared/` **as

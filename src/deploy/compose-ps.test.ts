@@ -113,22 +113,22 @@ test("readComposePsLabels accepts object map and comma-separated strings", () =>
       Labels: {
         "turbopanel.role": "ingress",
         ignored: 1,
-        "com.turbopanel.service": "svc",
+        "io.turbopanel.service": "svc",
       },
     }),
     {
       "turbopanel.role": "ingress",
-      "com.turbopanel.service": "svc",
+      "io.turbopanel.service": "svc",
     },
   );
 
   assertEquals(
     readComposePsLabels({
-      Labels: "turbopanel.role=ingress,com.turbopanel.service=svc,bad,=empty",
+      Labels: "turbopanel.role=ingress,io.turbopanel.service=svc,bad,=empty",
     }),
     {
       "turbopanel.role": "ingress",
-      "com.turbopanel.service": "svc",
+      "io.turbopanel.service": "svc",
     },
   );
 });

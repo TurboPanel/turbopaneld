@@ -509,3 +509,30 @@ test("a failed run never prints a clean recap", () => {
     "playbook exited with an error before a recap",
   );
 });
+
+test("a debug task that says WARNING: is logged with its text at warn level", () => {
+  setActiveInstallPresenter(null);
+  const line = formatAnsibleEventLog({
+    _event: "v2_runner_on_ok",
+    _timestamp: "2026-01-01T00:00:00Z",
+    task: {
+      name: "Warn when the tunnel metrics port lock did not load",
+      id: "1",
+      path: "",
+      duration: TASK_DURATION,
+    },
+    hosts: { localhost: { msg: "WARNING: the lock did not load. Reason: x" } },
+  });
+  assertEquals(line?.level, "WARN");
+  assertEquals(
+    line?.message,
+    "[warning] Warn when the tunnel metrics port lock did not load: WARNING: the lock did not load. Reason: x",
+  );
+  const plain = formatAnsibleEventLog({
+    _event: "v2_runner_on_ok",
+    _timestamp: "2026-01-01T00:00:00Z",
+    task: { name: "Say hi", id: "1", path: "", duration: TASK_DURATION },
+    hosts: { localhost: { msg: "hello" } },
+  });
+  assertEquals(plain?.level, "DEBUG");
+});
