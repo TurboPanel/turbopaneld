@@ -74,10 +74,30 @@
     _ui_export_environment: >-
       {{
         {'HOME': turbopanel_ui_runtime_dir, 'PATH': turbopanel_runtime_path}
-        | combine({'NODE_OPTIONS': '--max-old-space-size=' ~ turbopanel_ui_export_node_heap_mb}
+        | combine({'NODE_OPTIONS': '--max-old-space-size=' ~ turbopanel_ui_export_node_heap_mb,
+                    'EXPO_NO_BUNDLE_SPLITTING': '1'}
                   if _ui_export_dev | bool else {})
       }}
   register: _ui_local_build
+
+# A development export names every async chunk after the hash of empty content,
+# so chunks that share a file name overwrite each other and the browser then
+# fails with an unknown module. Bundle splitting is off for it, which leaves the
+# entry as the only script; any other script means splitting came back.
+- name: Check the development UI export is one script
+  when:
+    - turbopanel_ui_mode == 'static'
+    - _ui_local_build is defined
+    - _ui_local_build is changed
+    - _ui_export_dev | bool
+  ansible.builtin.shell: |
+    set -eu
+    extra="$(find "{{ turbopanel_ui_dir }}/dist/_expo/static/js" -type f -name '*.js' ! -name 'entry-*.js' -print -quit)"
+    if [ -n "$extra" ]; then
+      echo "development UI export has split chunks (e.g. $extra); they collide on file name" >&2
+      exit 1
+    fi
+  changed_when: false
 
 - name: Publish locally-built UI export to the FHS static dir
   when:

@@ -1394,6 +1394,14 @@ test("ui-build exports in development mode only when a dev user is set", async (
     join(CHECKOUT_ORCHESTRATION_DIR, "roles/ui-build/tasks/main.yml"),
   );
   assert(/--dev/.test(tasks), "dev export passes --dev");
+  assert(
+    /EXPO_NO_BUNDLE_SPLITTING/.test(tasks),
+    "dev export turns bundle splitting off (chunk names collide in --dev)",
+  );
+  assert(
+    /! -name 'entry-\*\.js'/.test(tasks),
+    "dev export fails when a split chunk appears",
+  );
 });
 
 test("mergeTimeSyncApplyWithHostState preserves host NTP when command omits it", () => {

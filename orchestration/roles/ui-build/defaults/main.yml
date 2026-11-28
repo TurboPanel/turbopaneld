@@ -37,7 +37,11 @@ force_build: false
 #     default is one per CPU, which can exceed 4 GiB on a many-core host);
 #   - a 1536 MiB old-space cap on the main Node process, enough for the web
 #     bundle graph, low enough that a runaway build fails instead of swapping.
-# Raise both on a larger guest. Production exports ignore these.
+# Bundle splitting is off (EXPO_NO_BUNDLE_SPLITTING): a development export names
+# every async chunk after the hash of empty content, so same-named route chunks
+# overwrite each other and the browser fails with an unknown module. The export
+# is one entry script and the build fails if any other script appears.
+# Raise both limits on a larger guest. Production exports ignore these.
 turbopanel_ui_export_dev: "{{ turbopanel_dev_user | default('') | length > 0 }}"
 turbopanel_ui_export_max_workers: 2
 turbopanel_ui_export_node_heap_mb: 1536
